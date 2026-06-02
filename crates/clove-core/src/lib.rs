@@ -5,6 +5,7 @@
 
 pub mod comments;
 pub mod error;
+pub mod graph;
 pub mod id;
 pub mod limits;
 pub mod model;
@@ -16,6 +17,10 @@ pub mod write;
 
 pub use comments::{add_comment, list_comments, Comment};
 pub use error::CloveError;
+pub use graph::{
+    is_hard_dep, BlockedItem, ChildrenSummary, DanglingRef, DepTreeNode, EdgeKind, GraphStore,
+    ItemMeta,
+};
 pub use id::CloveId;
 pub use model::{normalize_label, Item, ItemFrontmatter, ItemStatus, ItemType, Priority};
 pub use parse::{parse_frontmatter_file, parse_item_bytes, parse_item_file};
