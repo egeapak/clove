@@ -1,0 +1,60 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/clove-core",
+    "crates/clove-index",
+    "crates/clove-import",
+    "crates/clove",
+    "crates/cloved",
+    "xtask",
+]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+authors = ["Ege Apak"]
+repository = "https://github.com/egeapak/clove"
+
+# Pinned shared dependencies — see docs/DESIGN.md §1.
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml_neo = "0.11"         # strict YAML (maintained serde_yaml fork); DESIGN §4/§14.2 pinned 0.9 but crates.io only has 0.10/0.11
+petgraph = "0.6"                # DAG engine
+rusqlite = { version = "0.40", features = ["bundled"] }  # embedded SQLite, no runtime dep (M1)
+notify = "6"                    # file-watch (M3); 9.0-rc is NOT production-ready — do not bump
+interprocess = "2"              # Unix socket + Windows named pipe (M3)
+tokio = { version = "1", features = ["full"] }  # daemon async runtime only
+clap = { version = "4", features = ["derive"] }  # CLI only
+anyhow = "1"                    # CLI + daemon only; never in clove-core
+thiserror = "1"                 # clove-core + clove-index typed errors
+proptest = "1"                  # property tests
+criterion = "0.5"               # benchmarks
+insta = "1"                     # snapshot tests
+assert_cmd = "2"                # CLI integration tests
+tempfile = "3"                  # atomic writes + test isolation
+camino = "1"                    # UTF-8 paths throughout clove-core
+smol_str = "0.3"                # inline IDs <=23 bytes (crate is smol_str, not smolstr)
+getrandom = "0.2"               # ID entropy
+memchr = "2"                    # fast frontmatter boundary scanning
+blake3 = "1"                    # content hashing for staleness (M1)
+rayon = "1"                     # parallel parse above 500 items
+fd-lock = "4"                   # advisory file locking
+git2 = "0.21"                   # M3 daemon git auto-sync only (vendored libgit2 C build blocks macOS->Windows cross-check; M0 worktree detection uses a `git` CLI wrapper instead)
+chrono = { version = "0.4", features = ["serde"] }  # RFC3339 timestamps
+jiff = "0.2"                    # nanosecond timestamps for comment filenames
+octocrab = "0.51"               # GitHub REST API client (clove-import, M2)
+toml = "0.8"                    # config.toml parsing
+jsonschema = "0.46"             # JSON Schema validation in tests (T-CLI14)
+
+# Internal crates (explicit version keeps them off cargo-deny's wildcard list
+# and is required for publishing clove-core to crates.io — PRD §13).
+clove-core = { path = "crates/clove-core", version = "0.1.0" }
+clove-index = { path = "crates/clove-index", version = "0.1.0" }
+clove-import = { path = "crates/clove-import", version = "0.1.0" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

@@ -1,0 +1,29 @@
+[package]
+name = "clove"
+description = "clove: a fast, git-native, dependency-aware work-item tracker"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+default-run = "clove"
+
+[[bin]]
+name = "clove"
+path = "src/main.rs"
+
+[dependencies]
+clove-core.workspace = true
+clove-index.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+camino.workspace = true
+chrono.workspace = true
+
+# jsonschema is added in T-CLI14 (JSON Schema validation in tests).
+[dev-dependencies]
+assert_cmd.workspace = true
+insta.workspace = true
+tempfile.workspace = true

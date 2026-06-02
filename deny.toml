@@ -1,0 +1,35 @@
+# cargo-deny configuration — license and advisory gating for the workspace.
+# See https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+all-features = true
+
+[licenses]
+# Permissive licenses only. The base policy is MIT / Apache-2.0 / BSD / ISC
+# (per IMPLEMENTATION_PLAN.md T-I02); the remaining entries are equally
+# permissive licenses that transitive dependencies in the tree carry.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[advisories]
+yanked = "deny"
+# `ignore` is intentionally empty; add RUSTSEC IDs here only with justification.
+ignore = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

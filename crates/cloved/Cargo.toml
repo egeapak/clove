@@ -1,0 +1,17 @@
+[package]
+name = "cloved"
+description = "clove optional daemon: file-watch, incremental index, opt-in git sync"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "cloved"
+path = "src/main.rs"
+
+# The daemon (file-watch, IPC) is M3; tokio/interprocess/notify are added then.
+[dependencies]
+clove-core.workspace = true
+clove-index.workspace = true

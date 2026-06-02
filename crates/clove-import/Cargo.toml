@@ -1,0 +1,17 @@
+[package]
+name = "clove-import"
+description = "clove importers/exporters: beads, tk, github"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+# File-based importers (beads/tk) land in M2; the GitHub importer adds
+# tokio + octocrab then (T-M03).
+[dependencies]
+clove-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+camino.workspace = true
+anyhow.workspace = true

@@ -1,0 +1,11 @@
+[package]
+name = "xtask"
+description = "clove build/bench tooling (cargo xtask)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+camino.workspace = true

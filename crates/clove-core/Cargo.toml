@@ -1,0 +1,28 @@
+[package]
+name = "clove-core"
+description = "clove core: item model, file store, dependency-graph engine, ID generation"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_yaml_neo.workspace = true
+thiserror.workspace = true
+camino.workspace = true
+smol_str = { workspace = true, features = ["serde"] }
+getrandom.workspace = true
+memchr.workspace = true
+petgraph.workspace = true
+chrono.workspace = true
+jiff.workspace = true
+rayon.workspace = true
+fd-lock.workspace = true
+tempfile.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+insta.workspace = true
+tempfile.workspace = true

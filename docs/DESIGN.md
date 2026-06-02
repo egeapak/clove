@@ -70,7 +70,10 @@ no SQLite surface.
 | `jiff` | 0.1 | nanosecond timestamps for comment filenames |
 | `octocrab` | 0.41 | GitHub REST API client (clove-import GitHub importer/exporter) |
 
-**Rust edition/MSRV:** `edition = "2021"`, `rust-version = "1.80.0"` (async-in-traits stable).
+**Rust edition/MSRV:** `edition = "2021"`. **No pinned MSRV — clove tracks current
+stable Rust** (decision 2026-06-02: a strict 1.80 MSRV added dependency-version friction
+with no consumer needing it for this new binary; revisit if `clove-core` gains external
+embedders who require an older toolchain).
 
 **Feature flags:** none. Do not gate clove-index behind a feature flag; keep crate boundaries.
 

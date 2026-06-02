@@ -1,0 +1,12 @@
+[package]
+name = "clove-index"
+description = "clove optional SQLite index: FTS5, staleness detection, reindex"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+# M0 is file-only; the SQLite stack (rusqlite/blake3) is added in M1 (T-S01).
+[dependencies]
+clove-core.workspace = true
