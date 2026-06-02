@@ -1,11 +1,42 @@
 # clove — Session Handoff
 
 **Updated:** 2026-06-02
-**State:** M0 foundation built (infra, data model, graph engine, config + CLI
-foundation). **M1 `clove-index` library built** (see below). Most of the M0 CLI
-command surface is still pending.
-**Next step:** either finish the M0 CLI commands (the bulk of `crates/clove`) or
-wire the M1 index into the CLI (T-S04 CLI half, T-S05, T-S06, T-S08).
+**State:** M0 built end-to-end (infra, data model, graph, config, **full CLI
+command surface**) plus the **M1 `clove-index` library**, with `reindex` and
+`search` wired to the index. `clove` is usable end-to-end.
+**Next step:** the remaining index-acceleration/polish tasks — T-S06
+(`with_index` read path so `ls`/`ready` use the index when fresh), T-S08
+(`doctor` index-divergence check), T-CLI14 (formal JSON Schema files), and
+T-CLI16 (xtask fixture generator).
+
+---
+
+## M0 CLI + index wiring (this session)
+
+The whole `crates/clove` command surface is implemented, dispatched from
+`main.rs` via `cli.rs`, on shared helpers (`context.rs` discovery, `util.rs`
+parsing, `item_json.rs` shaping, `cmd/listing.rs` filter/sort/paginate/emit):
+
+- init, new, show (fast vs graph path), edit/set (KEY=VALUE + `labels+=/-=`),
+  status/start/close, label/assign/priority, dep add/rm/tree/cycle,
+  ready/blocked, ls/query (stdin JSON filter), comment/comments, version,
+  agent-doc (idempotent, `--check`), doctor (`--fix`/`--strict`), reindex, search.
+- `reindex` calls `clove_index::reindex`; `search` uses the FTS index when
+  present (`_meta.source = "index"`) and falls back to a file scan otherwise.
+- Exit codes per DESIGN §7.6 (dep self-loop=4, cycle=3, not-found=2, …);
+  every command supports `--format json|jsonl` with the standard envelope.
+- New `clove-core` support: `CloveError::{NoRepo, SelfDependency,
+  DependencyCycle, DependencyExists}` and the `doctor` module (`diagnose`/`fix`,
+  the §7.7 check suite). New `clove-index` `search()`.
+- Tests: `crates/clove/tests/cli_commands.rs` (14 e2e tests via `assert_cmd`)
+  plus the clove-core `doctor` and unit tests. `cargo test --workspace` is green
+  except the pre-existing `repo::tests::linked_worktree_resolves_to_main_worktree`
+  (an environment-only failure: it makes a real `git commit`, which this sandbox
+  routes through a signing server that returns 400).
+
+**Deferred (noted above):** T-S06, T-S08, T-CLI14, T-CLI16. The list commands
+(`ls`/`ready`/`blocked`/`query`) currently always read the files (the source of
+truth); index acceleration for them is the T-S06 follow-up.
 
 ---
 

@@ -43,11 +43,18 @@ pub fn print_json_success(data: Value, meta: Value) {
     println!("{envelope}");
 }
 
-/// Print one JSONL line: a success envelope whose `data` is a single value.
-/// Used by the list commands (`ls`/`query`) once they land.
-#[allow(dead_code)]
-pub fn print_jsonl_line(data: Value, meta: Value) {
-    print_json_success(data, meta);
+/// Print a list result as one envelope whose `data` is an array.
+pub fn print_json_list(items: Vec<Value>, meta: Value) {
+    print_json_success(Value::Array(items), meta);
+}
+
+/// Print one `{ v, ok, data }` line per element (the `--format jsonl` shape).
+/// Each line is independently valid JSON.
+pub fn print_jsonl_items(items: &[Value]) {
+    for item in items {
+        let line = json!({ "v": ENVELOPE_VERSION, "ok": true, "data": item });
+        println!("{line}");
+    }
 }
 
 /// Print an error envelope `{ v, ok: false, error: { code, message, exit } }`

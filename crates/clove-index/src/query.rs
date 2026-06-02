@@ -117,10 +117,48 @@ pub fn query_items(conn: &Connection, filter: &Filter) -> Result<Vec<ItemRow>, I
     Ok(out)
 }
 
+/// Full-text search over the FTS5 index (T-S05, index path).
+///
+/// The match runs in a subquery that resolves matched FTS rowids back to item
+/// ids via `fts_map` (a contentless FTS table exposes only rowids); the outer
+/// query then reads full item rows. Relevance ordering is left to the caller
+/// (the CLI re-ranks title matches ahead of body matches).
+pub fn search(
+    conn: &Connection,
+    text: &str,
+    limit: Option<usize>,
+) -> Result<Vec<ItemRow>, IndexError> {
+    // Quote the user text as a single FTS5 string token, escaping embedded
+    // quotes, so arbitrary input can't be interpreted as FTS query syntax.
+    let match_query = format!("\"{}\"", text.replace('"', "\"\""));
+    let limit_sql = match limit {
+        Some(n) => format!(" LIMIT {n}"),
+        None => String::new(),
+    };
+    let sql = format!(
+        "SELECT {ITEM_COLUMNS} FROM items WHERE id IN (\
+           SELECT m.item_id FROM items_fts JOIN fts_map m ON m.fts_rowid = items_fts.rowid \
+           WHERE items_fts MATCH ?1\
+         ) ORDER BY priority ASC, topological_rank IS NULL ASC, topological_rank ASC, id ASC{limit_sql}"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([match_query], ItemRow::from_row)?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
 impl crate::db::Index {
     /// Run a filtered query against the index (T-S07).
     pub fn query_items(&self, filter: &Filter) -> Result<Vec<ItemRow>, IndexError> {
         query_items(self.conn(), filter)
+    }
+
+    /// Full-text search (T-S05).
+    pub fn search(&self, text: &str, limit: Option<usize>) -> Result<Vec<ItemRow>, IndexError> {
+        search(self.conn(), text, limit)
     }
 }
 

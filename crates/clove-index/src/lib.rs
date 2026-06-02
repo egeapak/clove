@@ -22,7 +22,7 @@ pub mod stale;
 pub mod write;
 
 pub use db::{Index, IndexError, ItemRow, SCHEMA_VERSION};
-pub use query::{query_items, Filter, QueryMode};
+pub use query::{query_items, search, Filter, QueryMode};
 pub use reindex::{reindex, ReindexReport};
 pub use stale::{apply_staleness, check_staleness, StalenessReport};
 pub use write::upsert_item;

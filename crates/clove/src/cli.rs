@@ -1,8 +1,8 @@
-//! Command-line surface (DESIGN.md §7.1, §7.2). Defines the global flags and
-//! the subcommand set. Commands are wired in as their tasks land.
+//! Command-line surface (DESIGN.md §7.1, §7.2): global flags and the full M0
+//! subcommand set.
 
 use camino::Utf8PathBuf;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use clove_core::OutputFormat;
 
 /// clove — a fast, git-native, dependency-aware work-item tracker.
@@ -25,7 +25,7 @@ pub struct Cli {
     #[arg(long, global = true, value_enum, default_value_t = ColorChoice::Auto)]
     pub color: ColorChoice,
 
-    /// Override `.clove/` discovery with an explicit directory.
+    /// Override `.clove/` discovery with an explicit `.clove` directory.
     #[arg(long, global = true, value_name = "PATH")]
     pub clove_dir: Option<Utf8PathBuf>,
 
@@ -41,11 +41,303 @@ pub enum ColorChoice {
     Never,
 }
 
-/// The subcommand set. Grows as command tasks (T-CLI*) are implemented.
+/// The subcommand set.
 #[derive(Debug, Subcommand)]
 pub enum Commands {
+    /// Initialize a `.clove/` repository in the current directory.
+    Init(InitArgs),
+    /// Create a new item.
+    New(NewArgs),
+    /// Show one item.
+    Show(ShowArgs),
+    /// Edit an item (open `$EDITOR`, or `--field KEY=VALUE` for a field edit).
+    Edit(EditArgs),
+    /// Set one or more fields non-interactively (alias for `edit --field`).
+    Set(SetArgs),
+    /// Change an item's status (`open|in_progress|closed`).
+    Status(StatusArgs),
+    /// Mark an item in progress (alias for `status <id> in_progress`).
+    Start(IdArg),
+    /// Close an item (alias for `status <id> closed`).
+    Close(IdArg),
+    /// Add or remove a label.
+    Label(LabelArgs),
+    /// Set or clear the assignee.
+    Assign(AssignArgs),
+    /// Set the priority (0–4).
+    Priority(PriorityArgs),
+    /// Manage dependencies.
+    Dep(DepArgs),
+    /// List items that are ready to work on.
+    Ready(FilterArgs),
+    /// List items blocked by open dependencies.
+    Blocked(FilterArgs),
+    /// List items with optional filters.
+    Ls(FilterArgs),
+    /// Query items via a JSON filter (flag or stdin).
+    Query(QueryArgs),
+    /// Add a comment to an item.
+    Comment(CommentArgs),
+    /// List an item's comments.
+    Comments(CommentsArgs),
+    /// Full-text search.
+    Search(SearchArgs),
+    /// Rebuild the SQLite index from the files.
+    Reindex,
+    /// Generate an agent-facing usage document.
+    AgentDoc(AgentDocArgs),
+    /// Check the store for problems (optionally repair safe ones).
+    Doctor(DoctorArgs),
     /// Print version and schema information.
     Version,
+}
+
+/// A bare `<id>` positional argument.
+#[derive(Debug, Args)]
+pub struct IdArg {
+    /// The item id.
+    pub id: String,
+}
+
+#[derive(Debug, Args)]
+pub struct InitArgs {
+    /// Override the generated id prefix.
+    #[arg(long, value_name = "STR")]
+    pub prefix: Option<String>,
+    /// Also install the 3-way merge driver (`.gitattributes` + `.git/config`).
+    #[arg(long)]
+    pub merge_driver: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct NewArgs {
+    /// The item title.
+    pub title: String,
+    /// Item type (bug|feature|chore|docs|epic). Defaults to the config default.
+    #[arg(long = "type", value_name = "TYPE")]
+    pub item_type: Option<String>,
+    /// Priority 0 (highest) – 4. Defaults to 2.
+    #[arg(short = 'p', long)]
+    pub priority: Option<u8>,
+    /// Add a label (repeatable).
+    #[arg(short = 'l', long = "label", value_name = "LABEL")]
+    pub labels: Vec<String>,
+    /// Add a hard dependency (repeatable).
+    #[arg(long = "dep", value_name = "ID")]
+    pub deps: Vec<String>,
+    /// Set the parent item.
+    #[arg(long, value_name = "ID")]
+    pub parent: Option<String>,
+    /// Set the assignee.
+    #[arg(short = 'a', long, value_name = "WHO")]
+    pub assignee: Option<String>,
+    /// Set the item body.
+    #[arg(short = 'b', long, value_name = "TEXT")]
+    pub body: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ShowArgs {
+    /// The item id.
+    pub id: String,
+    /// Comma-separated field projection.
+    #[arg(long, value_name = "LIST")]
+    pub fields: Option<String>,
+    /// Compute `ready`/`blocked_by` even for human output.
+    #[arg(short = 'v', long)]
+    pub verbose: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct EditArgs {
+    /// The item id.
+    pub id: String,
+    /// A `KEY=VALUE` field edit (repeatable). If omitted, opens `$EDITOR`.
+    #[arg(long = "field", value_name = "KEY=VALUE")]
+    pub fields: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct SetArgs {
+    /// The item id.
+    pub id: String,
+    /// One or more `KEY=VALUE` assignments.
+    #[arg(value_name = "KEY=VALUE", required = true)]
+    pub assignments: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct StatusArgs {
+    /// The item id.
+    pub id: String,
+    /// The new status: `open`, `in_progress`, or `closed`.
+    pub state: String,
+}
+
+#[derive(Debug, Args)]
+pub struct LabelArgs {
+    /// The item id.
+    pub id: String,
+    /// `add` or `rm`.
+    pub action: String,
+    /// The label value.
+    pub label: String,
+}
+
+#[derive(Debug, Args)]
+pub struct AssignArgs {
+    /// The item id.
+    pub id: String,
+    /// The assignee (omit with `--clear` to unset).
+    pub assignee: Option<String>,
+    /// Clear the assignee.
+    #[arg(long)]
+    pub clear: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct PriorityArgs {
+    /// The item id.
+    pub id: String,
+    /// Priority 0 (highest) – 4.
+    pub priority: u8,
+}
+
+#[derive(Debug, Args)]
+pub struct DepArgs {
+    #[command(subcommand)]
+    pub action: DepAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DepAction {
+    /// Add a hard dependency: `<id>` depends on `<dep-id>`.
+    Add { id: String, dep_id: String },
+    /// Remove a hard dependency.
+    Rm { id: String, dep_id: String },
+    /// Print the dependency tree rooted at `<id>`.
+    Tree(DepTreeArgs),
+    /// List dependency cycles.
+    Cycle(DepCycleArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct DepTreeArgs {
+    /// The root item id.
+    pub id: String,
+    /// Maximum depth (default 5).
+    #[arg(long, default_value_t = 5)]
+    pub depth: usize,
+    /// Remove the depth limit.
+    #[arg(long)]
+    pub full: bool,
+    /// Emit a flat array with a `depth` field instead of a nested tree.
+    #[arg(long)]
+    pub flat: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct DepCycleArgs {
+    /// Exit 3 if any cycle is found.
+    #[arg(long)]
+    pub fail_on_cycle: bool,
+}
+
+/// Shared filter/pagination flags for `ls`, `ready`, `blocked`.
+#[derive(Debug, Args, Default)]
+pub struct FilterArgs {
+    /// Filter by status (`open|in_progress|closed`).
+    #[arg(long)]
+    pub status: Option<String>,
+    /// Filter by type.
+    #[arg(long = "type", value_name = "TYPE")]
+    pub item_type: Option<String>,
+    /// Filter by label (canonicalized before matching).
+    #[arg(long)]
+    pub label: Option<String>,
+    /// Filter by assignee.
+    #[arg(long)]
+    pub assignee: Option<String>,
+    /// Filter by priority.
+    #[arg(long)]
+    pub priority: Option<u8>,
+    /// Maximum number of results.
+    #[arg(long)]
+    pub limit: Option<usize>,
+    /// Skip this many results.
+    #[arg(long)]
+    pub offset: Option<usize>,
+    /// Comma-separated field projection.
+    #[arg(long, value_name = "LIST")]
+    pub fields: Option<String>,
+    /// Include items with dangling dependencies (ready/blocked).
+    #[arg(long)]
+    pub include_warnings: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct QueryArgs {
+    /// A JSON filter object. If omitted and stdin is not a TTY, read it there.
+    #[arg(long, value_name = "JSON")]
+    pub filter: Option<String>,
+    /// Comma-separated field projection.
+    #[arg(long, value_name = "LIST")]
+    pub fields: Option<String>,
+    /// Maximum number of results.
+    #[arg(long)]
+    pub limit: Option<usize>,
+    /// Skip this many results.
+    #[arg(long)]
+    pub offset: Option<usize>,
+}
+
+#[derive(Debug, Args)]
+pub struct CommentArgs {
+    /// The item id.
+    pub id: String,
+    /// The comment body.
+    pub message: String,
+}
+
+#[derive(Debug, Args)]
+pub struct CommentsArgs {
+    /// The item id.
+    pub id: String,
+    /// Show at most this many (most recent) comments.
+    #[arg(long)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Args)]
+pub struct SearchArgs {
+    /// The search text.
+    pub text: String,
+    /// Maximum number of results.
+    #[arg(long)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Args)]
+pub struct AgentDocArgs {
+    /// Write to a file instead of stdout.
+    #[arg(long, value_name = "FILE")]
+    pub out: Option<Utf8PathBuf>,
+    /// Verify a file's embedded schema version matches this binary.
+    #[arg(long)]
+    pub check: bool,
+    /// The file to check (with `--check`).
+    #[arg(long, value_name = "PATH")]
+    pub file: Option<Utf8PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct DoctorArgs {
+    /// Apply safe repairs (labels, list order, orphaned comment dirs).
+    #[arg(long)]
+    pub fix: bool,
+    /// Exit 4 while any unresolved error remains.
+    #[arg(long)]
+    pub strict: bool,
 }
 
 /// clap value-parser for [`OutputFormat`].
