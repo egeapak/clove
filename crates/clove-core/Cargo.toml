@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 serde.workspace = true
 serde_yaml_neo.workspace = true
+toml.workspace = true
 thiserror.workspace = true
 camino.workspace = true
 smol_str = { workspace = true, features = ["serde"] }

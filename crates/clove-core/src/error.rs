@@ -39,6 +39,10 @@ pub enum CloveError {
     #[error("label is empty after normalization: {raw:?}")]
     EmptyLabel { raw: String },
 
+    /// The repository configuration is invalid or unreadable.
+    #[error("config error in `{path}`: {message}")]
+    Config { path: Utf8PathBuf, message: String },
+
     /// The frontmatter block exceeds [`crate::limits::MAX_FRONTMATTER_BYTES`].
     #[error("frontmatter exceeds {limit} bytes in `{path}`")]
     FrontmatterTooLarge { path: Utf8PathBuf, limit: usize },

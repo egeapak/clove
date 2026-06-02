@@ -4,6 +4,7 @@
 //! whole tool lives here — the index and daemon are accelerators layered on top.
 
 pub mod comments;
+pub mod config;
 pub mod error;
 pub mod graph;
 pub mod id;
@@ -16,6 +17,7 @@ pub mod validate;
 pub mod write;
 
 pub use comments::{add_comment, list_comments, Comment};
+pub use config::{load_config, CloveConfig, DaemonConfig, IndexConfig, OutputFormat};
 pub use error::CloveError;
 pub use graph::{
     is_hard_dep, BlockedItem, ChildrenSummary, DanglingRef, DepTreeNode, EdgeKind, GraphStore,
