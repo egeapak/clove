@@ -3,9 +3,11 @@
 use std::io::{IsTerminal, Read};
 
 use clove_core::{CloveError, OutputFormat};
+use clove_index::QueryMode;
 use serde::Deserialize;
 
 use crate::cli::QueryArgs;
+use crate::cmd::index_read::list_via_index;
 use crate::cmd::listing::{emit, ranks_of, sort_by_priority_topo, Filters, ListOpts};
 use crate::context::Ctx;
 use crate::item_json::parse_fields;
@@ -24,7 +26,12 @@ struct QueryFilter {
     offset: Option<usize>,
 }
 
-pub fn run(ctx: &Ctx, format: OutputFormat, args: QueryArgs) -> Result<(), CloveError> {
+pub fn run(
+    ctx: &Ctx,
+    format: OutputFormat,
+    args: QueryArgs,
+    no_index: bool,
+) -> Result<(), CloveError> {
     let raw = match args.filter {
         Some(text) => text,
         None => read_stdin_filter()?,
@@ -46,20 +53,40 @@ pub fn run(ctx: &Ctx, format: OutputFormat, args: QueryArgs) -> Result<(), Clove
         qf.priority,
     )?;
 
+    let fields = args.fields.as_deref().map(parse_fields);
+    let offset = args.offset.or(qf.offset).unwrap_or(0);
+    let limit = args.limit.or(qf.limit);
+
+    if let Some((ordered, warnings)) = list_via_index(ctx, no_index, QueryMode::List, &filters)? {
+        let total = ordered.len();
+        emit(
+            format,
+            &ordered,
+            ListOpts {
+                total,
+                offset,
+                limit,
+                fields: fields.as_deref(),
+                source: "index",
+                warnings,
+            },
+        );
+        return Ok(());
+    }
+
     let (mut frontmatters, _errors) = ctx.store.scan_frontmatter()?;
     let (_graph, ranks) = ranks_of(&frontmatters);
     frontmatters.retain(|fm| filters.matches(fm));
     sort_by_priority_topo(&mut frontmatters, &ranks);
 
     let total = frontmatters.len();
-    let fields = args.fields.as_deref().map(parse_fields);
     emit(
         format,
         &frontmatters,
         ListOpts {
             total,
-            offset: args.offset.or(qf.offset).unwrap_or(0),
-            limit: args.limit.or(qf.limit),
+            offset,
+            limit,
             fields: fields.as_deref(),
             source: "files",
             warnings: Vec::new(),

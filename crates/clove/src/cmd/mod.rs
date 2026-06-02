@@ -7,6 +7,7 @@ pub mod comments;
 pub mod dep;
 pub mod doctor;
 pub mod edit;
+pub mod index_read;
 pub mod init;
 pub mod label;
 pub mod listing;

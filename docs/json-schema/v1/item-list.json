@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://clove.dev/schema/v1/item-list.json",
+  "title": "clove item list envelope",
+  "type": "object",
+  "required": ["v", "ok", "data"],
+  "properties": {
+    "v": { "const": 1 },
+    "ok": { "const": true },
+    "data": {
+      "type": "array",
+      "items": { "type": "object", "required": ["id", "status"] }
+    },
+    "_meta": { "type": "object" }
+  },
+  "additionalProperties": false
+}

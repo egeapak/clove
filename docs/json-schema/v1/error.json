@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://clove.dev/schema/v1/error.json",
+  "title": "clove error envelope",
+  "type": "object",
+  "required": ["v", "ok", "error"],
+  "properties": {
+    "v": { "const": 1 },
+    "ok": { "const": false },
+    "error": {
+      "type": "object",
+      "required": ["code", "message", "exit"],
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "type": "string" },
+        "exit": { "type": "integer", "minimum": 0, "maximum": 7 }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

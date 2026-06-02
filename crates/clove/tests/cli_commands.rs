@@ -310,6 +310,104 @@ fn doctor_strict_exits_4_on_errors() {
 }
 
 #[test]
+fn ls_uses_index_when_present_and_matches_file_path() {
+    let dir = init_repo();
+    let dep = new_item(dir.path(), "Dep", &[]);
+    new_item(dir.path(), "Other", &["--dep", &dep, "--type", "bug"]);
+
+    // Before indexing, the file scan is used.
+    let files = json_ok(clove(dir.path()).arg("ls"));
+    assert_eq!(files["_meta"]["source"], "files");
+
+    clove(dir.path()).arg("reindex").assert().success();
+
+    // After indexing, ls uses the index and returns the same ordered ids.
+    let indexed = json_ok(clove(dir.path()).arg("ls"));
+    assert_eq!(indexed["_meta"]["source"], "index");
+    assert_eq!(
+        indexed["data"], files["data"],
+        "index output must match files"
+    );
+
+    // --no-index forces the file path.
+    let forced = json_ok(clove(dir.path()).args(["ls", "--no-index"]));
+    assert_eq!(forced["_meta"]["source"], "files");
+}
+
+#[test]
+fn ls_index_auto_refreshes_after_edit() {
+    let dir = init_repo();
+    new_item(dir.path(), "One", &[]);
+    clove(dir.path()).arg("reindex").assert().success();
+
+    // Add an item after indexing; the index auto-refreshes (<= threshold).
+    new_item(dir.path(), "Two", &[]);
+    let v = json_ok(clove(dir.path()).arg("ls"));
+    assert_eq!(v["_meta"]["source"], "index");
+    assert_eq!(v["data"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn doctor_detects_and_fixes_index_divergence() {
+    let dir = init_repo();
+    new_item(dir.path(), "Indexed", &[]);
+    clove(dir.path()).arg("reindex").assert().success();
+
+    // Diverge the index by deleting the item file directly.
+    for entry in std::fs::read_dir(dir.path().join(".clove/issues")).unwrap() {
+        let p = entry.unwrap().path();
+        if p.extension().and_then(|e| e.to_str()) == Some("md") {
+            std::fs::remove_file(p).unwrap();
+        }
+    }
+
+    let report = json_ok(clove(dir.path()).arg("doctor"));
+    let codes: Vec<&str> = report["data"]["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["code"].as_str().unwrap())
+        .collect();
+    assert!(codes.contains(&"INDEX_DIVERGENCE"), "codes: {codes:?}");
+
+    // --fix rebuilds the index; a subsequent run is clean of divergence.
+    clove(dir.path())
+        .args(["doctor", "--fix"])
+        .assert()
+        .success();
+    let after = json_ok(clove(dir.path()).arg("doctor"));
+    let after_codes: Vec<&str> = after["data"]["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["code"].as_str().unwrap())
+        .collect();
+    assert!(
+        !after_codes.contains(&"INDEX_DIVERGENCE"),
+        "codes: {after_codes:?}"
+    );
+}
+
+#[test]
+fn doctor_no_index_skips_divergence_check() {
+    let dir = init_repo();
+    new_item(dir.path(), "X", &[]);
+    clove(dir.path()).arg("reindex").assert().success();
+    std::fs::remove_dir_all(dir.path().join(".clove/issues")).unwrap();
+    std::fs::create_dir_all(dir.path().join(".clove/issues")).unwrap();
+
+    // With --no-index the divergence check does not run.
+    let report = json_ok(clove(dir.path()).args(["doctor", "--no-index"]));
+    let codes: Vec<&str> = report["data"]["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["code"].as_str().unwrap())
+        .collect();
+    assert!(!codes.contains(&"INDEX_DIVERGENCE"));
+}
+
+#[test]
 fn env_clove_format_json_without_flag() {
     let dir = init_repo();
     new_item(dir.path(), "Item", &[]);
