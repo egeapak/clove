@@ -10,3 +10,20 @@ repository.workspace = true
 # M0 is file-only; the SQLite stack (rusqlite/blake3) is added in M1 (T-S01).
 [dependencies]
 clove-core.workspace = true
+rusqlite.workspace = true
+blake3.workspace = true
+thiserror.workspace = true
+camino.workspace = true
+chrono.workspace = true
+rayon.workspace = true
+serde_json.workspace = true
+fd-lock.workspace = true     # advisory reindex lock (auto-released on crash)
+
+[dev-dependencies]
+tempfile.workspace = true
+criterion.workspace = true
+filetime = "0.2"          # backdate file mtimes in staleness tests/benches
+
+[[bench]]
+name = "index"
+harness = false

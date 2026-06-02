@@ -22,7 +22,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml_neo = "0.11"         # strict YAML (maintained serde_yaml fork); DESIGN §4/§14.2 pinned 0.9 but crates.io only has 0.10/0.11
 petgraph = "0.6"                # DAG engine
-rusqlite = { version = "0.40", features = ["bundled"] }  # embedded SQLite, no runtime dep (M1)
+rusqlite = { version = "0.37", features = ["bundled"] }  # embedded SQLite, no runtime dep (M1). DESIGN §1 named 0.40, but its libsqlite3-sys 0.38 build script needs unstable `cfg_select!`; 0.37 (libsqlite3-sys 0.35) builds on the pinned toolchain and still bundles SQLite ≥3.43 for FTS5 contentless_delete.
 notify = "6"                    # file-watch (M3); 9.0-rc is NOT production-ready — do not bump
 interprocess = "2"              # Unix socket + Windows named pipe (M3)
 tokio = { version = "1", features = ["full"] }  # daemon async runtime only

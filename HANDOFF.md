@@ -1,8 +1,59 @@
 # clove — Session Handoff
 
 **Updated:** 2026-06-02
-**State:** Planning complete and reviewed. **Not yet built. Not yet a git repo.**
-**Next step:** Start the M0 build from `docs/IMPLEMENTATION_PLAN.md`.
+**State:** M0 foundation built (infra, data model, graph engine, config + CLI
+foundation). **M1 `clove-index` library built** (see below). Most of the M0 CLI
+command surface is still pending.
+**Next step:** either finish the M0 CLI commands (the bulk of `crates/clove`) or
+wire the M1 index into the CLI (T-S04 CLI half, T-S05, T-S06, T-S08).
+
+---
+
+## M1 progress — `clove-index` library (this session)
+
+Built the self-contained index crate; depends only on the finished `clove-core`.
+
+- **T-S01** `db.rs` — schema/DDL, `Index::open`/`open_or_create`, `IndexError`,
+  `ItemRow`; `user_version` schema check with drop-and-rebuild on
+  mismatch/corruption.
+- **T-S02** `write.rs` — `upsert_item`, the single encapsulated write path
+  (items + edges + labels + FTS5) in one `BEGIN IMMEDIATE` txn.
+- **T-S03** `stale.rs` — `check_staleness` / `apply_staleness`
+  (`StalenessReport`); dir-mtime + count fast path, content-hash gate with the
+  2 s recent-file guard.
+- **T-S04** `reindex.rs` — **library half only**: `reindex(issues_dir, db_path)`
+  with tmp-build + atomic rename, `fd-lock` advisory lock, parallel parse, topo
+  ranks via `clove-core` `GraphStore`. The `clove reindex` CLI command is
+  deferred (needs the M0 command surface).
+- **T-S07** `query.rs` — `query_items` with `Filter`/`QueryMode` (ready SQL +
+  list filters), ordered `(priority, topo rank NULLs-last, id)` to match the
+  file path.
+- Benchmarks in `benches/index.rs` (criterion); unit tests cover every AC above.
+
+**Deferred (blocked on the M0 CLI):** T-S04 CLI half, T-S05 `clove search`,
+T-S06 `with_index` read-path wrapper, T-S08 `doctor` index-divergence check.
+
+**Decisions / deviations made (don't relitigate without reason):**
+- Added `clove_core::graph::GraphStore::topological_ranks()` — a small public
+  accessor exposing the already-computed ranks so the index can persist
+  `topological_rank` without rebuilding the graph.
+- **rusqlite pinned to 0.37** (not DESIGN's 0.40): 0.40's `libsqlite3-sys` 0.38
+  build script needs the unstable `cfg_select!` macro, which fails on the pinned
+  stable toolchain. 0.37 (libsqlite3-sys 0.35) still bundles SQLite ≥3.43.
+- **FTS5 deviates from the §6.1 DDL in two ways**, both forced by pairing a
+  contentless FTS table with a `WITHOUT ROWID` `items` table: (1)
+  `contentless_delete=1` so a shadow row can be deleted by rowid (the spec's
+  `'delete'` command needs the old column values, which we lack on edit/delete);
+  (2) an `fts_map(fts_rowid → item_id)` side table so a full-text match (which
+  yields only rowids on a contentless table) can be resolved back to an item id.
+- `upsert_item` (incremental write-through) stores best-effort `file_mtime=now`
+  and `content_hash` over the body; the authoritative file mtime/hash come from
+  `reindex`/`apply_staleness`. `ParentOf` is not stored in `edges` (parent lives
+  in `items.parent_id`; the ready query only consults `DependsOn`).
+- **Perf note:** at 2k items (release): reindex ~116 ms, ls ~3.1 ms, ready
+  ~3.7 ms, staleness-clean ~2.1 ms. The 10k acceptance-gate tuning (esp. the
+  staleness fast path doing a per-file `readdir`, and `ls` row construction)
+  should be revisited when the CLI read path lands.
 
 ---
 
