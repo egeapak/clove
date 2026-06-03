@@ -115,3 +115,95 @@ fn ls_ready_query_route_through_daemon_with_parity() {
         "stale sock cleaned"
     );
 }
+
+/// Parse the new-item id from `clove new ... -f json`.
+fn new_id(out: &[u8]) -> String {
+    let v: serde_json::Value = serde_json::from_slice(out).unwrap();
+    v["data"]["id"].as_str().unwrap().to_owned()
+}
+
+#[test]
+fn tier1_tier2_commands_route_through_daemon_with_parity() {
+    let Some(bin) = cloved_bin() else {
+        eprintln!("skipping: cloved binary not built (run via `cargo test --workspace`)");
+        return;
+    };
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    assert!(run_in(root, &["init"]).status.success());
+    let a = new_id(&run_in(root, &["new", "alpha apple", "-f", "json"]).stdout);
+    let b = new_id(&run_in(root, &["new", "beta banana", "-f", "json"]).stdout);
+    let c = new_id(&run_in(root, &["new", "gamma grape", "-f", "json"]).stdout);
+    // a depends on b (b open → a blocked); c depends on a (→ c blocked too).
+    assert!(run_in(root, &["dep", "add", &a, &b]).status.success());
+    assert!(run_in(root, &["dep", "add", &c, &a]).status.success());
+    assert!(run_in(root, &["reindex"]).status.success());
+
+    // Ground truth (no daemon, file scan).
+    let mut want_blocked = list_ids(&run_in(root, &["--no-index", "blocked", "-f", "json"]).stdout);
+    want_blocked.sort();
+    let want_cycle_count = cycle_count(&run_in(root, &["dep", "cycle", "-f", "json"]).stdout);
+    let want_tree = tree_shape(&run_in(root, &["dep", "tree", &c, "-f", "json"]).stdout);
+
+    let clove_dir = root.join(".clove");
+    let mut daemon = spawn_daemon(&clove_dir, &bin);
+
+    // search → daemon, finds the item by title.
+    let (search_ids, search_src) =
+        ids_and_source(&run_in(root, &["search", "apple", "-f", "json"]).stdout);
+    assert_eq!(search_src, "daemon", "search routes to the daemon");
+    assert_eq!(search_ids, vec![a.clone()], "search finds 'alpha apple'");
+
+    // blocked → daemon, same set as the file path.
+    let (mut blocked_ids, blocked_src) =
+        ids_and_source(&run_in(root, &["blocked", "-f", "json"]).stdout);
+    assert_eq!(blocked_src, "daemon", "blocked routes to the daemon");
+    blocked_ids.sort();
+    assert_eq!(
+        blocked_ids, want_blocked,
+        "blocked set matches the file path"
+    );
+
+    // dep cycle → daemon, same count.
+    assert_eq!(
+        cycle_count(&run_in(root, &["dep", "cycle", "-f", "json"]).stdout),
+        want_cycle_count
+    );
+
+    // dep tree → daemon, same shape.
+    assert_eq!(
+        tree_shape(&run_in(root, &["dep", "tree", &c, "-f", "json"]).stdout),
+        want_tree
+    );
+
+    // reindex delegates to the daemon (still reports the item count).
+    let rv: serde_json::Value =
+        serde_json::from_slice(&run_in(root, &["reindex", "-f", "json"]).stdout).unwrap();
+    assert_eq!(rv["data"]["items_indexed"], serde_json::json!(3));
+
+    sigterm(daemon.id());
+    let _ = daemon.wait();
+}
+
+fn list_ids(out: &[u8]) -> Vec<String> {
+    ids_and_source(out).0
+}
+
+fn cycle_count(out: &[u8]) -> u64 {
+    let v: serde_json::Value = serde_json::from_slice(out).unwrap();
+    v["_meta"]["count"].as_u64().unwrap()
+}
+
+/// A stable "shape" string of a dep tree: root id + the ids of its children.
+fn tree_shape(out: &[u8]) -> String {
+    let v: serde_json::Value = serde_json::from_slice(out).unwrap();
+    let root = v["data"]["id"].as_str().unwrap();
+    let kids: Vec<&str> = v["data"]["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["id"].as_str().unwrap())
+        .collect();
+    format!("{root}:{}", kids.join(","))
+}

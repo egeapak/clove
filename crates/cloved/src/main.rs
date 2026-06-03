@@ -12,6 +12,7 @@ use clap::{Parser, Subcommand};
 
 #[cfg(feature = "git-sync")]
 mod git_sync;
+mod graph_cache;
 mod ipc;
 mod lifecycle;
 mod reindexer;

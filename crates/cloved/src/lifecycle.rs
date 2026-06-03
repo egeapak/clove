@@ -66,10 +66,12 @@ pub fn run(clove_dir: &Utf8Path) -> anyhow::Result<()> {
              git-sync support; auto-commit is disabled"
         );
     }
+    let repo_root = clove_dir.parent().unwrap_or(clove_dir).to_owned();
     let watch_options = crate::watcher::WatchOptions {
-        repo_root: clove_dir.parent().unwrap_or(clove_dir).to_owned(),
+        repo_root: repo_root.clone(),
         git_sync,
     };
+    let graph = Arc::new(crate::graph_cache::GraphCache::new(repo_root));
 
     // 3. Tokio runtime — 2 workers (IPC + watcher), per DESIGN §8.1.
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -84,6 +86,7 @@ pub fn run(clove_dir: &Utf8Path) -> anyhow::Result<()> {
         issues_dir: issues_dir.clone(),
         db_path: db_path.clone(),
         auto_refresh,
+        graph: Arc::clone(&graph),
     };
 
     let serve_result: anyhow::Result<()> = runtime.block_on(async {
@@ -108,7 +111,7 @@ pub fn run(clove_dir: &Utf8Path) -> anyhow::Result<()> {
         //    timeout) fires.
         tokio::select! {
             _ = accept_loop(listener, dispatcher) => {},
-            _ = crate::watcher::watch(issues_dir.clone(), Arc::clone(&index), Arc::clone(&state), debounce, watch_options.clone()) => {},
+            _ = crate::watcher::watch(issues_dir.clone(), Arc::clone(&index), Arc::clone(&state), debounce, watch_options.clone(), Arc::clone(&graph)) => {},
             _ = idle_watchdog(Arc::clone(&state), idle_shutdown) => {},
             _ = shutdown_signal(clove_dir) => {},
         }

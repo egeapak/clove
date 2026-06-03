@@ -13,6 +13,7 @@
 //! STATUS  → { uptime_s, items_indexed, watcher_state, last_event_ms }
 //! ```
 
+use clove_core::graph::DepTreeNode;
 use clove_core::{ItemStatus, ItemType, Priority};
 use serde::{Deserialize, Serialize};
 
@@ -33,10 +34,53 @@ pub enum Request {
     Ping,
     /// A read query the daemon answers from its hot index.
     Query(QueryRequest),
+    /// Full-text search; returns matched ids in FTS-rank order.
+    Search(SearchRequest),
+    /// A dependency-graph query served from the daemon's cached graph.
+    Graph(GraphRequest),
     /// Force a full reindex inside the daemon.
     Reindex,
     /// Operational daemon telemetry.
     Status,
+}
+
+/// A dependency-graph query (DESIGN §8.4 extension for `blocked`/`dep`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum GraphRequest {
+    /// Active items blocked by open or (with `include_warnings`) missing deps,
+    /// in `(priority, topological_rank, id)` order.
+    Blocked { include_warnings: bool },
+    /// All hard-dependency cycles.
+    Cycles,
+    /// The dependency tree rooted at `root`, to `depth` (use `usize::MAX` for full).
+    Tree { root: String, depth: usize },
+    /// Whether adding `from → to` would create a cycle.
+    WouldCycle { from: String, to: String },
+}
+
+/// The reply to a [`Request::Graph`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "graph", rename_all = "snake_case")]
+pub enum GraphResponse {
+    /// Ordered blocked-item ids (the CLI reads those files for full detail).
+    Blocked { ids: Vec<String> },
+    /// Each cycle as its member ids.
+    Cycles { cycles: Vec<Vec<String>> },
+    /// The dependency tree, or `None` if the root is unknown.
+    Tree { node: Option<DepTreeNode> },
+    /// Whether the edge would create a cycle.
+    WouldCycle { would: bool },
+}
+
+/// The payload of a [`Request::Search`] (the FTS query the daemon runs).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchRequest {
+    /// The free-text query.
+    pub text: String,
+    /// Optional result cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
 }
 
 /// Which lean list a [`Request::Query`] runs — mirrors `clove_index::QueryMode`.
@@ -108,6 +152,11 @@ pub enum Response {
     Pong,
     /// Reply to [`Request::Query`]: the lean rows + total the CLI shapes itself.
     QueryList(QueryListResponse),
+    /// Reply to [`Request::Search`]: matched item ids in FTS-rank order. The CLI
+    /// reads those files for full detail, preserving `clove search`'s shape.
+    SearchIds { ids: Vec<String> },
+    /// Reply to [`Request::Graph`].
+    Graph(GraphResponse),
     /// Reply to [`Request::Reindex`].
     ReindexDone(ReindexDone),
     /// Reply to [`Request::Status`].
@@ -176,6 +225,22 @@ mod tests {
             Request::Ping,
             Request::Reindex,
             Request::Status,
+            Request::Search(SearchRequest {
+                text: "hello world".to_owned(),
+                limit: Some(20),
+            }),
+            Request::Graph(GraphRequest::Blocked {
+                include_warnings: true,
+            }),
+            Request::Graph(GraphRequest::Cycles),
+            Request::Graph(GraphRequest::Tree {
+                root: "proj-7af".to_owned(),
+                depth: 5,
+            }),
+            Request::Graph(GraphRequest::WouldCycle {
+                from: "proj-7af".to_owned(),
+                to: "proj-3k2".to_owned(),
+            }),
             Request::Query(QueryRequest {
                 kind: QueryKind::List,
                 status: Some(ItemStatus::Open),
@@ -220,6 +285,16 @@ mod tests {
                 total: 1,
                 warnings: vec![],
             }),
+            Response::SearchIds {
+                ids: vec!["proj-7af".to_owned(), "proj-3k2".to_owned()],
+            },
+            Response::Graph(GraphResponse::Blocked {
+                ids: vec!["proj-7af".to_owned()],
+            }),
+            Response::Graph(GraphResponse::Cycles {
+                cycles: vec![vec!["proj-a".to_owned(), "proj-b".to_owned()]],
+            }),
+            Response::Graph(GraphResponse::WouldCycle { would: true }),
             Response::ReindexDone(ReindexDone {
                 items_indexed: 42,
                 duration_ms: 735,

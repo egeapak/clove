@@ -10,7 +10,11 @@ the optional `cloved` (file-watch incremental index, IPC, opt-in git auto-sync),
 `clove daemon start|stop|status`, transparent read routing through the daemon, and
 a `doctor` daemon-health check — see `docs/M3_PLAN.md` and
 `docs/M3_ACCEPTANCE_GATES.md` (gates M3-G01–M3-G10 all pass). New lean crate
-`clove-ipc`; index schema **v3** (`file_mtimes.synced_at`). All five JSON schemas
+`clove-ipc`; index schema **v3** (`file_mtimes.synced_at`). When a daemon is
+running the CLI defers read/graph work to it — `ls`/`ready`/`query` (lean index),
+`search` (FTS), `blocked`/`dep tree`/`dep cycle`/`dep add` cycle-check (cached
+graph), and `reindex` (delegated so the daemon stays coherent) — all with a clean
+local fallback; see the routing matrix in `docs/M3_ACCEPTANCE_GATES.md`. All five JSON schemas
 published + validated. Perf/parity/fuzz/golden gates pass (M0
 `docs/IMPLEMENTATION_PLAN.md`, M1 `docs/M1_ACCEPTANCE_GATES.md`, M2
 `docs/M2_ACCEPTANCE_GATES.md`, M3 `docs/M3_ACCEPTANCE_GATES.md`). Tests green

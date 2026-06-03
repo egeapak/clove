@@ -19,6 +19,7 @@ use camino::Utf8PathBuf;
 use clove_index::Index;
 use notify::{recommended_watcher, Event, RecursiveMode, Watcher};
 
+use crate::graph_cache::GraphCache;
 use crate::reindexer::sync_once;
 use crate::state::{DaemonState, WatcherState};
 
@@ -47,6 +48,7 @@ pub async fn watch(
     state: Arc<Mutex<DaemonState>>,
     debounce: Duration,
     options: WatchOptions,
+    graph: Arc<GraphCache>,
 ) {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<PathBuf>();
 
@@ -97,6 +99,8 @@ pub async fn watch(
 
         // Apply one index batch (one transaction) and record it.
         sync_once(&issues_dir, &index, &state);
+        // The files changed → the cached dependency graph is now stale.
+        graph.mark_dirty();
         if let Ok(mut st) = state.lock() {
             st.mark_event();
             st.inc_batches();

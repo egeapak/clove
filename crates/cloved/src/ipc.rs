@@ -13,14 +13,16 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use camino::Utf8PathBuf;
+use clove_core::CloveId;
 use clove_index::{Filter, Index, ItemListRow, QueryMode};
 use clove_ipc::frame::MAX_FRAME;
 use clove_ipc::protocol::{
-    ErrorResponse, LeanRow, QueryKind, QueryListResponse, QueryRequest, ReindexDone, Request,
-    Response,
+    ErrorResponse, GraphRequest, GraphResponse, LeanRow, QueryKind, QueryListResponse,
+    QueryRequest, ReindexDone, Request, Response,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+use crate::graph_cache::GraphCache;
 use crate::state::DaemonState;
 
 /// Above this many out-of-date items, the QUERY-time refresh is skipped (the
@@ -36,6 +38,7 @@ pub struct Dispatcher {
     pub issues_dir: Utf8PathBuf,
     pub db_path: Utf8PathBuf,
     pub auto_refresh: bool,
+    pub graph: Arc<GraphCache>,
 }
 
 impl Dispatcher {
@@ -51,7 +54,82 @@ impl Dispatcher {
                 Err(_) => Response::Error(ErrorResponse::new("internal", "state lock poisoned")),
             },
             Request::Query(q) => self.handle_query(q),
+            Request::Search(s) => self.handle_search(s),
+            Request::Graph(g) => self.handle_graph(g),
             Request::Reindex => self.handle_reindex(),
+        }
+    }
+
+    /// Serve a dependency-graph query from the daemon's cached graph (Tier 2).
+    fn handle_graph(&self, req: GraphRequest) -> Response {
+        let resp = self.graph.with_graph(|graph, ranks| match req {
+            GraphRequest::Cycles => GraphResponse::Cycles {
+                cycles: graph
+                    .all_cycles()
+                    .iter()
+                    .map(|c| c.iter().map(|id| id.to_string()).collect())
+                    .collect(),
+            },
+            GraphRequest::Tree { root, depth } => {
+                let node = CloveId::new(&root)
+                    .ok()
+                    .and_then(|id| graph.dep_tree(&id, depth));
+                GraphResponse::Tree { node }
+            }
+            GraphRequest::WouldCycle { from, to } => {
+                let would = match (CloveId::new(&from), CloveId::new(&to)) {
+                    (Ok(f), Ok(t)) => graph.check_would_cycle(&f, &t),
+                    _ => false,
+                };
+                GraphResponse::WouldCycle { would }
+            }
+            GraphRequest::Blocked { include_warnings } => {
+                // Same set + (priority, topological_rank, id) order as the CLI's
+                // file path (`clove blocked`), computed from the graph alone.
+                let mut keyed: Vec<(u8, usize, CloveId)> = graph
+                    .blocked_items()
+                    .into_iter()
+                    .filter(|b| include_warnings || !b.blocking_deps.is_empty())
+                    .filter_map(|b| {
+                        graph.meta(&b.id).map(|m| {
+                            let rank = ranks.get(&b.id).copied().unwrap_or(usize::MAX);
+                            (m.priority.0, rank, b.id.clone())
+                        })
+                    })
+                    .collect();
+                keyed.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+                GraphResponse::Blocked {
+                    ids: keyed.into_iter().map(|(_, _, id)| id.to_string()).collect(),
+                }
+            }
+        });
+        match resp {
+            Some(r) => Response::Graph(r),
+            None => Response::Error(ErrorResponse::new("graph_failed", "could not scan files")),
+        }
+    }
+
+    /// Run an FTS search over the hot index (freshening first) and return matched
+    /// ids in rank order; the CLI reads those files for full detail.
+    fn handle_search(&self, req: clove_ipc::SearchRequest) -> Response {
+        let mut index = match self.index.lock() {
+            Ok(g) => g,
+            Err(_) => {
+                return Response::Error(ErrorResponse::new("internal", "index lock poisoned"))
+            }
+        };
+        if self.auto_refresh {
+            if let Ok(report) = index.check_staleness_fast(&self.issues_dir) {
+                if !report.is_clean() && report.change_count() <= STALE_REFRESH_LIMIT {
+                    let _ = index.apply_staleness(&report, &self.issues_dir);
+                }
+            }
+        }
+        match index.search(&req.text, req.limit) {
+            Ok(rows) => Response::SearchIds {
+                ids: rows.into_iter().map(|r| r.id).collect(),
+            },
+            Err(e) => Response::Error(ErrorResponse::new("search_failed", e.to_string())),
         }
     }
 

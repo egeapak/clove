@@ -1,7 +1,8 @@
 //! `clove dep add|rm|tree|cycle` (T-CLI08, T-CLI09).
 
 use clove_core::graph::{render_dep_tree_human, DepTreeNode};
-use clove_core::{CloveError, GraphStore, OutputFormat};
+use clove_core::{CloveError, CloveId, GraphStore, OutputFormat};
+use clove_ipc::{DaemonClient, GraphRequest, GraphResponse};
 use serde_json::{json, Map, Value};
 
 use crate::cli::{DepAction, DepCycleArgs, DepTreeArgs};
@@ -37,9 +38,7 @@ fn add(ctx: &Ctx, format: OutputFormat, id_s: &str, dep_s: &str) -> Result<(), C
         return Err(CloveError::SelfDependency { id: id.to_string() });
     }
 
-    let (frontmatters, _errors) = ctx.store.scan_frontmatter()?;
-    let (graph, _dangling) = GraphStore::build(&frontmatters);
-    if graph.check_would_cycle(&id, &dep) {
+    if would_cycle(ctx, &id, &dep)? {
         return Err(CloveError::DependencyCycle {
             from: id.to_string(),
             to: dep.to_string(),
@@ -77,12 +76,18 @@ fn tree(ctx: &Ctx, format: OutputFormat, args: DepTreeArgs) -> Result<(), CloveE
     if !ctx.store.exists(&id) {
         return Err(CloveError::NotFound { id: id.to_string() });
     }
-    let (frontmatters, _errors) = ctx.store.scan_frontmatter()?;
-    let (graph, _dangling) = GraphStore::build(&frontmatters);
     let depth = if args.full { usize::MAX } else { args.depth };
-    let root = graph
-        .dep_tree(&id, depth)
-        .ok_or_else(|| CloveError::NotFound { id: id.to_string() })?;
+    // Daemon fast path: serve the tree from the daemon's cached graph.
+    let root = match dep_tree_via_daemon(ctx, &id, depth) {
+        Some(node_opt) => node_opt.ok_or_else(|| CloveError::NotFound { id: id.to_string() })?,
+        None => {
+            let (frontmatters, _errors) = ctx.store.scan_frontmatter()?;
+            let (graph, _dangling) = GraphStore::build(&frontmatters);
+            graph
+                .dep_tree(&id, depth)
+                .ok_or_else(|| CloveError::NotFound { id: id.to_string() })?
+        }
+    };
 
     match format {
         OutputFormat::Json | OutputFormat::Jsonl => {
@@ -101,13 +106,23 @@ fn tree(ctx: &Ctx, format: OutputFormat, args: DepTreeArgs) -> Result<(), CloveE
 }
 
 fn cycle(ctx: &Ctx, format: OutputFormat, args: DepCycleArgs) -> Result<ExitCode, CloveError> {
-    let (frontmatters, _errors) = ctx.store.scan_frontmatter()?;
-    let (graph, _dangling) = GraphStore::build(&frontmatters);
-    let cycles = graph.all_cycles();
+    // Daemon fast path: serve cycles from the daemon's cached graph.
+    let cycles: Vec<Vec<String>> = match cycles_via_daemon(ctx) {
+        Some(cycles) => cycles,
+        None => {
+            let (frontmatters, _errors) = ctx.store.scan_frontmatter()?;
+            let (graph, _dangling) = GraphStore::build(&frontmatters);
+            graph
+                .all_cycles()
+                .iter()
+                .map(|c| c.iter().map(|id| id.to_string()).collect())
+                .collect()
+        }
+    };
 
     let arrays: Vec<Value> = cycles
         .iter()
-        .map(|c| Value::Array(c.iter().map(|id| json!(id.as_str())).collect()))
+        .map(|c| Value::Array(c.iter().map(|id| json!(id)).collect()))
         .collect();
 
     match format {
@@ -120,7 +135,7 @@ fn cycle(ctx: &Ctx, format: OutputFormat, args: DepCycleArgs) -> Result<ExitCode
                 println!("no cycles");
             } else {
                 for c in &cycles {
-                    let ids: Vec<&str> = c.iter().map(|id| id.as_str()).collect();
+                    let ids: Vec<&str> = c.iter().map(|s| s.as_str()).collect();
                     println!("{}", ids.join(" → "));
                 }
             }
@@ -156,5 +171,50 @@ fn flatten(node: &DepTreeNode, depth: usize, out: &mut Vec<Value>) {
     }));
     for child in &node.children {
         flatten(child, depth + 1, out);
+    }
+}
+
+// ---- Daemon routing (Tier 2) --------------------------------------------------
+
+/// `.clove/` dir, or `None` if it cannot be located.
+fn daemon_client(ctx: &Ctx) -> Option<DaemonClient> {
+    DaemonClient::probe(ctx.issues_dir.parent()?)
+}
+
+/// Whether `from → to` would cycle. Uses the daemon's cached graph when alive,
+/// else builds the graph locally.
+fn would_cycle(ctx: &Ctx, from: &CloveId, to: &CloveId) -> Result<bool, CloveError> {
+    if let Some(mut client) = daemon_client(ctx) {
+        if let Ok(GraphResponse::WouldCycle { would }) = client.graph(GraphRequest::WouldCycle {
+            from: from.to_string(),
+            to: to.to_string(),
+        }) {
+            return Ok(would);
+        }
+    }
+    let (frontmatters, _errors) = ctx.store.scan_frontmatter()?;
+    let (graph, _dangling) = GraphStore::build(&frontmatters);
+    Ok(graph.check_would_cycle(from, to))
+}
+
+/// Daemon-served dependency tree. Outer `None` = no daemon (caller falls back);
+/// inner `None` = daemon reports the root unknown.
+fn dep_tree_via_daemon(ctx: &Ctx, root: &CloveId, depth: usize) -> Option<Option<DepTreeNode>> {
+    let mut client = daemon_client(ctx)?;
+    match client.graph(GraphRequest::Tree {
+        root: root.to_string(),
+        depth,
+    }) {
+        Ok(GraphResponse::Tree { node }) => Some(node),
+        _ => None,
+    }
+}
+
+/// Daemon-served cycles (member ids). `None` = no daemon.
+fn cycles_via_daemon(ctx: &Ctx) -> Option<Vec<Vec<String>>> {
+    let mut client = daemon_client(ctx)?;
+    match client.graph(GraphRequest::Cycles) {
+        Ok(GraphResponse::Cycles { cycles }) => Some(cycles),
+        _ => None,
     }
 }

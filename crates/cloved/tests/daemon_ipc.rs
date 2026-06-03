@@ -196,3 +196,38 @@ fn stale_socket_recovery_is_fast() {
     );
     assert!(!clove_dir.join("daemon.pid").exists(), "stale pid cleaned");
 }
+
+#[test]
+fn search_and_graph_over_ipc() {
+    use clove_ipc::{GraphRequest, GraphResponse, SearchRequest};
+    let (_tmp, clove_dir) = init_repo_with_items(3);
+    let mut child = spawn_ready(&clove_dir);
+    let mut client = DaemonClient::probe(&clove_dir).expect("daemon alive");
+
+    // SEARCH returns ids for a matching title token ("item" is in every title).
+    let ids = client
+        .search(SearchRequest {
+            text: "item".to_owned(),
+            limit: None,
+        })
+        .unwrap();
+    assert_eq!(ids.len(), 3, "search matches all three items");
+
+    // GRAPH: no deps yet → no cycles, nothing blocked.
+    match client.graph(GraphRequest::Cycles).unwrap() {
+        GraphResponse::Cycles { cycles } => assert!(cycles.is_empty()),
+        other => panic!("expected Cycles, got {other:?}"),
+    }
+    match client
+        .graph(GraphRequest::Blocked {
+            include_warnings: false,
+        })
+        .unwrap()
+    {
+        GraphResponse::Blocked { ids } => assert!(ids.is_empty(), "nothing blocked"),
+        other => panic!("expected Blocked, got {other:?}"),
+    }
+
+    sigterm(child.id());
+    let _ = child.wait();
+}

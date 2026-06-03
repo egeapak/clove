@@ -138,6 +138,34 @@ impl DaemonClient {
         }
     }
 
+    /// Run a full-text search; returns matched ids in FTS-rank order.
+    pub fn search(
+        &mut self,
+        req: crate::protocol::SearchRequest,
+    ) -> Result<Vec<String>, ClientError> {
+        match self.request(&Request::Search(req))? {
+            Response::SearchIds { ids } => Ok(ids),
+            Response::Error(e) => Err(ClientError::Protocol(format!("{}: {}", e.code, e.message))),
+            other => Err(ClientError::Protocol(format!(
+                "expected SEARCH reply, got {other:?}"
+            ))),
+        }
+    }
+
+    /// Run a dependency-graph query against the daemon's cached graph.
+    pub fn graph(
+        &mut self,
+        req: crate::protocol::GraphRequest,
+    ) -> Result<crate::protocol::GraphResponse, ClientError> {
+        match self.request(&Request::Graph(req))? {
+            Response::Graph(resp) => Ok(resp),
+            Response::Error(e) => Err(ClientError::Protocol(format!("{}: {}", e.code, e.message))),
+            other => Err(ClientError::Protocol(format!(
+                "expected GRAPH reply, got {other:?}"
+            ))),
+        }
+    }
+
     /// Trigger a full reindex inside the daemon; returns its report.
     pub fn reindex(&mut self) -> Result<crate::protocol::ReindexDone, ClientError> {
         match self.request(&Request::Reindex)? {

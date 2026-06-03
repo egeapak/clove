@@ -74,6 +74,30 @@ Release numbers are equal or better; the gates are asserted in `cargo test`
   check (a committed file is no longer dirty, so the next batch skips it);
   `file_mtimes.synced_at` (schema v3) additionally records each sync.
 
+## CLI → daemon read routing
+
+When a daemon is live, the CLI defers index/graph work to it (the daemon holds a
+hot index + a cached dependency graph), falling back to the local path when the
+daemon is absent. The deferral matrix (see `docs/M3_PLAN.md` §"CLI-surface review"
+analysis):
+
+| Command | Routed? | IPC | Daemon work offloaded | Parity |
+|---|---|---|---|---|
+| `ls` / `ready` / `query` | ✅ | `QUERY` | staleness scan + lean index read | byte-identical (`_meta.source="daemon"`) |
+| `search` | ✅ | `SEARCH` | index open + FTS (CLI still reads matched files for full detail) | identical objects |
+| `blocked` | ✅ | `GRAPH Blocked` | file scan + graph build + `(priority, topo, id)` order | same set/order |
+| `dep tree` | ✅ | `GRAPH Tree` | file scan + graph build + traversal | same tree |
+| `dep cycle` | ✅ | `GRAPH Cycles` | file scan + graph build + cycle detection | same cycles |
+| `dep add` (cycle pre-check) | ✅ | `GRAPH WouldCycle` | the read-only cycle check (the write stays local) | same decision |
+| `reindex` | ✅ | `REINDEX` | rebuild *and reopen* in the daemon (keeps its handle coherent) | same report |
+| `show` / `comments` | ✗ | — | single-file read; a round-trip ≥ the work | n/a |
+| `new`/`edit`/`set`/`status`/`label`/`assign`/`priority`/`comment` | ✗ | — | writes are one atomic file write, no index work; the daemon's watcher + self-freshening `QUERY` keep reads consistent | n/a |
+
+The daemon's cached graph (`graph_cache.rs`) is built once from files and rebuilt
+only when the watcher marks it dirty, so repeated `blocked`/`dep` queries are
+served with no rescan. Every routed command degrades to its existing local path
+when no daemon is running (gate (fallback) above).
+
 ## Testing layers used
 
 Unit (frame codec, protocol serde, daemon state, idle decision), `assert_cmd`
