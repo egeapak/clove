@@ -1,0 +1,161 @@
+---
+source: crates/clove/tests/golden_cli.rs
+expression: items
+---
+[
+  {
+    "assignee": null,
+    "closed": null,
+    "created": "2026-01-01T00:00:00Z",
+    "deps": [
+      "proj-BBBBBBBB"
+    ],
+    "duplicates": [],
+    "external_ref": null,
+    "id": "proj-AAAAAAAA",
+    "labels": [
+      "area:core"
+    ],
+    "parent": null,
+    "priority": 1,
+    "relates": [],
+    "schema": 1,
+    "source_system": null,
+    "status": "open",
+    "supersedes": [],
+    "title": "Chain head A blocked by B",
+    "type": "feature",
+    "updated": "2026-01-01T00:00:00Z"
+  },
+  {
+    "assignee": null,
+    "closed": null,
+    "created": "2026-01-01T00:00:00Z",
+    "deps": [
+      "proj-CCCCCCCC"
+    ],
+    "duplicates": [],
+    "external_ref": null,
+    "id": "proj-BBBBBBBB",
+    "labels": [],
+    "parent": null,
+    "priority": 2,
+    "relates": [],
+    "schema": 1,
+    "source_system": null,
+    "status": "open",
+    "supersedes": [],
+    "title": "Chain middle B ready once C closed",
+    "type": "feature",
+    "updated": "2026-01-01T00:00:00Z"
+  },
+  {
+    "assignee": null,
+    "closed": "2026-01-02T00:00:00Z",
+    "created": "2026-01-01T00:00:00Z",
+    "deps": [],
+    "duplicates": [],
+    "external_ref": null,
+    "id": "proj-CCCCCCCC",
+    "labels": [],
+    "parent": null,
+    "priority": 3,
+    "relates": [],
+    "schema": 1,
+    "source_system": null,
+    "status": "closed",
+    "supersedes": [],
+    "title": "Chain tail C already closed",
+    "type": "chore",
+    "updated": "2026-01-02T00:00:00Z"
+  },
+  {
+    "assignee": null,
+    "closed": null,
+    "created": "2026-01-01T00:00:00Z",
+    "deps": [
+      "proj-EEEEEEEE"
+    ],
+    "duplicates": [],
+    "external_ref": null,
+    "id": "proj-DDDDDDDD",
+    "labels": [
+      "area:cli",
+      "kind:regression"
+    ],
+    "parent": null,
+    "priority": 0,
+    "relates": [],
+    "schema": 1,
+    "source_system": null,
+    "status": "open",
+    "supersedes": [],
+    "title": "Chain head D blocked by E",
+    "type": "bug",
+    "updated": "2026-01-01T00:00:00Z"
+  },
+  {
+    "assignee": null,
+    "closed": null,
+    "created": "2026-01-01T00:00:00Z",
+    "deps": [],
+    "duplicates": [],
+    "external_ref": null,
+    "id": "proj-EEEEEEEE",
+    "labels": [],
+    "parent": null,
+    "priority": 2,
+    "relates": [],
+    "schema": 1,
+    "source_system": null,
+    "status": "in_progress",
+    "supersedes": [],
+    "title": "Chain tail E ready to start",
+    "type": "bug",
+    "updated": "2026-01-03T00:00:00Z"
+  },
+  {
+    "assignee": null,
+    "closed": null,
+    "created": "2026-01-01T00:00:00Z",
+    "deps": [
+      "proj-GGGGGGGG"
+    ],
+    "duplicates": [],
+    "external_ref": null,
+    "id": "proj-FFFFFFFF",
+    "labels": [],
+    "parent": null,
+    "priority": 2,
+    "relates": [],
+    "schema": 1,
+    "source_system": null,
+    "status": "open",
+    "supersedes": [],
+    "title": "Cycle node F depends on G",
+    "type": "feature",
+    "updated": "2026-01-01T00:00:00Z"
+  },
+  {
+    "assignee": null,
+    "closed": null,
+    "created": "2026-01-01T00:00:00Z",
+    "deps": [
+      "proj-FFFFFFFF"
+    ],
+    "duplicates": [],
+    "external_ref": null,
+    "id": "proj-GGGGGGGG",
+    "labels": [],
+    "parent": null,
+    "priority": 3,
+    "relates": [],
+    "schema": 1,
+    "source_system": null,
+    "status": "open",
+    "supersedes": [],
+    "title": "Cycle node G depends on F",
+    "type": "feature",
+    "updated": "2026-01-01T00:00:00Z"
+  }
+]

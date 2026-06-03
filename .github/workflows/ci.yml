@@ -30,6 +30,35 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+      - name: Benchmarks compile (T-X01)
+        run: cargo bench --workspace --no-run
+
+  perf-gates:
+    name: perf gates (release)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Enforce the DESIGN §13.1 file-scan budgets — these only assert in
+      # optimized builds (debug is several times slower).
+      - name: Perf gate tests
+        run: cargo test --release -p clove-core --test perf_gates
+
+  fuzz:
+    name: fuzz (30s/target)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      # T-X02 regression: each target runs 30s against its committed seed corpus.
+      - name: Fuzz parse_item_file
+        run: cargo fuzz run parse_item_file -- -max_total_time=30
+      - name: Fuzz parse_dep_list
+        run: cargo fuzz run parse_dep_list -- -max_total_time=30
 
   deny:
     name: cargo-deny

@@ -24,6 +24,6 @@ chrono.workspace = true
 
 [dev-dependencies]
 assert_cmd.workspace = true
-insta.workspace = true
+insta = { workspace = true, features = ["json"] }       # golden CLI snapshot tests (T-X01 acceptance gate)
 tempfile.workspace = true
 jsonschema.workspace = true       # T-CLI14: validate JSON output against v1 schema

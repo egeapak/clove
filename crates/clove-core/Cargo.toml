@@ -6,6 +6,9 @@ version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+# Benches are declared explicitly below; `benches/fixtures.rs`-style helpers are
+# shared via the library, so disable bench auto-discovery.
+autobenches = false
 
 [dependencies]
 serde.workspace = true
@@ -27,3 +30,19 @@ proptest.workspace = true
 insta.workspace = true
 tempfile.workspace = true
 serde_json.workspace = true
+criterion.workspace = true        # T-X01 performance benchmarks
+
+# T-X01: file-store performance benchmarks (DESIGN.md §13.1). Run with
+# `cargo bench -p clove-core`; CI runs `cargo bench --no-run` as a compile gate.
+# The enforced timing thresholds live in `tests/perf_gates.rs`.
+[[bench]]
+name = "bench_parse"
+harness = false
+
+[[bench]]
+name = "bench_scan"
+harness = false
+
+[[bench]]
+name = "bench_graph"
+harness = false

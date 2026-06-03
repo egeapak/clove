@@ -8,6 +8,9 @@ members = [
     "crates/cloved",
     "xtask",
 ]
+# The cargo-fuzz crate (T-X02) is its own workspace: it needs nightly + the
+# libfuzzer sanitizer runtime, so it must not be built by the normal workspace.
+exclude = ["fuzz"]
 
 [workspace.package]
 edition = "2021"

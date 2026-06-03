@@ -1,0 +1,30 @@
+[package]
+name = "clove-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+camino = "1"
+clove-core = { path = "../crates/clove-core" }
+
+[[bin]]
+name = "parse_item_file"
+path = "fuzz_targets/parse_item_file.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_dep_list"
+path = "fuzz_targets/parse_dep_list.rs"
+test = false
+doc = false
+bench = false
+
+# Detach from the parent workspace — cargo-fuzz drives this crate on its own.
+[workspace]

@@ -1,0 +1,30 @@
+---
+source: crates/clove/tests/golden_cli.rs
+expression: "v[\"data\"]"
+---
+[
+  {
+    "cycle_ref": false,
+    "depth": 0,
+    "id": "proj-AAAAAAAA",
+    "ready": false,
+    "status": "open",
+    "title": "Chain head A blocked by B"
+  },
+  {
+    "cycle_ref": false,
+    "depth": 1,
+    "id": "proj-BBBBBBBB",
+    "ready": true,
+    "status": "open",
+    "title": "Chain middle B ready once C closed"
+  },
+  {
+    "cycle_ref": false,
+    "depth": 2,
+    "id": "proj-CCCCCCCC",
+    "ready": false,
+    "status": "closed",
+    "title": "Chain tail C already closed"
+  }
+]

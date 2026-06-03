@@ -7,6 +7,7 @@ pub mod comments;
 pub mod config;
 pub mod doctor;
 pub mod error;
+pub mod fixtures;
 pub mod graph;
 pub mod id;
 pub mod limits;
