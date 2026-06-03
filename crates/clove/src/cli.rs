@@ -89,6 +89,12 @@ pub enum Commands {
     Search(SearchArgs),
     /// Rebuild the SQLite index from the files.
     Reindex,
+    /// Import items from another tracker (`tk|beads|github`).
+    Import(ImportArgs),
+    /// Export items to `json`, `jsonl`, or GitHub.
+    Export(ExportArgs),
+    /// Git 3-way merge driver for item files (`clove merge-driver %O %A %B %L`).
+    MergeDriver(MergeDriverArgs),
     /// Generate an agent-facing usage document.
     AgentDoc(AgentDocArgs),
     /// Check the store for problems (optionally repair safe ones).
@@ -343,6 +349,81 @@ pub struct DoctorArgs {
     /// Exit 4 while any unresolved error remains.
     #[arg(long)]
     pub strict: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ImportArgs {
+    /// The source tracker to import from.
+    #[command(subcommand)]
+    pub source: ImportSource,
+}
+
+/// The import source kind plus its source path/spec and shared flags.
+///
+/// Each variant carries a `src` (a directory or file path, or a `owner/repo`
+/// spec for GitHub) and a `--dry-run` flag (plan only, no writes).
+#[derive(Debug, Subcommand)]
+pub enum ImportSource {
+    /// Import a `tk` `.tickets/` directory (DESIGN §11.1).
+    Tk {
+        /// Path to the `.tickets/` directory.
+        src: Utf8PathBuf,
+        /// Plan only: report what would happen without writing any files.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Import a Beads `issues.jsonl` file (DESIGN §11.2).
+    Beads {
+        /// Path to the `issues.jsonl` file.
+        src: Utf8PathBuf,
+        /// Plan only: report what would happen without writing any files.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Import GitHub issues from `owner/repo` (DESIGN §11.3).
+    Github {
+        /// The `owner/repo` spec to fetch issues from.
+        src: String,
+        /// Plan only: report what would happen without writing any files.
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+#[derive(Debug, Args)]
+pub struct ExportArgs {
+    /// The export format.
+    #[arg(value_enum, value_name = "FORMAT")]
+    pub export_format: ExportFormat,
+    /// Write to a file instead of stdout.
+    #[arg(long, value_name = "FILE")]
+    pub out: Option<Utf8PathBuf>,
+    /// For `github`: plan only, do not push anything.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+/// The `clove export` output format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ExportFormat {
+    /// A single JSON envelope with a `data` array of all items.
+    Json,
+    /// One item per line (NDJSON), Beads-isomorphic.
+    Jsonl,
+    /// Push to GitHub Issues via the REST API.
+    Github,
+}
+
+#[derive(Debug, Args)]
+pub struct MergeDriverArgs {
+    /// The merge base (`%O`); may be absent for an add/add merge.
+    pub ancestor: Utf8PathBuf,
+    /// Our version (`%A`); the merged result is written back here.
+    pub ours: Utf8PathBuf,
+    /// Their version (`%B`).
+    pub theirs: Utf8PathBuf,
+    /// The conflict marker size (`%L`).
+    pub marker_size: usize,
 }
 
 /// clap value-parser for [`OutputFormat`].

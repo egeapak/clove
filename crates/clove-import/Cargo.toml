@@ -7,11 +7,22 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
-# File-based importers (beads/tk) land in M2; the GitHub importer adds
-# tokio + octocrab then (T-M03).
+# File-based importers (beads/tk) use only clove-core; the GitHub
+# importer/exporter (T-M03) adds tokio + octocrab behind the `github` feature so
+# non-GitHub / lean builds (`--no-default-features`) stay free of that weight.
+[features]
+default = ["github"]
+github = ["dep:octocrab", "dep:tokio"]
+
 [dependencies]
 clove-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 camino.workspace = true
 anyhow.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+
+# GitHub-only deps, gated behind the `github` feature.
+octocrab = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }

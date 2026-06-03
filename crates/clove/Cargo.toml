@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 clove-core.workspace = true
 clove-index.workspace = true
+clove-import.workspace = true   # M2 import/export/merge-driver (default features incl. `github`)
 clap.workspace = true
 anyhow.workspace = true
 serde.workspace = true

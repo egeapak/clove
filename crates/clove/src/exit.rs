@@ -74,6 +74,10 @@ pub fn classify(error: &CloveError) -> (ExitCode, &'static str) {
         CloveError::NoRepo { .. } => (ExitCode::Io, "NO_REPO"),
         CloveError::Io { .. } => (ExitCode::Io, "IO_ERROR"),
 
+        // A wired-but-unimplemented command (M2 scaffolding) is a usage-class
+        // failure: the surface exists, the behavior does not yet.
+        CloveError::NotYetImplemented { .. } => (ExitCode::Usage, "NOT_YET_IMPLEMENTED"),
+
         // `CloveError` is non_exhaustive; default unknown variants to I/O.
         _ => (ExitCode::Io, "ERROR"),
     }

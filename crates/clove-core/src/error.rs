@@ -118,4 +118,10 @@ pub enum CloveError {
         #[source]
         source: std::io::Error,
     },
+
+    /// A command (or feature) exists in the CLI surface but its behavior has not
+    /// been implemented yet. Used by M2 scaffolding stubs (import/export/
+    /// merge-driver) until each phase lands.
+    #[error("not yet implemented: {feature}")]
+    NotYetImplemented { feature: String },
 }
