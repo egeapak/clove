@@ -237,7 +237,11 @@ fn split_frontmatter<'a>(
 /// non-space character is `:`, `[`, `{`, or `,`. This catches `key: &a`,
 /// `[*a]`, `{&b}` while leaving free text alone (a title `Fix *the* thing` or
 /// `R&D` is not flagged, since `*`/`&` there are mid-scalar).
-fn contains_yaml_anchor_or_alias(frontmatter: &[u8]) -> bool {
+///
+/// Exposed (`pub`) so foreign-input parsers outside this crate — notably the tk
+/// importer, which feeds untrusted frontmatter to the YAML parser — can reuse
+/// the exact same guard instead of copy-pasting it.
+pub fn contains_yaml_anchor_or_alias(frontmatter: &[u8]) -> bool {
     for (index, &byte) in frontmatter.iter().enumerate() {
         if byte != b'&' && byte != b'*' {
             continue;

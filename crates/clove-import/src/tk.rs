@@ -37,13 +37,20 @@
 //! [`TkImporter::plan`] is pure (no writes): it reads + maps every ticket, stashes
 //! the fully-mapped [`StagedTicket`]s internally (so [`apply`](TkImporter::apply)
 //! need not re-read the source), and returns the `{would_create, would_skip,
-//! conflicts}` plan. Title-fallback warnings collected during planning are exposed
-//! via [`TkImporter::take_warnings`] for the CLI to print to stderr.
+//! conflicts}` plan. [`apply`](TkImporter::apply) consumes the staged records
+//! POSITIONALLY (one written file per staged record), so two tickets sharing a
+//! source id can never collapse onto one — the later duplicate is reported as a
+//! `would_skip` with reason `"duplicate_id"`. Title-fallback / dep-cap-truncation
+//! / dangling-dependency warnings collected during planning are exposed via
+//! [`TkImporter::take_warnings`] for the CLI to print to stderr *and* surface in
+//! the JSON envelope's `_meta.warnings`.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 
 use camino::Utf8Path;
 use chrono::{DateTime, Utc};
+use clove_core::contains_yaml_anchor_or_alias;
 use clove_core::id::new_id;
 use clove_core::model::CURRENT_SCHEMA_VERSION;
 use clove_core::write::write_item_file;
@@ -51,7 +58,10 @@ use clove_core::{CloveId, Item, ItemFrontmatter, ItemStatus, ItemStore, ItemType
 use serde::Deserialize;
 
 use crate::error::ImportError;
-use crate::map::{coerce_priority, coerce_status, map_labels, tk_type};
+use crate::map::{
+    cap_dep_array, coerce_priority, coerce_status, dangling_targets, map_labels, tk_type,
+    MAX_IMPORT_UNIT_BYTES,
+};
 use crate::plan::{ImportPlan, ImportReport, PlanItem, SkipItem};
 use crate::{ImportCtx, Importer};
 
@@ -96,8 +106,6 @@ struct StagedTicket {
     /// The idempotency key / clove `external_ref` (`"tk:<id>"`, possibly with an
     /// appended `" upstream:<value>"`).
     external_ref: String,
-    /// The source id surfaced in the plan (`PlanItem.id` / `SkipItem.id`).
-    source_id: String,
     title: String,
     status: ItemStatus,
     item_type: ItemType,
@@ -153,13 +161,40 @@ impl Importer for TkImporter {
         let mut staged = self.staged.borrow_mut();
         staged.clear();
 
+        // Source ids already seen in this run, to detect intra-source duplicates
+        // (C1): the first occurrence is staged; later ones are skipped, never
+        // silently overwriting the first staged record's data.
+        let mut seen_ids: HashSet<String> = HashSet::new();
+
         for path in paths {
+            // M5: cap the per-file byte size before reading/parsing so a
+            // pathologically large foreign file can never be slurped whole.
+            let metadata = std::fs::metadata(&path).map_err(|source| ImportError::Source {
+                path: path.clone(),
+                message: source.to_string(),
+            })?;
+            if metadata.len() as usize > MAX_IMPORT_UNIT_BYTES {
+                return Err(ImportError::Record {
+                    message: format!(
+                        "{path}: file is {} bytes, exceeding the import limit of {MAX_IMPORT_UNIT_BYTES}",
+                        metadata.len()
+                    ),
+                });
+            }
             let bytes = std::fs::read(&path).map_err(|source| ImportError::Source {
                 path: path.clone(),
                 message: source.to_string(),
             })?;
             let text = String::from_utf8_lossy(&bytes);
             let (frontmatter_text, body) = split_frontmatter(&text);
+
+            // M5: reject YAML anchors/aliases (bomb guard) using clove-core's own
+            // guard, exactly as the strict parser does, before deserializing.
+            if contains_yaml_anchor_or_alias(frontmatter_text.as_bytes()) {
+                return Err(ImportError::Record {
+                    message: format!("{path}: YAML anchors/aliases are not allowed"),
+                });
+            }
 
             let ticket: TkTicket =
                 serde_yaml_neo::from_str(frontmatter_text).map_err(|err| ImportError::Record {
@@ -180,6 +215,16 @@ impl Importer for TkImporter {
                     (stem.clone(), body)
                 }
             };
+
+            // C1: a second ticket sharing the same source id would otherwise be
+            // paired back to the first staged record. Skip it and report.
+            if !seen_ids.insert(tk_id.clone()) {
+                plan.would_skip.push(SkipItem {
+                    id: tk_id,
+                    reason: "duplicate_id".to_owned(),
+                });
+                continue;
+            }
 
             let external_ref = match ticket.external_ref.as_deref() {
                 Some(upstream) if !upstream.trim().is_empty() => {
@@ -203,15 +248,43 @@ impl Importer for TkImporter {
             let parent = parse_ids(&path, ticket.parent.as_deref())?
                 .into_iter()
                 .next();
-            let deps = parse_ids(&path, ticket.deps.iter().map(String::as_str))?;
-            let relates = parse_ids(&path, ticket.links.iter().map(String::as_str))?;
+            // M4: enforce the per-array dep cap (truncate + warn) so the written
+            // file can never violate the store's own validation limit.
+            let deps = cap_dep_array(
+                parse_ids(&path, ticket.deps.iter().map(String::as_str))?,
+                "deps",
+                &tk_id,
+                &mut self.warnings.borrow_mut(),
+            );
+            let relates = cap_dep_array(
+                parse_ids(&path, ticket.links.iter().map(String::as_str))?,
+                "relates",
+                &tk_id,
+                &mut self.warnings.borrow_mut(),
+            );
             let mut labels = map_labels(&ticket.tags)?;
             labels.sort();
             labels.dedup();
 
+            // M4: flag dangling dependency targets (ids absent from the store).
+            // Report-only: the write still proceeds.
+            let dangling = dangling_targets(
+                &ctx.store_ids,
+                parent.iter().chain(deps.iter()).chain(relates.iter()),
+            );
+            if !dangling.is_empty() {
+                let list = dangling
+                    .iter()
+                    .map(CloveId::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.warnings.borrow_mut().push(format!(
+                    "item `{tk_id}`: dangling dependency target(s) not present in the store: {list}"
+                ));
+            }
+
             let staged_ticket = StagedTicket {
                 external_ref: external_ref.clone(),
-                source_id: tk_id.clone(),
                 title: title.clone(),
                 status,
                 item_type,
@@ -225,6 +298,10 @@ impl Importer for TkImporter {
             };
 
             if ctx.is_imported(&external_ref) {
+                // M3: report field-level divergences against the existing item
+                // (status, priority, title); the write is still skipped.
+                let conflicts = ctx.conflicts_for(&external_ref, &tk_id, status, priority, &title);
+                plan.conflicts.extend(conflicts);
                 plan.would_skip.push(SkipItem {
                     id: tk_id,
                     reason: "already_imported".to_owned(),
@@ -242,12 +319,12 @@ impl Importer for TkImporter {
         let staged = self.staged.borrow();
         let mut created = 0usize;
 
-        for item in plan.would_create.iter() {
-            // Find the staged ticket matching this plan entry by source id.
-            let Some(ticket) = staged.iter().find(|t| t.source_id == item.id) else {
-                continue;
-            };
-
+        // C1: pair plan ↔ staged POSITIONALLY by iterating the staged Vec
+        // directly. `plan` (the create set) and `staged` are pushed together in
+        // lock-step during `plan`, so each staged record is written exactly once
+        // with its own data — a shared source id can no longer collapse two
+        // records onto the first one.
+        for ticket in staged.iter() {
             let id = new_id(&self.prefix, store.issues_dir())?;
             let closed = if ticket.status == ItemStatus::Closed {
                 Some(self.now)
@@ -358,6 +435,9 @@ where
 /// frontmatter block (whole file is then the body) and of LF/CRLF line endings.
 /// Unlike clove's strict parser this never errors — tk files are foreign input.
 fn split_frontmatter(text: &str) -> (&str, String) {
+    // H1: a leading UTF-8 BOM otherwise defeats the `---` prefix check, making the
+    // whole file parse as body and silently dropping id/status/deps. Strip it.
+    let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
     let Some(rest) = text
         .strip_prefix("---\n")
         .or_else(|| text.strip_prefix("---\r\n"))
@@ -398,8 +478,18 @@ fn split_frontmatter(text: &str) -> (&str, String) {
 /// `None` if no `# ` heading is present.
 fn extract_h1(body: &str) -> Option<(String, String)> {
     let mut lines: Vec<&str> = body.lines().collect();
+    // Track fenced-code state so a `# ` line inside a ``` (or ~~~) fence is not
+    // mistaken for the H1 heading (Nit).
+    let mut in_fence = false;
     let idx = lines.iter().position(|line| {
         let t = line.trim_start();
+        if t.starts_with("```") || t.starts_with("~~~") {
+            in_fence = !in_fence;
+            return false;
+        }
+        if in_fence {
+            return false;
+        }
         t.strip_prefix("# ").is_some_and(|h| !h.trim().is_empty())
     })?;
     let heading = lines[idx].trim_start();
@@ -461,5 +551,31 @@ mod tests {
         assert_eq!(t.id.as_deref(), Some("t-1"));
         assert_eq!(t.ticket_type.as_deref(), Some("task"));
         assert_eq!(t.tags, vec!["a", "b"]);
+    }
+
+    // H1: a leading UTF-8 BOM must not defeat frontmatter detection.
+    #[test]
+    fn split_strips_leading_bom_before_fence() {
+        let (fm, body) = split_frontmatter("\u{FEFF}---\nid: t-1\nstatus: closed\n---\nhi\n");
+        assert_eq!(fm, "id: t-1\nstatus: closed");
+        assert_eq!(body, "hi\n");
+        // The whole document still deserializes id/status (not dropped to body).
+        let t: TkTicket = serde_yaml_neo::from_str(fm).unwrap();
+        assert_eq!(t.id.as_deref(), Some("t-1"));
+        assert_eq!(t.status.as_deref(), Some("closed"));
+    }
+
+    // Nit: a `# ` line inside a fenced code block is not the H1.
+    #[test]
+    fn extract_h1_ignores_headings_inside_code_fences() {
+        let body = "```\n# not a heading\n```\n\n# Real Title\n\nBody.\n";
+        let (title, rest) = extract_h1(body).unwrap();
+        assert_eq!(title, "Real Title");
+        assert!(
+            rest.contains("# not a heading"),
+            "fence content kept: {rest:?}"
+        );
+        // A document whose only `# ` line is fenced has no extractable H1.
+        assert!(extract_h1("```\n# fenced only\n```\n").is_none());
     }
 }

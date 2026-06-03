@@ -201,6 +201,208 @@ fn dry_run_writes_zero_files_and_reports_would_create() {
     assert_eq!(v["data"]["conflicts"].as_array().unwrap().len(), 0);
 }
 
+/// Write a `.tickets/` dir with the given `(filename, contents)` pairs and return
+/// the temp dir holding it (kept alive by the caller).
+fn write_tickets(files: &[(&str, &str)]) -> TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let tickets = dir.path().join(".tickets");
+    std::fs::create_dir_all(&tickets).unwrap();
+    for (name, contents) in files {
+        std::fs::write(tickets.join(name), contents).unwrap();
+    }
+    dir
+}
+
+/// C1: two tickets sharing `id: tk-dup` with different titles must not collapse
+/// onto a single staged record. The duplicate is reported, distinct data kept.
+#[test]
+fn duplicate_source_id_is_reported_not_collapsed() {
+    let src = write_tickets(&[
+        ("a.md", "---\nid: tk-dup\n---\n# First Title\n\nBody A.\n"),
+        ("b.md", "---\nid: tk-dup\n---\n# Second Title\n\nBody B.\n"),
+    ]);
+    let tickets = src.path().join(".tickets");
+    let repo = init_repo();
+
+    let out = clove(repo.path())
+        .args([
+            "import",
+            "tk",
+            tickets.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "import failed: {out:?}");
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    // Exactly one created (the first), one skipped as a duplicate — never two
+    // identical files for the same source id.
+    assert_eq!(v["data"]["created"], 1, "only the first dup is written");
+    assert_eq!(v["data"]["skipped"], 1, "the later dup is skipped");
+    assert_eq!(item_file_count(repo.path()), 1);
+
+    // The single written item preserves the FIRST ticket's distinct data.
+    let items = list_items(repo.path());
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["title"], "First Title");
+}
+
+/// H1: a BOM-prefixed tk ticket imports with its real id/status/frontmatter
+/// intact (the BOM must not push the whole file into the body).
+#[test]
+fn bom_prefixed_ticket_parses_frontmatter() {
+    let src = write_tickets(&[(
+        "bom.md",
+        "\u{FEFF}---\nid: tk-bom\nstatus: closed\ntype: bug\n---\n# BOM Title\n\nBody.\n",
+    )]);
+    let tickets = src.path().join(".tickets");
+    let repo = init_repo();
+
+    clove(repo.path())
+        .args(["import", "tk", tickets.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let items = list_items(repo.path());
+    let it = find_by_tk_id(&items, "tk-bom");
+    assert_eq!(it["status"], "closed", "BOM dropped frontmatter: {it}");
+    assert_eq!(it["type"], "bug");
+    assert_eq!(it["title"], "BOM Title");
+}
+
+/// M5: a tk ticket whose frontmatter contains a YAML alias is rejected with a
+/// clean error, not parsed.
+#[test]
+fn yaml_alias_in_frontmatter_is_rejected() {
+    let src = write_tickets(&[(
+        "alias.md",
+        "---\nid: tk-alias\nstatus: &a open\ndupe: *a\n---\n# T\n",
+    )]);
+    let tickets = src.path().join(".tickets");
+    let repo = init_repo();
+
+    let out = clove(repo.path())
+        .args(["import", "tk", tickets.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "alias ticket must be rejected");
+    assert_eq!(item_file_count(repo.path()), 0, "nothing written");
+}
+
+/// M5: an oversized tk file (beyond the per-file import ceiling) is rejected
+/// cleanly rather than slurped whole and parsed.
+#[test]
+fn oversized_file_is_rejected() {
+    // Ceiling = MAX_FRONTMATTER_BYTES (64KiB) + MAX_BODY_BYTES (4MiB) + 4096.
+    let ceiling = 65_536 + 4_194_304 + 4096;
+    let mut contents = String::from("---\nid: tk-big\n---\n# Big\n\n");
+    contents.push_str(&"x".repeat(ceiling + 1));
+    let src = write_tickets(&[("big.md", &contents)]);
+    let tickets = src.path().join(".tickets");
+    let repo = init_repo();
+
+    let out = clove(repo.path())
+        .args(["import", "tk", tickets.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "oversized file must be rejected");
+    assert_eq!(item_file_count(repo.path()), 0, "nothing written");
+}
+
+/// M4: a dep on an absent id surfaces a dangling-target warning (report-only:
+/// the item is still planned/created).
+#[test]
+fn dangling_dep_emits_warning() {
+    let src = write_tickets(&[(
+        "dang.md",
+        "---\nid: tk-dang\ndeps: [proj-ZZZZ9999]\n---\n# Has Dangling Dep\n",
+    )]);
+    let tickets = src.path().join(".tickets");
+    let repo = init_repo();
+
+    let out = clove(repo.path())
+        .args([
+            "import",
+            "tk",
+            tickets.to_str().unwrap(),
+            "--dry-run",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "import failed: {out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.to_lowercase().contains("dangling") && stderr.contains("proj-ZZZZ9999"),
+        "expected dangling warning on stderr, got:\n{stderr}"
+    );
+    // And the warning reaches the JSON envelope's _meta.warnings.
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let warnings = v["_meta"]["warnings"].as_array().unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.as_str().is_some_and(|s| s.contains("proj-ZZZZ9999"))),
+        "dangling warning missing from _meta.warnings: {warnings:?}"
+    );
+}
+
+/// M3: re-importing the same external_ref with a changed status reports the
+/// divergence under `conflicts`; an unchanged re-import reports none.
+#[test]
+fn re_import_with_changed_status_reports_conflict() {
+    let open = write_tickets(&[("c.md", "---\nid: tk-c\nstatus: open\n---\n# Same Title\n")]);
+    let repo = init_repo();
+    clove(repo.path())
+        .args([
+            "import",
+            "tk",
+            open.path().join(".tickets").to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    // Re-import the SAME id with a divergent status → conflict on `status`.
+    let changed = write_tickets(&[("c.md", "---\nid: tk-c\nstatus: closed\n---\n# Same Title\n")]);
+    let out = clove(repo.path())
+        .args([
+            "import",
+            "tk",
+            changed.path().join(".tickets").to_str().unwrap(),
+            "--dry-run",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "re-import failed: {out:?}");
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let conflicts = v["data"]["conflicts"].as_array().unwrap();
+    assert_eq!(conflicts.len(), 1, "expected one conflict: {v}");
+    assert_eq!(conflicts[0]["field"], "status");
+    assert_eq!(conflicts[0]["existing"], "open");
+    assert_eq!(conflicts[0]["incoming"], "closed");
+
+    // An UNCHANGED re-import: skipped with empty conflicts.
+    let out = clove(repo.path())
+        .args([
+            "import",
+            "tk",
+            open.path().join(".tickets").to_str().unwrap(),
+            "--dry-run",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["data"]["would_skip"].as_array().unwrap().len(), 1);
+    assert_eq!(v["data"]["conflicts"].as_array().unwrap().len(), 0);
+}
+
 #[test]
 fn re_import_is_idempotent() {
     let dir = init_repo();

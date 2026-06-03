@@ -22,17 +22,18 @@ pub fn run(ctx: &Ctx, format: OutputFormat, args: ImportArgs) -> Result<(), Clov
             let import_ctx = ImportCtx::new(&ctx.store, dry_run).map_err(import_err)?;
             let plan = importer.plan(&src, &import_ctx).map_err(import_err)?;
 
-            // Title-fallback (and any other) warnings go to stderr, never stdout,
-            // so JSON consumers still get a clean envelope.
-            for warning in importer.take_warnings() {
+            // Title-fallback (and any other) warnings go to stderr for humans and
+            // into the JSON envelope's `_meta.warnings` for machine consumers.
+            let warnings = importer.take_warnings();
+            for warning in &warnings {
                 eprintln!("warning: {warning}");
             }
 
             if dry_run {
-                emit_plan(format, &plan);
+                emit_plan(format, &plan, &warnings);
             } else {
                 let report = importer.apply(plan, &ctx.store).map_err(import_err)?;
-                emit_report(format, &report);
+                emit_report(format, &report, &warnings);
             }
             Ok(())
         }
@@ -41,17 +42,18 @@ pub fn run(ctx: &Ctx, format: OutputFormat, args: ImportArgs) -> Result<(), Clov
             let import_ctx = ImportCtx::new(&ctx.store, dry_run).map_err(import_err)?;
             let plan = importer.plan(&src, &import_ctx).map_err(import_err)?;
 
-            // comment_count (and any other) warnings go to stderr, never stdout,
-            // so JSON consumers still get a clean envelope.
-            for warning in importer.take_warnings() {
+            // comment_count (and any other) warnings go to stderr for humans and
+            // into the JSON envelope's `_meta.warnings` for machine consumers.
+            let warnings = importer.take_warnings();
+            for warning in &warnings {
                 eprintln!("warning: {warning}");
             }
 
             if dry_run {
-                emit_plan(format, &plan);
+                emit_plan(format, &plan, &warnings);
             } else {
                 let report = importer.apply(plan, &ctx.store).map_err(import_err)?;
-                emit_report(format, &report);
+                emit_report(format, &report, &warnings);
             }
             Ok(())
         }
@@ -78,8 +80,8 @@ fn import_github(
         clove_import::github::import_github(src, &import_ctx, &ctx.store, &ctx.config.id_prefix)
             .map_err(import_err)?;
     match report {
-        Some(report) => emit_report(format, &report),
-        None => emit_plan(format, &plan),
+        Some(report) => emit_report(format, &report, &[]),
+        None => emit_plan(format, &plan, &[]),
     }
     Ok(())
 }
@@ -100,11 +102,11 @@ fn import_github(
 
 /// Emit the `--dry-run` `{ would_create, would_skip, conflicts }` envelope
 /// (DESIGN §11.3) in JSON, or a readable summary in human format.
-fn emit_plan(format: OutputFormat, plan: &clove_import::ImportPlan) {
+fn emit_plan(format: OutputFormat, plan: &clove_import::ImportPlan, warnings: &[String]) {
     match format {
         OutputFormat::Json | OutputFormat::Jsonl => print_json_success(
             serde_json::to_value(plan).unwrap_or_else(|_| json!({})),
-            json!({ "warnings": [] }),
+            json!({ "warnings": warnings }),
         ),
         OutputFormat::Human => {
             println!(
@@ -124,7 +126,7 @@ fn emit_plan(format: OutputFormat, plan: &clove_import::ImportPlan) {
 }
 
 /// Emit the post-`apply` `{ created, skipped, conflicts }` summary.
-fn emit_report(format: OutputFormat, report: &clove_import::ImportReport) {
+fn emit_report(format: OutputFormat, report: &clove_import::ImportReport, warnings: &[String]) {
     match format {
         OutputFormat::Json | OutputFormat::Jsonl => print_json_success(
             json!({
@@ -132,7 +134,7 @@ fn emit_report(format: OutputFormat, report: &clove_import::ImportReport) {
                 "skipped": report.skipped,
                 "conflicts": report.conflicts,
             }),
-            json!({ "warnings": [] }),
+            json!({ "warnings": warnings }),
         ),
         OutputFormat::Human => println!(
             "imported: {} created, {} skipped, {} conflicts",

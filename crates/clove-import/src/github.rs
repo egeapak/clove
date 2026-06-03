@@ -787,7 +787,7 @@ mod tests {
 
     #[test]
     fn idempotency_skips_already_imported() {
-        use std::collections::HashMap;
+        use std::collections::{HashMap, HashSet};
         let issues = vec![
             GitHubIssue {
                 number: 1,
@@ -804,9 +804,13 @@ mod tests {
         ];
         // Pretend gh-1 was already imported.
         let mut external_refs = HashMap::new();
-        external_refs.insert("gh-1".to_owned(), CloveId::new("proj-AAAA1111").unwrap());
+        external_refs.insert(
+            "gh-1".to_owned(),
+            CloveId::new("proj-AAAA1111").unwrap().into(),
+        );
         let ctx = ImportCtx {
             external_refs,
+            store_ids: HashSet::new(),
             dry_run: true,
         };
         let (plan, staged) = plan_issues(&issues, &ctx).unwrap();
@@ -820,7 +824,7 @@ mod tests {
 
     #[test]
     fn pull_requests_are_skipped() {
-        use std::collections::HashMap;
+        use std::collections::{HashMap, HashSet};
         let issues = vec![GitHubIssue {
             number: 9,
             title: "a PR".to_owned(),
@@ -830,6 +834,7 @@ mod tests {
         }];
         let ctx = ImportCtx {
             external_refs: HashMap::new(),
+            store_ids: HashSet::new(),
             dry_run: true,
         };
         let (plan, staged) = plan_issues(&issues, &ctx).unwrap();

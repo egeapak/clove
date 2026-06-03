@@ -53,12 +53,24 @@
 //! ## comment_count warning
 //!
 //! Beads' `issues.jsonl` carries `comment_count` but **not** comment bodies. Any
-//! issue with `comment_count > 0` pushes a warning (surfaced to stderr by the
-//! CLI) naming the beads id and suggesting `bd show --json <id>` — the import
-//! must not silently succeed with missing comment data (DESIGN §11.2).
+//! issue with `comment_count > 0` pushes a warning (surfaced to stderr by the CLI
+//! and in the JSON envelope's `_meta.warnings`) naming the beads id and suggesting
+//! `bd show --json <id>` — the import must not silently succeed with missing
+//! comment data (DESIGN §11.2).
+//!
+//! ## Resilience: malformed lines, duplicate ids, dep caps
+//!
+//! A single malformed JSONL line never aborts the whole import: it is reported as
+//! a `would_skip` with reason `"malformed_line:<n>"` and the remaining valid lines
+//! still import (M2). Two lines sharing a source id do not collapse onto one
+//! record — `apply` consumes staged issues POSITIONALLY and the later duplicate is
+//! a `would_skip` with reason `"duplicate_id"` (C1). Over-long `deps`/`relates`
+//! arrays are truncated to [`clove_core::limits::MAX_DEP_ARRAY_LEN`] with a
+//! warning, and dependency targets absent from the store are reported as dangling
+//! (M4, report-only).
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use camino::Utf8Path;
 use chrono::{DateTime, Utc};
@@ -70,7 +82,10 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::error::ImportError;
-use crate::map::{beads_type, coerce_priority, coerce_status, map_labels};
+use crate::map::{
+    beads_type, cap_dep_array, coerce_priority, coerce_status, dangling_targets, map_labels,
+    MAX_IMPORT_UNIT_BYTES,
+};
 use crate::plan::{ImportPlan, ImportReport, PlanItem, SkipItem};
 use crate::{ImportCtx, Importer};
 
@@ -249,14 +264,39 @@ impl Importer for BeadsImporter {
         let mut staged = self.staged.borrow_mut();
         staged.clear();
 
+        // Source ids already seen in this run, to detect intra-source duplicates
+        // (C1): the first occurrence is staged; later ones are skipped, never
+        // silently overwriting the first staged record's data.
+        let mut seen_ids: HashSet<String> = HashSet::new();
+
         for (lineno, raw_line) in text.lines().enumerate() {
             let line = raw_line.trim();
             if line.is_empty() {
                 continue;
             }
-            let staged_issue = map_line(line).map_err(|message| ImportError::Record {
-                message: format!("{src}:{}: {message}", lineno + 1),
-            })?;
+            // M5: cap the per-line byte size before parsing.
+            if line.len() > MAX_IMPORT_UNIT_BYTES {
+                return Err(ImportError::Record {
+                    message: format!(
+                        "{src}:{}: line is {} bytes, exceeding the import limit of {MAX_IMPORT_UNIT_BYTES}",
+                        lineno + 1,
+                        line.len()
+                    ),
+                });
+            }
+
+            // M2: a malformed line must not abort the whole import. Skip-and-report
+            // it (with its 1-based line number) and continue with the valid lines.
+            let mut staged_issue = match map_line(line) {
+                Ok(issue) => issue,
+                Err(_) => {
+                    plan.would_skip.push(SkipItem {
+                        id: format!("line {}", lineno + 1),
+                        reason: format!("malformed_line:{}", lineno + 1),
+                    });
+                    continue;
+                }
+            };
 
             // comment_count > 0: comment bodies are not present in the JSONL, so
             // warn (must not silently succeed) — DESIGN §11.2.
@@ -269,7 +309,60 @@ impl Importer for BeadsImporter {
                 }
             }
 
+            // M4: enforce the per-array dep cap (truncate + warn).
+            let source_id = staged_issue.source_id.clone();
+            staged_issue.deps = cap_dep_array(
+                std::mem::take(&mut staged_issue.deps),
+                "deps",
+                &source_id,
+                &mut self.warnings.borrow_mut(),
+            );
+            staged_issue.relates = cap_dep_array(
+                std::mem::take(&mut staged_issue.relates),
+                "relates",
+                &source_id,
+                &mut self.warnings.borrow_mut(),
+            );
+
+            // M4: flag dangling dependency targets (ids absent from the store).
+            let dangling = dangling_targets(
+                &ctx.store_ids,
+                staged_issue
+                    .parent
+                    .iter()
+                    .chain(staged_issue.deps.iter())
+                    .chain(staged_issue.relates.iter()),
+            );
+            if !dangling.is_empty() {
+                let list = dangling
+                    .iter()
+                    .map(CloveId::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.warnings.borrow_mut().push(format!(
+                    "item `{source_id}`: dangling dependency target(s) not present in the store: {list}"
+                ));
+            }
+
+            // C1: skip a second line that shares an already-seen source id.
+            if !seen_ids.insert(staged_issue.source_id.clone()) {
+                plan.would_skip.push(SkipItem {
+                    id: staged_issue.source_id.clone(),
+                    reason: "duplicate_id".to_owned(),
+                });
+                continue;
+            }
+
             if ctx.is_imported(&staged_issue.external_ref) {
+                // M3: report field-level divergences against the existing item.
+                let conflicts = ctx.conflicts_for(
+                    &staged_issue.external_ref,
+                    &staged_issue.source_id,
+                    staged_issue.status,
+                    staged_issue.priority,
+                    &staged_issue.title,
+                );
+                plan.conflicts.extend(conflicts);
                 plan.would_skip.push(SkipItem {
                     id: staged_issue.source_id.clone(),
                     reason: "already_imported".to_owned(),
@@ -290,11 +383,11 @@ impl Importer for BeadsImporter {
         let staged = self.staged.borrow();
         let mut created = 0usize;
 
-        for item in plan.would_create.iter() {
-            let Some(issue) = staged.iter().find(|s| s.source_id == item.id) else {
-                continue;
-            };
-
+        // C1: pair plan ↔ staged POSITIONALLY by iterating the staged Vec
+        // directly. `plan` (the create set) and `staged` are pushed together in
+        // lock-step during `plan`, so each staged record is written exactly once
+        // with its own data.
+        for issue in staged.iter() {
             let id = new_id(&self.prefix, store.issues_dir())?;
             let closed = if issue.status == ItemStatus::Closed {
                 Some(self.now)
@@ -518,12 +611,17 @@ pub fn parse_beads_line(line: &str) -> Result<(), ImportError> {
 }
 
 /// Parse arbitrary bytes as a beads `issues.jsonl` document (line by line),
-/// reporting malformed lines as errors rather than panicking. Stops at the first
-/// malformed line (mirroring [`BeadsImporter::plan`]).
+/// tolerating malformed lines rather than aborting (M2): a bad line is skipped so
+/// the parser keeps exercising every subsequent line (mirroring
+/// [`BeadsImporter::plan`], which surfaces each bad line as a `would_skip`). This
+/// only ever returns `Ok`, never a panic — the property the `import_beads` fuzz
+/// target checks.
 pub fn parse_beads_bytes(bytes: &[u8]) -> Result<(), ImportError> {
     let text = String::from_utf8_lossy(bytes);
     for line in text.lines() {
-        parse_beads_line(line)?;
+        // A malformed line is intentionally ignored here (the plan path reports
+        // it); we keep parsing the remaining lines.
+        let _ = parse_beads_line(line);
     }
     Ok(())
 }
@@ -625,5 +723,13 @@ mod tests {
     fn comment_count_extracted() {
         assert_eq!(comment_count_of(r#"{"id":"x","comment_count":4}"#), Some(4));
         assert_eq!(comment_count_of(r#"{"id":"x"}"#), None);
+    }
+
+    // M2: a malformed line in the middle must not abort parsing of the rest.
+    #[test]
+    fn parse_beads_bytes_tolerates_malformed_lines() {
+        let doc = b"{\"id\":\"bd-1\"}\n{not json\n{\"id\":\"bd-3\"}\n";
+        // Never errors / panics even with a bad middle line.
+        assert!(parse_beads_bytes(doc).is_ok());
     }
 }

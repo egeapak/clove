@@ -165,6 +165,163 @@ fn maps_all_fields_correctly() {
     assert_eq!(o["assignee"], "ops-team");
 }
 
+/// Write a `issues.jsonl` file with the given line contents and return both the
+/// temp dir (kept alive by the caller) and the file path.
+fn write_jsonl(lines: &[&str]) -> (TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("issues.jsonl");
+    std::fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
+    (dir, path)
+}
+
+/// C1: two JSONL lines sharing an id must not collapse onto one staged record.
+#[test]
+fn duplicate_source_id_is_reported_not_collapsed() {
+    let (_src, path) = write_jsonl(&[
+        r#"{"id":"bd-dup","title":"First"}"#,
+        r#"{"id":"bd-dup","title":"Second"}"#,
+    ]);
+    let repo = init_repo();
+
+    let out = clove(repo.path())
+        .args([
+            "import",
+            "beads",
+            path.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "import failed: {out:?}");
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["data"]["created"], 1, "only the first dup is written");
+    assert_eq!(v["data"]["skipped"], 1, "later dup skipped");
+    assert_eq!(item_file_count(repo.path()), 1);
+
+    let items = list_items(repo.path());
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["title"], "First", "first dup's data preserved");
+}
+
+/// M2: one malformed line in the middle does not abort the import — the valid
+/// lines still import and the bad line is reported.
+#[test]
+fn malformed_line_is_skipped_and_reported() {
+    let (_src, path) = write_jsonl(&[
+        r#"{"id":"bd-1","title":"One"}"#,
+        r#"{not valid json"#,
+        r#"{"id":"bd-3","title":"Three"}"#,
+    ]);
+    let repo = init_repo();
+
+    let out = clove(repo.path())
+        .args([
+            "import",
+            "beads",
+            path.to_str().unwrap(),
+            "--dry-run",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "import failed: {out:?}");
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    // Lines 1 and 3 plan to create; line 2 is reported as a skip.
+    assert_eq!(v["data"]["would_create"].as_array().unwrap().len(), 2);
+    let skips = v["data"]["would_skip"].as_array().unwrap();
+    assert!(
+        skips.iter().any(|s| s["reason"]
+            .as_str()
+            .is_some_and(|r| r.starts_with("malformed_line:2"))),
+        "expected malformed_line:2 skip, got: {skips:?}"
+    );
+
+    // A real import writes both good items.
+    clove(repo.path())
+        .args(["import", "beads", path.to_str().unwrap()])
+        .assert()
+        .success();
+    assert_eq!(item_file_count(repo.path()), 2, "valid lines imported");
+}
+
+/// M3: re-importing the same external_ref with a changed status reports the
+/// divergence under `conflicts`.
+#[test]
+fn re_import_with_changed_status_reports_conflict() {
+    let (_open_src, open) = write_jsonl(&[r#"{"id":"bd-c","title":"T","status":"open"}"#]);
+    let repo = init_repo();
+    clove(repo.path())
+        .args(["import", "beads", open.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let (_changed_src, changed) = write_jsonl(&[r#"{"id":"bd-c","title":"T","status":"closed"}"#]);
+    let out = clove(repo.path())
+        .args([
+            "import",
+            "beads",
+            changed.to_str().unwrap(),
+            "--dry-run",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "re-import failed: {out:?}");
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let conflicts = v["data"]["conflicts"].as_array().unwrap();
+    assert_eq!(conflicts.len(), 1, "expected one conflict: {v}");
+    assert_eq!(conflicts[0]["field"], "status");
+    assert_eq!(conflicts[0]["existing"], "open");
+    assert_eq!(conflicts[0]["incoming"], "closed");
+
+    // Unchanged re-import: skipped, no conflicts.
+    let out = clove(repo.path())
+        .args([
+            "import",
+            "beads",
+            open.to_str().unwrap(),
+            "--dry-run",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["data"]["would_skip"].as_array().unwrap().len(), 1);
+    assert_eq!(v["data"]["conflicts"].as_array().unwrap().len(), 0);
+}
+
+/// Low: importer warnings (here, comment_count) reach the JSON envelope's
+/// `_meta.warnings`, not just stderr.
+#[test]
+fn comment_count_warning_reaches_json_envelope() {
+    let (_src, path) = write_jsonl(&[r#"{"id":"bd-cc","title":"T","comment_count":3}"#]);
+    let repo = init_repo();
+
+    let out = clove(repo.path())
+        .args([
+            "import",
+            "beads",
+            path.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "import failed: {out:?}");
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let warnings = v["_meta"]["warnings"].as_array().unwrap();
+    assert!(
+        warnings.iter().any(|w| w
+            .as_str()
+            .is_some_and(|s| s.contains("bd-cc") && s.contains("comment"))),
+        "comment_count warning missing from _meta.warnings: {warnings:?}"
+    );
+}
+
 #[test]
 fn comment_count_emits_stderr_warning() {
     let dir = init_repo();
