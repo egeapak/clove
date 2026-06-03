@@ -11,7 +11,23 @@ repository.workspace = true
 name = "cloved"
 path = "src/main.rs"
 
-# The daemon (file-watch, IPC) is M3; tokio/interprocess/notify are added then.
+[features]
+# git auto-sync (T-D06) is gated so a lean / cross-compiled build stays free of
+# vendored libgit2 (DESIGN §1 notes git2's C build blocks the macOS->Windows
+# cross-check). Default-on, mirroring clove-import's `github` feature.
+default = ["git-sync"]
+git-sync = ["dep:git2"]
+
 [dependencies]
 clove-core.workspace = true
 clove-index.workspace = true
+clove-ipc.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+camino.workspace = true
+# git2 is optional and only pulled in under the `git-sync` feature (P5/T-D06).
+git2 = { workspace = true, optional = true }
+
+# tokio (runtime), interprocess (IPC listener), fd-lock (single-instance lock),
+# and notify (file-watch) are added in the phases that introduce them (P1/P3) to
+# keep each phase's build minimal.

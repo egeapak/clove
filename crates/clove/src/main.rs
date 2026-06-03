@@ -129,6 +129,7 @@ fn run_repo(
         Commands::Search(a) => cmd::search::run(ctx, f, a, no_index).map(|_| ok),
         Commands::Reindex => cmd::reindex::run(ctx, f, quiet).map(|_| ok),
         Commands::Doctor(a) => cmd::doctor::run(ctx, f, a, no_index),
+        Commands::Daemon(a) => cmd::daemon::run(ctx, f, a.action),
         Commands::Import(a) => cmd::import::run(ctx, f, a).map(|_| ok),
         Commands::Export(a) => cmd::export::run(ctx, f, a).map(|_| ok),
         // Non-repo commands are dispatched earlier.

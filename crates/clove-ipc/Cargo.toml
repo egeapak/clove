@@ -1,0 +1,22 @@
+[package]
+name = "clove-ipc"
+description = "clove daemon IPC wire protocol, frame codec, and blocking client (M3)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+# Deliberately lean: serde + a synchronous interprocess client only. No tokio,
+# notify, or git2 — this is the crate the lean `clove` CLI links to talk to the
+# daemon, so it must not pull the daemon's async/file-watch/git stack into the CLI
+# (DESIGN §1, M3_PLAN §1.1 lean-CLI gate).
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+interprocess.workspace = true
+camino.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
