@@ -1,0 +1,4 @@
+  - [nested, flow]
+  - {a: map}
+  - ../../etc/passwd
+  - "id with spaces and : colons"

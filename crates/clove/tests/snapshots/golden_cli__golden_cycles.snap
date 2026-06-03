@@ -1,0 +1,10 @@
+---
+source: crates/clove/tests/golden_cli.rs
+expression: cycles
+---
+[
+  [
+    "proj-FFFFFFFF",
+    "proj-GGGGGGGG"
+  ]
+]

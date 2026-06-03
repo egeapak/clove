@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://clove.dev/schema/v1/item.json",
+  "title": "clove item",
+  "type": "object",
+  "required": ["id", "title", "status", "type", "priority", "created", "updated"],
+  "properties": {
+    "schema": { "type": "integer", "minimum": 1 },
+    "id": { "type": "string", "pattern": "^[a-z][a-z0-9]{0,7}-[0-9A-Z]{8}$" },
+    "title": { "type": "string" },
+    "status": { "enum": ["open", "in_progress", "closed"] },
+    "type": { "enum": ["bug", "feature", "chore", "docs", "epic"] },
+    "priority": { "type": "integer", "minimum": 0, "maximum": 4 },
+    "created": { "type": "string" },
+    "updated": { "type": "string" },
+    "closed": { "type": ["string", "null"] },
+    "assignee": { "type": ["string", "null"] },
+    "parent": { "type": ["string", "null"] },
+    "labels": { "type": "array", "items": { "type": "string" } },
+    "deps": { "type": "array", "items": { "type": "string" } },
+    "relates": { "type": "array", "items": { "type": "string" } },
+    "duplicates": { "type": "array", "items": { "type": "string" } },
+    "supersedes": { "type": "array", "items": { "type": "string" } },
+    "source_system": { "type": ["string", "null"] },
+    "external_ref": { "type": ["string", "null"] },
+    "body": { "type": "string" },
+    "comment_count": { "type": "integer", "minimum": 0 },
+    "ready": { "type": ["boolean", "null"] },
+    "blocked_by": { "type": ["array", "null"], "items": { "type": "string" } }
+  },
+  "additionalProperties": true
+}

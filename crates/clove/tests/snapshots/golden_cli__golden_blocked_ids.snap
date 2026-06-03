@@ -1,0 +1,8 @@
+---
+source: crates/clove/tests/golden_cli.rs
+expression: "sorted_ids(&v[\"data\"])"
+---
+[
+  "proj-AAAAAAAA",
+  "proj-DDDDDDDD"
+]

@@ -12,9 +12,9 @@
 .clove/reindex.lock
 .clove/daemon.lock
 
-# Criterion / fuzz artifacts
+# Criterion / fuzz build output and crash artifacts (the seed corpus under
+# /fuzz/corpus IS committed — it is the T-X02 regression input).
 /fuzz/target
-/fuzz/corpus
 /fuzz/artifacts
 
 # OS / editor cruft

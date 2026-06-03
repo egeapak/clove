@@ -57,6 +57,9 @@ pub fn classify(error: &CloveError) -> (ExitCode, &'static str) {
         | CloveError::EmptyLabel { .. }
         | CloveError::Invalid { .. } => (ExitCode::Validation, "VALIDATION_ERROR"),
         CloveError::HasDependents { .. } => (ExitCode::Validation, "HAS_DEPENDENTS"),
+        CloveError::SelfDependency { .. } => (ExitCode::Validation, "SELF_LOOP"),
+        CloveError::DependencyExists { .. } => (ExitCode::Validation, "ALREADY_EXISTS"),
+        CloveError::DependencyCycle { .. } => (ExitCode::Cycle, "CYCLE_DETECTED"),
         CloveError::Config { .. } => (ExitCode::Validation, "CONFIG_ERROR"),
 
         // Malformed item files are data problems → validation, not I/O.
@@ -68,6 +71,7 @@ pub fn classify(error: &CloveError) -> (ExitCode, &'static str) {
         | CloveError::IdMismatch { .. }
         | CloveError::InvalidYaml { .. } => (ExitCode::Validation, "PARSE_ERROR"),
 
+        CloveError::NoRepo { .. } => (ExitCode::Io, "NO_REPO"),
         CloveError::Io { .. } => (ExitCode::Io, "IO_ERROR"),
 
         // `CloveError` is non_exhaustive; default unknown variants to I/O.

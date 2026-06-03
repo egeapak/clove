@@ -83,6 +83,10 @@ pub enum CloveError {
         summary: String,
     },
 
+    /// No `.clove/` directory was found in the current directory or any ancestor.
+    #[error("no clove repository found in `{searched}` or any parent (run `clove init`)")]
+    NoRepo { searched: Utf8PathBuf },
+
     /// No item exists with the requested id.
     #[error("no item with id `{id}`")]
     NotFound { id: String },
@@ -90,6 +94,22 @@ pub enum CloveError {
     /// Deletion was refused because other items depend on this one.
     #[error("`{id}` has {} dependent(s): {}", dependents.len(), dependents.join(", "))]
     HasDependents { id: String, dependents: Vec<String> },
+
+    /// `dep add` was given an item as its own dependency.
+    #[error("`{id}` cannot depend on itself")]
+    SelfDependency { id: String },
+
+    /// `dep add` would introduce a hard-dependency cycle.
+    #[error("adding `{from}` → `{to}` would create a cycle: {}", cycle.join(" → "))]
+    DependencyCycle {
+        from: String,
+        to: String,
+        cycle: Vec<String>,
+    },
+
+    /// `dep add` for a dependency that is already present.
+    #[error("`{from}` already depends on `{to}`")]
+    DependencyExists { from: String, to: String },
 
     /// A filesystem operation failed.
     #[error("io error at `{path}`: {source}")]

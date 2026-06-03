@@ -1,8 +1,99 @@
 # clove — Session Handoff
 
-**Updated:** 2026-06-02
-**State:** Planning complete and reviewed. **Not yet built. Not yet a git repo.**
-**Next step:** Start the M0 build from `docs/IMPLEMENTATION_PLAN.md`.
+**Updated:** 2026-06-03
+**State:** **M0 and M1 are complete and gated.** Full CLI command surface; the
+SQLite index serves `ls`/`ready`/`query` (lean covering-index scan, default
+`--limit 100`, fast staleness with `--deep`), `search`, `reindex`, and
+`doctor` divergence. All five JSON schemas published + validated. Perf/parity/
+fuzz/golden gates pass (see `docs/M1_ACCEPTANCE_GATES.md`). ~240 tests green
+except one environment-only failure (`repo::tests::linked_worktree…`, a sandbox
+git-signing artifact, not a code defect).
+**Next step:** **M2 — Interop** (`import tk|beads|github`, `export json|jsonl|
+github`, and the real `clove merge-driver` for T-M05). M3 (daemon) builds on the
+finished M1 index; M4 (TUI/web/vendor bridges) is still undesigned.
+
+### Small backlog (optional M0/M1 nice-to-haves, non-blocking)
+- Broaden JSON-schema validation to more commands (version/reindex/doctor/new)
+  if desired — the 5 data-shape families are done.
+- `ls` gate is 15 ms with ~4.5 ms headroom; tighten to ~8 ms only if you want CI
+  to catch a covering-scan regression.
+
+---
+
+## M0 CLI + index wiring (this session)
+
+The whole `crates/clove` command surface is implemented, dispatched from
+`main.rs` via `cli.rs`, on shared helpers (`context.rs` discovery, `util.rs`
+parsing, `item_json.rs` shaping, `cmd/listing.rs` filter/sort/paginate/emit):
+
+- init, new, show (fast vs graph path), edit/set (KEY=VALUE + `labels+=/-=`),
+  status/start/close, label/assign/priority, dep add/rm/tree/cycle,
+  ready/blocked, ls/query (stdin JSON filter), comment/comments, version,
+  agent-doc (idempotent, `--check`), doctor (`--fix`/`--strict`), reindex, search.
+- `reindex` calls `clove_index::reindex`; `search` uses the FTS index when
+  present (`_meta.source = "index"`) and falls back to a file scan otherwise.
+- Exit codes per DESIGN §7.6 (dep self-loop=4, cycle=3, not-found=2, …);
+  every command supports `--format json|jsonl` with the standard envelope.
+- New `clove-core` support: `CloveError::{NoRepo, SelfDependency,
+  DependencyCycle, DependencyExists}` and the `doctor` module (`diagnose`/`fix`,
+  the §7.7 check suite). New `clove-index` `search()`.
+- Tests: `crates/clove/tests/cli_commands.rs` (14 e2e tests via `assert_cmd`)
+  plus the clove-core `doctor` and unit tests. `cargo test --workspace` is green
+  except the pre-existing `repo::tests::linked_worktree_resolves_to_main_worktree`
+  (an environment-only failure: it makes a real `git commit`, which this sandbox
+  routes through a signing server that returns 400).
+
+**Deferred (noted above):** T-S06, T-S08, T-CLI14, T-CLI16. The list commands
+(`ls`/`ready`/`blocked`/`query`) currently always read the files (the source of
+truth); index acceleration for them is the T-S06 follow-up.
+
+---
+
+## M1 progress — `clove-index` library (this session)
+
+Built the self-contained index crate; depends only on the finished `clove-core`.
+
+- **T-S01** `db.rs` — schema/DDL, `Index::open`/`open_or_create`, `IndexError`,
+  `ItemRow`; `user_version` schema check with drop-and-rebuild on
+  mismatch/corruption.
+- **T-S02** `write.rs` — `upsert_item`, the single encapsulated write path
+  (items + edges + labels + FTS5) in one `BEGIN IMMEDIATE` txn.
+- **T-S03** `stale.rs` — `check_staleness` / `apply_staleness`
+  (`StalenessReport`); dir-mtime + count fast path, content-hash gate with the
+  2 s recent-file guard.
+- **T-S04** `reindex.rs` — **library half only**: `reindex(issues_dir, db_path)`
+  with tmp-build + atomic rename, `fd-lock` advisory lock, parallel parse, topo
+  ranks via `clove-core` `GraphStore`. The `clove reindex` CLI command is
+  deferred (needs the M0 command surface).
+- **T-S07** `query.rs` — `query_items` with `Filter`/`QueryMode` (ready SQL +
+  list filters), ordered `(priority, topo rank NULLs-last, id)` to match the
+  file path.
+- Benchmarks in `benches/index.rs` (criterion); unit tests cover every AC above.
+
+**Deferred (blocked on the M0 CLI):** T-S04 CLI half, T-S05 `clove search`,
+T-S06 `with_index` read-path wrapper, T-S08 `doctor` index-divergence check.
+
+**Decisions / deviations made (don't relitigate without reason):**
+- Added `clove_core::graph::GraphStore::topological_ranks()` — a small public
+  accessor exposing the already-computed ranks so the index can persist
+  `topological_rank` without rebuilding the graph.
+- **rusqlite pinned to 0.37** (not DESIGN's 0.40): 0.40's `libsqlite3-sys` 0.38
+  build script needs the unstable `cfg_select!` macro, which fails on the pinned
+  stable toolchain. 0.37 (libsqlite3-sys 0.35) still bundles SQLite ≥3.43.
+- **FTS5 deviates from the §6.1 DDL in two ways**, both forced by pairing a
+  contentless FTS table with a `WITHOUT ROWID` `items` table: (1)
+  `contentless_delete=1` so a shadow row can be deleted by rowid (the spec's
+  `'delete'` command needs the old column values, which we lack on edit/delete);
+  (2) an `fts_map(fts_rowid → item_id)` side table so a full-text match (which
+  yields only rowids on a contentless table) can be resolved back to an item id.
+- `upsert_item` (incremental write-through) stores best-effort `file_mtime=now`
+  and `content_hash` over the body; the authoritative file mtime/hash come from
+  `reindex`/`apply_staleness`. `ParentOf` is not stored in `edges` (parent lives
+  in `items.parent_id`; the ready query only consults `DependsOn`).
+- **Perf note:** at 2k items (release): reindex ~116 ms, ls ~3.1 ms, ready
+  ~3.7 ms, staleness-clean ~2.1 ms. The 10k acceptance-gate tuning (esp. the
+  staleness fast path doing a per-file `readdir`, and `ls` row construction)
+  should be revisited when the CLI read path lands.
 
 ---
 

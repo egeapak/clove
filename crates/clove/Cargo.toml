@@ -22,8 +22,8 @@ serde_json.workspace = true
 camino.workspace = true
 chrono.workspace = true
 
-# jsonschema is added in T-CLI14 (JSON Schema validation in tests).
 [dev-dependencies]
 assert_cmd.workspace = true
-insta.workspace = true
+insta = { workspace = true, features = ["json"] }       # golden CLI snapshot tests (T-X01 acceptance gate)
 tempfile.workspace = true
+jsonschema.workspace = true       # T-CLI14: validate JSON output against v1 schema

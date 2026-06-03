@@ -1,3 +1,24 @@
 //! Subcommand implementations. Each `clove <command>` lives in its own module.
 
+pub mod agent_doc;
+pub mod assign;
+pub mod blocked;
+pub mod comments;
+pub mod dep;
+pub mod doctor;
+pub mod edit;
+pub mod index_read;
+pub mod init;
+pub mod label;
+pub mod listing;
+pub mod ls;
+pub mod new;
+pub mod priority;
+pub mod query;
+pub mod ready;
+pub mod reindex;
+pub mod search;
+pub mod set;
+pub mod show;
+pub mod status;
 pub mod version;
