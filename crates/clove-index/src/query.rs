@@ -97,20 +97,19 @@ fn where_clause(filter: &Filter) -> (String, Vec<Box<dyn ToSql>>) {
     (where_sql, params)
 }
 
-/// The `ORDER BY … [LIMIT …]` tail. `topological_rank IS NULL` sorts unranked
-/// items (cyclic graph, or not yet reindexed) last — matching clove-core's
-/// file-path ordering, which treats a missing rank as `usize::MAX`. A `LIMIT`
-/// (from `Filter::limit`) is pushed into SQL so a paginated `ls` steps only the
-/// rows it needs rather than the whole table.
+/// The `ORDER BY … [LIMIT …]` tail. Unranked items carry the sentinel
+/// `topological_rank` ([`crate::write::UNRANKED_TOPO`], a large value), so a
+/// plain `(priority, topological_rank, id)` order sorts them last — matching
+/// clove-core's file-path `usize::MAX` treatment — *and* lets the planner use the
+/// `idx_items_list` covering index instead of a sort. A `LIMIT` (from
+/// `Filter::limit`) is pushed into SQL so a paginated `ls` steps only the rows it
+/// needs rather than the whole table.
 fn order_limit_sql(filter: &Filter) -> String {
     let limit_sql = match filter.limit {
         Some(n) => format!(" LIMIT {n}"),
         None => String::new(),
     };
-    format!(
-        " ORDER BY priority ASC, topological_rank IS NULL ASC, \
-         topological_rank ASC, id ASC{limit_sql}"
-    )
+    format!(" ORDER BY priority ASC, topological_rank ASC, id ASC{limit_sql}")
 }
 
 /// The combined `WHERE … ORDER BY … [LIMIT …]` tail (and params) for a row query.

@@ -5,8 +5,8 @@
 //! builds use a small corpus and skip the assertions (they would flake).
 //!
 //! Gates (warm index, 10k items):
-//! - `reindex`                < 1000 ms (met, ~620 ms)
-//! - `ls` (lean `query_list`)  <  15 ms (met, ~11 ms; revised from 10 ms — see docs)
+//! - `reindex`                < 1000 ms (met, ~735 ms — incl. deferred covering-index build)
+//! - `ls` (lean `query_list`)  <  15 ms (met, ~4.5 ms via the `idx_items_list` covering scan)
 //! - `search` (FTS5, selective) < 20 ms (met, ~3 ms)
 //! - staleness fast, 0 stale   <   5 ms (met, ~3 ms via `check_staleness_fast`)
 
@@ -98,9 +98,9 @@ fn m1_index_perf_gates() {
         ls_count = index.query_list(&Filter::default()).unwrap().len();
     });
     assert_eq!(ls_count, n, "ls must return every item");
-    // Gate: < 15 ms (revised from 10 ms). SQLite's per-row step cost (~0.8 µs) is
-    // the floor for returning 10k rows (~8 ms); the lean projection lands ~11 ms.
-    // See docs/M1_ACCEPTANCE_GATES.md for the timing breakdown.
+    // Gate: < 15 ms. With the `idx_items_list` covering index the lean list is an
+    // index-only scan (~4.5 ms; per-row step dropped from ~793 ns to ~116 ns once
+    // the second b-tree lookup was removed). See docs/M1_ACCEPTANCE_GATES.md.
     assert_within("ls_lean", ls_elapsed, Duration::from_millis(15));
 
     // ready gate: the lean projection in Ready mode.

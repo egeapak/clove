@@ -7,16 +7,35 @@ and `--test index_parity`.
 | M1 gate (IMPLEMENTATION_PLAN) | Target | Measured (10k, release) | Status |
 |---|---|---|---|
 | `ls`/`ready`/filter ordered output == file-scan path | — | id-sequences equal across 5 seeds | ✅ met |
-| `reindex` 10k items | < 1000 ms | ~620 ms | ✅ met |
+| `reindex` 10k items | < 1000 ms | ~735 ms | ✅ met |
 | `search` 10k via FTS5 (selective query) | < 20 ms | ~3 ms | ✅ met |
 | Staleness detection, 10k, 0 stale | < 5 ms | ~3 ms (fast path) | ✅ **met** |
 | All M0 tests continue to pass | — | yes | ✅ met |
-| `ls` 10k items, warm index | < 15 ms (revised from 10 ms) | ~11 ms | ✅ met |
+| `ls` 10k items, warm index | < 15 ms | **~4.5 ms** (covering index) | ✅ met |
 
-The `ls` gate was revised from < 10 ms to **< 15 ms**: SQLite's per-row step is
-~0.8 µs (see the timing breakdown below), so returning 10k rows floors at ~8 ms
-and the lean projection lands ~11 ms — 10 ms is below the row-return floor for a
-full 10k list and would require a capped/paginated default, not a faster query.
+The `ls` gate is **< 15 ms**. With the `idx_items_list` covering index the lean
+list is an index-only scan and lands ~4.5 ms — comfortably under (and under the
+original 10 ms aspiration). The 15 ms bound is kept as headroom; note it does not
+by itself guard against *losing* the covering scan (that would regress to ~11 ms,
+still < 15 ms) — tighten to ~8 ms if you want CI to catch a covering-scan
+regression. Two further levers exist for the interactive case: the default
+`--limit 100` (the index pushes `LIMIT` into SQL, so a page steps ~100 rows, not
+10k), and `_meta.total` from a cheap `COUNT(*)`.
+
+### Covering index (schema v2)
+
+`SELECT id,status,item_type,priority,title … ORDER BY priority,topological_rank,id`
+is served by `idx_items_list(priority, topological_rank, id, status, item_type,
+title)` as an **index-only scan** — `EXPLAIN QUERY PLAN` →
+`SCAN items USING COVERING INDEX idx_items_list` — so there is no per-row lookup
+into the `WITHOUT ROWID` `items` b-tree. Enabling it required storing a sentinel
+`topological_rank` (`i64::MAX`) for unranked items instead of `NULL`, so the
+order is a plain `(priority, topological_rank, id)` the index satisfies (the
+sentinel sorts unranked items last, matching the file path's `usize::MAX`). The
+index is built **after** the bulk insert during reindex (one pass, not 10k
+incremental updates), which keeps reindex at ~735 ms (vs ~620 ms without the
+index, ~853 ms if maintained inline). Schema bumped to v2 (old indexes
+auto-rebuild on open).
 
 ## What changed (the two gaps, now resolved)
 
@@ -28,23 +47,26 @@ the full 15-column owned-row materialization (incl. the per-row label-JSON
 parse). The result is ~11 ms — down from ~18 ms, comfortably under the revised
 15 ms gate.
 
-**Timing breakdown** (10k rows, release; `tests/timing_breakdown.rs`):
+**Timing breakdown** (10k rows, release; `tests/timing_breakdown.rs`), *with the
+covering index*:
 
 | stage | total | per row |
 |---|---|---|
 | prepare (compile SQL) | 4 µs | — |
-| step-only (no decode) | 7.9 ms | 793 ns |
-| + read priority (int) | 7.8 ms | 781 ns |
-| + decode lean (SmolStr) — the `ls` path | 10.1 ms | 1012 ns |
-| + decode lean (String) | 10.3 ms | 1029 ns |
-| + decode full 15-col (old `query_items`) | 16.2 ms | 1623 ns |
+| step-only (no decode) | 1.2 ms | **116 ns** |
+| + read priority (int) | 1.3 ms | 130 ns |
+| + decode lean (SmolStr) — the `ls` path | 3.7 ms | 369 ns |
+| + decode lean (String) | 3.9 ms | 386 ns |
+| + decode full 15-col (old `query_items`) | 15.7 ms | 1573 ns |
 
-The decisive finding: **SQLite stepping is ~78 % of the lean `ls` time** (793
-ns/row, ~7.9 ms) and is irreducible for "return 10k rows." Decoding the lean row
-adds only ~220 ns/row; the full 15-column row adds ~830 ns/row on top (the ~6 ms
-that separates the old 18 ms from the new 11 ms). So < 8 ms is not reachable
-without *not* returning 10k rows (e.g. a capped/paginated default); 11 ms is
-effectively optimal for a full 10k lean list.
+The decisive change: the covering index dropped raw stepping from **793 ns/row to
+116 ns/row** — that ~677 ns/row was the second b-tree lookup into the `WITHOUT
+ROWID` `items` table for `status`/`type`/`title`, now served from the index leaf.
+The lean `ls` path (step + decode) is ~369 ns/row → ~3.7 ms for 10k (the gate
+measures ~4.5 ms incl. the `COUNT(*)` and `Vec` build). String vs SmolStr decode
+still differs only ~17 ns/row (SmolStr is kept for memory, not time — see below).
+There is no separate bulk-step API in SQLite; this index-only scan is the way to
+make each step cheaper.
 
 **`SmolStr` short columns are kept — for memory, not time.** Time saved vs
 all-`String` is only ~1.7 % (17 ns/row), but the memory win is real

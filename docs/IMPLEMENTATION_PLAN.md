@@ -423,7 +423,7 @@
 **M1 Acceptance Gates**
 
 - `clove ls` id-ordering identical from file-scan and index paths (property test passes). The index path serves a lean `id/status/type/priority/title` projection; the file path the full frontmatter (see docs/M1_ACCEPTANCE_GATES.md).
-- `clove ls` 10k items with warm index < 15ms (criterion). Revised from 10ms: SQLite's per-row step is ~0.8µs, so returning 10k rows floors at ~8ms; the lean projection lands ~11ms.
+- `clove ls` 10k items with warm index < 15ms (criterion). ~4.5ms via the `idx_items_list` covering index (index-only scan; per-row step ~116ns). Gate set to 15ms for headroom; see docs/M1_ACCEPTANCE_GATES.md.
 - `clove search` 10k items via FTS5 < 20ms (criterion).
 - `clove reindex` 10k items < 1000ms.
 - All M0 tests continue to pass.

@@ -18,8 +18,9 @@ use rusqlite::Connection;
 use smol_str::SmolStr;
 use tempfile::TempDir;
 
-const ORDER: &str =
-    "ORDER BY priority ASC, topological_rank IS NULL ASC, topological_rank ASC, id ASC";
+// Matches query.rs: a plain order so the `idx_items_list` covering index serves
+// the lean query as an index-only scan.
+const ORDER: &str = "ORDER BY priority ASC, topological_rank ASC, id ASC";
 
 fn lean_sql() -> String {
     format!("SELECT id, status, item_type, priority, title FROM items {ORDER}")

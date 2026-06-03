@@ -35,14 +35,21 @@ pub(crate) fn fts_rowid(id: &str) -> i64 {
     i64::from_le_bytes(hash.as_bytes()[..8].try_into().expect("8 bytes"))
 }
 
+/// Sentinel `topological_rank` for items whose rank is unknown (incremental
+/// write-through, or a cyclic hard-dependency graph). Stored instead of `NULL`
+/// so the list query can order by a plain `(priority, topological_rank, id)` and
+/// use the `idx_items_list` covering index; the large value sorts these items
+/// last, matching the file path's `usize::MAX` treatment.
+pub(crate) const UNRANKED_TOPO: i64 = i64::MAX;
+
 /// Per-row index metadata that is not derivable from an [`Item`] alone.
 pub(crate) struct RowMeta {
     /// File modification time, Unix epoch milliseconds.
     pub file_mtime_ms: i64,
     /// First 8 bytes of BLAKE3 over the file's bytes.
     pub content_hash: [u8; 8],
-    /// Topological rank over the hard-dependency graph (None when unknown, e.g.
-    /// incremental write-through or a cyclic graph).
+    /// Topological rank over the hard-dependency graph (`None` when unknown — it
+    /// is persisted as [`UNRANKED_TOPO`], never `NULL`).
     pub topo_rank: Option<i64>,
     /// Whether the item references at least one missing hard dependency.
     pub has_dangling_deps: bool,
@@ -95,7 +102,7 @@ pub(crate) fn write_row(
             fm.priority.get(),
             fm.assignee,
             fm.parent.as_ref().map(|p| p.as_str()),
-            meta.topo_rank,
+            meta.topo_rank.unwrap_or(UNRANKED_TOPO),
             meta.has_dangling_deps,
             labels_json,
             fm.created.to_rfc3339(),

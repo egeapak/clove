@@ -13,8 +13,9 @@ use smol_str::SmolStr;
 use thiserror::Error;
 
 /// Index schema version. Bumped whenever the DDL below changes incompatibly;
-/// an open of an older/newer database triggers a drop-and-rebuild.
-pub const SCHEMA_VERSION: i64 = 1;
+/// an open of an older/newer database triggers a drop-and-rebuild. v2 added the
+/// `idx_items_list` covering index and the sentinel `topological_rank`.
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Complete DDL for the index (DESIGN §6.1). Kept as one reviewable block.
 /// PRAGMAs that must run per-connection (not persisted) are applied separately
@@ -98,11 +99,27 @@ CREATE TABLE fts_map (
 );
 
 CREATE INDEX idx_items_status ON items(status);
-CREATE INDEX idx_items_priority ON items(priority, topological_rank);
 CREATE INDEX idx_edges_to ON edges(to_id, kind);
 CREATE INDEX idx_edges_from ON edges(from_id, kind);
 CREATE INDEX idx_labels_label ON labels(label);
 ";
+
+/// The covering index for the lean `ls` projection, created separately so the
+/// reindex bulk-load can defer it until after the rows are inserted (building it
+/// once is far cheaper than maintaining it across 10k inserts).
+///
+/// Ordered by the list sort key `(priority, topological_rank, id)` and carrying
+/// `status`/`item_type`/`title`, so the list query is an **index-only scan** — no
+/// per-row lookup into the `WITHOUT ROWID` `items` b-tree (`EXPLAIN QUERY PLAN`:
+/// `SCAN items USING COVERING INDEX idx_items_list`). This is why
+/// `topological_rank` is stored as a sentinel, never `NULL` (see write.rs).
+const COVERING_INDEX_DDL: &str = "CREATE INDEX idx_items_list \
+    ON items(priority, topological_rank, id, status, item_type, title);";
+
+/// The covering-index DDL, for the reindex builder (deferred) and `Index::open`.
+pub(crate) fn covering_index_ddl() -> &'static str {
+    COVERING_INDEX_DDL
+}
 
 /// The schema DDL, for the reindex builder which initializes a fresh tmp
 /// database directly (T-S04) rather than through [`Index::open`].
@@ -282,6 +299,7 @@ impl Index {
         match version {
             0 => {
                 conn.execute_batch(SCHEMA_DDL)?;
+                conn.execute_batch(COVERING_INDEX_DDL)?;
                 conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             }
             v if v == SCHEMA_VERSION => {}

@@ -75,6 +75,9 @@ pub fn reindex(issues_dir: &Utf8Path, db_path: &Utf8Path) -> Result<ReindexRepor
         let parsed = parse_all(issues_dir, &mut warnings)?;
         write_all(&mut conn, &parsed)?;
         write_meta(&conn, issues_dir, clove_dir, parsed.len())?;
+        // Build the covering index now, in one pass, rather than maintaining it
+        // across every insert above (much cheaper for a bulk load).
+        conn.execute_batch(crate::db::covering_index_ddl())?;
         conn.execute_batch("PRAGMA synchronous=NORMAL; PRAGMA wal_checkpoint(TRUNCATE);")?;
         parsed.len()
     }; // conn dropped/closed here, flushing the WAL.
