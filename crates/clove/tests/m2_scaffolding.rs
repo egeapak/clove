@@ -96,9 +96,26 @@ fn export_github_stub_returns_clean_error() {
 }
 
 #[test]
-fn import_beads_stub_returns_clean_error() {
+fn import_beads_is_implemented() {
+    // `import beads` is implemented (Phase 4); it is no longer a stub. Full
+    // mapping/round-trip coverage lives in `tests/import_beads.rs`; here we only
+    // assert the handler is reached and returns a clean success envelope when
+    // pointed at a beads `issues.jsonl`.
     let dir = init_repo();
-    assert_not_yet_implemented(clove(dir.path()).args(["import", "beads", "issues.jsonl"]));
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/beads/issues.jsonl");
+    let out = clove(dir.path())
+        .args([
+            "import",
+            "beads",
+            fixture.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "import beads failed: {out:?}");
+    let v: Value = serde_json::from_slice(&out.stdout).expect("valid JSON envelope on stdout");
+    assert_eq!(v["ok"], true, "envelope should be ok: {v}");
 }
 
 #[test]

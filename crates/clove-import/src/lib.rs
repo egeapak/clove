@@ -7,6 +7,7 @@
 //! in [`map`], and the `external_ref` idempotency index — that every concrete
 //! importer reuses. See `docs/M2_PLAN.md` §2 and DESIGN.md §11.
 
+pub mod beads;
 pub mod error;
 pub mod export;
 pub mod map;
@@ -19,6 +20,7 @@ use std::collections::HashMap;
 use camino::Utf8Path;
 use clove_core::{CloveId, ItemStore};
 
+pub use beads::BeadsImporter;
 pub use error::ImportError;
 pub use map::build_external_ref_index;
 pub use plan::{ConflictItem, ImportPlan, ImportReport, PlanItem, SkipItem};

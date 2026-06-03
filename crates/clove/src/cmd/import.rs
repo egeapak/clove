@@ -1,14 +1,14 @@
 //! `clove import <tk|beads|github> <src> [--dry-run]` (T-M01/T-M02/T-M03).
 //!
-//! The tk source (T-M01) is implemented; Beads and GitHub remain
-//! [`CloveError::NotYetImplemented`] until their phases. The shared planning
+//! The tk (T-M01) and Beads (T-M02) sources are implemented; GitHub remains
+//! [`CloveError::NotYetImplemented`] until its phase. The shared planning
 //! layer lives in `clove-import`: every source runs `plan` (pure, drives
 //! `--dry-run`) and, when not in dry-run, `apply` (writes through the file
 //! store).
 
 use chrono::Utc;
 use clove_core::{CloveError, OutputFormat};
-use clove_import::{ImportCtx, Importer, TkImporter};
+use clove_import::{BeadsImporter, ImportCtx, Importer, TkImporter};
 use serde_json::json;
 
 use crate::cli::{ImportArgs, ImportSource};
@@ -36,9 +36,25 @@ pub fn run(ctx: &Ctx, format: OutputFormat, args: ImportArgs) -> Result<(), Clov
             }
             Ok(())
         }
-        ImportSource::Beads { .. } => Err(CloveError::NotYetImplemented {
-            feature: "import beads".to_owned(),
-        }),
+        ImportSource::Beads { src, dry_run } => {
+            let importer = BeadsImporter::new(ctx.config.id_prefix.clone(), Utc::now());
+            let import_ctx = ImportCtx::new(&ctx.store, dry_run).map_err(import_err)?;
+            let plan = importer.plan(&src, &import_ctx).map_err(import_err)?;
+
+            // comment_count (and any other) warnings go to stderr, never stdout,
+            // so JSON consumers still get a clean envelope.
+            for warning in importer.take_warnings() {
+                eprintln!("warning: {warning}");
+            }
+
+            if dry_run {
+                emit_plan(format, &plan);
+            } else {
+                let report = importer.apply(plan, &ctx.store).map_err(import_err)?;
+                emit_report(format, &report);
+            }
+            Ok(())
+        }
         ImportSource::Github { .. } => Err(CloveError::NotYetImplemented {
             feature: "import github".to_owned(),
         }),

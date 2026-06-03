@@ -41,3 +41,7 @@ harness = false
 [[bench]]
 name = "bench_import_tk"
 harness = false
+
+[[bench]]
+name = "bench_import_beads"
+harness = false

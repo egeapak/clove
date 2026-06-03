@@ -26,6 +26,14 @@ pub fn tk_type(raw: &str) -> ItemType {
     }
 }
 
+/// Coerce a Beads `issue_type` (or a clove `type`) string to a clove
+/// [`ItemType`]. Identical mapping to [`tk_type`] (notably `task → chore`,
+/// DESIGN §11.2); kept as a named alias so each importer reads against its own
+/// spec.
+pub fn beads_type(raw: &str) -> ItemType {
+    tk_type(raw)
+}
+
 /// Coerce a source "status" string to a clove [`ItemStatus`].
 ///
 /// Unrecognized statuses default to [`ItemStatus::Open`]. (Beads' `deferred →
