@@ -1,7 +1,7 @@
-//! M2 Phase 0 scaffolding tests: the `import`/`export`/`merge-driver` command
-//! surface parses and reaches its (stub) handler, which returns a clean
-//! "not yet implemented" error rather than panicking. No real interop behavior
-//! exists yet (later phases); these only pin the CLI wiring.
+//! M2 CLI-surface tests: the `import`/`export`/`merge-driver` commands parse and
+//! reach their handlers. Stub handlers (Phase 5 `import`/`export github`) return
+//! a clean "not yet implemented" error; the Phase 2 `merge-driver` is wired and
+//! implemented (see `tests/merge_driver.rs` for its full coverage).
 
 use std::path::Path;
 use std::process::Command;
@@ -102,8 +102,33 @@ fn import_beads_stub_returns_clean_error() {
 }
 
 #[test]
-fn merge_driver_stub_returns_clean_error() {
-    // merge-driver does not require a repository; it operates on file paths.
+fn merge_driver_is_implemented_and_resolves_identical_sides() {
+    // merge-driver is implemented in Phase 2 (no longer a stub). It operates on
+    // file paths, not a repository. With identical ours/theirs and no ancestor
+    // (add/add), the merge is trivially clean → exit 0 and the result is written
+    // to the `%A` (ours) path. Full git-integration coverage lives in
+    // `tests/merge_driver.rs`.
     let dir = tempfile::tempdir().unwrap();
-    assert_not_yet_implemented(clove(dir.path()).args(["merge-driver", "o", "a", "b", "7"]));
+    let p = dir.path();
+    let item = "---\nschema: 1\nid: proj-AAAAAAAA\ntitle: x\nstatus: open\ntype: feature\npriority: 2\ncreated: 2026-06-02T10:00:00Z\nupdated: 2026-06-02T10:00:00Z\nlabels: []\ndeps: []\nrelates: []\nduplicates: []\nsupersedes: []\n---\nbody\n";
+    let ours = p.join("ours.md");
+    let theirs = p.join("theirs.md");
+    std::fs::write(&ours, item).unwrap();
+    std::fs::write(&theirs, item).unwrap();
+
+    clove(p)
+        .args([
+            "merge-driver",
+            "/nonexistent-ancestor",
+            ours.to_str().unwrap(),
+            theirs.to_str().unwrap(),
+            "7",
+        ])
+        .assert()
+        .success();
+    let merged = std::fs::read_to_string(&ours).unwrap();
+    assert!(
+        merged.contains("id: proj-AAAAAAAA"),
+        "merged item written:\n{merged}"
+    );
 }

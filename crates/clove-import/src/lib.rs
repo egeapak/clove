@@ -10,6 +10,7 @@
 pub mod error;
 pub mod export;
 pub mod map;
+pub mod merge;
 pub mod plan;
 
 use std::collections::HashMap;

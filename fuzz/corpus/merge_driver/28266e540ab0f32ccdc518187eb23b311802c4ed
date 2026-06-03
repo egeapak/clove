@@ -1,0 +1,9 @@
+---
+schema: 1
+id: f`uzz-00000000
+1title: Seed item
+'status: []
+deps: [fuzz-00000001]
+cud[epreses> []
+---
+Body.

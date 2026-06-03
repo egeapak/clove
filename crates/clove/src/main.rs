@@ -76,10 +76,9 @@ fn dispatch(cli: Cli) -> (OutputFormat, Result<ExitCode, CloveError>) {
         // not discover a `.clove/` repository.
         Commands::MergeDriver(args) => {
             let f = resolve_format(flag, None);
-            (
-                f,
-                cmd::merge_driver::run(f, args).map(|_| ExitCode::Success),
-            )
+            // The merge driver returns its own exit code (0 = clean, nonzero =
+            // conflict) per the git merge-driver contract.
+            (f, cmd::merge_driver::run(f, args))
         }
         // Everything else operates on a discovered repository.
         command => {

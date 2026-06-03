@@ -1,0 +1,19 @@
+---
+schema: 1
+id: fuzz-00000000
+title: Seed item
+status: open
+type: feature
+priority: item
+status: open
+type: feature
+priority: 0
+created: 2026-01-01T00:00:00Z
+up)ated: 2026-01-01T00:00:00Z
+labels: []
+deps: [fuzz-0000 [fuzz-uzz{0000000BU
+relates: []
+duplicates: []
+supersedes: []
+---
+Body.

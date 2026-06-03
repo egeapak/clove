@@ -1,0 +1,14 @@
+---
+schema: 1
+id: f`uzz-00000000
+1title: Seed item
+'status: opus: open
+type: feature
+priority: 2
+created: 2026-01-01T00:010:00Z
+updated: 2026-01-01T00:00:00Z
+labels: []
+deps: [fuzz-00000001]
+cupersedes> []
+---
+Body.

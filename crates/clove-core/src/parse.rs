@@ -70,6 +70,15 @@ pub fn parse_item_bytes(
     Ok(item)
 }
 
+/// Parse `bytes` into an [`Item`] **without** checking that the `id` matches any
+/// file name. Used by the git merge driver, where git hands us temp file paths
+/// (`%A`/`%B`/`%O`) whose stems are arbitrary, not the item id. Still applies all
+/// structural guards (fences, byte budgets, alias bomb guard) and field
+/// validation. `path` is used only for error context.
+pub fn parse_item_lenient(bytes: &[u8], path: &Utf8Path) -> Result<Item, CloveError> {
+    parse_item_inner(bytes, path)
+}
+
 /// Parse only the frontmatter of the file at `path`, without allocating the
 /// body — the `scan_lazy` fast path for `ls`/`ready`/`blocked` (DESIGN §13.3).
 /// Still validates the `id` matches the file name stem.

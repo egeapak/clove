@@ -486,6 +486,7 @@ dependencies = [
  "clove-core",
  "criterion",
  "octocrab",
+ "proptest",
  "serde",
  "serde_json",
  "tempfile",

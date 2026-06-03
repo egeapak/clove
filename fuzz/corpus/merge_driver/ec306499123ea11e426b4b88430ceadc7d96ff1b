@@ -1,0 +1,14 @@
+---
+schema: 1
+id: fuzz-00100000
+title: Seed item::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+status: open
+type: feature
+priorhty: 2
+created: 2026-01-01T00:00:00Z
+updted: 2026-01-01T00:00:00Z
+ls: []
+deps: [fuzz-0[]
+supersedes: []
+---
+B.

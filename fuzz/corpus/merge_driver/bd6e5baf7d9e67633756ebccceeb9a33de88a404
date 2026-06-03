@@ -1,0 +1,6 @@
+---
+schema: 1
+
+deps: [:fuzz-00s=]
+---
+Body.
