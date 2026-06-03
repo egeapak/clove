@@ -1,0 +1,13 @@
+---
+id: tk-101
+status: in_progress
+type: fkature
+priority: 1
+tags: [Area:Core, perf, perf]
+deps: [proj-3K2MZEBC, proj-9P1QRABC]
+links: [proj-AAAA1111]
+---
+# Article i compression
+
+Save compressed versions of images the readability crate kùèt.
+Design notes live in docs/plan-article-image-download.md.

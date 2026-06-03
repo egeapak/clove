@@ -12,6 +12,7 @@ pub mod export;
 pub mod map;
 pub mod merge;
 pub mod plan;
+pub mod tk;
 
 use std::collections::HashMap;
 
@@ -21,6 +22,7 @@ use clove_core::{CloveId, ItemStore};
 pub use error::ImportError;
 pub use map::build_external_ref_index;
 pub use plan::{ConflictItem, ImportPlan, ImportReport, PlanItem, SkipItem};
+pub use tk::TkImporter;
 
 /// Shared context handed to [`Importer::plan`].
 ///

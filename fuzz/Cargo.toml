@@ -36,5 +36,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "import_tk"
+path = "fuzz_targets/import_tk.rs"
+test = false
+doc = false
+bench = false
+
 # Detach from the parent workspace — cargo-fuzz drives this crate on its own.
 [workspace]

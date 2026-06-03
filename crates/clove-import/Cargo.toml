@@ -18,6 +18,7 @@ github = ["dep:octocrab", "dep:tokio"]
 clove-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml_neo.workspace = true
 camino.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
@@ -35,4 +36,8 @@ proptest.workspace = true      # T-M05: set-merge invariant property tests
 
 [[bench]]
 name = "bench_export"
+harness = false
+
+[[bench]]
+name = "bench_import_tk"
 harness = false

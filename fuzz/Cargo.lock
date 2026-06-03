@@ -140,6 +140,7 @@ dependencies = [
  "clove-core",
  "serde",
  "serde_json",
+ "serde_yaml_neo",
  "thiserror",
 ]
 
