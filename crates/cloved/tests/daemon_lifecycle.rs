@@ -136,6 +136,35 @@ fn sigkill_then_restart_recovers() {
     let _ = restarted.wait();
 }
 
+#[test]
+fn idle_shutdown_self_terminates() {
+    let (_tmp, clove_dir) = init_clove_dir();
+    // CLOVED_IDLE_SHUTDOWN_MS is the test seam for the minute-granularity
+    // `[daemon] idle_shutdown_min` (T-D05): self-terminate after 500ms idle.
+    let mut child = Command::new(cloved_bin())
+        .arg("run")
+        .arg("--clove-dir")
+        .arg(clove_dir.as_str())
+        .env("CLOVED_IDLE_SHUTDOWN_MS", "500")
+        .spawn()
+        .expect("spawn cloved");
+
+    // Wait for readiness.
+    let pid_file = clove_dir.join("daemon.pid");
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(5) && !pid_file.exists() {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(pid_file.exists(), "daemon became ready");
+
+    // With no activity it must self-terminate cleanly within a few windows.
+    let status = wait_with_timeout(&mut child, Duration::from_secs(3));
+    assert!(status.is_some(), "daemon self-terminated on idle");
+    assert!(status.unwrap().success(), "clean idle shutdown (exit 0)");
+    assert!(!pid_file.exists(), "pid removed on idle shutdown");
+    assert!(!clove_dir.join("daemon.sock").exists(), "socket removed");
+}
+
 /// Wait for `child` up to `timeout`, returning its exit status or `None` on
 /// timeout (after which it is killed).
 fn wait_with_timeout(child: &mut Child, timeout: Duration) -> Option<std::process::ExitStatus> {

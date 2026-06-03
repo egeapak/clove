@@ -40,6 +40,17 @@ pub fn run(
         }
     }
 
+    // T-D07: daemon-health check (independent of the index; runs even with
+    // --no-index, since it inspects socket/pid state, not the index).
+    if let Some(issue) = daemon_health(ctx) {
+        if args.fix {
+            clove_ipc::client::cleanup_stale(daemon_dir(ctx));
+            fixed += 1;
+        } else {
+            report.issues.push(issue);
+        }
+    }
+
     match format {
         OutputFormat::Json | OutputFormat::Jsonl => emit_json(&report, fixed),
         OutputFormat::Human => emit_human(&report, fixed),
@@ -84,6 +95,33 @@ fn index_divergence(ctx: &Ctx) -> Result<Option<DoctorIssue>, CloveError> {
             fixable: true,
         }))
     }
+}
+
+/// The `.clove/` directory (parent of `issues/`).
+fn daemon_dir(ctx: &Ctx) -> &camino::Utf8Path {
+    ctx.issues_dir.parent().unwrap_or(&ctx.issues_dir)
+}
+
+/// T-D07: detect a dead-daemon footprint. When `daemon.sock`/`daemon.pid` are
+/// present but no daemon answers, they are corpse files from a crash; `--fix`
+/// removes them (the DESIGN §8.3 cleanup as an explicit repair). A live daemon —
+/// or a lone leftover `daemon.lock` (normal, reused on next start) — is no finding.
+fn daemon_health(ctx: &Ctx) -> Option<DoctorIssue> {
+    let dir = daemon_dir(ctx);
+    let sock = clove_ipc::sock_path(dir).exists();
+    let pid = clove_ipc::pid_path(dir).exists();
+    if (sock || pid) && !clove_ipc::DaemonClient::is_alive(dir) {
+        return Some(DoctorIssue {
+            severity: Severity::Warning,
+            code: "DAEMON_STALE_SOCKET",
+            item: None,
+            message: "stale daemon socket/pid from a crashed daemon; \
+                      run `clove doctor --fix` to remove them"
+                .to_owned(),
+            fixable: true,
+        });
+    }
+    None
 }
 
 fn emit_json(report: &DoctorReport, fixed: usize) {

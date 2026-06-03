@@ -32,6 +32,13 @@ camino.workspace = true
 chrono.workspace = true
 tempfile.workspace = true       # T-M04: atomic `export --out FILE` writes
 
+# `clove daemon stop` on Windows signals the daemon's named event (DESIGN §8.9).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 assert_cmd.workspace = true
 insta = { workspace = true, features = ["json"] }       # golden CLI snapshot tests (T-X01 acceptance gate)

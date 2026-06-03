@@ -70,6 +70,12 @@ impl DaemonState {
         self.batches_applied += 1;
     }
 
+    /// How long since the last watcher/IPC activity (or since startup if none).
+    /// Drives idle self-shutdown (DESIGN §8.8 `idle_shutdown_min`).
+    pub fn idle_for(&self) -> std::time::Duration {
+        self.last_event_at.unwrap_or(self.started_at).elapsed()
+    }
+
     /// Record that a watcher/IPC event just happened (for `last_event_ms`).
     pub fn mark_event(&mut self) {
         self.last_event_at = Some(Instant::now());

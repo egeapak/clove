@@ -73,6 +73,15 @@ impl DaemonClient {
         }
     }
 
+    /// Liveness check that does **not** mutate the filesystem (unlike
+    /// [`DaemonClient::probe`], which cleans up a stale socket). Returns `true`
+    /// only if a daemon answers `PING`. Used by `clove doctor` to distinguish a
+    /// live daemon from a dead-daemon footprint before deciding whether to clean
+    /// up (T-D07).
+    pub fn is_alive(clove_dir: &Utf8Path) -> bool {
+        sock_path(clove_dir).exists() && Self::connect_and_ping(clove_dir).is_ok()
+    }
+
     /// Connect + `PING`/`PONG`, bounded by [`CONNECT_TIMEOUT`]. The whole
     /// handshake runs on a worker thread so a hung peer cannot block the CLI past
     /// the timeout (the worker is abandoned on timeout; the CLI is short-lived).

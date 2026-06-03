@@ -1,29 +1,261 @@
-//! `clove daemon <start|stop|status>` (DESIGN §7.2, §8).
+//! `clove daemon <start|stop|status>` (T-D05, DESIGN §7.2/§8).
 //!
 //! The daemon is an optional accelerator: it watches `.clove/issues/` and keeps
-//! the index hot, but every read command works identically without it.
-//!
-//! **Phase 0 (this commit):** the subcommand surface and dispatch only — each
-//! action is a wired stub. `start` (detached spawn) and `status` (IPC `STATUS`)
-//! land in Phase 4 (T-D05), on top of the daemon lifecycle (P1) and IPC (P2).
+//! the index hot, but every read command works identically without it. `start`
+//! spawns the sibling `cloved` binary detached and waits for its pid (readiness);
+//! `stop` signals it and waits for teardown; `status` queries it over IPC.
 
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+use camino::Utf8Path;
 use clove_core::{CloveError, OutputFormat};
+use clove_ipc::{pid_path, DaemonClient};
+use serde_json::json;
 
 use crate::cli::DaemonAction;
 use crate::context::Ctx;
 use crate::exit::ExitCode;
+use crate::output::print_json_success;
 
-pub fn run(
-    _ctx: &Ctx,
-    _format: OutputFormat,
-    action: DaemonAction,
-) -> Result<ExitCode, CloveError> {
-    let feature = match action {
-        DaemonAction::Start => "daemon start",
-        DaemonAction::Stop => "daemon stop",
-        DaemonAction::Status => "daemon status",
+/// How long `start`/`stop` wait for the pid file to appear/disappear.
+const WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+
+pub fn run(ctx: &Ctx, format: OutputFormat, action: DaemonAction) -> Result<ExitCode, CloveError> {
+    let clove_dir = ctx
+        .issues_dir
+        .parent()
+        .ok_or_else(|| daemon_err("cannot locate .clove directory"))?
+        .to_owned();
+    match action {
+        DaemonAction::Start => start(&clove_dir, format),
+        DaemonAction::Stop => stop(&clove_dir, format),
+        DaemonAction::Status => status(&clove_dir, format),
+    }
+}
+
+/// Start a detached `cloved` for this repository.
+fn start(clove_dir: &Utf8Path, format: OutputFormat) -> Result<ExitCode, CloveError> {
+    // Idempotent: a live daemon means we are already done.
+    if DaemonClient::probe(clove_dir).is_some() {
+        return emit(
+            format,
+            json!({ "started": false, "running": true }),
+            &format!("daemon already running for {clove_dir}"),
+        );
+    }
+
+    let bin = cloved_path()?;
+    spawn_detached(&bin, clove_dir)?;
+
+    // Wait for readiness (the pid file, written only after bind + startup sweep).
+    let pid_file = pid_path(clove_dir);
+    let start = Instant::now();
+    while start.elapsed() < WAIT_TIMEOUT {
+        if let Ok(contents) = std::fs::read_to_string(&pid_file) {
+            let pid = contents.trim().to_owned();
+            return emit(
+                format,
+                json!({ "started": true, "pid": pid }),
+                &format!("daemon started (pid {pid})"),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Err(daemon_err("daemon did not become ready within 5s"))
+}
+
+/// Stop a running daemon and wait for it to tear down.
+fn stop(clove_dir: &Utf8Path, format: OutputFormat) -> Result<ExitCode, CloveError> {
+    let pid_file = pid_path(clove_dir);
+    let pid = match std::fs::read_to_string(&pid_file) {
+        Ok(s) => s.trim().parse::<u32>().ok(),
+        Err(_) => None,
     };
-    Err(CloveError::NotYetImplemented {
-        feature: feature.to_owned(),
-    })
+    let Some(pid) = pid else {
+        // Nothing to stop. Clean up any stray socket and report a no-op.
+        clove_ipc::client::cleanup_stale(clove_dir);
+        return emit(
+            format,
+            json!({ "stopped": false, "running": false }),
+            "no daemon running",
+        );
+    };
+
+    signal_shutdown(clove_dir, pid)?;
+
+    let start = Instant::now();
+    while start.elapsed() < WAIT_TIMEOUT {
+        if !pid_file.exists() {
+            return emit(format, json!({ "stopped": true }), "daemon stopped");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Err(daemon_err("daemon did not stop within 5s"))
+}
+
+/// Query and print the running daemon's status.
+fn status(clove_dir: &Utf8Path, format: OutputFormat) -> Result<ExitCode, CloveError> {
+    let Some(mut client) = DaemonClient::probe(clove_dir) else {
+        return emit(format, json!({ "running": false }), "daemon not running");
+    };
+    let status = client
+        .status()
+        .map_err(|e| daemon_err(&format!("status query failed: {e}")))?;
+
+    let data = json!({
+        "running": true,
+        "uptime_s": status.uptime_s,
+        "items_indexed": status.items_indexed,
+        "watcher_state": status.watcher_state,
+        "last_event_ms": status.last_event_ms,
+        "batches_applied": status.batches_applied,
+    });
+    match format {
+        OutputFormat::Json | OutputFormat::Jsonl => print_json_success(data, json!({})),
+        OutputFormat::Human => {
+            println!(
+                "running  uptime {}s  items {}  watcher {}  batches {}",
+                status.uptime_s, status.items_indexed, status.watcher_state, status.batches_applied
+            );
+        }
+    }
+    Ok(ExitCode::Success)
+}
+
+/// Emit a small success envelope (`json`) or a one-line message (`human`).
+fn emit(
+    format: OutputFormat,
+    data: serde_json::Value,
+    human: &str,
+) -> Result<ExitCode, CloveError> {
+    match format {
+        OutputFormat::Json | OutputFormat::Jsonl => print_json_success(data, json!({})),
+        OutputFormat::Human => println!("{human}"),
+    }
+    Ok(ExitCode::Success)
+}
+
+fn daemon_err(msg: &str) -> CloveError {
+    CloveError::Io {
+        path: camino::Utf8PathBuf::from("daemon"),
+        source: std::io::Error::other(msg.to_owned()),
+    }
+}
+
+/// Locate the `cloved` binary next to the running `clove` executable (the install
+/// layout, and the cargo target dir in tests).
+fn cloved_path() -> Result<PathBuf, CloveError> {
+    let exe =
+        std::env::current_exe().map_err(|e| daemon_err(&format!("locating clove exe: {e}")))?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| daemon_err("clove exe has no parent dir"))?;
+    let name = if cfg!(windows) {
+        "cloved.exe"
+    } else {
+        "cloved"
+    };
+    let path = dir.join(name);
+    if path.exists() {
+        Ok(path)
+    } else {
+        Err(daemon_err(&format!(
+            "cloved binary not found at {}",
+            path.display()
+        )))
+    }
+}
+
+/// Spawn `cloved run --clove-dir <dir>` detached from this process and terminal.
+#[cfg(unix)]
+fn spawn_detached(bin: &std::path::Path, clove_dir: &Utf8Path) -> Result<(), CloveError> {
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    let mut cmd = Command::new(bin);
+    cmd.arg("run")
+        .arg("--clove-dir")
+        .arg(clove_dir.as_str())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // New session leader → detached from the controlling terminal. The parent
+    // (`clove`) exits right after readiness, so the daemon reparents to init.
+    unsafe {
+        cmd.pre_exec(|| {
+            // SAFETY: setsid in the forked child before exec; no allocation.
+            if libc_setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    cmd.spawn()
+        .map(|_child| ())
+        .map_err(|e| daemon_err(&format!("spawning cloved: {e}")))
+}
+
+#[cfg(unix)]
+extern "C" {
+    #[link_name = "setsid"]
+    fn libc_setsid() -> i32;
+}
+
+#[cfg(windows)]
+fn spawn_detached(bin: &std::path::Path, clove_dir: &Utf8Path) -> Result<(), CloveError> {
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    Command::new(bin)
+        .arg("run")
+        .arg("--clove-dir")
+        .arg(clove_dir.as_str())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
+        .spawn()
+        .map(|_child| ())
+        .map_err(|e| daemon_err(&format!("spawning cloved: {e}")))
+}
+
+/// Signal the daemon to shut down: SIGTERM (Unix) / named event (Windows).
+#[cfg(unix)]
+fn signal_shutdown(_clove_dir: &Utf8Path, pid: u32) -> Result<(), CloveError> {
+    // SAFETY: kill(2) with a parsed pid and SIGTERM (15).
+    let rc = unsafe { libc_kill(pid as i32, 15) };
+    if rc == -1 {
+        let err = std::io::Error::last_os_error();
+        // ESRCH (no such process): treat as already-stopped.
+        if err.raw_os_error() != Some(3) {
+            return Err(daemon_err(&format!("sending SIGTERM: {err}")));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+extern "C" {
+    #[link_name = "kill"]
+    fn libc_kill(pid: i32, sig: i32) -> i32;
+}
+
+#[cfg(windows)]
+fn signal_shutdown(clove_dir: &Utf8Path, _pid: u32) -> Result<(), CloveError> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenEventW, SetEvent, EVENT_MODIFY_STATE};
+    let name = clove_ipc::event_name(clove_dir);
+    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: open the daemon's named shutdown event and signal it.
+    unsafe {
+        let handle = OpenEventW(EVENT_MODIFY_STATE, 0, wide.as_ptr());
+        if handle.is_null() {
+            return Err(daemon_err("daemon shutdown event not found"));
+        }
+        SetEvent(handle);
+        CloseHandle(handle);
+    }
+    Ok(())
 }

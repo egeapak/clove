@@ -57,6 +57,8 @@ pub fn run(clove_dir: &Utf8Path) -> anyhow::Result<()> {
     let auto_refresh = config.as_ref().is_none_or(|c| c.index.auto_refresh);
     let debounce =
         Duration::from_millis(config.as_ref().map_or(200, |c| c.daemon.watch_debounce_ms));
+    let idle_shutdown =
+        idle_shutdown_duration(config.as_ref().map_or(0, |c| c.daemon.idle_shutdown_min));
 
     // 3. Tokio runtime — 2 workers (IPC + watcher), per DESIGN §8.1.
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -91,10 +93,12 @@ pub fn run(clove_dir: &Utf8Path) -> anyhow::Result<()> {
         crate::reindexer::sync_once(&issues_dir, &index, &state);
         write_pid(clove_dir).context("writing pid file")?;
 
-        // 5. Serve IPC + watch for changes until a shutdown signal fires.
+        // 5. Serve IPC + watch for changes until a shutdown signal (or idle
+        //    timeout) fires.
         tokio::select! {
             _ = accept_loop(listener, dispatcher) => {},
             _ = crate::watcher::watch(issues_dir.clone(), Arc::clone(&index), Arc::clone(&state), debounce) => {},
+            _ = idle_watchdog(Arc::clone(&state), idle_shutdown) => {},
             _ = shutdown_signal(clove_dir) => {},
         }
         Ok(())
@@ -110,6 +114,36 @@ pub fn run(clove_dir: &Utf8Path) -> anyhow::Result<()> {
     let _ = std::fs::remove_file(pid_path(clove_dir));
 
     serve_result
+}
+
+/// Resolve the idle-shutdown window (DESIGN §8.8). `idle_shutdown_min == 0` means
+/// never. A `CLOVED_IDLE_SHUTDOWN_MS` env var overrides it (sub-minute values for
+/// tests). `None` = never self-terminate.
+fn idle_shutdown_duration(idle_min: u64) -> Option<Duration> {
+    if let Ok(ms) = std::env::var("CLOVED_IDLE_SHUTDOWN_MS") {
+        if let Ok(ms) = ms.parse::<u64>() {
+            return (ms > 0).then(|| Duration::from_millis(ms));
+        }
+    }
+    (idle_min > 0).then(|| Duration::from_secs(idle_min * 60))
+}
+
+/// Resolve once the daemon has been idle for `idle` (DESIGN §8.8). Never resolves
+/// when `idle` is `None`. Idle resets on any watcher/IPC activity (`mark_event`).
+async fn idle_watchdog(state: Arc<Mutex<DaemonState>>, idle: Option<Duration>) {
+    let Some(idle) = idle else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    // Check a few times per window so shutdown fires within a fraction of it.
+    let tick = (idle / 4).max(Duration::from_millis(25));
+    loop {
+        tokio::time::sleep(tick).await;
+        let idle_for = state.lock().map(|s| s.idle_for()).unwrap_or_default();
+        if idle_for >= idle {
+            return;
+        }
+    }
 }
 
 /// Write the current process id to `daemon.pid` (DESIGN §8.2).
