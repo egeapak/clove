@@ -1,38 +1,0 @@
----
-schema: 1
-id: fuzz-00000000s: open
-type:01T00:00:00Z
-updated: 2026-01-01
-type: featuse
-priority---
-schema: 1
-id: fuzz-00000000
-title: Seed item
-status:le: Seed iteamsst
-tu: open
-type: f--eature
-priority: 2
-created: 2026-01-01T00:00:00Z
-updated: 2026-01-01T00:00:00Z
-labels: []
-deps: [fuzz-0000 open
-type: featus-01T---ates:0:00:00Z
-labels: []
-deps: [fuzz-0000 open
-type: featus-01T---at-00000001, fuzz-0000000B]
-relat¹¹¹¹r0000001, fu1-01T---ates: []
-du
-:00Z
-updated: 2026-01-01T00:00:00Z
-label[ s:]
-deps: [fuzz-00000001, fuzz-0000000B]
-relaed item
-status: open
-type: featus-01T---ates: []
-du
-:00Z
-updated: 2026-01-uplicates: []
-supersedes: []
----1
-created
-Body.

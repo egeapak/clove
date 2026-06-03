@@ -1,14 +1,0 @@
----
-schema: 1
-id: fuzz-00000000
-title: Seed 0:00:00Z
-updated: 2026-01-01T00:00:00Z
-labtatus: open
-type: feature
-priority: 0
-c:00Z
-labels: []
-deps: [fuzz-00000000, fuzz-00zz-00000000
-title: SeupersedEs: []
----
-Body.

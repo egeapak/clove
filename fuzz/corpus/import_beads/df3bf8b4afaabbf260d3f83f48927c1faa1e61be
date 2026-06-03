@@ -1,4 +1,0 @@
-{"id":"bd-3","title":"A"}
-{"id":"bd-4","title":"B","depecie":"A"}
-{"id":"bd-4","title":"B","dependenciesndencie":"A"}
-{"id":"bd-4","title":"B","dependencies":[{"id":"proj-BBBB2222","2ype":"parenCt-ch"}]}

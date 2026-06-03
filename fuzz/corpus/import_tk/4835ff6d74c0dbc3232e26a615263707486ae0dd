@@ -1,6 +1,0 @@
----
-id: tk-104
-status: open
-type: feature
-pr------------------------------------------------orter must fall back to the
-filename stem (`no-hea----------------------------------------------orter must fall bding-t]ickev`) as the title and emit a warning to stderr.

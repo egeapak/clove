@@ -1,3 +1,9 @@
 # Build output and crash artifacts are generated; the seed corpus is committed.
 /target
 /artifacts
+
+# libFuzzer writes discovered inputs into corpus/<target>/; only the hand-written
+# `seed_*` files are tracked. Everything else under a corpus dir is generated and
+# ignored (add a new seed with `git add -f` if it doesn't match `seed_*`).
+corpus/*/*
+!corpus/*/seed_*

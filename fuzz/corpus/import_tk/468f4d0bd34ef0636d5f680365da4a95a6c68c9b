@@ -1,7 +1,0 @@
----
-id: t-x
-type: t\res--
-id: tk to the
-filÿÿÿÿÿDÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿïÿÿÿÿÿÿÿename stem (`no-headihe title and emitrioritÿÿÿÿÿÿÿÿ
-This ticket has no `# H1` heading, so the importer must fall back to the
-filename stem (`no-headihe title and emit a warning to stderr.

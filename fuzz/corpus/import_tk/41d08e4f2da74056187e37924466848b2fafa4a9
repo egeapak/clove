@@ -1,8 +1,0 @@
----
-i$d: tk-101
-status: in_progress
-type: feature
-priority: 1
-tags: [Area:=Core, perf, perf]
-degs: [Area:=Core, perf, perf]
-deps: [proj-3K2MZABC, proj-e-downps: [proj-3K

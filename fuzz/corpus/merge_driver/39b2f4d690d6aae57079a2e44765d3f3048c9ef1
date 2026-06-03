@@ -1,9 +1,0 @@
----
-schema: 1
-id: fuzz-000 2
-created: 2026-0-01-01T00:00:00Z
-labels: []
-deps: [fuzz-00000001]
-[]
----
-B.ydo
