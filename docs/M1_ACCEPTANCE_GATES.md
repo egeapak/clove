@@ -15,15 +15,45 @@ and `--test index_parity`.
 
 ## What changed (the two gaps, now resolved or near-resolved)
 
-### `ls` 10k — 18 ms → ~11 ms (lean projection)
+### `ls` 10k — 18 ms → ~11 ms (lean projection), and where the time goes
 `clove ls` is now served **directly from the index** as a lean projection
 (`query_list` → `id, status, type, priority, title`, the columns the list
 renders) with **no per-item file read**. This removed both the file-reload and
 the full 15-column owned-row materialization (incl. the per-row label-JSON
 parse). The result is ~11 ms — down from ~18 ms, within ~10 % of the 10 ms
-aspiration. The residual is SQLite's per-row step cost (~1 µs/row), the floor for
-returning 10k rows individually; `smol_str` for the short columns was tried and
-saved < 1 ms, so it was not kept.
+aspiration.
+
+**Timing breakdown** (10k rows, release; `tests/timing_breakdown.rs`):
+
+| stage | total | per row |
+|---|---|---|
+| prepare (compile SQL) | 4 µs | — |
+| step-only (no decode) | 7.9 ms | 793 ns |
+| + read priority (int) | 7.8 ms | 781 ns |
+| + decode lean (SmolStr) — the `ls` path | 10.1 ms | 1012 ns |
+| + decode lean (String) | 10.3 ms | 1029 ns |
+| + decode full 15-col (old `query_items`) | 16.2 ms | 1623 ns |
+
+The decisive finding: **SQLite stepping is ~78 % of the lean `ls` time** (793
+ns/row, ~7.9 ms) and is irreducible for "return 10k rows." Decoding the lean row
+adds only ~220 ns/row; the full 15-column row adds ~830 ns/row on top (the ~6 ms
+that separates the old 18 ms from the new 11 ms). So < 8 ms is not reachable
+without *not* returning 10k rows (e.g. a capped/paginated default); 11 ms is
+effectively optimal for a full 10k lean list.
+
+**`SmolStr` short columns are kept — for memory, not time.** Time saved vs
+all-`String` is only ~1.7 % (17 ns/row), but the memory win is real
+(`tests/memory_footprint.rs`, 10k rows):
+
+| representation | heap retained | allocations |
+|---|---|---|
+| `SmolStr` (id/status/type inline) | 1.41 MB (141 B/row) | 10 001 (1.0/row) |
+| all-`String` | 1.72 MB (172 B/row) | 40 001 (4.0/row) |
+| **saved** | **310 KB (18 %)** | **30 000 (75 %)** |
+
+i.e. **75 % fewer allocations** (1 per row — just `title` — instead of 4) and 18 %
+fewer bytes. At scale the reduced allocator pressure matters more than the byte
+count, so `SmolStr` is the right call for the list row.
 
 **Output shape note (intentional):** the index path returns the lean object; the
 file-scan path (no SQLite available) keeps the full frontmatter object. Both
@@ -63,6 +93,11 @@ fast_misses_inplace_edit_that_deep_catches}` pin both behaviors.
   the deep staleness path.
 - `crates/clove-index/tests/index_parity.rs` — the file↔index id-order parity
   gate (multi-seed).
+- `crates/clove-index/tests/memory_footprint.rs` — counting-allocator comparison
+  of the `SmolStr` lean row vs all-`String` (asserts SmolStr uses fewer
+  bytes/allocations).
+- `crates/clove-index/tests/timing_breakdown.rs` — per-stage `ls` timing
+  (prepare / step / decode by representation), informational.
 
 ## Still informational (not gates)
 - Broad `search` whose term matches every item materializes all 10k rows → ~29

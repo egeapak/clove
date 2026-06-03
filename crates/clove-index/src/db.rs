@@ -9,6 +9,7 @@
 
 use camino::{Utf8Path, Utf8PathBuf};
 use rusqlite::Connection;
+use smol_str::SmolStr;
 use thiserror::Error;
 
 /// Index schema version. Bumped whenever the DDL below changes incompatibly;
@@ -221,25 +222,33 @@ impl ItemRow {
 pub(crate) const LIST_COLUMNS: &str = "id, status, item_type, priority, title";
 
 /// A lean list row (the `clove ls` projection): only the columns the list
-/// renders, so there is no per-row label-JSON parse and ~3× fewer allocations
-/// than [`ItemRow`]. (`SmolStr` for the short columns was tried and saved < 1 ms
-/// at 10k — the floor is SQLite's per-row step cost — so plain `String` is kept.)
+/// renders, so there is no per-row label-JSON parse and far fewer allocations
+/// than [`ItemRow`].
+///
+/// The short, low-cardinality columns use [`SmolStr`], which stores strings up
+/// to 23 bytes inline — so `id` (e.g. `proj-7af3q2k9`), `status`, and `type`
+/// cost **no per-row heap allocation**. Only `title` heap-allocates. This roughly
+/// quarters the per-row heap footprint and allocation count versus all-`String`
+/// (see `tests/memory_footprint.rs`); the time win is small (the floor is
+/// SQLite's per-row step cost) but the memory win is real at scale.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ItemListRow {
-    pub id: String,
-    pub status: String,
-    pub item_type: String,
+    pub id: SmolStr,
+    pub status: SmolStr,
+    pub item_type: SmolStr,
     pub priority: u8,
     pub title: String,
 }
 
 impl ItemListRow {
-    /// Decode a row selected with [`LIST_COLUMNS`] (column order matters).
+    /// Decode a row selected with [`LIST_COLUMNS`] (column order matters). Uses
+    /// `get_ref` + `as_str` to borrow each text column straight from the SQLite
+    /// row buffer (no intermediate `String`) before inlining into `SmolStr`.
     pub(crate) fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ItemListRow> {
         Ok(ItemListRow {
-            id: row.get(0)?,
-            status: row.get(1)?,
-            item_type: row.get(2)?,
+            id: SmolStr::new(row.get_ref(0)?.as_str()?),
+            status: SmolStr::new(row.get_ref(1)?.as_str()?),
+            item_type: SmolStr::new(row.get_ref(2)?.as_str()?),
             priority: row.get(3)?,
             title: row.get(4)?,
         })

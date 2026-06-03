@@ -117,9 +117,15 @@ pub fn objects_from_lean_rows(rows: &[ItemListRow]) -> Vec<ListObject> {
     rows.iter()
         .map(|r| {
             let mut m = Map::new();
-            m.insert("id".to_owned(), Value::String(r.id.clone()));
-            m.insert("status".to_owned(), Value::String(r.status.clone()));
-            m.insert("type".to_owned(), Value::String(r.item_type.clone()));
+            m.insert("id".to_owned(), Value::String(r.id.as_str().to_owned()));
+            m.insert(
+                "status".to_owned(),
+                Value::String(r.status.as_str().to_owned()),
+            );
+            m.insert(
+                "type".to_owned(),
+                Value::String(r.item_type.as_str().to_owned()),
+            );
             m.insert("priority".to_owned(), Value::Number(r.priority.into()));
             m.insert("title".to_owned(), Value::String(r.title.clone()));
             m

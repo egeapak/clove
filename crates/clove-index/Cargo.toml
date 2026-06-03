@@ -18,6 +18,7 @@ chrono.workspace = true
 rayon.workspace = true
 serde_json.workspace = true
 fd-lock.workspace = true     # advisory reindex lock (auto-released on crash)
+smol_str.workspace = true    # inline short list-row strings (id/status/type): no per-row heap alloc
 
 [dev-dependencies]
 tempfile.workspace = true
