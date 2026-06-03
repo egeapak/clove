@@ -4,7 +4,7 @@ use clove_core::{CloveError, OutputFormat};
 use clove_index::QueryMode;
 
 use crate::cli::FilterArgs;
-use crate::cmd::index_read::list_via_index;
+use crate::cmd::index_read::{list_via_daemon, list_via_index};
 use crate::cmd::listing::{
     effective_limit, emit, objects_from_frontmatters, objects_from_lean_rows, ranks_of,
     sort_by_priority_topo, Filters, ListOpts,
@@ -29,6 +29,26 @@ pub fn run(
     let fields = args.fields.as_deref().map(parse_fields);
     let offset = args.offset.unwrap_or(0);
     let limit = effective_limit(args.limit);
+
+    // Daemon fast path: a running daemon serves the lean projection from its hot
+    // index (the CLI skips its own staleness scan — the daemon owns freshness).
+    if let Some((objects, total, warnings)) =
+        list_via_daemon(ctx, no_index, QueryMode::List, &filters, offset, limit)
+    {
+        emit(
+            format,
+            objects,
+            ListOpts {
+                total,
+                offset,
+                limit,
+                fields: fields.as_deref(),
+                source: "daemon",
+                warnings,
+            },
+        );
+        return Ok(());
+    }
 
     // Index fast path: the DB serves the lean projection directly.
     if let Some((rows, total, warnings)) = list_via_index(

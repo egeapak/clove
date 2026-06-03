@@ -4,32 +4,42 @@
 //! is driven over Tokio's `AsyncRead`/`AsyncWrite` here so the accept loop stays
 //! on the runtime. The blocking client in `clove-ipc` interoperates byte-for-byte.
 //!
-//! **Phase 1 (this commit):** `PING` and `STATUS` (both answered from daemon
-//! state alone). `QUERY`/`REINDEX` — which touch the index — land in Phase 2
-//! (T-D03).
+//! Commands (DESIGN §8.4): `PING`/`STATUS` answer from daemon state; `QUERY` runs
+//! the lean `clove_index` list (freshening first, like the CLI's index path) and
+//! returns rows the CLI shapes itself; `REINDEX` rebuilds and reopens the index.
 
 use std::io;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
-use clove_index::Index;
+use camino::Utf8PathBuf;
+use clove_index::{Filter, Index, ItemListRow, QueryMode};
 use clove_ipc::frame::MAX_FRAME;
-use clove_ipc::protocol::{ErrorResponse, Request, Response};
+use clove_ipc::protocol::{
+    ErrorResponse, LeanRow, QueryKind, QueryListResponse, QueryRequest, ReindexDone, Request,
+    Response,
+};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::state::DaemonState;
 
+/// Above this many out-of-date items, the QUERY-time refresh is skipped (the
+/// rows may then be slightly behind until the watcher catches up); mirrors the
+/// CLI's `STALE_REFRESH_LIMIT` (DESIGN §6.4).
+const STALE_REFRESH_LIMIT: usize = 20;
+
 /// Shared context every connection handler needs.
 #[derive(Clone)]
 pub struct Dispatcher {
-    // Used by the QUERY/REINDEX handlers in Phase 2 (T-D03).
-    #[allow(dead_code)]
     pub index: Arc<Mutex<Index>>,
     pub state: Arc<Mutex<DaemonState>>,
+    pub issues_dir: Utf8PathBuf,
+    pub db_path: Utf8PathBuf,
+    pub auto_refresh: bool,
 }
 
 impl Dispatcher {
-    /// Map a request to a response. Phase 1 answers `PING` and `STATUS`; the
-    /// index-touching commands return a structured error until Phase 2.
+    /// Map a request to a response.
     pub fn dispatch(&self, req: Request) -> Response {
         if let Ok(mut state) = self.state.lock() {
             state.mark_event();
@@ -40,11 +50,100 @@ impl Dispatcher {
                 Ok(state) => Response::Status(state.snapshot()),
                 Err(_) => Response::Error(ErrorResponse::new("internal", "state lock poisoned")),
             },
-            Request::Query(_) | Request::Reindex => Response::Error(ErrorResponse::new(
-                "not_implemented",
-                "command not implemented until M3 Phase 2",
-            )),
+            Request::Query(q) => self.handle_query(q),
+            Request::Reindex => self.handle_reindex(),
         }
+    }
+
+    /// Serve a lean list query, freshening the index inline first (the daemon owns
+    /// freshness; the watcher in P3 makes this a no-op in the steady state).
+    fn handle_query(&self, q: QueryRequest) -> Response {
+        let mut index = match self.index.lock() {
+            Ok(g) => g,
+            Err(_) => {
+                return Response::Error(ErrorResponse::new("internal", "index lock poisoned"))
+            }
+        };
+
+        if self.auto_refresh {
+            if let Ok(report) = index.check_staleness_fast(&self.issues_dir) {
+                if !report.is_clean() && report.change_count() <= STALE_REFRESH_LIMIT {
+                    let _ = index.apply_staleness(&report, &self.issues_dir);
+                }
+            }
+        }
+
+        let filter = build_filter(&q);
+        let total = match index.count_items(&filter) {
+            Ok(n) => n as u64,
+            Err(e) => return Response::Error(ErrorResponse::new("query_failed", e.to_string())),
+        };
+        let rows = match index.query_list(&filter) {
+            Ok(rows) => rows,
+            Err(e) => return Response::Error(ErrorResponse::new("query_failed", e.to_string())),
+        };
+
+        if let Ok(mut state) = self.state.lock() {
+            state.set_items_indexed(index.item_count().unwrap_or(0) as u64);
+        }
+
+        Response::QueryList(QueryListResponse {
+            rows: rows.iter().map(to_lean).collect(),
+            total,
+            warnings: Vec::new(),
+        })
+    }
+
+    /// Rebuild the index from files, then reopen so the daemon serves the rebuilt
+    /// file rather than the replaced inode.
+    fn handle_reindex(&self) -> Response {
+        let start = Instant::now();
+        let report = match clove_index::reindex(&self.issues_dir, &self.db_path) {
+            Ok(report) => report,
+            Err(e) => return Response::Error(ErrorResponse::new("reindex_failed", e.to_string())),
+        };
+        if let (Ok(mut index), Ok(fresh)) =
+            (self.index.lock(), Index::open_or_create(&self.db_path))
+        {
+            *index = fresh;
+            if let Ok(mut state) = self.state.lock() {
+                state.set_items_indexed(index.item_count().unwrap_or(0) as u64);
+            }
+        }
+        Response::ReindexDone(ReindexDone {
+            items_indexed: report.items_indexed as u64,
+            duration_ms: start.elapsed().as_millis() as u64,
+            warnings: report.warnings,
+        })
+    }
+}
+
+/// Build a `clove_index::Filter` from the wire request (mirrors the CLI's
+/// `list_via_index`: fetch `offset + limit` rows; `total` is reported separately).
+fn build_filter(q: &QueryRequest) -> Filter {
+    Filter {
+        mode: match q.kind {
+            QueryKind::List => QueryMode::List,
+            QueryKind::Ready => QueryMode::Ready,
+        },
+        status: q.status.map(|s| vec![s]),
+        item_type: q.item_type,
+        priority: q.priority,
+        assignee: q.assignee.clone(),
+        label: q.label.clone(),
+        parent: None,
+        limit: q.limit.map(|n| q.offset.saturating_add(n)),
+    }
+}
+
+/// Project an index row onto the lean wire row.
+fn to_lean(row: &ItemListRow) -> LeanRow {
+    LeanRow {
+        id: row.id.as_str().to_owned(),
+        status: row.status.as_str().to_owned(),
+        item_type: row.item_type.as_str().to_owned(),
+        priority: row.priority,
+        title: row.title.clone(),
     }
 }
 

@@ -13,6 +13,7 @@
 //! STATUS  → { uptime_s, items_indexed, watcher_state, last_event_ms }
 //! ```
 
+use clove_core::{ItemStatus, ItemType, Priority};
 use serde::{Deserialize, Serialize};
 
 /// Wire-protocol version. Bumped on any incompatible change to the types below.
@@ -38,46 +39,65 @@ pub enum Request {
     Status,
 }
 
-/// Which read a [`Request::Query`] runs. Mirrors the CLI's read commands so the
-/// daemon can dispatch to the matching `clove-index` query path.
+/// Which lean list a [`Request::Query`] runs — mirrors `clove_index::QueryMode`.
+/// Both `clove ls` and `clove query` are [`QueryKind::List`]; `clove ready` is
+/// [`QueryKind::Ready`]. (`search`/`blocked` are not daemon-routed in M3 — they
+/// fall back to the local path.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QueryKind {
-    /// `clove ls` — the lean list projection.
-    Ls,
-    /// `clove ready` — unblocked open/in_progress items.
+    /// Status/type/priority/label/assignee filter over all items.
+    List,
+    /// Unblocked open/in_progress items.
     Ready,
-    /// `clove blocked` — items with unresolved deps.
-    Blocked,
-    /// `clove query` — structured filter.
-    Query,
-    /// `clove search` — full-text search.
-    Search,
 }
 
-/// The payload of a [`Request::Query`] (DESIGN §8.4 `QUERY { filter, format,
-/// fields }`, extended with the pagination + kind the daemon needs to dispatch).
+/// The payload of a [`Request::Query`]: the filter the daemon turns into a
+/// `clove_index::Filter`. Carries the typed model values so the daemon and CLI
+/// agree without string round-tripping (DESIGN §8.4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueryRequest {
-    /// Which read command this is.
+    /// Which lean list this is.
     pub kind: QueryKind,
-    /// Opaque structured filter (the CLI's JSON filter object), passed through.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub filter: Option<serde_json::Value>,
-    /// Free-text argument for [`QueryKind::Search`].
+    pub status: Option<ItemStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    /// Output format string (`json`/`jsonl`/`human`), echoed in the envelope.
-    pub format: String,
-    /// Optional `--fields` projection.
+    pub item_type: Option<ItemType>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fields: Option<Vec<String>>,
-    /// Result cap (`--limit`); `None` = command default.
+    pub priority: Option<Priority>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Page offset (`--offset`).
+    pub offset: usize,
+    /// Page cap (`--limit`); `None` = unlimited.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
-    /// Result offset (`--offset`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub offset: Option<usize>,
+}
+
+/// One lean list row on the wire — the columns `clove ls` renders
+/// (`{ id, status, type, priority, title }`). Mirrors `clove_index::ItemListRow`
+/// without coupling this crate to the index layer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeanRow {
+    pub id: String,
+    pub status: String,
+    pub item_type: String,
+    pub priority: u8,
+    pub title: String,
+}
+
+/// `QUERY` reply: the (page-limited) lean rows, the full unpaginated match count,
+/// and any warnings. The CLI shapes these with its own list renderer, so
+/// daemon-routed output is byte-identical to the local index path bar
+/// `_meta.source = "daemon"`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueryListResponse {
+    pub rows: Vec<LeanRow>,
+    pub total: u64,
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 /// A response from the daemon to the CLI.
@@ -86,11 +106,8 @@ pub struct QueryRequest {
 pub enum Response {
     /// Reply to [`Request::Ping`].
     Pong,
-    /// Reply to [`Request::Query`]: the full standard CLI envelope
-    /// (`{v, ok, data, _meta}`) the daemon built, carried verbatim so the CLI can
-    /// print it unchanged. Kept as a raw value to avoid coupling this lean crate
-    /// to the CLI's item JSON shapes.
-    Query { envelope: serde_json::Value },
+    /// Reply to [`Request::Query`]: the lean rows + total the CLI shapes itself.
+    QueryList(QueryListResponse),
     /// Reply to [`Request::Reindex`].
     ReindexDone(ReindexDone),
     /// Reply to [`Request::Status`].
@@ -156,22 +173,24 @@ mod tests {
             Request::Reindex,
             Request::Status,
             Request::Query(QueryRequest {
-                kind: QueryKind::Search,
-                filter: None,
-                text: Some("hello".to_owned()),
-                format: "json".to_owned(),
-                fields: Some(vec!["id".to_owned(), "title".to_owned()]),
+                kind: QueryKind::List,
+                status: Some(ItemStatus::Open),
+                item_type: Some(ItemType::Bug),
+                priority: None,
+                assignee: Some("alice".to_owned()),
+                label: Some("area:core".to_owned()),
+                offset: 0,
                 limit: Some(100),
-                offset: None,
             }),
             Request::Query(QueryRequest {
                 kind: QueryKind::Ready,
-                filter: Some(serde_json::json!({"status": "open"})),
-                text: None,
-                format: "human".to_owned(),
-                fields: None,
+                status: None,
+                item_type: None,
+                priority: None,
+                assignee: None,
+                label: None,
+                offset: 20,
                 limit: None,
-                offset: Some(20),
             }),
         ];
         for case in cases {
@@ -186,9 +205,17 @@ mod tests {
     fn response_round_trips() {
         let cases = vec![
             Response::Pong,
-            Response::Query {
-                envelope: serde_json::json!({"v": 1, "ok": true, "data": []}),
-            },
+            Response::QueryList(QueryListResponse {
+                rows: vec![LeanRow {
+                    id: "proj-7af".to_owned(),
+                    status: "open".to_owned(),
+                    item_type: "feature".to_owned(),
+                    priority: 1,
+                    title: "do the thing".to_owned(),
+                }],
+                total: 1,
+                warnings: vec![],
+            }),
             Response::ReindexDone(ReindexDone {
                 items_indexed: 42,
                 duration_ms: 735,

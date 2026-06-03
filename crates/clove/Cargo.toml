@@ -23,6 +23,7 @@ github = ["clove-import/github"]
 clove-core.workspace = true
 clove-index.workspace = true
 clove-import = { workspace = true, default-features = false }   # M2 import/export/merge-driver; `github` via this crate's `github` feature
+clove-ipc.workspace = true       # M3: daemon liveness probe + QUERY routing (no tokio — lean client)
 clap.workspace = true
 anyhow.workspace = true
 serde.workspace = true

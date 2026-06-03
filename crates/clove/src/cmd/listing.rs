@@ -125,25 +125,39 @@ pub fn objects_from_frontmatters(fms: &[ItemFrontmatter]) -> Vec<ListObject> {
     fms.iter().map(frontmatter_object).collect()
 }
 
-/// Build list objects from lean index rows (the index fast path). The lean shape
-/// is `{ id, status, type, priority, title }` — the columns `ls` renders.
+/// The single lean-object builder, shared by the index path and the daemon path
+/// so their output is byte-identical. The lean shape is
+/// `{ id, status, type, priority, title }` — the columns `ls` renders.
+fn lean_object(id: &str, status: &str, item_type: &str, priority: u8, title: &str) -> ListObject {
+    let mut m = Map::new();
+    m.insert("id".to_owned(), Value::String(id.to_owned()));
+    m.insert("status".to_owned(), Value::String(status.to_owned()));
+    m.insert("type".to_owned(), Value::String(item_type.to_owned()));
+    m.insert("priority".to_owned(), Value::Number(priority.into()));
+    m.insert("title".to_owned(), Value::String(title.to_owned()));
+    m
+}
+
+/// Build list objects from lean index rows (the index fast path).
 pub fn objects_from_lean_rows(rows: &[ItemListRow]) -> Vec<ListObject> {
     rows.iter()
         .map(|r| {
-            let mut m = Map::new();
-            m.insert("id".to_owned(), Value::String(r.id.as_str().to_owned()));
-            m.insert(
-                "status".to_owned(),
-                Value::String(r.status.as_str().to_owned()),
-            );
-            m.insert(
-                "type".to_owned(),
-                Value::String(r.item_type.as_str().to_owned()),
-            );
-            m.insert("priority".to_owned(), Value::Number(r.priority.into()));
-            m.insert("title".to_owned(), Value::String(r.title.clone()));
-            m
+            lean_object(
+                r.id.as_str(),
+                r.status.as_str(),
+                r.item_type.as_str(),
+                r.priority,
+                &r.title,
+            )
         })
+        .collect()
+}
+
+/// Build list objects from daemon-returned wire rows (the daemon fast path).
+/// Uses the same [`lean_object`] builder as the index path, guaranteeing parity.
+pub fn objects_from_wire_rows(rows: &[clove_ipc::LeanRow]) -> Vec<ListObject> {
+    rows.iter()
+        .map(|r| lean_object(&r.id, &r.status, &r.item_type, r.priority, &r.title))
         .collect()
 }
 

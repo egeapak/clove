@@ -42,3 +42,4 @@ windows-sys = { version = "0.59", features = [
 
 [dev-dependencies]
 tempfile.workspace = true
+chrono.workspace = true

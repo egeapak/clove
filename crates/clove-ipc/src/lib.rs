@@ -22,8 +22,8 @@ use camino::{Utf8Path, Utf8PathBuf};
 pub use client::{ClientError, DaemonClient};
 pub use frame::{read_frame, read_message, write_frame, write_message, FrameError, MAX_FRAME};
 pub use protocol::{
-    ErrorResponse, QueryKind, QueryRequest, ReindexDone, Request, Response, StatusResponse,
-    PROTOCOL_VERSION,
+    ErrorResponse, LeanRow, QueryKind, QueryListResponse, QueryRequest, ReindexDone, Request,
+    Response, StatusResponse, PROTOCOL_VERSION,
 };
 
 /// The Unix socket filename inside `.clove/` (DESIGN §8.2).

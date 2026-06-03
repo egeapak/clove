@@ -6,7 +6,7 @@ use clove_core::{CloveError, CloveId, ItemFrontmatter, OutputFormat};
 use clove_index::QueryMode;
 
 use crate::cli::FilterArgs;
-use crate::cmd::index_read::list_via_index;
+use crate::cmd::index_read::{list_via_daemon, list_via_index};
 use crate::cmd::listing::{
     effective_limit, emit, objects_from_frontmatters, objects_from_lean_rows, ranks_of, Filters,
     ListOpts,
@@ -32,6 +32,25 @@ pub fn run(
     let fields = args.fields.as_deref().map(parse_fields);
     let offset = args.offset.unwrap_or(0);
     let limit = effective_limit(args.limit);
+
+    // Daemon fast path: a running daemon serves the ready set from its hot index.
+    if let Some((objects, total, warnings)) =
+        list_via_daemon(ctx, no_index, QueryMode::Ready, &filters, offset, limit)
+    {
+        emit(
+            format,
+            objects,
+            ListOpts {
+                total,
+                offset,
+                limit,
+                fields: fields.as_deref(),
+                source: "daemon",
+                warnings,
+            },
+        );
+        return Ok(());
+    }
 
     // Index fast path: the ready SQL replaces the in-memory graph build.
     if let Some((rows, total, warnings)) = list_via_index(

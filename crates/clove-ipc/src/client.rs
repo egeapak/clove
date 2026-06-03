@@ -18,7 +18,7 @@ use interprocess::local_socket::Stream;
 use thiserror::Error;
 
 use crate::frame::{self, FrameError};
-use crate::protocol::{QueryRequest, Request, Response};
+use crate::protocol::{QueryListResponse, QueryRequest, Request, Response};
 use crate::{pid_path, sock_path, socket_name};
 
 /// Liveness/connect timeout (DESIGN §8.3: "Attempt connect with 50ms timeout").
@@ -118,13 +118,35 @@ impl DaemonClient {
         }
     }
 
-    /// Run a query; returns the standard CLI envelope the daemon built.
-    pub fn query(&mut self, req: QueryRequest) -> Result<serde_json::Value, ClientError> {
+    /// Run a lean list query; returns the rows + total the CLI shapes itself.
+    pub fn query_list(&mut self, req: QueryRequest) -> Result<QueryListResponse, ClientError> {
         match self.request(&Request::Query(req))? {
-            Response::Query { envelope } => Ok(envelope),
+            Response::QueryList(resp) => Ok(resp),
             Response::Error(e) => Err(ClientError::Protocol(format!("{}: {}", e.code, e.message))),
             other => Err(ClientError::Protocol(format!(
                 "expected QUERY reply, got {other:?}"
+            ))),
+        }
+    }
+
+    /// Trigger a full reindex inside the daemon; returns its report.
+    pub fn reindex(&mut self) -> Result<crate::protocol::ReindexDone, ClientError> {
+        match self.request(&Request::Reindex)? {
+            Response::ReindexDone(done) => Ok(done),
+            Response::Error(e) => Err(ClientError::Protocol(format!("{}: {}", e.code, e.message))),
+            other => Err(ClientError::Protocol(format!(
+                "expected REINDEX reply, got {other:?}"
+            ))),
+        }
+    }
+
+    /// Fetch the daemon's operational status.
+    pub fn status(&mut self) -> Result<crate::protocol::StatusResponse, ClientError> {
+        match self.request(&Request::Status)? {
+            Response::Status(s) => Ok(s),
+            Response::Error(e) => Err(ClientError::Protocol(format!("{}: {}", e.code, e.message))),
+            other => Err(ClientError::Protocol(format!(
+                "expected STATUS reply, got {other:?}"
             ))),
         }
     }

@@ -446,6 +446,7 @@ dependencies = [
  "clove-core",
  "clove-import",
  "clove-index",
+ "clove-ipc",
  "insta",
  "jsonschema",
  "serde",
@@ -519,6 +520,7 @@ name = "clove-ipc"
 version = "0.1.0"
 dependencies = [
  "camino",
+ "clove-core",
  "interprocess",
  "serde",
  "serde_json",
@@ -532,6 +534,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "camino",
+ "chrono",
  "clap",
  "clove-core",
  "clove-index",

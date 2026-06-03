@@ -43,10 +43,19 @@ pub fn run(clove_dir: &Utf8Path) -> anyhow::Result<()> {
 
     // 2. Open the index (rebuilt if stale/corrupt — it is a cache).
     let db_path = clove_dir.join("index.db");
+    let issues_dir = clove_dir.join("issues");
     let index = Index::open_or_create(&db_path).context("opening index")?;
     let items = index.item_count().unwrap_or(0) as u64;
     let index = Arc::new(Mutex::new(index));
     let state = Arc::new(Mutex::new(DaemonState::new(items)));
+
+    // Repo config (auto-refresh, and — from P5 — git_sync). A missing/invalid
+    // config falls back to defaults; the daemon must still run.
+    let auto_refresh = clove_dir
+        .parent()
+        .and_then(|root| clove_core::load_config(root).ok())
+        .map(|cfg| cfg.index.auto_refresh)
+        .unwrap_or(true);
 
     // 3. Tokio runtime — 2 workers (IPC + watcher), per DESIGN §8.1.
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -58,6 +67,9 @@ pub fn run(clove_dir: &Utf8Path) -> anyhow::Result<()> {
     let dispatcher = Dispatcher {
         index: Arc::clone(&index),
         state,
+        issues_dir,
+        db_path: db_path.clone(),
+        auto_refresh,
     };
 
     let serve_result: anyhow::Result<()> = runtime.block_on(async {

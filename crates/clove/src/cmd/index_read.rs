@@ -8,8 +8,9 @@
 
 use clove_core::CloveError;
 use clove_index::{Filter, Index, ItemListRow, QueryMode};
+use clove_ipc::{DaemonClient, QueryKind, QueryRequest};
 
-use crate::cmd::listing::Filters;
+use crate::cmd::listing::{objects_from_wire_rows, Filters, ListObject};
 use crate::context::{index_error, Ctx};
 
 /// Above this many out-of-date items, skip the incremental refresh and fall back
@@ -19,6 +20,56 @@ const STALE_REFRESH_LIMIT: usize = 20;
 /// The index read result: the (already page-limited) lean rows, the full
 /// unpaginated match count, and any warnings to surface.
 pub type IndexList = (Vec<ItemListRow>, usize, Vec<String>);
+
+/// The daemon read result: pre-shaped lean list objects, the full match count,
+/// and warnings. Objects are built with the same [`objects_from_wire_rows`] /
+/// `lean_object` builder as the index path, so daemon output is byte-identical
+/// bar `_meta.source = "daemon"`.
+pub type DaemonList = (Vec<ListObject>, usize, Vec<String>);
+
+/// Try to satisfy a list/ready query via a running daemon (DESIGN §8.3/§8.4).
+///
+/// Probes liveness (50 ms, cleaning up a stale socket on the way); on a live
+/// daemon, sends `QUERY` and returns its lean rows. Returns `None` — so the caller
+/// falls back to [`list_via_index`] — for `--no-index`, no daemon, or any IPC
+/// error. The daemon keeps its index fresh, so the CLI skips its own staleness
+/// scan on this path.
+pub fn list_via_daemon(
+    ctx: &Ctx,
+    no_index: bool,
+    mode: QueryMode,
+    filters: &Filters,
+    offset: usize,
+    limit: Option<usize>,
+) -> Option<DaemonList> {
+    if no_index {
+        return None;
+    }
+    let clove_dir = ctx.issues_dir.parent()?;
+    let mut client = DaemonClient::probe(clove_dir)?;
+    let kind = match mode {
+        QueryMode::List => QueryKind::List,
+        QueryMode::Ready => QueryKind::Ready,
+    };
+    let request = QueryRequest {
+        kind,
+        status: filters.status,
+        item_type: filters.item_type,
+        priority: filters.priority,
+        assignee: filters.assignee.clone(),
+        label: filters.label.clone(),
+        offset,
+        limit,
+    };
+    match client.query_list(request) {
+        Ok(resp) => Some((
+            objects_from_wire_rows(&resp.rows),
+            resp.total as usize,
+            resp.warnings,
+        )),
+        Err(_) => None,
+    }
+}
 
 /// Try to satisfy a list/ready query from the index.
 ///

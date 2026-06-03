@@ -12,6 +12,7 @@ repository.workspace = true
 # daemon, so it must not pull the daemon's async/file-watch/git stack into the CLI
 # (DESIGN §1, M3_PLAN §1.1 lean-CLI gate).
 [dependencies]
+clove-core.workspace = true   # model types (ItemStatus/ItemType/Priority) on the wire; pure, lean
 serde.workspace = true
 serde_json.workspace = true
 interprocess.workspace = true
