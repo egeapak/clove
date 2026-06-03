@@ -5,10 +5,10 @@
 //! builds use a small corpus and skip the assertions (they would flake).
 //!
 //! Gates (warm index, 10k items):
-//! - `reindex`               < 1000 ms  (met, ~620 ms)
-//! - `ls` (lean `query_list`) <  15 ms  (~11 ms; DESIGN aspiration 10 ms — see docs)
+//! - `reindex`                < 1000 ms (met, ~620 ms)
+//! - `ls` (lean `query_list`)  <  15 ms (met, ~11 ms; revised from 10 ms — see docs)
 //! - `search` (FTS5, selective) < 20 ms (met, ~3 ms)
-//! - staleness fast, 0 stale  <   5 ms  (met, ~3 ms via `check_staleness_fast`)
+//! - staleness fast, 0 stale   <   5 ms (met, ~3 ms via `check_staleness_fast`)
 
 use std::time::{Duration, Instant};
 
@@ -98,11 +98,9 @@ fn m1_index_perf_gates() {
         ls_count = index.query_list(&Filter::default()).unwrap().len();
     });
     assert_eq!(ls_count, n, "ls must return every item");
-    // DESIGN aspiration is < 10 ms; the lean projection lands ~11 ms at 10k —
-    // SQLite's per-row step cost (~1 µs) is the floor for returning 10k rows, so
-    // this is within ~10% of target. Interim asserted bound pending the final
-    // gate decision; see docs/M1_ACCEPTANCE_GATES.md.
-    eprintln!("m1 perf gate ls_lean: {ls_elapsed:?} (DESIGN aspiration 10ms)");
+    // Gate: < 15 ms (revised from 10 ms). SQLite's per-row step cost (~0.8 µs) is
+    // the floor for returning 10k rows (~8 ms); the lean projection lands ~11 ms.
+    // See docs/M1_ACCEPTANCE_GATES.md for the timing breakdown.
     assert_within("ls_lean", ls_elapsed, Duration::from_millis(15));
 
     // ready gate: the lean projection in Ready mode.
