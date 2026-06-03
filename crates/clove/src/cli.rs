@@ -395,6 +395,9 @@ pub struct ExportArgs {
     /// The export format.
     #[arg(value_enum, value_name = "FORMAT")]
     pub export_format: ExportFormat,
+    /// For `github`: the `owner/repo` to push to (required for `github`).
+    #[arg(value_name = "OWNER/REPO")]
+    pub target: Option<String>,
     /// Write to a file instead of stdout.
     #[arg(long, value_name = "FILE")]
     pub out: Option<Utf8PathBuf>,

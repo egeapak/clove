@@ -55,10 +55,47 @@ pub fn run(ctx: &Ctx, format: OutputFormat, args: ImportArgs) -> Result<(), Clov
             }
             Ok(())
         }
-        ImportSource::Github { .. } => Err(CloveError::NotYetImplemented {
-            feature: "import github".to_owned(),
-        }),
+        ImportSource::Github { src, dry_run } => import_github(ctx, format, &src, dry_run),
     }
+}
+
+/// `clove import github <owner/repo> [--dry-run]`.
+///
+/// The GitHub source is a network endpoint, not a file path, so it does not go
+/// through the `Importer` trait — but it keeps the identical dry-run envelope /
+/// idempotency / apply-report semantics. A `GITHUB_TOKEN` is required to reach
+/// the API (even for `--dry-run`, which still fetches repo state to plan); the
+/// network layer errors cleanly when it is absent.
+#[cfg(feature = "github")]
+fn import_github(
+    ctx: &Ctx,
+    format: OutputFormat,
+    src: &str,
+    dry_run: bool,
+) -> Result<(), CloveError> {
+    let import_ctx = ImportCtx::new(&ctx.store, dry_run).map_err(import_err)?;
+    let (plan, report) =
+        clove_import::github::import_github(src, &import_ctx, &ctx.store, &ctx.config.id_prefix)
+            .map_err(import_err)?;
+    match report {
+        Some(report) => emit_report(format, &report),
+        None => emit_plan(format, &plan),
+    }
+    Ok(())
+}
+
+/// When built without the `github` feature the source is recognized but fails
+/// with a clean error rather than a parse error.
+#[cfg(not(feature = "github"))]
+fn import_github(
+    _ctx: &Ctx,
+    _format: OutputFormat,
+    _src: &str,
+    _dry_run: bool,
+) -> Result<(), CloveError> {
+    Err(CloveError::NotYetImplemented {
+        feature: "import github (built without github support)".to_owned(),
+    })
 }
 
 /// Emit the `--dry-run` `{ would_create, would_skip, conflicts }` envelope

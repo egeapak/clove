@@ -1,0 +1,15 @@
+{
+  "number": 42,
+  "title": "Crash on startup",
+  "state": "closed",
+  "body": "It crashes.\n\n<!-- clove-meta: {\"id\":\"proj-AAAA1111\",\"priority\":0,\"deps\":[\"proj-BBBB2222\"]} -->",
+  "labels": [
+    { "name": "Bug" },
+    { "name": "Area:Core" }
+  ],
+  "assignees": [
+    { "login": "octocat" },
+    { "login": "ferris" }
+  ],
+  "closed_at": "2026-05-01T12:00:00Z"
+}

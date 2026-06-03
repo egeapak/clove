@@ -22,15 +22,6 @@ use crate::context::Ctx;
 use crate::item_json::export_object;
 
 pub fn run(ctx: &Ctx, format: OutputFormat, args: ExportArgs) -> Result<(), CloveError> {
-    match args.export_format {
-        ExportFormat::Json | ExportFormat::Jsonl => {}
-        ExportFormat::Github => {
-            return Err(CloveError::NotYetImplemented {
-                feature: "export github".to_owned(),
-            });
-        }
-    }
-
     // Files are the source of truth: load every item with its body. Per-file
     // parse failures are dropped (consistent with `ls`/`ready`); export never
     // partially succeeds on a corrupt store silently beyond what scan reports.
@@ -61,6 +52,24 @@ pub fn run(ctx: &Ctx, format: OutputFormat, args: ExportArgs) -> Result<(), Clov
         .map(|item| Value::Object(export_object(item, &ctx.issues_dir, &ready, &blocked)))
         .collect();
 
+    // GitHub is a network sink, not a file/stdout sink: it pushes the shaped items
+    // (create/update) and emits its own plan/report envelope. `--dry-run` is fully
+    // offline (no token needed): it lists what would be pushed from local items.
+    if matches!(args.export_format, ExportFormat::Github) {
+        let target = args
+            .target
+            .clone()
+            .ok_or_else(|| CloveError::InvalidField {
+                field: "target".to_owned(),
+                reason: "export github requires an `owner/repo` target".to_owned(),
+            })?;
+        let objs: Vec<serde_json::Map<String, Value>> = shaped
+            .iter()
+            .filter_map(|v| v.as_object().cloned())
+            .collect();
+        return export_github(format, &target, &objs, args.dry_run);
+    }
+
     // Pick the sink: a file (atomic write) when `--out` is set, else stdout.
     match &args.out {
         Some(path) => {
@@ -89,6 +98,80 @@ pub fn run(ctx: &Ctx, format: OutputFormat, args: ExportArgs) -> Result<(), Clov
     }
 
     Ok(())
+}
+
+/// `clove export github <owner/repo> [--dry-run]`.
+///
+/// GitHub is a network sink: each shaped local item is created (no
+/// `external_ref`) or updated (`external_ref = "gh-<n>"`) via octocrab. The body
+/// gets a `<!-- clove-meta: {id,priority,deps} -->` comment appended. `--dry-run`
+/// is fully offline — it partitions local items into would-create / would-update
+/// without contacting GitHub (no token required). A real push needs `GITHUB_TOKEN`.
+#[cfg(feature = "github")]
+fn export_github(
+    format: OutputFormat,
+    target: &str,
+    objs: &[serde_json::Map<String, Value>],
+    dry_run: bool,
+) -> Result<(), CloveError> {
+    use crate::output::print_json_success;
+
+    let (plan, report) =
+        clove_import::github::export_github(target, objs, dry_run).map_err(export_err)?;
+
+    match (format, report) {
+        (OutputFormat::Json | OutputFormat::Jsonl, Some(report)) => print_json_success(
+            json!({ "created": report.created, "updated": report.updated }),
+            json!({ "warnings": [] }),
+        ),
+        (OutputFormat::Json | OutputFormat::Jsonl, None) => print_json_success(
+            serde_json::to_value(&plan).unwrap_or_else(|_| json!({})),
+            json!({ "warnings": [] }),
+        ),
+        (OutputFormat::Human, Some(report)) => println!(
+            "exported to github: {} created, {} updated",
+            report.created.len(),
+            report.updated.len()
+        ),
+        (OutputFormat::Human, None) => println!(
+            "dry-run: would create {}, would update {}",
+            plan.would_create.len(),
+            plan.would_update.len()
+        ),
+    }
+    Ok(())
+}
+
+/// When built without the `github` feature, `export github` is recognized but
+/// fails with a clean error rather than attempting a push.
+#[cfg(not(feature = "github"))]
+fn export_github(
+    _format: OutputFormat,
+    _target: &str,
+    _objs: &[serde_json::Map<String, Value>],
+    _dry_run: bool,
+) -> Result<(), CloveError> {
+    Err(CloveError::NotYetImplemented {
+        feature: "export github (built without github support)".to_owned(),
+    })
+}
+
+/// Map a `clove-import` error onto a `CloveError` for exit-code classification.
+#[cfg(feature = "github")]
+fn export_err(err: clove_import::ImportError) -> CloveError {
+    use clove_import::ImportError;
+    match err {
+        ImportError::Core(core) => core,
+        ImportError::NotYetImplemented { feature } => CloveError::NotYetImplemented { feature },
+        ImportError::Source { path, message } => CloveError::Io {
+            path,
+            source: std::io::Error::other(message),
+        },
+        other => CloveError::Io {
+            path: Utf8Path::new("<github>").to_owned(),
+            source: std::io::Error::other(other.to_string()),
+        },
+    }
 }
 
 /// Serialize `items` to `writer` in the chosen format. JSON wraps them in the

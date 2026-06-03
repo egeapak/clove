@@ -10,6 +10,7 @@
 pub mod beads;
 pub mod error;
 pub mod export;
+pub mod github;
 pub mod map;
 pub mod merge;
 pub mod plan;
