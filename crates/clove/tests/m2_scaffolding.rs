@@ -88,9 +88,11 @@ fn assert_not_yet_implemented(cmd: &mut Command) {
 }
 
 #[test]
-fn export_json_stub_returns_clean_error() {
+fn export_github_stub_returns_clean_error() {
+    // `export json|jsonl` are implemented (Phase 1); `export github` is Phase 5
+    // and still returns a clean NOT_YET_IMPLEMENTED error.
     let dir = init_repo();
-    assert_not_yet_implemented(clove(dir.path()).args(["export", "json"]));
+    assert_not_yet_implemented(clove(dir.path()).args(["export", "github"]));
 }
 
 #[test]

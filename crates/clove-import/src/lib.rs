@@ -8,6 +8,7 @@
 //! importer reuses. See `docs/M2_PLAN.md` §2 and DESIGN.md §11.
 
 pub mod error;
+pub mod export;
 pub mod map;
 pub mod plan;
 

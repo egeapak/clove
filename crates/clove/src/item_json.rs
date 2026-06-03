@@ -4,7 +4,10 @@
 //! augment that object with computed fields (`body`, `comment_count`, `ready`,
 //! `blocked_by`) and may project it down to a `--fields` subset.
 
-use clove_core::{Item, ItemFrontmatter, OutputFormat};
+use std::collections::HashMap;
+
+use camino::Utf8Path;
+use clove_core::{list_comments, CloveId, Item, ItemFrontmatter, OutputFormat};
 use serde_json::{json, Map, Value};
 
 use crate::output::print_json_success;
@@ -22,6 +25,45 @@ pub fn frontmatter_object(fm: &ItemFrontmatter) -> Map<String, Value> {
         Ok(Value::Object(map)) => map,
         _ => Map::new(),
     }
+}
+
+/// Build the full §7.4 item JSON object for export: the serialized frontmatter
+/// plus the computed/augmented fields `body`, `comment_count`, `ready`,
+/// `blocked_by`, and `dangling_deps`. This is the same shape `clove show
+/// --format json` emits, so an exported item validates against `item.json`.
+///
+/// `graph`, `ready`, and `blocked` are precomputed once over the whole store by
+/// the caller and shared across all items (avoiding a per-item rescan).
+pub fn export_object(
+    item: &Item,
+    issues_dir: &Utf8Path,
+    ready: &std::collections::HashSet<CloveId>,
+    blocked: &HashMap<CloveId, (Vec<CloveId>, Vec<CloveId>)>,
+) -> Map<String, Value> {
+    let id = &item.frontmatter.id;
+    let mut obj = item_object(item);
+    obj.insert("body".to_owned(), json!(item.body));
+
+    let comment_count = list_comments(issues_dir, id).map(|c| c.len()).unwrap_or(0);
+    obj.insert("comment_count".to_owned(), json!(comment_count));
+
+    obj.insert("ready".to_owned(), json!(ready.contains(id)));
+
+    let (blocked_by, dangling) = match blocked.get(id) {
+        Some((blocking, dangling)) => {
+            let combined: Vec<String> = blocking
+                .iter()
+                .chain(dangling.iter())
+                .map(CloveId::to_string)
+                .collect();
+            (combined, dangling.iter().map(CloveId::to_string).collect())
+        }
+        None => (Vec::new(), Vec::new()),
+    };
+    obj.insert("blocked_by".to_owned(), json!(blocked_by));
+    obj.insert("dangling_deps".to_owned(), json!(dangling));
+
+    obj
 }
 
 /// Restrict `obj` to the keys named in `fields` (order follows `fields`).

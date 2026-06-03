@@ -26,3 +26,12 @@ chrono.workspace = true
 # GitHub-only deps, gated behind the `github` feature.
 octocrab = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
+
+[dev-dependencies]
+criterion.workspace = true     # T-X01: export throughput bench (informational)
+tempfile.workspace = true
+camino.workspace = true
+
+[[bench]]
+name = "bench_export"
+harness = false
