@@ -59,6 +59,12 @@ jobs:
         run: cargo fuzz run parse_item_file -- -max_total_time=30
       - name: Fuzz parse_dep_list
         run: cargo fuzz run parse_dep_list -- -max_total_time=30
+      - name: Fuzz merge_driver
+        run: cargo fuzz run merge_driver -- -max_total_time=30
+      - name: Fuzz import_tk
+        run: cargo fuzz run import_tk -- -max_total_time=30
+      - name: Fuzz import_beads
+        run: cargo fuzz run import_beads -- -max_total_time=30
 
   deny:
     name: cargo-deny

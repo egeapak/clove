@@ -433,9 +433,13 @@
 
 ## M2 — Interop
 
+> **Status: ✅ complete and gated** (Phases 0–6 on `claude/charming-hamilton-cqkHx`).
+> T-M01–T-M05 all implemented; the task specs below are unchanged. Per-gate
+> evidence is in `docs/M2_ACCEPTANCE_GATES.md` (mirrors `docs/M2_PLAN.md`).
+
 ---
 
-**T-M01: `clove import tk`**
+**T-M01: `clove import tk`**  — ✅ implemented (Phase 3)
 - Files: `crates/clove-import/src/tk.rs`, `crates/clove/src/cmd/import.rs`
 - Deps: T-C05, T-CLI01
 - Description: Implement importer as specified in DESIGN.md §11.1. Handle H1-title extraction from body. Set `source_system = "tk"`. Idempotent: skip items where `external_ref` matches existing item. `--dry-run` emits `would_create`/`would_skip`/`conflicts` without writing files. Fixture test with 5 representative tickets.
@@ -443,7 +447,7 @@
 
 ---
 
-**T-M02: `clove import beads`**
+**T-M02: `clove import beads`**  — ✅ implemented (Phase 4)
 - Files: `crates/clove-import/src/beads.rs`
 - Deps: T-C05, T-CLI01
 - Description: Implement importer as specified in DESIGN.md §11.2. Define `BeadsIssue` thin deserialization struct. Map all fields. Stash unmapped fields in `metadata` blob. For items with `comment_count > 0`: emit stderr warning with IDs. Set `source_system = "beads"`. `--dry-run` support. Fixture test with Beads JSONL sample.
@@ -451,7 +455,7 @@
 
 ---
 
-**T-M03: `clove import github`, `clove export github`**
+**T-M03: `clove import github`, `clove export github`**  — ✅ implemented (Phase 5, `github` feature)
 - Files: `crates/clove-import/src/github.rs`, `crates/clove/src/cmd/export.rs`
 - Deps: T-C05, T-CLI01
 - Description: Implement import/export using `octocrab`. Export: encode clove metadata as `<!-- clove-meta: {...} -->` HTML comment. Import: `gh-<number>` ID prefix, parse clove-meta comment. Idempotent re-import. Integration test with real GitHub repo using `GITHUB_TOKEN` env var; skip if not set.
@@ -459,7 +463,7 @@
 
 ---
 
-**T-M04: `clove export json`, `clove export jsonl`**
+**T-M04: `clove export json`, `clove export jsonl`**  — ✅ implemented (Phase 1; round-trip closed Phase 4)
 - Files: `crates/clove/src/cmd/export.rs`
 - Deps: T-C05, T-CLI01
 - Description: `clove export json`: single JSON envelope with all items. `clove export jsonl`: one item per line (NDJSON), isomorphic with Beads JSONL format. Both support `--out FILE`.
@@ -467,7 +471,7 @@
 
 ---
 
-**T-M05: Git merge driver**
+**T-M05: Git merge driver**  — ✅ implemented (Phase 2)
 - Files: `crates/clove/src/cmd/merge_driver.rs`
 - Deps: T-C02, T-C03, T-CLI02
 - Description: Implement `clove merge-driver <ancestor> <ours> <theirs> <marker-size>` as specified in DESIGN.md §9.2. Same-value scalar conflicts → auto-resolve. Union-merge for dep/label lists (three-way set merge). Dep removal conflict (A removes X, B adds X) → flag conflict. Body: delegate to `git merge-file`. Integration tests with fixture files: same-value status conflict (auto-resolves), divergent status (flags), dep union-merge, dep removal conflict.
@@ -475,12 +479,14 @@
 
 ---
 
-**M2 Acceptance Gates**
+**M2 Acceptance Gates** — ✅ met (see `docs/M2_ACCEPTANCE_GATES.md` for per-gate evidence)
 
-- All three importers pass their fixture tests.
-- `--dry-run` for all importers writes no files.
-- GitHub roundtrip test passes (with token).
-- Merge driver resolves same-value conflicts automatically.
+- ✅ All three importers pass their fixture tests.
+- ✅ `--dry-run` for all importers writes no files.
+- ✅ GitHub roundtrip test passes (with token); offline mapping/codec tested
+  everywhere, network round-trip token-gated/`#[ignore]` so CI stays green.
+- ✅ Merge driver resolves same-value conflicts automatically (V-I14/15/16).
+- ✅ All M0 + M1 gates still pass (M2-G06).
 
 ---
 

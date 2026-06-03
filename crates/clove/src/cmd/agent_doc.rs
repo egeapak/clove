@@ -90,6 +90,29 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
 - `clove reindex` — rebuild the SQLite index. `clove doctor [--fix] [--strict]` — health check.\n\
 - `clove version` — `{{ clove, schema, git_hash, build_date }}`.\n\
 \n\
+## Interop (import / export / merge)\n\
+\n\
+- `clove import tk <.tickets-dir> [--dry-run]` — import tk tickets.\n\
+- `clove import beads <issues.jsonl> [--dry-run]` — import a Beads JSONL export.\n\
+- `clove import github [--dry-run]` — import GitHub issues (needs the `github`\n\
+  build feature + a token via `GITHUB_TOKEN` or `gh auth token`).\n\
+- `clove export json` / `clove export jsonl [--out FILE]` — dump all items as a\n\
+  JSON envelope (`data` array) or one item per line (NDJSON, Beads-isomorphic).\n\
+- `clove export github` — push items to a GitHub repo (token + `github` feature).\n\
+- Imports are idempotent on `external_ref`: re-running skips already-imported\n\
+  items. `--dry-run` reports `{{ would_create, would_skip, conflicts }}` and\n\
+  writes nothing.\n\
+- `clove init --merge-driver` installs a git merge driver for\n\
+  `.clove/issues/**/*.md`. On `git merge`, same-value scalar edits and dependency/\n\
+  label set-unions auto-resolve; only genuinely divergent edits conflict.\n\
+\n\
+## Git integration\n\
+\n\
+- Files are the source of truth and travel with the repo. After a `git merge` or\n\
+  `git pull` the SQLite index refreshes automatically on the next command\n\
+  (staleness is detected and the index reindexed transparently), so reads stay\n\
+  correct without a manual `clove reindex`.\n\
+\n\
 ## Conventions\n\
 \n\
 - Labels are case-insensitive and canonicalized (`Area:iOS` → `area:ios`).\n\
