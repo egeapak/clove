@@ -119,3 +119,40 @@ fn github_roundtrip() {
         "re-import should create nothing: {v}"
     );
 }
+
+/// Without the `github` build feature both `import github` and `export github`
+/// must fail with a clean fallback error — not a panic, not an item-not-found,
+/// not a silent success. Gated on `not(feature = "github")` so it compiles and
+/// runs only under `cargo test -p clove --no-default-features` (the default
+/// build has `github` on, where the network paths above apply instead).
+#[cfg(not(feature = "github"))]
+#[test]
+fn github_without_feature_returns_clean_fallback_error() {
+    let dir = init_repo();
+    clove(dir.path())
+        .args(["new", "Local item"])
+        .assert()
+        .success();
+
+    for args in [
+        ["export", "github", "owner/repo"].as_slice(),
+        ["import", "github", "owner/repo"].as_slice(),
+    ] {
+        let out = clove(dir.path())
+            .args(args)
+            .env_remove("GITHUB_TOKEN")
+            .output()
+            .unwrap();
+        // NotYetImplemented → exit 1 (Usage). Clean error, never a panic/abort.
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "`{args:?}` without the github feature must be a clean fallback error"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.to_lowercase().contains("github"),
+            "fallback error should mention github: {stderr}"
+        );
+    }
+}

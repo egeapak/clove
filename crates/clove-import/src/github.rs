@@ -101,31 +101,46 @@ pub fn append_clove_meta(body: &str, meta: &CloveMeta) -> String {
     }
 }
 
-/// Parse the first `<!-- clove-meta: {json} -->` comment out of `body`.
+/// Locate the **last** `<!-- clove-meta: … -->` marker in `body`, returning the
+/// byte span `(start, end)` covering the whole comment (from `<!-- clove-meta:`
+/// through the closing `-->`).
+///
+/// [`append_clove_meta`] always writes clove's real metadata at the *end* of the
+/// body, so a crafted/human earlier `clove-meta`-looking comment must never win.
+/// Both [`decode_clove_meta`] and [`strip_clove_meta`] route through this single
+/// helper so they can never diverge on which marker they pick. Returns `None`
+/// when the marker is absent or unterminated.
+fn last_clove_meta_span(body: &str) -> Option<(usize, usize)> {
+    let start = body.rfind(META_OPEN)?;
+    let after_open = start + META_OPEN.len();
+    let rel_end = body[after_open..].find(META_CLOSE)?;
+    let end = after_open + rel_end + META_CLOSE.len();
+    Some((start, end))
+}
+
+/// Parse the **last** `<!-- clove-meta: {json} -->` comment out of `body`.
+///
+/// The last occurrence is the one clove itself appended (see
+/// [`last_clove_meta_span`]); an earlier human/crafted marker is ignored.
 ///
 /// Tolerant: returns `None` when the comment is absent OR its JSON payload is
 /// malformed (never errors, never panics) so a foreign body can never break an
 /// import.
 pub fn decode_clove_meta(body: &str) -> Option<CloveMeta> {
-    let start = body.find(META_OPEN)?;
-    let after_open = start + META_OPEN.len();
-    let rel_end = body[after_open..].find(META_CLOSE)?;
-    let json = body[after_open..after_open + rel_end].trim();
+    let (start, end) = last_clove_meta_span(body)?;
+    let json = body[start + META_OPEN.len()..end - META_CLOSE.len()].trim();
     serde_json::from_str(json).ok()
 }
 
-/// Strip the first `<!-- clove-meta: … -->` comment (and surrounding blank lines)
-/// from `body`, returning the human-facing body. If no comment is present the
-/// body is returned trimmed of a trailing newline only.
+/// Strip the **last** `<!-- clove-meta: … -->` comment (and surrounding blank
+/// lines) from `body`, returning the human-facing body. The last occurrence is
+/// the one clove appended (see [`last_clove_meta_span`]); any earlier
+/// human/crafted marker is left intact as ordinary body text. If no comment is
+/// present the body is returned trimmed of a trailing newline only.
 pub fn strip_clove_meta(body: &str) -> String {
-    let Some(start) = body.find(META_OPEN) else {
+    let Some((start, end)) = last_clove_meta_span(body) else {
         return body.to_owned();
     };
-    let after_open = start + META_OPEN.len();
-    let Some(rel_end) = body[after_open..].find(META_CLOSE) else {
-        return body.to_owned();
-    };
-    let end = after_open + rel_end + META_CLOSE.len();
     let mut out = String::with_capacity(body.len());
     out.push_str(&body[..start]);
     out.push_str(&body[end..]);
@@ -468,8 +483,10 @@ mod net {
     /// `None` (never an error) so the caller can emit the auth-missing message.
     fn resolve_github_token() -> Option<String> {
         if let Ok(token) = std::env::var("GITHUB_TOKEN") {
-            if !token.trim().is_empty() {
-                return Some(token);
+            let token = token.trim();
+            if !token.is_empty() {
+                // Return the trimmed value: a trailing newline must not reach octocrab.
+                return Some(token.to_owned());
             }
         }
         // Fall back to the gh CLI. A missing binary or failed call is "no token".
@@ -735,6 +752,37 @@ mod tests {
         assert_eq!(strip_clove_meta(&with_meta), "Human readable description.");
         // And the meta is recoverable.
         assert_eq!(decode_clove_meta(&with_meta).unwrap(), meta);
+    }
+
+    #[test]
+    fn clove_meta_picks_trailing_real_marker_over_earlier_human_one() {
+        // A crafted/human earlier marker must never win over clove's real meta,
+        // which `append_clove_meta` always writes at the END of the body.
+        let real = CloveMeta {
+            id: Some("proj-AAAA1111".to_owned()),
+            priority: Some(2),
+            deps: vec!["proj-BBBB2222".to_owned()],
+        };
+        let human = "Human readable description.\n\n<!-- clove-meta: {\"priority\":4} -->\n";
+        let with_meta = append_clove_meta(human, &real);
+
+        // decode must return the TRAILING (real) meta, not the human priority:4.
+        let decoded = decode_clove_meta(&with_meta).expect("trailing meta decodes");
+        assert_eq!(decoded, real, "decode must pick the last (real) marker");
+        assert_eq!(decoded.priority, Some(2));
+
+        // strip must remove the TRAILING comment, leaving the earlier human one
+        // intact as ordinary body text.
+        let stripped = strip_clove_meta(&with_meta);
+        assert!(
+            stripped.contains("<!-- clove-meta: {\"priority\":4} -->"),
+            "earlier human marker survives as body text:\n{stripped}"
+        );
+        assert!(
+            !stripped.contains("proj-AAAA1111"),
+            "trailing real marker is removed:\n{stripped}"
+        );
+        assert!(stripped.starts_with("Human readable description."));
     }
 
     /// Build a `GitHubIssue` from the committed REST-shaped JSON fixture (no network).

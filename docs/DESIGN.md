@@ -68,7 +68,7 @@ no SQLite surface.
 | `git2` | 0.19 | worktree detection (no `git` subprocess) |
 | `chrono` | 0.4 | RFC3339 timestamps |
 | `jiff` | 0.1 | nanosecond timestamps for comment filenames |
-| `octocrab` | 0.41 | GitHub REST API client (clove-import GitHub importer/exporter) |
+| `octocrab` | 0.51 | GitHub REST API client (clove-import GitHub importer/exporter) |
 
 **Rust edition/MSRV:** `edition = "2021"`. **No pinned MSRV — clove tracks current
 stable Rust** (decision 2026-06-02: a strict 1.80 MSRV added dependency-version friction
@@ -1048,8 +1048,11 @@ Installed optionally via `clove init --merge-driver`.
 
 **`.gitattributes` (committed):**
 ```
-.clove/issues/**/*.md merge=clove-item
+.clove/issues/*.md merge=clove-item
 ```
+The glob is intentionally narrow (`*.md`, not `**/*.md`): comment files live under
+`<id>/comments/` and are append-only, uniquely named, and never merged by the item
+driver, so they are deliberately excluded from it.
 
 **`.git/config` (local, not committed):**
 ```ini

@@ -207,6 +207,46 @@ fn empty_repo_jsonl_zero_lines_json_empty_data() {
 }
 
 #[test]
+fn export_github_with_out_is_rejected() {
+    // `--out` is a file sink; `export github` is a network sink. Passing both
+    // must be a clean validation error (exit 4), never a silently-ignored flag.
+    let dir = init_with_items();
+    let out_path = dir.path().join("dump.json");
+    let out = clove(dir.path())
+        .args(["export", "github", "owner/repo", "--out"])
+        .arg(&out_path)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "export github --out must be a validation error (exit 4)"
+    );
+    assert!(
+        !out_path.exists(),
+        "the --out file must not have been written"
+    );
+}
+
+#[test]
+fn export_json_with_target_is_rejected() {
+    // An `owner/repo` target is only meaningful for `export github`; passing it
+    // to json/jsonl must be a clean validation error (exit 4), not ignored.
+    let dir = init_with_items();
+    for fmt in ["json", "jsonl"] {
+        let out = clove(dir.path())
+            .args(["export", fmt, "owner/repo"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(4),
+            "export {fmt} <target> must be a validation error (exit 4)"
+        );
+    }
+}
+
+#[test]
 fn exported_item_includes_full_frontmatter_fields() {
     let dir = init_with_items();
     let out = clove(dir.path())

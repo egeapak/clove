@@ -94,12 +94,32 @@ pub fn run(format: OutputFormat, args: MergeDriverArgs) -> Result<ExitCode, Clov
         marker_size,
     )?;
 
-    let (merged_fm, field_conflicts) = match &outcome {
+    let (merged_fm, mut field_conflicts) = match &outcome {
         MergeOutcome::Clean(fm) => (fm.as_ref(), Vec::new()),
         MergeOutcome::Conflict { merged, conflicts } => (merged.as_ref(), conflicts.clone()),
     };
 
-    let conflicted = !outcome.is_clean() || body_merge.conflicted;
+    // Re-validate the merged frontmatter before committing to a clean write.
+    // A clean field merge must still satisfy the §7.7 field invariants (e.g.
+    // status ↔ `closed` coherence); if any future field change lets the merge
+    // produce an invalid item, fail safe — downgrade to a conflict rather than
+    // writing a possibly-invalid item.
+    if outcome.is_clean() {
+        let validation = clove_core::validate_item(merged_fm);
+        if !validation.is_empty() {
+            field_conflicts.push(FieldConflict {
+                field: "validation".to_owned(),
+                ours: "merged result is invalid".to_owned(),
+                theirs: validation
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            });
+        }
+    }
+
+    let conflicted = !field_conflicts.is_empty() || body_merge.conflicted;
 
     // Serialize canonical frontmatter, then append conflict-marked field blocks
     // (if any) and the (possibly conflict-marked) body.

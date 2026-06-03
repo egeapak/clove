@@ -23,8 +23,4 @@ pub enum ImportError {
     /// A single source record was malformed (line/entry-level).
     #[error("malformed source record: {message}")]
     Record { message: String },
-
-    /// The requested capability is not yet implemented.
-    #[error("not yet implemented: {feature}")]
-    NotYetImplemented { feature: String },
 }

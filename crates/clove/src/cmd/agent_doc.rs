@@ -94,16 +94,17 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
 \n\
 - `clove import tk <.tickets-dir> [--dry-run]` — import tk tickets.\n\
 - `clove import beads <issues.jsonl> [--dry-run]` — import a Beads JSONL export.\n\
-- `clove import github [--dry-run]` — import GitHub issues (needs the `github`\n\
-  build feature + a token via `GITHUB_TOKEN` or `gh auth token`).\n\
+- `clove import github <owner/repo> [--dry-run]` — import GitHub issues (needs\n\
+  the `github` build feature + a token via `GITHUB_TOKEN` or `gh auth token`).\n\
 - `clove export json` / `clove export jsonl [--out FILE]` — dump all items as a\n\
   JSON envelope (`data` array) or one item per line (NDJSON, Beads-isomorphic).\n\
-- `clove export github` — push items to a GitHub repo (token + `github` feature).\n\
+- `clove export github <owner/repo>` — push items to a GitHub repo (token +\n\
+  `github` feature).\n\
 - Imports are idempotent on `external_ref`: re-running skips already-imported\n\
   items. `--dry-run` reports `{{ would_create, would_skip, conflicts }}` and\n\
   writes nothing.\n\
 - `clove init --merge-driver` installs a git merge driver for\n\
-  `.clove/issues/**/*.md`. On `git merge`, same-value scalar edits and dependency/\n\
+  `.clove/issues/*.md`. On `git merge`, same-value scalar edits and dependency/\n\
   label set-unions auto-resolve; only genuinely divergent edits conflict.\n\
 \n\
 ## Git integration\n\

@@ -4,8 +4,9 @@
 //! store (export always reads files, never the index), loading every item with
 //! its full §7.4 shape (frontmatter + body + computed `ready`/`blocked_by`),
 //! sorted by `(priority, topological_rank, id)` to match list ordering. Output
-//! goes to stdout by default, or atomically to `--out FILE`. The GitHub arm is
-//! Phase 5 and still returns [`CloveError::NotYetImplemented`].
+//! goes to stdout by default, or atomically to `--out FILE`. The GitHub arm
+//! (built with the `github` feature) pushes the shaped items to an `owner/repo`
+//! via octocrab; without that feature it returns a clean fallback error.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
@@ -22,6 +23,26 @@ use crate::context::Ctx;
 use crate::item_json::export_object;
 
 pub fn run(ctx: &Ctx, format: OutputFormat, args: ExportArgs) -> Result<(), CloveError> {
+    // Cross-flag validation up front (exit 4) so a misused flag is a clean
+    // validation error rather than being silently ignored.
+    // `--out` is a file sink; `github` is a network sink and ignores it.
+    if matches!(args.export_format, ExportFormat::Github) && args.out.is_some() {
+        return Err(CloveError::InvalidField {
+            field: "out".to_owned(),
+            reason: "`--out` is not valid for `export github` (it pushes to GitHub, not a file)"
+                .to_owned(),
+        });
+    }
+    // `target` (owner/repo) is only meaningful for github; reject it on json/jsonl.
+    if matches!(args.export_format, ExportFormat::Json | ExportFormat::Jsonl)
+        && args.target.is_some()
+    {
+        return Err(CloveError::InvalidField {
+            field: "target".to_owned(),
+            reason: "an `owner/repo` target is only valid for `export github`".to_owned(),
+        });
+    }
+
     // Files are the source of truth: load every item with its body. Per-file
     // parse failures are dropped (consistent with `ls`/`ready`); export never
     // partially succeeds on a corrupt store silently beyond what scan reports.
@@ -162,7 +183,6 @@ fn export_err(err: clove_import::ImportError) -> CloveError {
     use clove_import::ImportError;
     match err {
         ImportError::Core(core) => core,
-        ImportError::NotYetImplemented { feature } => CloveError::NotYetImplemented { feature },
         ImportError::Source { path, message } => CloveError::Io {
             path,
             source: std::io::Error::other(message),

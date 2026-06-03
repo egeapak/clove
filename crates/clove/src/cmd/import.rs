@@ -1,10 +1,11 @@
 //! `clove import <tk|beads|github> <src> [--dry-run]` (T-M01/T-M02/T-M03).
 //!
-//! The tk (T-M01) and Beads (T-M02) sources are implemented; GitHub remains
-//! [`CloveError::NotYetImplemented`] until its phase. The shared planning
-//! layer lives in `clove-import`: every source runs `plan` (pure, drives
-//! `--dry-run`) and, when not in dry-run, `apply` (writes through the file
-//! store).
+//! All three sources are implemented: tk (T-M01), Beads (T-M02), and GitHub
+//! (T-M03). The GitHub arm is built behind the `github` feature; without it the
+//! command is still recognized but returns a clean fallback error rather than a
+//! panic. The shared planning layer lives in `clove-import`: every source runs
+//! `plan` (pure, drives `--dry-run`) and, when not in dry-run, `apply` (writes
+//! through the file store).
 
 use chrono::Utc;
 use clove_core::{CloveError, OutputFormat};
@@ -150,7 +151,6 @@ fn import_err(err: clove_import::ImportError) -> CloveError {
     use clove_import::ImportError;
     match err {
         ImportError::Core(core) => core,
-        ImportError::NotYetImplemented { feature } => CloveError::NotYetImplemented { feature },
         ImportError::Source { path, message } => CloveError::Io {
             path,
             source: std::io::Error::other(message),

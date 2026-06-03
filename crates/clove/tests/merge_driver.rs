@@ -455,6 +455,163 @@ fn conflicting_body_edits_produce_markers() {
 // Unparseable side → nonzero, ours not destroyed.
 // --------------------------------------------------------------------------
 
+// --------------------------------------------------------------------------
+// add/add: same item id created on two branches with no common ancestor (%O
+// empty). The frontmatter merge must run against base=None: same-value fields
+// stay, divergent scalars conflict, dep lists union.
+// --------------------------------------------------------------------------
+
+/// Write a minimal valid clove item file at `<id>.md` with the given title and
+/// deps line, so two branches can independently "add" the same id.
+fn write_item(path: &Path, id: &str, title: &str, deps: &str) {
+    // The `.clove/issues` dir can vanish on a branch with no items (git prunes
+    // empty dirs on checkout); recreate it so the add/add write always lands.
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    let body = format!(
+        "---\n\
+schema: 1\n\
+id: {id}\n\
+title: {title}\n\
+status: open\n\
+type: feature\n\
+priority: 2\n\
+created: 2026-01-01T00:00:00Z\n\
+updated: 2026-01-01T00:00:00Z\n\
+deps: {deps}\n\
+---\n\
+Body for {id}.\n"
+    );
+    std::fs::write(path, body).unwrap();
+}
+
+#[test]
+fn add_add_same_id_unions_deps_no_ancestor() {
+    // Base has NO item, so when both branches add the same id git invokes the
+    // driver with an EMPTY ancestor (`%O`). The dep lists must union (base=None
+    // means every element is an addition, never a removal), and the disjoint
+    // titles/same scalars must not spuriously clobber.
+    let dir = setup_repo();
+    let p = dir.path();
+    let id = "proj-ADDADD01";
+    let path = item_path(p, id);
+
+    git_ok(p, &["checkout", "-qb", "a"]);
+    write_item(&path, id, "Shared title", "[proj-AAAAAAAA]");
+    git_ok(p, &["add", "-A"]);
+    git_ok(p, &["commit", "-qm", "add on a"]);
+
+    git_ok(p, &["checkout", "-q", "main"]);
+    git_ok(p, &["checkout", "-qb", "b"]);
+    write_item(&path, id, "Shared title", "[proj-BBBBBBBB]");
+    git_ok(p, &["add", "-A"]);
+    git_ok(p, &["commit", "-qm", "add on b"]);
+
+    git_ok(p, &["checkout", "-q", "a"]);
+    assert!(
+        git_merge(p, "b"),
+        "add/add with same title + disjoint deps must auto-merge (union)"
+    );
+    let text = read(&path);
+    assert!(!has_conflict_markers(&text), "no markers:\n{text}");
+    assert!(
+        text.contains("deps: [proj-AAAAAAAA, proj-BBBBBBBB]"),
+        "deps union under empty ancestor:\n{text}"
+    );
+    assert!(text.contains("title: Shared title"), "title kept:\n{text}");
+}
+
+#[test]
+fn add_add_divergent_scalar_conflicts_without_clobbering_ours() {
+    // Same id added on both branches (empty ancestor) but with a divergent
+    // scalar (priority). That must conflict, and ours must survive intact.
+    let dir = setup_repo();
+    let p = dir.path();
+    let id = "proj-ADDADD02";
+    let path = item_path(p, id);
+
+    git_ok(p, &["checkout", "-qb", "a"]);
+    write_item(&path, id, "Ours title", "[]");
+    git_ok(p, &["add", "-A"]);
+    git_ok(p, &["commit", "-qm", "add ours"]);
+
+    git_ok(p, &["checkout", "-q", "main"]);
+    git_ok(p, &["checkout", "-qb", "b"]);
+    // Same id, different title (divergent scalar) → conflict.
+    write_item(&path, id, "Theirs title", "[]");
+    git_ok(p, &["add", "-A"]);
+    git_ok(p, &["commit", "-qm", "add theirs"]);
+
+    git_ok(p, &["checkout", "-q", "a"]);
+    assert!(
+        !git_merge(p, "b"),
+        "add/add with divergent title must conflict (empty ancestor, base=None)"
+    );
+    let text = read(&path);
+    // Canonical frontmatter still carries ours; the conflict block makes the
+    // divergence explicit. Ours must not be clobbered.
+    assert!(
+        text.contains("title: Ours title"),
+        "ours preserved on add/add conflict:\n{text}"
+    );
+    assert!(text.contains("title:"), "title divergence shown:\n{text}");
+}
+
+// --------------------------------------------------------------------------
+// Simultaneous frontmatter + body conflict in one file: both the field
+// conflict block and the git body markers appear, exit nonzero.
+// --------------------------------------------------------------------------
+
+#[test]
+fn simultaneous_field_and_body_conflict() {
+    let dir = setup_repo_with_item();
+    let p = dir.path();
+    let id = only_item_id(p);
+    let path = item_path(p, &id);
+
+    // Give the base a body line both sides will edit divergently.
+    let base = read(&path);
+    std::fs::write(&path, format!("{base}Shared body line.\n")).unwrap();
+    git_ok(p, &["add", "-A"]);
+    git_ok(p, &["commit", "-qm", "base body"]);
+
+    git_ok(p, &["checkout", "-qb", "a"]);
+    clove(p).args(["start", &id]).assert().success(); // status → in_progress
+    let t = read(&path);
+    std::fs::write(&path, t.replace("Shared body line.", "Body edited by A.")).unwrap();
+    git_ok(p, &["add", "-A"]);
+    git_ok(p, &["commit", "-qm", "field+body a"]);
+
+    git_ok(p, &["checkout", "-q", "main"]);
+    git_ok(p, &["checkout", "-qb", "b"]);
+    clove(p).args(["close", &id]).assert().success(); // status → closed (divergent)
+    let t = read(&path);
+    std::fs::write(&path, t.replace("Shared body line.", "Body edited by B.")).unwrap();
+    git_ok(p, &["add", "-A"]);
+    git_ok(p, &["commit", "-qm", "field+body b"]);
+
+    git_ok(p, &["checkout", "-q", "a"]);
+    assert!(
+        !git_merge(p, "b"),
+        "divergent field AND divergent body must conflict (nonzero)"
+    );
+    let text = read(&path);
+    // Body conflict: git markers present, both sides shown.
+    assert!(has_conflict_markers(&text), "body markers present:\n{text}");
+    assert!(text.contains("Body edited by A."), "ours body:\n{text}");
+    assert!(text.contains("Body edited by B."), "theirs body:\n{text}");
+    // Field conflict: the dedicated frontmatter conflict block + status field.
+    assert!(
+        text.contains("clove: frontmatter merge conflict"),
+        "field conflict block present:\n{text}"
+    );
+    assert!(
+        text.contains("status:"),
+        "status field conflict shown:\n{text}"
+    );
+}
+
 #[test]
 fn unparseable_side_conflicts_without_clobbering_ours() {
     let dir = setup_repo_with_item();
