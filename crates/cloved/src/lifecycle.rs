@@ -59,6 +59,17 @@ pub fn run(clove_dir: &Utf8Path) -> anyhow::Result<()> {
         Duration::from_millis(config.as_ref().map_or(200, |c| c.daemon.watch_debounce_ms));
     let idle_shutdown =
         idle_shutdown_duration(config.as_ref().map_or(0, |c| c.daemon.idle_shutdown_min));
+    let git_sync = config.as_ref().is_some_and(|c| c.daemon.git_sync);
+    if git_sync && !cfg!(feature = "git-sync") {
+        eprintln!(
+            "cloved: [daemon] git_sync = true but this binary was built without \
+             git-sync support; auto-commit is disabled"
+        );
+    }
+    let watch_options = crate::watcher::WatchOptions {
+        repo_root: clove_dir.parent().unwrap_or(clove_dir).to_owned(),
+        git_sync,
+    };
 
     // 3. Tokio runtime — 2 workers (IPC + watcher), per DESIGN §8.1.
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -97,7 +108,7 @@ pub fn run(clove_dir: &Utf8Path) -> anyhow::Result<()> {
         //    timeout) fires.
         tokio::select! {
             _ = accept_loop(listener, dispatcher) => {},
-            _ = crate::watcher::watch(issues_dir.clone(), Arc::clone(&index), Arc::clone(&state), debounce) => {},
+            _ = crate::watcher::watch(issues_dir.clone(), Arc::clone(&index), Arc::clone(&state), debounce, watch_options.clone()) => {},
             _ = idle_watchdog(Arc::clone(&state), idle_shutdown) => {},
             _ = shutdown_signal(clove_dir) => {},
         }

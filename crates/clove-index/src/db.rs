@@ -370,6 +370,17 @@ impl Index {
             .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
         Ok(())
     }
+
+    /// Record that the item file `file_name` was just git-auto-synced, stamping
+    /// `file_mtimes.synced_at` (schema v3, DESIGN §8.7). No-op if the row is
+    /// absent (the watcher indexes before git-sync, so it normally exists).
+    pub fn set_synced_at(&self, file_name: &str, synced_at_ns: i64) -> Result<(), IndexError> {
+        self.conn.execute(
+            "UPDATE file_mtimes SET synced_at = ?1 WHERE path = ?2",
+            rusqlite::params![synced_at_ns, file_name],
+        )?;
+        Ok(())
+    }
 }
 
 /// Apply the per-connection PRAGMAs (DESIGN §6.1). `execute_batch` tolerates the

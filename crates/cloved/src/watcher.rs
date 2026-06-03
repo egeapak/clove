@@ -22,6 +22,17 @@ use notify::{recommended_watcher, Event, RecursiveMode, Watcher};
 use crate::reindexer::sync_once;
 use crate::state::{DaemonState, WatcherState};
 
+/// Per-batch options that depend on repo config (the git-sync opt-in).
+#[derive(Clone)]
+// Read only by the `git-sync` build; a lean build keeps them for a uniform API.
+#[cfg_attr(not(feature = "git-sync"), allow(dead_code))]
+pub struct WatchOptions {
+    /// Repository root (parent of `.clove/`), for git-sync.
+    pub repo_root: Utf8PathBuf,
+    /// `[daemon] git_sync` — auto-commit clean edits (T-D06).
+    pub git_sync: bool,
+}
+
 /// Only `*.md` files under the issues dir are item files; everything else
 /// (including any stray `index.db*`) is ignored to prevent feedback loops.
 fn is_item_file(path: &std::path::Path) -> bool {
@@ -35,6 +46,7 @@ pub async fn watch(
     index: Arc<Mutex<Index>>,
     state: Arc<Mutex<DaemonState>>,
     debounce: Duration,
+    options: WatchOptions,
 ) {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<PathBuf>();
 
@@ -78,15 +90,33 @@ pub async fn watch(
                 Err(_) => break,   // quiet window elapsed → apply the batch
             }
         }
-        pending.clear();
+        let batch: Vec<Utf8PathBuf> = pending
+            .drain()
+            .filter_map(|p| Utf8PathBuf::from_path_buf(p).ok())
+            .collect();
 
-        // Apply one batch (one transaction) and record it.
+        // Apply one index batch (one transaction) and record it.
         sync_once(&issues_dir, &index, &state);
         if let Ok(mut st) = state.lock() {
             st.mark_event();
             st.inc_batches();
         }
+
+        // Opt-in git auto-sync of the changed files (T-D06).
+        maybe_git_sync(&options, batch, &index);
     }
 
     drop(watcher);
 }
+
+/// Auto-commit the batch's files when built with `git-sync` and enabled in config.
+#[cfg(feature = "git-sync")]
+fn maybe_git_sync(options: &WatchOptions, paths: Vec<Utf8PathBuf>, index: &Arc<Mutex<Index>>) {
+    if options.git_sync && !paths.is_empty() {
+        crate::git_sync::sync_files(&options.repo_root, &paths, index);
+    }
+}
+
+/// No-op when the `git-sync` feature is disabled.
+#[cfg(not(feature = "git-sync"))]
+fn maybe_git_sync(_options: &WatchOptions, _paths: Vec<Utf8PathBuf>, _index: &Arc<Mutex<Index>>) {}
