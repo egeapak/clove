@@ -140,6 +140,10 @@ pub struct StatusResponse {
     /// Milliseconds since the last watcher/IPC event, or `None` if none yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_event_ms: Option<u64>,
+    /// Count of debounced watcher batches applied (feedback-loop / debounce
+    /// observable; M3-G05/G06).
+    #[serde(default)]
+    pub batches_applied: u64,
 }
 
 /// A structured error reply.
@@ -226,6 +230,7 @@ mod tests {
                 items_indexed: 7,
                 watcher_state: "watching".to_owned(),
                 last_event_ms: Some(1200),
+                batches_applied: 3,
             }),
             Response::Error(ErrorResponse::new("bad_request", "unknown cmd")),
         ];

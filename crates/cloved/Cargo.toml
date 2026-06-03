@@ -28,6 +28,7 @@ camino.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 interprocess = { workspace = true, features = ["tokio"] }
+notify.workspace = true
 fd-lock.workspace = true
 # git2 is optional and only pulled in under the `git-sync` feature (P5/T-D06).
 git2 = { workspace = true, optional = true }

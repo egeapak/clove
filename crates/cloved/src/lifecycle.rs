@@ -23,7 +23,7 @@ use interprocess::local_socket::tokio::Listener as TokioListener;
 use interprocess::local_socket::ListenerOptions;
 
 use crate::ipc::{handle_connection, Dispatcher};
-use crate::state::DaemonState;
+use crate::state::{DaemonState, WatcherState};
 
 /// Run the daemon for `clove_dir` until a shutdown signal arrives. Blocks the
 /// calling thread (it owns the Tokio runtime). Exits the process with a non-zero
@@ -49,13 +49,14 @@ pub fn run(clove_dir: &Utf8Path) -> anyhow::Result<()> {
     let index = Arc::new(Mutex::new(index));
     let state = Arc::new(Mutex::new(DaemonState::new(items)));
 
-    // Repo config (auto-refresh, and — from P5 — git_sync). A missing/invalid
-    // config falls back to defaults; the daemon must still run.
-    let auto_refresh = clove_dir
+    // Repo config (auto-refresh, debounce, and — from P5 — git_sync). A
+    // missing/invalid config falls back to defaults; the daemon must still run.
+    let config = clove_dir
         .parent()
-        .and_then(|root| clove_core::load_config(root).ok())
-        .map(|cfg| cfg.index.auto_refresh)
-        .unwrap_or(true);
+        .and_then(|root| clove_core::load_config(root).ok());
+    let auto_refresh = config.as_ref().is_none_or(|c| c.index.auto_refresh);
+    let debounce =
+        Duration::from_millis(config.as_ref().map_or(200, |c| c.daemon.watch_debounce_ms));
 
     // 3. Tokio runtime — 2 workers (IPC + watcher), per DESIGN §8.1.
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -66,8 +67,8 @@ pub fn run(clove_dir: &Utf8Path) -> anyhow::Result<()> {
 
     let dispatcher = Dispatcher {
         index: Arc::clone(&index),
-        state,
-        issues_dir,
+        state: Arc::clone(&state),
+        issues_dir: issues_dir.clone(),
         db_path: db_path.clone(),
         auto_refresh,
     };
@@ -81,12 +82,19 @@ pub fn run(clove_dir: &Utf8Path) -> anyhow::Result<()> {
             .create_tokio()
             .with_context(|| format!("binding {}", sock_path(clove_dir)))?;
 
-        // 4. Advertise readiness: write the pid only after the socket is bound.
+        // 4. Startup mtime sweep (DESIGN §8.6): re-index anything changed while
+        //    the daemon was down (e.g. a `git pull`), BEFORE advertising
+        //    readiness. Only then write the pid → "pid present" ⇒ "swept & ready".
+        if let Ok(mut st) = state.lock() {
+            st.set_watcher_state(WatcherState::Sweeping);
+        }
+        crate::reindexer::sync_once(&issues_dir, &index, &state);
         write_pid(clove_dir).context("writing pid file")?;
 
-        // 5. Serve connections until a shutdown signal fires.
+        // 5. Serve IPC + watch for changes until a shutdown signal fires.
         tokio::select! {
             _ = accept_loop(listener, dispatcher) => {},
+            _ = crate::watcher::watch(issues_dir.clone(), Arc::clone(&index), Arc::clone(&state), debounce) => {},
             _ = shutdown_signal(clove_dir) => {},
         }
         Ok(())

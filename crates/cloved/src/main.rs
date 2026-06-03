@@ -14,7 +14,9 @@ use clap::{Parser, Subcommand};
 mod git_sync;
 mod ipc;
 mod lifecycle;
+mod reindexer;
 mod state;
+mod watcher;
 
 /// The `cloved` command line. `clove daemon start` spawns `cloved run` detached
 /// (T-D05); end users do not normally invoke this binary directly.

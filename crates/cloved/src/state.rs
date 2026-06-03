@@ -12,7 +12,6 @@ use clove_ipc::StatusResponse;
 
 /// What the file watcher is currently doing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // Sweeping/Watching are set by the watcher in Phase 3 (T-D04)
 pub enum WatcherState {
     /// Performing the startup mtime sweep (P3), before the daemon is ready.
     Sweeping,
@@ -40,6 +39,7 @@ pub struct DaemonState {
     items_indexed: u64,
     watcher_state: WatcherState,
     last_event_at: Option<Instant>,
+    batches_applied: u64,
 }
 
 impl DaemonState {
@@ -50,19 +50,24 @@ impl DaemonState {
             items_indexed,
             watcher_state: WatcherState::Idle,
             last_event_at: None,
+            batches_applied: 0,
         }
     }
 
     /// Update the indexed-item count (after a sweep/watch batch).
-    #[allow(dead_code)] // called by the watcher in Phase 3 (T-D04)
     pub fn set_items_indexed(&mut self, n: u64) {
         self.items_indexed = n;
     }
 
     /// Set the watcher state.
-    #[allow(dead_code)] // called by the watcher in Phase 3 (T-D04)
     pub fn set_watcher_state(&mut self, state: WatcherState) {
         self.watcher_state = state;
+    }
+
+    /// Record that the watcher applied one debounced batch (the M3-G05/G06
+    /// observable: feedback-loop prevention and debounce coalescing).
+    pub fn inc_batches(&mut self) {
+        self.batches_applied += 1;
     }
 
     /// Record that a watcher/IPC event just happened (for `last_event_ms`).
@@ -77,6 +82,7 @@ impl DaemonState {
             items_indexed: self.items_indexed,
             watcher_state: self.watcher_state.as_str().to_owned(),
             last_event_ms: self.last_event_at.map(|t| t.elapsed().as_millis() as u64),
+            batches_applied: self.batches_applied,
         }
     }
 }
