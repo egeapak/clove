@@ -16,12 +16,17 @@ use crate::context::{index_error, Ctx};
 /// to a file scan (DESIGN §6.4).
 const STALE_REFRESH_LIMIT: usize = 20;
 
-/// The index read result: the lean rows plus any warnings to surface.
-pub type IndexList = (Vec<ItemListRow>, Vec<String>);
+/// The index read result: the (already page-limited) lean rows, the full
+/// unpaginated match count, and any warnings to surface.
+pub type IndexList = (Vec<ItemListRow>, usize, Vec<String>);
 
 /// Try to satisfy a list/ready query from the index.
 ///
-/// Returns `Some((rows, warnings))` when the index was used (caller sets
+/// `offset`/`limit` are the requested page; the SQL fetches only `offset + limit`
+/// rows (all rows when `limit` is `None`) so a paginated `ls` steps just what it
+/// needs, while `count_items` reports the full `total`.
+///
+/// Returns `Some((rows, total, warnings))` when the index was used (caller sets
 /// `_meta.source = "index"`), or `None` to fall back to the file path. `None` is
 /// returned for `--no-index`, a missing/broken index, or one too stale to refresh
 /// cheaply.
@@ -31,6 +36,8 @@ pub fn list_via_index(
     deep: bool,
     mode: QueryMode,
     filters: &Filters,
+    offset: usize,
+    limit: Option<usize>,
 ) -> Result<Option<IndexList>, CloveError> {
     if no_index || !ctx.db_path.exists() {
         return Ok(None);
@@ -70,10 +77,14 @@ pub fn list_via_index(
         assignee: filters.assignee.clone(),
         label: filters.label.clone(),
         parent: None,
-        limit: None,
+        // Fetch only the rows the page needs (offset + limit); unlimited stays None.
+        limit: limit.map(|n| offset.saturating_add(n)),
     };
+    let total = index
+        .count_items(&filter)
+        .map_err(|e| index_error(e, &ctx.db_path))?;
     let rows = index
         .query_list(&filter)
         .map_err(|e| index_error(e, &ctx.db_path))?;
-    Ok(Some((rows, Vec::new())))
+    Ok(Some((rows, total, Vec::new())))
 }

@@ -266,7 +266,7 @@ pub struct FilterArgs {
     /// Filter by priority.
     #[arg(long)]
     pub priority: Option<u8>,
-    /// Maximum number of results.
+    /// Maximum number of results (default 100; use `--limit 0` for no limit).
     #[arg(long)]
     pub limit: Option<usize>,
     /// Skip this many results.
@@ -288,7 +288,7 @@ pub struct QueryArgs {
     /// Comma-separated field projection.
     #[arg(long, value_name = "LIST")]
     pub fields: Option<String>,
-    /// Maximum number of results.
+    /// Maximum number of results (default 100; use `--limit 0` for no limit).
     #[arg(long)]
     pub limit: Option<usize>,
     /// Skip this many results.
@@ -317,7 +317,7 @@ pub struct CommentsArgs {
 pub struct SearchArgs {
     /// The search text.
     pub text: String,
-    /// Maximum number of results.
+    /// Maximum number of results (default 100; use `--limit 0` for no limit).
     #[arg(long)]
     pub limit: Option<usize>,
 }

@@ -357,6 +357,40 @@ fn ls_index_serves_lean_rows_in_same_order_as_files() {
 }
 
 #[test]
+fn ls_default_limit_caps_at_100_with_full_total() {
+    let dir = init_repo();
+    let issues = dir.path().join(".clove/issues");
+    for i in 0..120u32 {
+        let id = format!("proj-{i:08}");
+        std::fs::write(
+            issues.join(format!("{id}.md")),
+            format!(
+                "---\nschema: 1\nid: {id}\ntitle: Item {i}\nstatus: open\ntype: feature\n\
+                 priority: 2\ncreated: 2026-06-02T10:00:00Z\nupdated: 2026-06-02T10:00:00Z\n---\nbody\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    // Default: capped at 100, but _meta.total reports all 120 (file path).
+    let v = json_ok(clove(dir.path()).arg("ls"));
+    assert_eq!(v["_meta"]["source"], "files");
+    assert_eq!(v["_meta"]["returned"], 100);
+    assert_eq!(v["_meta"]["total"], 120);
+
+    // --limit 0 returns everything.
+    let all = json_ok(clove(dir.path()).args(["ls", "--limit", "0"]));
+    assert_eq!(all["_meta"]["returned"], 120);
+
+    // Same caps via the index path, with an accurate total.
+    clove(dir.path()).arg("reindex").assert().success();
+    let idx = json_ok(clove(dir.path()).arg("ls"));
+    assert_eq!(idx["_meta"]["source"], "index");
+    assert_eq!(idx["_meta"]["returned"], 100);
+    assert_eq!(idx["_meta"]["total"], 120);
+}
+
+#[test]
 fn ls_deep_flag_still_uses_index() {
     let dir = init_repo();
     new_item(dir.path(), "One", &[]);

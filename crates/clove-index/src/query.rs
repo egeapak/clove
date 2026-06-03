@@ -39,14 +39,9 @@ pub struct Filter {
     pub limit: Option<usize>,
 }
 
-/// Build the shared `WHERE … ORDER BY … [LIMIT …]` tail (and bound params) for a
-/// filtered query, so the full and lean projections stay identical in selection
-/// and ordering.
-///
-/// `topological_rank IS NULL` sorts unranked items (cyclic graph, or not yet
-/// reindexed) last — matching clove-core's file-path ordering, which treats a
-/// missing rank as `usize::MAX` (graph.rs `ready_items`).
-fn where_order_sql(filter: &Filter) -> (String, Vec<Box<dyn ToSql>>) {
+/// Build the `WHERE` clause (and bound params) for a filter — shared by the row
+/// queries and the `COUNT(*)` used to report the unpaginated total.
+fn where_clause(filter: &Filter) -> (String, Vec<Box<dyn ToSql>>) {
     let mut where_clauses: Vec<String> = Vec::new();
     let mut params: Vec<Box<dyn ToSql>> = Vec::new();
 
@@ -99,15 +94,40 @@ fn where_order_sql(filter: &Filter) -> (String, Vec<Box<dyn ToSql>>) {
     } else {
         format!(" WHERE {}", where_clauses.join(" AND "))
     };
+    (where_sql, params)
+}
+
+/// The `ORDER BY … [LIMIT …]` tail. `topological_rank IS NULL` sorts unranked
+/// items (cyclic graph, or not yet reindexed) last — matching clove-core's
+/// file-path ordering, which treats a missing rank as `usize::MAX`. A `LIMIT`
+/// (from `Filter::limit`) is pushed into SQL so a paginated `ls` steps only the
+/// rows it needs rather than the whole table.
+fn order_limit_sql(filter: &Filter) -> String {
     let limit_sql = match filter.limit {
         Some(n) => format!(" LIMIT {n}"),
         None => String::new(),
     };
-    let tail = format!(
-        "{where_sql} ORDER BY priority ASC, topological_rank IS NULL ASC, \
+    format!(
+        " ORDER BY priority ASC, topological_rank IS NULL ASC, \
          topological_rank ASC, id ASC{limit_sql}"
-    );
-    (tail, params)
+    )
+}
+
+/// The combined `WHERE … ORDER BY … [LIMIT …]` tail (and params) for a row query.
+fn where_order_sql(filter: &Filter) -> (String, Vec<Box<dyn ToSql>>) {
+    let (where_sql, params) = where_clause(filter);
+    (format!("{where_sql}{}", order_limit_sql(filter)), params)
+}
+
+/// Count the items matching `filter` (ignoring its `limit`) — the unpaginated
+/// total for `_meta.total`. Cheap: `COUNT(*)` steps the matching rows but
+/// materializes no columns.
+pub fn count_items(conn: &Connection, filter: &Filter) -> Result<usize, IndexError> {
+    let (where_sql, params) = where_clause(filter);
+    let sql = format!("SELECT COUNT(*) FROM items{where_sql}");
+    let param_refs: Vec<&dyn ToSql> = params.iter().map(|b| b.as_ref()).collect();
+    let n: i64 = conn.query_row(&sql, param_refs.as_slice(), |r| r.get(0))?;
+    Ok(n as usize)
 }
 
 /// Run a filtered query returning full item rows (T-S07).
@@ -182,6 +202,11 @@ impl crate::db::Index {
     /// Run a filtered query returning the lean list projection.
     pub fn query_list(&self, filter: &Filter) -> Result<Vec<ItemListRow>, IndexError> {
         query_list(self.conn(), filter)
+    }
+
+    /// Count items matching `filter` (ignoring `limit`) — the unpaginated total.
+    pub fn count_items(&self, filter: &Filter) -> Result<usize, IndexError> {
+        count_items(self.conn(), filter)
     }
 
     /// Full-text search (T-S05).

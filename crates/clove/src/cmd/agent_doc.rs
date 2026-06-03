@@ -84,7 +84,7 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
 - `clove label <id> <add|rm> <label>`, `clove assign <id> <who|--clear>`, `clove priority <id> <0-4>`.\n\
 - `clove dep add <id> <dep-id>` / `dep rm` / `dep tree <id> [--depth N|--full] [--flat]` / `dep cycle [--fail-on-cycle]`.\n\
 - `clove ready` / `clove blocked` — work queues (filters: `--status --type --label --assignee --priority`).\n\
-- `clove ls` / `clove query [--filter JSON]` — list/query (`--fields`, `--limit`, `--offset`).\n\
+- `clove ls` / `clove query [--filter JSON]` — list/query (`--fields`, `--limit`, `--offset`). Lists are capped at 100 by default (`_meta.total` is the full count; `--limit 0` for all).\n\
 - `clove comment <id> <message>` / `clove comments <id> [--limit N]`.\n\
 - `clove search <text> [--limit N]` — full-text (index) or substring (files) search.\n\
 - `clove reindex` — rebuild the SQLite index. `clove doctor [--fix] [--strict]` — health check.\n\

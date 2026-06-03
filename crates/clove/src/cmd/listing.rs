@@ -88,6 +88,20 @@ pub fn sort_by_priority_topo(items: &mut [ItemFrontmatter], ranks: &HashMap<Clov
     });
 }
 
+/// Default cap on list output, so `ls` on a large repo stays snappy (the index
+/// steps only this many rows). `_meta.total` still reports the full match count.
+pub const DEFAULT_LIST_LIMIT: usize = 100;
+
+/// Resolve the effective page limit: `None` flag → the default cap; `--limit 0`
+/// → unlimited; `--limit n` → `n`.
+pub fn effective_limit(arg: Option<usize>) -> Option<usize> {
+    match arg {
+        None => Some(DEFAULT_LIST_LIMIT),
+        Some(0) => None,
+        Some(n) => Some(n),
+    }
+}
+
 /// Pagination, projection, and metadata options for [`emit`].
 #[derive(Debug, Default)]
 pub struct ListOpts<'a> {
