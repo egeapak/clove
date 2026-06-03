@@ -4,15 +4,17 @@
 //! IPC queries, and can opt in to git auto-sync. Never required — the CLI works
 //! identically without it.
 //!
-//! **Phase 0 (this commit):** crate scaffolding and the `cloved run` arg surface
-//! only. The lifecycle/lock/signal handling (P1), IPC server (P2), file watcher
-//! (P3), and git auto-sync (P5) land in subsequent phases per `docs/M3_PLAN.md`.
+//! Implemented incrementally per `docs/M3_PLAN.md`: lifecycle/lock/signals (P1),
+//! IPC server (P2), file watcher (P3), git auto-sync (P5).
 
 use camino::Utf8PathBuf;
 use clap::{Parser, Subcommand};
 
 #[cfg(feature = "git-sync")]
 mod git_sync;
+mod ipc;
+mod lifecycle;
+mod state;
 
 /// The `cloved` command line. `clove daemon start` spawns `cloved run` detached
 /// (T-D05); end users do not normally invoke this binary directly.
@@ -39,14 +41,6 @@ struct RunArgs {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Run(args) => {
-            // Phase 0 skeleton: lifecycle/IPC/watcher land in P1-P3.
-            eprintln!(
-                "cloved: daemon runtime not yet implemented (Phase 0 skeleton); \
-                 would serve {}",
-                args.clove_dir
-            );
-            Ok(())
-        }
+        Command::Run(args) => lifecycle::run(&args.clove_dir),
     }
 }

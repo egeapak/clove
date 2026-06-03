@@ -361,6 +361,15 @@ impl Index {
             .query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))?;
         Ok(n as usize)
     }
+
+    /// Flush the WAL back into the main database file and truncate it. Run on
+    /// daemon shutdown (DESIGN §8.9) so no `-wal` work is left dangling for the
+    /// next opener.
+    pub fn checkpoint_truncate(&self) -> Result<(), IndexError> {
+        self.conn
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        Ok(())
+    }
 }
 
 /// Apply the per-connection PRAGMAs (DESIGN §6.1). `execute_batch` tolerates the

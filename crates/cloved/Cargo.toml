@@ -25,9 +25,20 @@ clove-ipc.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 camino.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+interprocess = { workspace = true, features = ["tokio"] }
+fd-lock.workspace = true
 # git2 is optional and only pulled in under the `git-sync` feature (P5/T-D06).
 git2 = { workspace = true, optional = true }
 
-# tokio (runtime), interprocess (IPC listener), fd-lock (single-instance lock),
-# and notify (file-watch) are added in the phases that introduce them (P1/P3) to
-# keep each phase's build minimal.
+# Windows has no SIGTERM: `clove daemon stop` signals a named event the daemon
+# waits on (DESIGN §8.9). Win32 only, so it never touches the Unix build.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tempfile.workspace = true

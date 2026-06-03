@@ -14,12 +14,12 @@ use std::time::Duration;
 
 use camino::Utf8Path;
 use interprocess::local_socket::prelude::*;
-use interprocess::local_socket::{Name, Stream};
+use interprocess::local_socket::Stream;
 use thiserror::Error;
 
 use crate::frame::{self, FrameError};
 use crate::protocol::{QueryRequest, Request, Response};
-use crate::{pid_path, sock_path};
+use crate::{pid_path, sock_path, socket_name};
 
 /// Liveness/connect timeout (DESIGN §8.3: "Attempt connect with 50ms timeout").
 pub const CONNECT_TIMEOUT: Duration = Duration::from_millis(50);
@@ -46,27 +46,6 @@ pub enum ClientError {
     /// The daemon replied, but not with the expected response shape.
     #[error("unexpected daemon response: {0}")]
     Protocol(String),
-}
-
-/// Build the platform-specific socket name for a `.clove/` directory: a
-/// filesystem path on Unix (`daemon.sock`), a namespaced pipe on Windows
-/// (`clove-<hash>`), matching the listener side in `cloved` (DESIGN §8.2).
-fn socket_name(clove_dir: &Utf8Path) -> Result<Name<'static>, ClientError> {
-    #[cfg(windows)]
-    {
-        use interprocess::local_socket::GenericNamespaced;
-        crate::pipe_name(clove_dir)
-            .to_ns_name::<GenericNamespaced>()
-            .map_err(ClientError::Name)
-    }
-    #[cfg(not(windows))]
-    {
-        use interprocess::local_socket::GenericFilePath;
-        sock_path(clove_dir)
-            .into_string()
-            .to_fs_name::<GenericFilePath>()
-            .map_err(ClientError::Name)
-    }
 }
 
 /// A connected, handshaken daemon client.
@@ -98,7 +77,7 @@ impl DaemonClient {
     /// handshake runs on a worker thread so a hung peer cannot block the CLI past
     /// the timeout (the worker is abandoned on timeout; the CLI is short-lived).
     fn connect_and_ping(clove_dir: &Utf8Path) -> Result<DaemonClient, ClientError> {
-        let name = socket_name(clove_dir)?;
+        let name = socket_name(clove_dir).map_err(ClientError::Name)?;
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let result = (|| {

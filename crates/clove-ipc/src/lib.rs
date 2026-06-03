@@ -48,6 +48,35 @@ pub fn lock_path(clove_dir: &Utf8Path) -> Utf8PathBuf {
     clove_dir.join(LOCK_FILE)
 }
 
+/// Build the platform-specific local-socket name for a `.clove/` directory, used
+/// identically by the client ([`DaemonClient`]) and the `cloved` listener so the
+/// two always agree (DESIGN §8.2): a filesystem path on Unix (`daemon.sock`), a
+/// namespaced pipe on Windows (`clove-<hash>`).
+pub fn socket_name(
+    clove_dir: &Utf8Path,
+) -> std::io::Result<interprocess::local_socket::Name<'static>> {
+    use interprocess::local_socket::prelude::*;
+    #[cfg(windows)]
+    {
+        use interprocess::local_socket::GenericNamespaced;
+        pipe_name(clove_dir).to_ns_name::<GenericNamespaced>()
+    }
+    #[cfg(not(windows))]
+    {
+        use interprocess::local_socket::GenericFilePath;
+        sock_path(clove_dir)
+            .into_string()
+            .to_fs_name::<GenericFilePath>()
+    }
+}
+
+/// The Windows named shutdown-event name for this `.clove/` directory
+/// (DESIGN §8.9). `clove daemon stop` signals it; the daemon waits on it.
+#[cfg(windows)]
+pub fn event_name(clove_dir: &Utf8Path) -> String {
+    format!("clove-shutdown-{}", repo_hash(clove_dir))
+}
+
 /// A short, stable hash of the `.clove/` directory path, used to derive the
 /// Windows named-pipe name (`\\.\pipe\clove-<hash>`) and the Windows shutdown
 /// event name (DESIGN §8.2/§8.9). Deterministic across processes so the CLI and
