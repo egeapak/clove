@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://clove.dev/schema/v1/dep-tree.json",
+  "title": "clove dependency tree envelope",
+  "description": "The `clove dep tree <id>` response (nested form). `data` is a recursive node.",
+  "$defs": {
+    "node": {
+      "type": "object",
+      "required": ["id", "title", "status", "ready", "cycle_ref", "children"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9]{0,7}-[0-9A-Z]{8}$" },
+        "title": { "type": "string" },
+        "status": { "enum": ["open", "in_progress", "closed"] },
+        "ready": { "type": "boolean" },
+        "cycle_ref": { "type": "boolean" },
+        "children": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/node" }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "type": "object",
+  "required": ["v", "ok", "data"],
+  "properties": {
+    "v": { "const": 1 },
+    "ok": { "const": true },
+    "data": { "$ref": "#/$defs/node" },
+    "_meta": { "type": "object" }
+  },
+  "additionalProperties": false
+}

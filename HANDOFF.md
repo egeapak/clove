@@ -1,13 +1,22 @@
 # clove — Session Handoff
 
-**Updated:** 2026-06-02
-**State:** M0 built end-to-end (infra, data model, graph, config, **full CLI
-command surface**) plus the **M1 `clove-index` library**, with `reindex` and
-`search` wired to the index. `clove` is usable end-to-end.
-**Next step:** the remaining index-acceleration/polish tasks — T-S06
-(`with_index` read path so `ls`/`ready` use the index when fresh), T-S08
-(`doctor` index-divergence check), T-CLI14 (formal JSON Schema files), and
-T-CLI16 (xtask fixture generator).
+**Updated:** 2026-06-03
+**State:** **M0 and M1 are complete and gated.** Full CLI command surface; the
+SQLite index serves `ls`/`ready`/`query` (lean covering-index scan, default
+`--limit 100`, fast staleness with `--deep`), `search`, `reindex`, and
+`doctor` divergence. All five JSON schemas published + validated. Perf/parity/
+fuzz/golden gates pass (see `docs/M1_ACCEPTANCE_GATES.md`). ~240 tests green
+except one environment-only failure (`repo::tests::linked_worktree…`, a sandbox
+git-signing artifact, not a code defect).
+**Next step:** **M2 — Interop** (`import tk|beads|github`, `export json|jsonl|
+github`, and the real `clove merge-driver` for T-M05). M3 (daemon) builds on the
+finished M1 index; M4 (TUI/web/vendor bridges) is still undesigned.
+
+### Small backlog (optional M0/M1 nice-to-haves, non-blocking)
+- Broaden JSON-schema validation to more commands (version/reindex/doctor/new)
+  if desired — the 5 data-shape families are done.
+- `ls` gate is 15 ms with ~4.5 ms headroom; tighten to ~8 ms only if you want CI
+  to catch a covering-scan regression.
 
 ---
 

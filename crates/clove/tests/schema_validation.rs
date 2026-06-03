@@ -91,3 +91,62 @@ fn not_found_matches_error_schema() {
     assert_eq!(code, 2);
     assert_valid(&error, &v);
 }
+
+/// Create an item and return its id.
+fn new_item(dir: &std::path::Path, title: &str) -> String {
+    let (v, _) = run_json(clove(dir).args(["new", title]));
+    v["data"]["id"].as_str().unwrap().to_owned()
+}
+
+#[test]
+fn ready_output_matches_item_list_schema() {
+    let dir = init_with_items();
+    let list = schema("item-list.json");
+    let (v, code) = run_json(clove(dir.path()).arg("ready"));
+    assert_eq!(code, 0);
+    assert_valid(&list, &v);
+}
+
+#[test]
+fn index_ls_lean_matches_item_list_schema() {
+    let dir = init_with_items();
+    clove(dir.path()).arg("reindex").assert().success();
+    let list = schema("item-list.json");
+    let (v, code) = run_json(clove(dir.path()).arg("ls"));
+    assert_eq!(code, 0);
+    // The index path returns the lean projection (no created/updated); it must
+    // still satisfy the list schema, which requires only the lean fields.
+    assert_eq!(v["_meta"]["source"], "index");
+    assert_valid(&list, &v);
+}
+
+#[test]
+fn dep_tree_matches_schema() {
+    let dir = init_with_items();
+    let root = new_item(dir.path(), "Root");
+    let dep = new_item(dir.path(), "Dep");
+    clove(dir.path())
+        .args(["dep", "add", &root, &dep])
+        .assert()
+        .success();
+
+    let tree = schema("dep-tree.json");
+    let (v, code) = run_json(clove(dir.path()).args(["dep", "tree", &root]));
+    assert_eq!(code, 0);
+    assert_valid(&tree, &v);
+}
+
+#[test]
+fn comments_match_schema() {
+    let dir = init_with_items();
+    let id = new_item(dir.path(), "Discussed");
+    clove(dir.path())
+        .args(["comment", &id, "a note"])
+        .assert()
+        .success();
+
+    let comments = schema("comment-list.json");
+    let (v, code) = run_json(clove(dir.path()).args(["comments", &id]));
+    assert_eq!(code, 0);
+    assert_valid(&comments, &v);
+}
