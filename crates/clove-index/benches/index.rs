@@ -99,6 +99,15 @@ fn bench_index(c: &mut Criterion) {
             criterion::black_box(report.change_count());
         });
     });
+    // M1 gate: FTS5 `clove search` at 10k items should be < 20ms. The corpus
+    // bodies all contain "keyword<i>"; "fox" appears in every body, so this is a
+    // realistically broad match.
+    c.bench_function(&format!("search_{n}"), |b| {
+        b.iter(|| {
+            let rows = index.search("fox", None).unwrap();
+            criterion::black_box(rows.len());
+        });
+    });
 }
 
 criterion_group!(benches, bench_index);
