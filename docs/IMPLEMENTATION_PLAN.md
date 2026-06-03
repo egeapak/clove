@@ -492,6 +492,13 @@
 
 ## M3 — Daemon
 
+> **Status: ✅ complete and gated** (see `docs/M3_PLAN.md` and
+> `docs/M3_ACCEPTANCE_GATES.md`). T-D01–T-D07 all implemented across phases P0–P6;
+> the task specs below are unchanged. New crate `clove-ipc` (lean IPC: protocol +
+> frame codec + sync client); `cloved` gains lifecycle/IPC/watcher/git-sync; `clove`
+> gains `daemon start|stop|status`, transparent read routing, and a `doctor`
+> daemon-health check. Index schema bumped to **v3** (`file_mtimes.synced_at`).
+
 ---
 
 **T-D01: M1 prerequisites for daemon**

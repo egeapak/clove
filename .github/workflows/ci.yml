@@ -65,6 +65,25 @@ jobs:
         run: cargo fuzz run import_tk -- -max_total_time=30
       - name: Fuzz import_beads
         run: cargo fuzz run import_beads -- -max_total_time=30
+      - name: Fuzz ipc_frame
+        run: cargo fuzz run ipc_frame -- -max_total_time=30
+
+  daemon-windows:
+    name: daemon (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # M3 gate M3-G03 (VERIFICATION_PLAN §9): compile the Windows named-event
+      # shutdown path (cloved CreateEventW + `clove daemon stop` OpenEventW/SetEvent)
+      # and run the platform-agnostic daemon unit tests. The Unix-only socket/
+      # signal integration tests are `#![cfg(unix)]` and are exercised on the
+      # ubuntu/macos matrix.
+      - name: Build daemon (windows shutdown path)
+        run: cargo build -p cloved -p clove
+      - name: Daemon unit tests
+        run: cargo test -p cloved --lib
 
   deny:
     name: cargo-deny
