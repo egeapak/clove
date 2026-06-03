@@ -310,28 +310,60 @@ fn doctor_strict_exits_4_on_errors() {
 }
 
 #[test]
-fn ls_uses_index_when_present_and_matches_file_path() {
+fn ls_index_serves_lean_rows_in_same_order_as_files() {
     let dir = init_repo();
     let dep = new_item(dir.path(), "Dep", &[]);
     new_item(dir.path(), "Other", &["--dep", &dep, "--type", "bug"]);
 
-    // Before indexing, the file scan is used.
+    // Before indexing, the file scan is used (full frontmatter objects).
     let files = json_ok(clove(dir.path()).arg("ls"));
     assert_eq!(files["_meta"]["source"], "files");
+    let file_ids: Vec<&str> = files["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_str().unwrap())
+        .collect();
+    // The file path includes full fields like `deps`.
+    assert!(files["data"][0].get("deps").is_some());
 
     clove(dir.path()).arg("reindex").assert().success();
 
-    // After indexing, ls uses the index and returns the same ordered ids.
+    // After indexing, ls uses the index and serves the lean projection
+    // (id/status/type/priority/title) in the SAME id order.
     let indexed = json_ok(clove(dir.path()).arg("ls"));
     assert_eq!(indexed["_meta"]["source"], "index");
-    assert_eq!(
-        indexed["data"], files["data"],
-        "index output must match files"
-    );
+    let index_ids: Vec<&str> = indexed["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(index_ids, file_ids, "index and file ls must agree on order");
 
-    // --no-index forces the file path.
+    let mut keys: Vec<&str> = indexed["data"][0]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(keys, vec!["id", "priority", "status", "title", "type"]);
+
+    // --no-index forces the (full) file path.
     let forced = json_ok(clove(dir.path()).args(["ls", "--no-index"]));
     assert_eq!(forced["_meta"]["source"], "files");
+    assert!(forced["data"][0].get("deps").is_some());
+}
+
+#[test]
+fn ls_deep_flag_still_uses_index() {
+    let dir = init_repo();
+    new_item(dir.path(), "One", &[]);
+    clove(dir.path()).arg("reindex").assert().success();
+    // --deep selects the thorough staleness check but still serves from the index.
+    let v = json_ok(clove(dir.path()).args(["ls", "--deep"]));
+    assert_eq!(v["_meta"]["source"], "index");
 }
 
 #[test]

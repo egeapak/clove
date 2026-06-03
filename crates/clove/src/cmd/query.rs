@@ -8,7 +8,10 @@ use serde::Deserialize;
 
 use crate::cli::QueryArgs;
 use crate::cmd::index_read::list_via_index;
-use crate::cmd::listing::{emit, ranks_of, sort_by_priority_topo, Filters, ListOpts};
+use crate::cmd::listing::{
+    emit, objects_from_frontmatters, objects_from_lean_rows, ranks_of, sort_by_priority_topo,
+    Filters, ListOpts,
+};
 use crate::context::Ctx;
 use crate::item_json::parse_fields;
 
@@ -31,6 +34,7 @@ pub fn run(
     format: OutputFormat,
     args: QueryArgs,
     no_index: bool,
+    deep: bool,
 ) -> Result<(), CloveError> {
     let raw = match args.filter {
         Some(text) => text,
@@ -57,11 +61,13 @@ pub fn run(
     let offset = args.offset.or(qf.offset).unwrap_or(0);
     let limit = args.limit.or(qf.limit);
 
-    if let Some((ordered, warnings)) = list_via_index(ctx, no_index, QueryMode::List, &filters)? {
-        let total = ordered.len();
+    if let Some((rows, warnings)) = list_via_index(ctx, no_index, deep, QueryMode::List, &filters)?
+    {
+        let objects = objects_from_lean_rows(&rows);
+        let total = objects.len();
         emit(
             format,
-            &ordered,
+            objects,
             ListOpts {
                 total,
                 offset,
@@ -79,10 +85,11 @@ pub fn run(
     frontmatters.retain(|fm| filters.matches(fm));
     sort_by_priority_topo(&mut frontmatters, &ranks);
 
-    let total = frontmatters.len();
+    let objects = objects_from_frontmatters(&frontmatters);
+    let total = objects.len();
     emit(
         format,
-        &frontmatters,
+        objects,
         ListOpts {
             total,
             offset,

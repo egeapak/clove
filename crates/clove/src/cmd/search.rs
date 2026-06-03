@@ -5,7 +5,7 @@
 use clove_core::{CloveError, CloveId, ItemFrontmatter, OutputFormat};
 
 use crate::cli::SearchArgs;
-use crate::cmd::listing::{emit, ListOpts};
+use crate::cmd::listing::{emit, objects_from_frontmatters, ListOpts};
 use crate::context::{index_error, Ctx};
 
 pub fn run(
@@ -39,10 +39,11 @@ pub fn run(
         (file_search(ctx, &text)?, "files")
     };
 
-    let total = ordered.len();
+    let objects = objects_from_frontmatters(&ordered);
+    let total = objects.len();
     emit(
         format,
-        &ordered,
+        objects,
         ListOpts {
             total,
             offset: 0,

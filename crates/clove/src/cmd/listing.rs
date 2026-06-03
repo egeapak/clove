@@ -7,7 +7,8 @@ use clove_core::{
     normalize_label, CloveError, CloveId, GraphStore, ItemFrontmatter, ItemStatus, ItemType,
     OutputFormat, Priority,
 };
-use serde_json::{json, Value};
+use clove_index::ItemListRow;
+use serde_json::{json, Map, Value};
 
 use crate::item_json::{frontmatter_object, project};
 use crate::output::{print_json_list, print_jsonl_items};
@@ -100,9 +101,37 @@ pub struct ListOpts<'a> {
     pub warnings: Vec<String>,
 }
 
+/// The JSON object for one item in a list. Built either from full frontmatter
+/// (file path) or a lean index row; both carry at least id/status/type/priority/
+/// title so the human renderer works uniformly.
+pub type ListObject = Map<String, Value>;
+
+/// Build list objects from full frontmatter (the file-scan path).
+pub fn objects_from_frontmatters(fms: &[ItemFrontmatter]) -> Vec<ListObject> {
+    fms.iter().map(frontmatter_object).collect()
+}
+
+/// Build list objects from lean index rows (the index fast path). The lean shape
+/// is `{ id, status, type, priority, title }` — the columns `ls` renders.
+pub fn objects_from_lean_rows(rows: &[ItemListRow]) -> Vec<ListObject> {
+    rows.iter()
+        .map(|r| {
+            let mut m = Map::new();
+            m.insert("id".to_owned(), Value::String(r.id.clone()));
+            m.insert("status".to_owned(), Value::String(r.status.clone()));
+            m.insert("type".to_owned(), Value::String(r.item_type.clone()));
+            m.insert("priority".to_owned(), Value::Number(r.priority.into()));
+            m.insert("title".to_owned(), Value::String(r.title.clone()));
+            m
+        })
+        .collect()
+}
+
 /// Emit a list: apply offset/limit, project fields, and render in `format`.
-pub fn emit(format: OutputFormat, ordered: &[ItemFrontmatter], opts: ListOpts<'_>) {
-    let page: Vec<&ItemFrontmatter> = ordered
+/// Objects are pre-built so the index path can pass a lean projection and the
+/// file path the full frontmatter, through one renderer.
+pub fn emit(format: OutputFormat, objects: Vec<ListObject>, opts: ListOpts<'_>) {
+    let page: Vec<&ListObject> = objects
         .iter()
         .skip(opts.offset)
         .take(opts.limit.unwrap_or(usize::MAX))
@@ -112,11 +141,10 @@ pub fn emit(format: OutputFormat, ordered: &[ItemFrontmatter], opts: ListOpts<'_
         OutputFormat::Json | OutputFormat::Jsonl => {
             let values: Vec<Value> = page
                 .iter()
-                .map(|fm| {
-                    let obj = frontmatter_object(fm);
+                .map(|obj| {
                     let obj = match opts.fields {
-                        Some(f) => project(obj, f),
-                        None => obj,
+                        Some(f) => project((*obj).clone(), f),
+                        None => (*obj).clone(),
                     };
                     Value::Object(obj)
                 })
@@ -137,14 +165,16 @@ pub fn emit(format: OutputFormat, ordered: &[ItemFrontmatter], opts: ListOpts<'_
             }
         }
         OutputFormat::Human => {
-            for fm in &page {
+            for obj in &page {
+                let s = |k: &str| obj.get(k).and_then(Value::as_str).unwrap_or("");
+                let priority = obj.get("priority").and_then(Value::as_u64).unwrap_or(0);
                 println!(
                     "{}  [{}] p{} {}  {}",
-                    fm.id.as_str(),
-                    fm.status.as_str(),
-                    fm.priority.get(),
-                    fm.item_type.as_str(),
-                    fm.title
+                    s("id"),
+                    s("status"),
+                    priority,
+                    s("type"),
+                    s("title")
                 );
             }
         }

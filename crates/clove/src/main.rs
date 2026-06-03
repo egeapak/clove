@@ -51,6 +51,7 @@ fn main() -> std::process::ExitCode {
 fn dispatch(cli: Cli) -> (OutputFormat, Result<ExitCode, CloveError>) {
     let flag = cli.format;
     let no_index = cli.no_index;
+    let deep = cli.deep;
     let quiet = cli.quiet;
     let clove_dir = cli.clove_dir.clone();
 
@@ -78,7 +79,7 @@ fn dispatch(cli: Cli) -> (OutputFormat, Result<ExitCode, CloveError>) {
                 Err(e) => return (resolve_format(flag, None), Err(e)),
             };
             let f = resolve_format(flag, Some(ctx.config.default_format));
-            (f, run_repo(command, &ctx, f, no_index, quiet))
+            (f, run_repo(command, &ctx, f, no_index, deep, quiet))
         }
     }
 }
@@ -88,6 +89,7 @@ fn run_repo(
     ctx: &Ctx,
     f: OutputFormat,
     no_index: bool,
+    deep: bool,
     quiet: bool,
 ) -> Result<ExitCode, CloveError> {
     let ok = ExitCode::Success;
@@ -110,10 +112,10 @@ fn run_repo(
         Commands::Assign(a) => cmd::assign::run(ctx, f, &a.id, a.assignee, a.clear).map(|_| ok),
         Commands::Priority(a) => cmd::priority::run(ctx, f, &a.id, a.priority).map(|_| ok),
         Commands::Dep(a) => cmd::dep::run(ctx, f, a.action),
-        Commands::Ready(a) => cmd::ready::run(ctx, f, a, quiet, no_index).map(|_| ok),
+        Commands::Ready(a) => cmd::ready::run(ctx, f, a, quiet, no_index, deep).map(|_| ok),
         Commands::Blocked(a) => cmd::blocked::run(ctx, f, a, quiet).map(|_| ok),
-        Commands::Ls(a) => cmd::ls::run(ctx, f, a, no_index).map(|_| ok),
-        Commands::Query(a) => cmd::query::run(ctx, f, a, no_index).map(|_| ok),
+        Commands::Ls(a) => cmd::ls::run(ctx, f, a, no_index, deep).map(|_| ok),
+        Commands::Query(a) => cmd::query::run(ctx, f, a, no_index, deep).map(|_| ok),
         Commands::Comment(a) => cmd::comments::add(ctx, f, &a.id, &a.message, quiet).map(|_| ok),
         Commands::Comments(a) => cmd::comments::list(ctx, f, &a.id, a.limit).map(|_| ok),
         Commands::Search(a) => cmd::search::run(ctx, f, a, no_index).map(|_| ok),

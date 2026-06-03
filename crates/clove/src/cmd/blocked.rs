@@ -5,7 +5,9 @@ use std::collections::HashMap;
 use clove_core::{CloveError, CloveId, ItemFrontmatter, OutputFormat};
 
 use crate::cli::FilterArgs;
-use crate::cmd::listing::{emit, ranks_of, sort_by_priority_topo, Filters, ListOpts};
+use crate::cmd::listing::{
+    emit, objects_from_frontmatters, ranks_of, sort_by_priority_topo, Filters, ListOpts,
+};
 use crate::context::Ctx;
 use crate::item_json::parse_fields;
 
@@ -40,11 +42,12 @@ pub fn run(
     ordered.retain(|fm| filters.matches(fm));
     sort_by_priority_topo(&mut ordered, &ranks);
 
-    let total = ordered.len();
     let fields = args.fields.as_deref().map(parse_fields);
+    let objects = objects_from_frontmatters(&ordered);
+    let total = objects.len();
     emit(
         format,
-        &ordered,
+        objects,
         ListOpts {
             total,
             offset: args.offset.unwrap_or(0),

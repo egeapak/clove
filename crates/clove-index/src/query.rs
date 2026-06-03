@@ -10,7 +10,7 @@ use clove_core::graph::EdgeKind;
 use clove_core::{CloveId, ItemStatus, ItemType, Priority};
 use rusqlite::{Connection, ToSql};
 
-use crate::db::{IndexError, ItemRow, ITEM_COLUMNS};
+use crate::db::{IndexError, ItemListRow, ItemRow, ITEM_COLUMNS, LIST_COLUMNS};
 
 /// Which query to run.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -39,8 +39,14 @@ pub struct Filter {
     pub limit: Option<usize>,
 }
 
-/// Run a filtered query against the index (T-S07).
-pub fn query_items(conn: &Connection, filter: &Filter) -> Result<Vec<ItemRow>, IndexError> {
+/// Build the shared `WHERE … ORDER BY … [LIMIT …]` tail (and bound params) for a
+/// filtered query, so the full and lean projections stay identical in selection
+/// and ordering.
+///
+/// `topological_rank IS NULL` sorts unranked items (cyclic graph, or not yet
+/// reindexed) last — matching clove-core's file-path ordering, which treats a
+/// missing rank as `usize::MAX` (graph.rs `ready_items`).
+fn where_order_sql(filter: &Filter) -> (String, Vec<Box<dyn ToSql>>) {
     let mut where_clauses: Vec<String> = Vec::new();
     let mut params: Vec<Box<dyn ToSql>> = Vec::new();
 
@@ -48,7 +54,6 @@ pub fn query_items(conn: &Connection, filter: &Filter) -> Result<Vec<ItemRow>, I
         QueryMode::Ready => {
             where_clauses.push("status IN ('open', 'in_progress')".to_owned());
             where_clauses.push("has_dangling_deps = FALSE".to_owned());
-            // Every hard dependency must be closed.
             where_clauses.push(format!(
                 "NOT EXISTS (SELECT 1 FROM edges e JOIN items dep ON e.to_id = dep.id \
                  WHERE e.from_id = items.id AND e.kind = {} AND dep.status != 'closed')",
@@ -98,18 +103,36 @@ pub fn query_items(conn: &Connection, filter: &Filter) -> Result<Vec<ItemRow>, I
         Some(n) => format!(" LIMIT {n}"),
         None => String::new(),
     };
-    // `topological_rank IS NULL` sorts unranked items (cyclic graph, or not yet
-    // reindexed) last — matching clove-core's file-path ordering, which treats a
-    // missing rank as `usize::MAX` (graph.rs `ready_items`). Required for the M1
-    // "identical output from both paths" gate.
-    let sql = format!(
-        "SELECT {ITEM_COLUMNS} FROM items{where_sql} \
-         ORDER BY priority ASC, topological_rank IS NULL ASC, topological_rank ASC, id ASC{limit_sql}"
+    let tail = format!(
+        "{where_sql} ORDER BY priority ASC, topological_rank IS NULL ASC, \
+         topological_rank ASC, id ASC{limit_sql}"
     );
+    (tail, params)
+}
 
+/// Run a filtered query returning full item rows (T-S07).
+pub fn query_items(conn: &Connection, filter: &Filter) -> Result<Vec<ItemRow>, IndexError> {
+    let (tail, params) = where_order_sql(filter);
+    let sql = format!("SELECT {ITEM_COLUMNS} FROM items{tail}");
     let param_refs: Vec<&dyn ToSql> = params.iter().map(|b| b.as_ref()).collect();
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(param_refs.as_slice(), ItemRow::from_row)?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+/// Run a filtered query returning the lean `clove ls` projection — same
+/// selection and order as [`query_items`], but only the columns `ls` renders.
+/// This is the index fast path for large lists.
+pub fn query_list(conn: &Connection, filter: &Filter) -> Result<Vec<ItemListRow>, IndexError> {
+    let (tail, params) = where_order_sql(filter);
+    let sql = format!("SELECT {LIST_COLUMNS} FROM items{tail}");
+    let param_refs: Vec<&dyn ToSql> = params.iter().map(|b| b.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(param_refs.as_slice(), ItemListRow::from_row)?;
     let mut out = Vec::new();
     for row in rows {
         out.push(row?);
@@ -154,6 +177,11 @@ impl crate::db::Index {
     /// Run a filtered query against the index (T-S07).
     pub fn query_items(&self, filter: &Filter) -> Result<Vec<ItemRow>, IndexError> {
         query_items(self.conn(), filter)
+    }
+
+    /// Run a filtered query returning the lean list projection.
+    pub fn query_list(&self, filter: &Filter) -> Result<Vec<ItemListRow>, IndexError> {
+        query_list(self.conn(), filter)
     }
 
     /// Full-text search (T-S05).

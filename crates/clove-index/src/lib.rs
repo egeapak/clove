@@ -21,8 +21,8 @@ pub mod reindex;
 pub mod stale;
 pub mod write;
 
-pub use db::{Index, IndexError, ItemRow, SCHEMA_VERSION};
-pub use query::{query_items, search, Filter, QueryMode};
+pub use db::{Index, IndexError, ItemListRow, ItemRow, SCHEMA_VERSION};
+pub use query::{query_items, query_list, search, Filter, QueryMode};
 pub use reindex::{reindex, ReindexReport};
-pub use stale::{apply_staleness, check_staleness, StalenessReport};
+pub use stale::{apply_staleness, check_staleness, check_staleness_fast, StalenessReport};
 pub use write::upsert_item;

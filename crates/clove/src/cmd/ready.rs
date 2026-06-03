@@ -7,7 +7,9 @@ use clove_index::QueryMode;
 
 use crate::cli::FilterArgs;
 use crate::cmd::index_read::list_via_index;
-use crate::cmd::listing::{emit, ranks_of, Filters, ListOpts};
+use crate::cmd::listing::{
+    emit, objects_from_frontmatters, objects_from_lean_rows, ranks_of, Filters, ListOpts,
+};
 use crate::context::Ctx;
 use crate::item_json::parse_fields;
 
@@ -17,6 +19,7 @@ pub fn run(
     args: FilterArgs,
     quiet: bool,
     no_index: bool,
+    deep: bool,
 ) -> Result<(), CloveError> {
     let filters = Filters::parse(
         args.status.as_deref(),
@@ -26,16 +29,19 @@ pub fn run(
         args.priority,
     )?;
     let fields = args.fields.as_deref().map(parse_fields);
+    let offset = args.offset.unwrap_or(0);
 
     // Index fast path: the ready SQL replaces the in-memory graph build.
-    if let Some((ordered, warnings)) = list_via_index(ctx, no_index, QueryMode::Ready, &filters)? {
-        let total = ordered.len();
+    if let Some((rows, warnings)) = list_via_index(ctx, no_index, deep, QueryMode::Ready, &filters)?
+    {
+        let objects = objects_from_lean_rows(&rows);
+        let total = objects.len();
         emit(
             format,
-            &ordered,
+            objects,
             ListOpts {
                 total,
-                offset: args.offset.unwrap_or(0),
+                offset,
                 limit: args.limit,
                 fields: fields.as_deref(),
                 source: "index",
@@ -45,6 +51,7 @@ pub fn run(
         return Ok(());
     }
 
+    // File-scan fallback: build the graph and compute the ready set.
     let (frontmatters, _errors) = ctx.store.scan_frontmatter()?;
     let by_id: HashMap<CloveId, ItemFrontmatter> = frontmatters
         .iter()
@@ -59,7 +66,6 @@ pub fn run(
         .iter()
         .filter_map(|id| by_id.get(id).cloned())
         .collect();
-
     ordered.retain(|fm| filters.matches(fm));
 
     // Items excluded from `ready` because they reference missing dependencies.
@@ -86,13 +92,14 @@ pub fn run(
         warnings.push(msg);
     }
 
-    let total = ordered.len();
+    let objects = objects_from_frontmatters(&ordered);
+    let total = objects.len();
     emit(
         format,
-        &ordered,
+        objects,
         ListOpts {
             total,
-            offset: args.offset.unwrap_or(0),
+            offset,
             limit: args.limit,
             fields: fields.as_deref(),
             source: "files",

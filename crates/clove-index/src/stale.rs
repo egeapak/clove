@@ -193,6 +193,84 @@ pub fn check_staleness(
     Ok(report)
 }
 
+/// Read the `meta` staleness oracle row, if present.
+fn read_meta(conn: &Connection) -> Result<Option<(i64, i64)>, IndexError> {
+    let meta = conn
+        .query_row(
+            "SELECT dir_mtime, file_count FROM meta WHERE id = 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(meta)
+}
+
+/// Count item files **without** stat-ing each one (readdir + name validation
+/// only). The cheap directory-level signal for the fast staleness path.
+fn count_item_files(issues_dir: &Utf8Path) -> Result<i64, IndexError> {
+    let read_dir = std::fs::read_dir(issues_dir).map_err(|source| IndexError::IoError {
+        path: issues_dir.to_owned(),
+        source,
+    })?;
+    let mut count = 0i64;
+    for entry in read_dir {
+        let entry = entry.map_err(|source| IndexError::IoError {
+            path: issues_dir.to_owned(),
+            source,
+        })?;
+        let file_type = entry.file_type().map_err(|source| IndexError::IoError {
+            path: issues_dir.to_owned(),
+            source,
+        })?;
+        if !file_type.is_file() {
+            continue;
+        }
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if name
+            .strip_suffix(".md")
+            .and_then(|stem| CloveId::new(stem).ok())
+            .is_some()
+        {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+/// Like [`check_staleness`] but O(readdir): when the directory mtime and file
+/// count still match the `meta` oracle (and the directory was not touched within
+/// the last 2 s), return "clean" without stat-ing or hashing any file. Only on a
+/// directory-level mismatch does it fall back to the full per-file pass.
+///
+/// **Tradeoff (the `--deep` escape hatch exists for this):** a content rewrite
+/// that changes neither the directory mtime nor the file count — i.e. an
+/// *in-place* edit not done through clove's atomic rename — is not detected until
+/// the next add/delete/rename, `git checkout`, or `reindex`. clove's own writes
+/// go through an atomic rename, which bumps the directory mtime, so they are
+/// always detected; use [`check_staleness`] (deep) when out-of-band in-place
+/// edits must be caught.
+pub fn check_staleness_fast(
+    conn: &Connection,
+    issues_dir: &Utf8Path,
+) -> Result<StalenessReport, IndexError> {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let cur_dir_mtime = dir_mtime_ms(issues_dir)?;
+    let cur_count = count_item_files(issues_dir)?;
+    if let Some((dir_mtime, file_count)) = read_meta(conn)? {
+        if dir_mtime == cur_dir_mtime
+            && file_count == cur_count
+            && now_ms - cur_dir_mtime >= RECENT_WINDOW_MS
+        {
+            return Ok(StalenessReport::default());
+        }
+    }
+    // Something changed at the directory level (or the dir is freshly touched):
+    // do the authoritative per-file pass to identify exactly what.
+    check_staleness(conn, issues_dir)
+}
+
 /// Apply a [`StalenessReport`]: re-parse and upsert new/changed items, delete
 /// removed ones, all in one transaction (T-S03).
 ///
@@ -269,9 +347,19 @@ fn file_mtime_ms(path: &Utf8Path) -> Result<i64, IndexError> {
 }
 
 impl Index {
-    /// Detect items that differ between the files and the index (T-S03).
+    /// Detect items that differ between the files and the index — the thorough
+    /// per-file pass (the `--deep` path); T-S03.
     pub fn check_staleness(&self, issues_dir: &Utf8Path) -> Result<StalenessReport, IndexError> {
         check_staleness(self.conn(), issues_dir)
+    }
+
+    /// Fast staleness check (O(readdir)): trusts the directory mtime + file count
+    /// for the common clean case. See [`check_staleness_fast`] for the tradeoff.
+    pub fn check_staleness_fast(
+        &self,
+        issues_dir: &Utf8Path,
+    ) -> Result<StalenessReport, IndexError> {
+        check_staleness_fast(self.conn(), issues_dir)
     }
 
     /// Apply a staleness report, resyncing the index in one transaction (T-S03).
@@ -429,6 +517,74 @@ mod tests {
         assert!(
             after.stale_ids.is_empty() && after.deleted_ids.is_empty(),
             "{after:?}"
+        );
+    }
+
+    /// Set the issues directory's mtime to a fixed point in the past.
+    fn backdate_dir(issues: &camino::Utf8Path) {
+        let past = filetime::FileTime::from_unix_time(1_600_000_000, 0);
+        filetime::set_file_mtime(issues.as_std_path(), past).unwrap();
+    }
+
+    #[test]
+    fn fast_clean_when_directory_unchanged() {
+        let fx = fixture(10);
+        reindex(&fx.issues, &fx.db).unwrap();
+        backdate(&fx.issues);
+        reindex(&fx.issues, &fx.db).unwrap(); // meta.dir_mtime = backdated
+
+        let index = Index::open(&fx.db).unwrap();
+        assert!(index.check_staleness_fast(&fx.issues).unwrap().is_clean());
+    }
+
+    #[test]
+    fn fast_detects_added_and_deleted() {
+        let fx = fixture(5);
+        reindex(&fx.issues, &fx.db).unwrap();
+        backdate(&fx.issues);
+        reindex(&fx.issues, &fx.db).unwrap();
+
+        // Adding a file changes the directory mtime + count → fast path falls to
+        // the full pass and reports it.
+        let new_id = id_for(999);
+        std::fs::write(
+            fx.issues.join(format!("{new_id}.md")),
+            item_md(&new_id, "New", "body"),
+        )
+        .unwrap();
+        let index = Index::open(&fx.db).unwrap();
+        let report = index.check_staleness_fast(&fx.issues).unwrap();
+        assert_eq!(report.new_ids.len(), 1, "{report:?}");
+    }
+
+    #[test]
+    fn fast_misses_inplace_edit_that_deep_catches() {
+        // The documented tradeoff: an in-place content rewrite that does not
+        // change the directory entry list (no add/delete/rename) is invisible to
+        // the fast path but caught by the deep (`--deep`) path.
+        let fx = fixture(5);
+        reindex(&fx.issues, &fx.db).unwrap();
+        backdate(&fx.issues);
+        reindex(&fx.issues, &fx.db).unwrap();
+
+        let id = id_for(0);
+        let path = fx.issues.join(format!("{id}.md"));
+        // In-place rewrite: file mtime becomes "now", count unchanged.
+        std::fs::write(&path, item_md(&id, "Item 0", "MUTATED body")).unwrap();
+        // Pin the directory mtime back to the past to isolate the "directory
+        // unchanged" condition the fast path trusts (some filesystems may have
+        // bumped it; the point is the fast path believes nothing changed).
+        backdate_dir(&fx.issues);
+
+        let index = Index::open(&fx.db).unwrap();
+        assert!(
+            index.check_staleness_fast(&fx.issues).unwrap().is_clean(),
+            "fast path trusts the unchanged directory and misses the in-place edit"
+        );
+        assert_eq!(
+            index.check_staleness(&fx.issues).unwrap().stale_ids.len(),
+            1,
+            "deep path stats the file and catches the change"
         );
     }
 }

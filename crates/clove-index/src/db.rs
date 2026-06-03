@@ -215,6 +215,37 @@ impl ItemRow {
     }
 }
 
+/// The lean column list for list views — just what `clove ls` renders. Selecting
+/// only these (vs. all of [`ITEM_COLUMNS`]) is what lets the index `ls` path hit
+/// its latency budget: no per-row label-JSON parse and ~3× fewer allocations.
+pub(crate) const LIST_COLUMNS: &str = "id, status, item_type, priority, title";
+
+/// A lean list row (the `clove ls` projection): only the columns the list
+/// renders, so there is no per-row label-JSON parse and ~3× fewer allocations
+/// than [`ItemRow`]. (`SmolStr` for the short columns was tried and saved < 1 ms
+/// at 10k — the floor is SQLite's per-row step cost — so plain `String` is kept.)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemListRow {
+    pub id: String,
+    pub status: String,
+    pub item_type: String,
+    pub priority: u8,
+    pub title: String,
+}
+
+impl ItemListRow {
+    /// Decode a row selected with [`LIST_COLUMNS`] (column order matters).
+    pub(crate) fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ItemListRow> {
+        Ok(ItemListRow {
+            id: row.get(0)?,
+            status: row.get(1)?,
+            item_type: row.get(2)?,
+            priority: row.get(3)?,
+            title: row.get(4)?,
+        })
+    }
+}
+
 /// A handle to an opened SQLite index.
 #[derive(Debug)]
 pub struct Index {

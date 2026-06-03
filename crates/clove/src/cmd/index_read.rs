@@ -1,13 +1,13 @@
 //! Index-accelerated read path (T-S06, DESIGN §6.4).
 //!
 //! When a fresh `index.db` is present, `ls`/`ready`/`query` resolve their
-//! filtered, ordered id set from SQLite instead of scanning + graph-building
-//! every file. Output objects are still read from the files (the source of
-//! truth), so the JSON is byte-for-byte identical to the file-scan path. A stale
-//! index is transparently refreshed (≤ the threshold) or bypassed.
+//! filtered, ordered result **directly from SQLite** as a lean projection (the
+//! columns the list renders) — no per-item file read. A stale index is
+//! transparently refreshed (≤ the threshold) or bypassed. Staleness uses the
+//! fast O(readdir) check by default; `--deep` forces the thorough per-file pass.
 
-use clove_core::{parse_frontmatter_file, CloveError, CloveId, ItemFrontmatter};
-use clove_index::{Filter, Index, QueryMode};
+use clove_core::CloveError;
+use clove_index::{Filter, Index, ItemListRow, QueryMode};
 
 use crate::cmd::listing::Filters;
 use crate::context::{index_error, Ctx};
@@ -16,18 +16,19 @@ use crate::context::{index_error, Ctx};
 /// to a file scan (DESIGN §6.4).
 const STALE_REFRESH_LIMIT: usize = 20;
 
-/// The index read result: the ordered, filtered frontmatters plus any warnings.
-pub type IndexList = (Vec<ItemFrontmatter>, Vec<String>);
+/// The index read result: the lean rows plus any warnings to surface.
+pub type IndexList = (Vec<ItemListRow>, Vec<String>);
 
 /// Try to satisfy a list/ready query from the index.
 ///
-/// Returns `Some((ordered_frontmatters, warnings))` when the index was used
-/// (caller sets `_meta.source = "index"`), or `None` to fall back to the file
-/// path. `None` is returned for `--no-index`, a missing/broken index, or one too
-/// stale to refresh cheaply.
+/// Returns `Some((rows, warnings))` when the index was used (caller sets
+/// `_meta.source = "index"`), or `None` to fall back to the file path. `None` is
+/// returned for `--no-index`, a missing/broken index, or one too stale to refresh
+/// cheaply.
 pub fn list_via_index(
     ctx: &Ctx,
     no_index: bool,
+    deep: bool,
     mode: QueryMode,
     filters: &Filters,
 ) -> Result<Option<IndexList>, CloveError> {
@@ -43,9 +44,13 @@ pub fn list_via_index(
 
     // Freshen the index unless the repo disables auto-refresh.
     if ctx.config.index.auto_refresh {
-        let report = index
-            .check_staleness(&ctx.issues_dir)
-            .map_err(|e| index_error(e, &ctx.db_path))?;
+        let report = if deep {
+            index.check_staleness(&ctx.issues_dir)
+        } else {
+            index.check_staleness_fast(&ctx.issues_dir)
+        }
+        .map_err(|e| index_error(e, &ctx.db_path))?;
+
         if report.change_count() > STALE_REFRESH_LIMIT {
             // Too far behind to refresh inline — use the files instead.
             return Ok(None);
@@ -68,19 +73,7 @@ pub fn list_via_index(
         limit: None,
     };
     let rows = index
-        .query_items(&filter)
+        .query_list(&filter)
         .map_err(|e| index_error(e, &ctx.db_path))?;
-
-    // Read each matched item's frontmatter from its file so output matches the
-    // file-scan path exactly. Files that vanished since the refresh are skipped.
-    let mut ordered = Vec::with_capacity(rows.len());
-    for row in &rows {
-        let Ok(id) = CloveId::new(&row.id) else {
-            continue;
-        };
-        if let Ok(fm) = parse_frontmatter_file(&ctx.store.path_for(&id)) {
-            ordered.push(fm);
-        }
-    }
-    Ok(Some((ordered, Vec::new())))
+    Ok(Some((rows, Vec::new())))
 }

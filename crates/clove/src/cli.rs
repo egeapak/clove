@@ -17,6 +17,11 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub no_index: bool,
 
+    /// Use the thorough per-file staleness check (stats every file) instead of
+    /// the fast directory-level check, when reading via the index.
+    #[arg(long, global = true)]
+    pub deep: bool,
+
     /// Suppress informational stderr output.
     #[arg(long, global = true)]
     pub quiet: bool,

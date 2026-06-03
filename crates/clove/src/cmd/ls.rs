@@ -5,7 +5,10 @@ use clove_index::QueryMode;
 
 use crate::cli::FilterArgs;
 use crate::cmd::index_read::list_via_index;
-use crate::cmd::listing::{emit, ranks_of, sort_by_priority_topo, Filters, ListOpts};
+use crate::cmd::listing::{
+    emit, objects_from_frontmatters, objects_from_lean_rows, ranks_of, sort_by_priority_topo,
+    Filters, ListOpts,
+};
 use crate::context::Ctx;
 use crate::item_json::parse_fields;
 
@@ -14,6 +17,7 @@ pub fn run(
     format: OutputFormat,
     args: FilterArgs,
     no_index: bool,
+    deep: bool,
 ) -> Result<(), CloveError> {
     let filters = Filters::parse(
         args.status.as_deref(),
@@ -23,16 +27,19 @@ pub fn run(
         args.priority,
     )?;
     let fields = args.fields.as_deref().map(parse_fields);
+    let offset = args.offset.unwrap_or(0);
 
-    // Index fast path: the DB does the filtering and ordering.
-    if let Some((ordered, warnings)) = list_via_index(ctx, no_index, QueryMode::List, &filters)? {
-        let total = ordered.len();
+    // Index fast path: the DB serves the lean projection directly.
+    if let Some((rows, warnings)) = list_via_index(ctx, no_index, deep, QueryMode::List, &filters)?
+    {
+        let objects = objects_from_lean_rows(&rows);
+        let total = objects.len();
         emit(
             format,
-            &ordered,
+            objects,
             ListOpts {
                 total,
-                offset: args.offset.unwrap_or(0),
+                offset,
                 limit: args.limit,
                 fields: fields.as_deref(),
                 source: "index",
@@ -42,19 +49,20 @@ pub fn run(
         return Ok(());
     }
 
-    // File-scan fallback.
+    // File-scan fallback (full frontmatter objects).
     let (mut frontmatters, _errors) = ctx.store.scan_frontmatter()?;
     let (_graph, ranks) = ranks_of(&frontmatters);
     frontmatters.retain(|fm| filters.matches(fm));
     sort_by_priority_topo(&mut frontmatters, &ranks);
 
-    let total = frontmatters.len();
+    let objects = objects_from_frontmatters(&frontmatters);
+    let total = objects.len();
     emit(
         format,
-        &frontmatters,
+        objects,
         ListOpts {
             total,
-            offset: args.offset.unwrap_or(0),
+            offset,
             limit: args.limit,
             fields: fields.as_deref(),
             source: "files",
