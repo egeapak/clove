@@ -941,6 +941,7 @@ Every gate must be green before tagging M0.
 | M3-G07 | git auto-sync skip-during-rebase | T-D06 AC passes |
 | M3-G08 | Two daemons prevention | Second daemon exits non-zero |
 | M3-G09 | All M2 gates still pass | Full M2 gate suite re-runs |
+| M3-G10 | `doctor` daemon-health | T-D07 AC: stale sock/pid/lock flagged; `--fix` cleans a dead-daemon footprint; live daemon untouched (added by M3_PLAN.md §1.1 CLI-surface review) |
 
 ---
 

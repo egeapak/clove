@@ -29,6 +29,7 @@ existing direct/index/file-scan paths whenever the daemon is absent.
 | T-D04 | File watcher (notify), debounce/batch, startup mtime sweep | §8.5, §8.6 |
 | T-D05 | `clove daemon start\|stop\|status`, `[daemon]` config, idle shutdown | §7.2, §8.8 |
 | T-D06 | Git auto-sync (opt-in, never push) | §8.7 |
+| **T-D07** | **`clove doctor` daemon-health extension** (new — CLI extension, see §1.1) | §7.7, §8.3 |
 
 **What already exists (consumed, not rebuilt):**
 
@@ -98,6 +99,68 @@ history/changelog. No new frontmatter fields. No mandatory daemon. No `git push`
 (auto-sync only ever `add`+`commit`, per §8.7). No multi-repo/global daemon (one
 per `.clove/`, §8.1).
 
+### 1.1 CLI-surface review (what M3 changes, what defers)
+
+The daemon introduces operational state (a socket, pid, lock, and a background
+writer) that the existing CLI surface does not yet account for. This review
+records exactly what M3 adds, plus two items the user flagged: stats-tracking and
+`doctor` coverage.
+
+**New CLI surface in M3 (the only additions):**
+- `clove daemon start|stop|status` — the §7.2 subcommand (T-D05).
+- **`clove doctor` daemon-health checks** — an *extension to the existing
+  command*, not a new command (T-D07, below). Required because once a daemon can
+  leave a `daemon.sock`/`daemon.pid`/`daemon.lock` behind, `doctor` (the store
+  health check, §7.7) must be able to see and (`--fix`) clean a stale/dead-daemon
+  footprint — today it only checks file integrity (M0) + index divergence (M1).
+
+**No other read/write command changes shape.** Daemon routing is transparent
+(§8.3): a read command may be *answered by* the daemon (envelope `_meta.source =
+"daemon"`) but its arguments, output schema, and exit codes are unchanged. The
+"nothing required but the binary and the files" guarantee means every command must
+still behave identically with the daemon absent (gate-enforced, M3-G04 fallback).
+
+**Stats-tracking — split into operational (M3) vs. analytics (deferred to M4):**
+- *Operational daemon stats are in M3* as the `STATUS` IPC payload
+  (`{uptime_s, items_indexed, watcher_state, last_event_ms}`, surfaced by
+  `clove daemon status`, T-D03/T-D05). This is the daemon's own runtime telemetry,
+  not work-item analytics, and is intrinsic to running a daemon.
+- *A user-facing work-item analytics command (`clove stats`)* — counts by
+  status/type/priority/assignee, ready/blocked/closed totals, cycle count, epic
+  rollups, throughput over time — **does not exist today** and is **not specified
+  in the PRD or DESIGN §7.2**. It is **not** required by M3 and is **deferred to
+  M4 (Extras)**. It is recorded here and added to `IMPLEMENTATION_PLAN.md` M4 so it
+  is not lost; the daemon's index already makes such aggregate queries cheap, which
+  is why M4 is its natural home (it would consume, not block, M3).
+
+### 1.2 Original-AC cross-check (T-D01–T-D06)
+
+Every acceptance criterion from `IMPLEMENTATION_PLAN.md` "M3 — Daemon" and the
+M3 Acceptance Gates block is covered by a phase below; this table is the audit:
+
+| Original AC (IMPLEMENTATION_PLAN) | Covered by | Phase |
+|---|---|---|
+| T-D01: all writes atomic-rename; `BEGIN IMMEDIATE`; `file_mtimes` present | invariant `#[test]`s | P0 |
+| T-D02: SIGTERM → clean exit, pid+sock removed, exit 0 | `daemon_lifecycle.rs` SIGTERM test (M3-G03) | P1 |
+| T-D02: Windows named-event → clean exit | `#[cfg(windows)]` shutdown test (`daemon-windows` CI) | P1 |
+| T-D02: two daemons → second exits non-zero | two-daemon guard test (M3-G08) | P1 |
+| T-D03: stale socket recovery, next `clove ls` < 200ms | SIGKILL + fallback test (M3-G04) | P2 |
+| T-D03: IPC PING/PONG round-trip | round-trip test + bench (M3-G01) | P2 |
+| T-D04: feedback-loop — zero `index.db` events on reindex | feedback-loop test (M3-G05) | P3 |
+| T-D04: debounce — 10 chunks × 10ms → exactly 1 update | debounce test (M3-G06) | P3 |
+| T-D04: startup sweep 1k/50 modified → ready < 500ms | startup bench/gate (M3-G02) | P3 |
+| T-D05: `start\|stop\|status` functional | `daemon_cli.rs` round-trip | P4 |
+| T-D05: idle shutdown via advanced (mock) time | tokio paused-time test | P4 |
+| T-D06: skip-during-rebase | rebase-guard test (M3-G07) | P5 |
+| T-D06: malformed-skip | invalid-frontmatter test | P5 |
+| T-D06: `synced_at` prevents re-commit | one-commit/no-loop test | P5 |
+| M3 gates: IPC < 5ms; sweep < 500ms; SIGTERM no stale; M0/M1/M2 still pass | M3-G01/G02/G03/G09 | P2/P3/P1/P6 |
+
+**Gap found and closed by this review:** the original AC have **no daemon-aware
+`doctor` check** even though M3 is the first milestone that can leave daemon
+artifacts on disk. T-D07 below closes it (new gate **M3-G10**); the stats-analytics
+gap is intentionally deferred to M4 (above).
+
 ---
 
 ## 2. Shared architecture (built in Phase 0, used by the rest)
@@ -131,6 +194,8 @@ crates/cloved/src/                 (tokio runtime; default-on `git-sync` feature
 crates/clove/src/cmd/
   daemon.rs         // T-D05: `clove daemon start|stop|status`; detached spawn;
                     //   stop via signal + poll; status via DaemonClient
+  doctor.rs (edit)  // T-D07: append daemon-health checks (stale sock/pid, orphan
+                    //   lock, pid/sock mismatch); --fix removes dead-daemon artifacts
 crates/clove/src/
   context.rs (edit) // liveness probe → route reads through DaemonClient when alive,
                     //   else today's index/file path (unchanged fallback)
@@ -322,8 +387,38 @@ startup sweep (1k/50) → ready < 500ms.
   assert the daemon self-terminates and cleans up.
 - `status --format json` validates against the standard envelope schema.
 
-**Gate P4 (T-D05 AC):** `start|stop|status` functional and idempotent; idle
-shutdown fires; JSON envelopes valid.
+**Build (T-D07 — `clove doctor` daemon-health extension):** extend
+`clove/cmd/doctor.rs` with a daemon-footprint check that runs after the existing
+M0 file checks + M1 index-divergence check (same `DoctorIssue`/`--fix` machinery,
+all **warning** severity — operational, not data-integrity, so warnings still
+exit 0 like the index-divergence check):
+- **Stale socket/pid** — `daemon.sock` and/or `daemon.pid` present but no live
+  daemon (liveness probe via `DaemonClient`: connect+PING fails) → warning;
+  `--fix` removes the dead `daemon.sock`+`daemon.pid` (the §8.3 cleanup, surfaced
+  as an explicit health repair).
+- **Orphaned `daemon.lock`** — lock file present and not held by any live daemon →
+  warning; `--fix` removes it. Conservative: only when liveness is negative, since
+  an `fd-lock` advisory lock file legitimately persists while a daemon runs.
+- **pid/socket mismatch** — exactly one of `daemon.pid`/`daemon.sock` present (a
+  half-written or partially-cleaned footprint) → warning; `--fix` removes the
+  orphan.
+- A **live, healthy daemon** produces **no** findings (and is never touched by
+  `--fix`). With `--no-index` the daemon checks still run (they are socket/pid
+  state, independent of the index).
+
+**Tests (`crates/clove/tests/doctor_daemon.rs`, assert_cmd):**
+- Live daemon → `doctor` reports zero daemon findings; `--fix` leaves sock/pid/lock
+  intact.
+- SIGKILL'd daemon (stale sock+pid+lock) → `doctor` warns on each;
+  `doctor --fix` removes them and a re-run is clean.
+- pid-without-sock and sock-without-pid each → one warning; `--fix` removes orphan.
+- `--strict` with only daemon warnings still exits 0 (warnings are not errors).
+- JSON mode: findings carry `{severity:"warning", code:"daemon-stale-socket"|…,
+  fixable:true}` and validate against the existing doctor JSON shape.
+
+**Gate P4 (T-D05 AC, T-D07/M3-G10):** `start|stop|status` functional and
+idempotent; idle shutdown fires; JSON envelopes valid; `doctor` detects and
+`--fix` cleans a dead-daemon footprint while never touching a live daemon's files.
 
 ### Phase 5 — Git auto-sync (T-D06, feature `git-sync`)
 
@@ -378,7 +473,9 @@ re-commit loop; never pushes; feature-off build is clean and fails fast on
   the measured numbers, the `git-sync` feature/cross-build caveat, and the Windows
   named-event note.
 - Update `HANDOFF.md` (state → "M3 complete and gated"), `IMPLEMENTATION_PLAN.md`
-  M3 status (✅ per task), and `VERIFICATION_PLAN.md` M3 gate statuses.
+  M3 status (✅ per task, incl. **T-D07**), and `VERIFICATION_PLAN.md` M3 gate
+  statuses (incl. the new **M3-G10** doctor row). Confirm the M4 backlog carries
+  the deferred **`clove stats`** analytics command (§1.1).
 
 **Gate P6 (M3-G09 + final):** **all** M0+M1+M2 acceptance gates re-run green;
 clippy/fmt clean in every feature config; the full M3 gate table below is
@@ -402,9 +499,15 @@ artifact) — plus, where unavoidable, the same signing caveat on the new
 | M3-G07 | T-D06 AC | P5 | git auto-sync skips during rebase/merge/malformed; synced_at no re-commit |
 | M3-G08 | T-D02 AC | P1 | Second daemon prints "already running", exits non-zero |
 | M3-G09 | full suite | P6 | All M0+M1+M2 gates still pass |
+| **M3-G10** | **T-D07 AC (new)** | **P4** | **`doctor` flags stale sock/pid/lock; `--fix` cleans a dead-daemon footprint; live daemon untouched** |
 | (fallback) | PRD §5.2 | P2 | All reads succeed with daemon absent (no required process) |
 | (lean CLI) | DESIGN §1 | P0 | `clove` binary pulls in no tokio/notify/git2 |
 | (fuzz) | T-X02 | P6 | `ipc_frame` target 30s clean on committed corpus |
+| (M4 defer) | §1.1 | — | `clove stats` analytics command recorded in IMPLEMENTATION_PLAN M4, **not built in M3** |
+
+> **M3-G10 is a plan addition** from the §1.1 CLI-surface review (the original
+> VERIFICATION_PLAN M3 gates stop at M3-G09). Phase 6 mirrors it back into
+> `VERIFICATION_PLAN.md` so the canonical gate registry stays in sync.
 
 **Testing layers used:** unit (frame codec, protocol serde, debounce timer, git-sync
 skip-guards), `assert_cmd` CLI e2e (`daemon start|stop|status`, daemon-routed reads,
@@ -449,6 +552,7 @@ target, 30s CI replay + seed corpus). Idle-shutdown uses tokio paused-time.
 ## 6. Execution order (commits on `claude/affectionate-lamport-k5b1u`)
 
 P0 prereq+ipc-scaffold+schema-v3 → P1 lifecycle/shutdown → P2 IPC+liveness →
-P3 watcher/debounce/sweep → P4 `clove daemon` CLI+idle → P5 git-sync →
-P6 fuzz/bench/docs/gates. Each phase is committed independently with its tests;
-push at phase boundaries. No PR is opened unless explicitly requested.
+P3 watcher/debounce/sweep → P4 `clove daemon` CLI + **`doctor` daemon-health
+(T-D07)** + idle → P5 git-sync → P6 fuzz/bench/docs/gates. Each phase is committed
+independently with its tests; push at phase boundaries. No PR is opened unless
+explicitly requested.

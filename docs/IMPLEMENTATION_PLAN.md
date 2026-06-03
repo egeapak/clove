@@ -546,11 +546,20 @@
 
 ---
 
+**T-D07: `clove doctor` daemon-health extension** *(added by the M3_PLAN.md §1.1 CLI-surface review)*
+- Files: `crates/clove/src/cmd/doctor.rs`
+- Deps: T-D03, T-D05
+- Description: Extend `clove doctor` (DESIGN §7.7) with daemon-footprint checks, since M3 is the first milestone that can leave `daemon.sock`/`daemon.pid`/`daemon.lock` on disk. Add three **warning**-severity checks running after the M0 file checks + M1 index-divergence check, reusing the existing `DoctorIssue`/`--fix` machinery: (1) **stale socket/pid** — sock/pid present but liveness probe (connect+PING via `DaemonClient`) fails → `--fix` removes the dead sock+pid (the §8.3 cleanup as an explicit repair); (2) **orphaned `daemon.lock`** — lock file present with no live daemon → `--fix` removes it (only when liveness is negative, since an `fd-lock` file legitimately persists while running); (3) **pid/socket mismatch** — exactly one of pid/sock present → `--fix` removes the orphan. A live, healthy daemon yields zero findings and is never modified by `--fix`. Checks run even with `--no-index` (socket/pid state is index-independent). Warnings exit 0 (like index-divergence); `--strict` is unaffected by these warnings.
+- AC: Live daemon → zero daemon findings, `--fix` leaves files intact. SIGKILL'd daemon (stale sock+pid+lock) → warns on each; `--fix` removes them; re-run clean. pid-without-sock and sock-without-pid each → one warning fixed by `--fix`. JSON findings carry `{severity:"warning", code:"daemon-stale-socket"|"daemon-orphan-lock"|"daemon-pid-sock-mismatch", fixable:true}`.
+
+---
+
 **M3 Acceptance Gates**
 
 - Daemon IPC round-trip time < 5ms for QUERY command.
 - Daemon startup on 1k-item repo (50 modified) < 500ms.
 - SIGTERM shutdown leaves no stale sock/pid files.
+- `clove doctor` detects and `--fix`-cleans a dead-daemon footprint; a live daemon is untouched (T-D07, gate M3-G10).
 - All M0/M1/M2 tests continue to pass.
 
 ---
@@ -560,6 +569,18 @@
 Tasks for M4 (TUI, web UI, vendor bridges, changelog) are not detailed here. They will be
 planned in a separate session once M3 is complete. Acceptance gates for M3 completion serve
 as the entry condition for M4 planning.
+
+**M4 backlog (recorded so it is not lost; not yet task-specified):**
+- **`clove stats` — work-item analytics command** *(deferred here by the M3_PLAN.md §1.1
+  CLI-surface review)*. A user-facing aggregate/statistics view: counts by status / type /
+  priority / assignee, ready / blocked / closed totals, open-cycle count, epic completion
+  rollups, and (optionally) throughput over time. Not in the PRD or DESIGN §7.2 CLI surface
+  and **not** required by M3. Natural M4 home because the M1 index already makes these
+  aggregate queries cheap (and the M3 daemon keeps that index hot). Note: this is distinct
+  from the M3 daemon `STATUS` IPC payload, which is daemon *operational* telemetry
+  (`uptime_s`, `items_indexed`, `watcher_state`, `last_event_ms`), not work-item analytics.
+- TUI and/or web UI; bidirectional vendor bridges (GitHub/GitLab/Jira); richer
+  history/changelog.
 
 ---
 
