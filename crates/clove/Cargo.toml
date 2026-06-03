@@ -12,15 +12,24 @@ default-run = "clove"
 name = "clove"
 path = "src/main.rs"
 
+# The `github` feature wires `import github` / `export github` through to
+# clove-import's GitHub (octocrab/tokio) layer. Default-on; a lean build can opt
+# out with `--no-default-features`, in which case those arms return a clean error.
+[features]
+default = ["github"]
+github = ["clove-import/github"]
+
 [dependencies]
 clove-core.workspace = true
 clove-index.workspace = true
+clove-import = { workspace = true, default-features = false }   # M2 import/export/merge-driver; `github` via this crate's `github` feature
 clap.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 camino.workspace = true
 chrono.workspace = true
+tempfile.workspace = true       # T-M04: atomic `export --out FILE` writes
 
 [dev-dependencies]
 assert_cmd.workspace = true

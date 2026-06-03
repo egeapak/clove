@@ -72,6 +72,14 @@ fn dispatch(cli: Cli) -> (OutputFormat, Result<ExitCode, CloveError>) {
             let f = resolve_format(flag, None);
             (f, cmd::agent_doc::run(f, args).map(|_| ExitCode::Success))
         }
+        // The merge driver is invoked by git on arbitrary file paths; it does
+        // not discover a `.clove/` repository.
+        Commands::MergeDriver(args) => {
+            let f = resolve_format(flag, None);
+            // The merge driver returns its own exit code (0 = clean, nonzero =
+            // conflict) per the git merge-driver contract.
+            (f, cmd::merge_driver::run(f, args))
+        }
         // Everything else operates on a discovered repository.
         command => {
             let ctx = match discover(clove_dir.as_deref()) {
@@ -121,7 +129,12 @@ fn run_repo(
         Commands::Search(a) => cmd::search::run(ctx, f, a, no_index).map(|_| ok),
         Commands::Reindex => cmd::reindex::run(ctx, f, quiet).map(|_| ok),
         Commands::Doctor(a) => cmd::doctor::run(ctx, f, a, no_index),
+        Commands::Import(a) => cmd::import::run(ctx, f, a).map(|_| ok),
+        Commands::Export(a) => cmd::export::run(ctx, f, a).map(|_| ok),
         // Non-repo commands are dispatched earlier.
-        Commands::Version | Commands::Init(_) | Commands::AgentDoc(_) => Ok(ok),
+        Commands::Version
+        | Commands::Init(_)
+        | Commands::AgentDoc(_)
+        | Commands::MergeDriver(_) => Ok(ok),
     }
 }

@@ -11,6 +11,9 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 camino = "1"
 clove-core = { path = "../crates/clove-core" }
+# Merge-driver fuzz target needs only the pure merge logic; skip the GitHub
+# feature (tokio/octocrab) so the fuzz build stays lean.
+clove-import = { path = "../crates/clove-import", default-features = false }
 
 [[bin]]
 name = "parse_item_file"
@@ -22,6 +25,27 @@ bench = false
 [[bin]]
 name = "parse_dep_list"
 path = "fuzz_targets/parse_dep_list.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "merge_driver"
+path = "fuzz_targets/merge_driver.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "import_tk"
+path = "fuzz_targets/import_tk.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "import_beads"
+path = "fuzz_targets/import_beads.rs"
 test = false
 doc = false
 bench = false

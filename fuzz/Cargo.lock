@@ -126,7 +126,22 @@ version = "0.0.0"
 dependencies = [
  "camino",
  "clove-core",
+ "clove-import",
  "libfuzzer-sys",
+]
+
+[[package]]
+name = "clove-import"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "camino",
+ "chrono",
+ "clove-core",
+ "serde",
+ "serde_json",
+ "serde_yaml_neo",
+ "thiserror",
 ]
 
 [[package]]

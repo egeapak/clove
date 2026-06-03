@@ -1,16 +1,19 @@
 # clove — Session Handoff
 
 **Updated:** 2026-06-03
-**State:** **M0 and M1 are complete and gated.** Full CLI command surface; the
-SQLite index serves `ls`/`ready`/`query` (lean covering-index scan, default
+**State:** **M0, M1, and M2 are complete and gated.** Full CLI command surface;
+the SQLite index serves `ls`/`ready`/`query` (lean covering-index scan, default
 `--limit 100`, fast staleness with `--deep`), `search`, `reindex`, and
-`doctor` divergence. All five JSON schemas published + validated. Perf/parity/
-fuzz/golden gates pass (see `docs/M1_ACCEPTANCE_GATES.md`). ~240 tests green
+`doctor` divergence. **M2 (Interop) adds import (tk/beads/github), export
+(json/jsonl/github), and a real 3-way `clove merge-driver`** — see
+`docs/M2_ACCEPTANCE_GATES.md`. All five JSON schemas published + validated.
+Perf/parity/fuzz/golden gates pass (M0 `docs/IMPLEMENTATION_PLAN.md`, M1
+`docs/M1_ACCEPTANCE_GATES.md`, M2 `docs/M2_ACCEPTANCE_GATES.md`). Tests green
 except one environment-only failure (`repo::tests::linked_worktree…`, a sandbox
-git-signing artifact, not a code defect).
-**Next step:** **M2 — Interop** (`import tk|beads|github`, `export json|jsonl|
-github`, and the real `clove merge-driver` for T-M05). M3 (daemon) builds on the
-finished M1 index; M4 (TUI/web/vendor bridges) is still undesigned.
+git-signing artifact, not a code defect; the token-gated `github_roundtrip`
+shows as `1 ignored`).
+**Next step:** **M3 — Daemon** (builds on the finished M1 index). M4 (TUI/web/
+vendor bridges) is still undesigned.
 
 ### Small backlog (optional M0/M1 nice-to-haves, non-blocking)
 - Broaden JSON-schema validation to more commands (version/reindex/doctor/new)
@@ -94,6 +97,53 @@ T-S06 `with_index` read-path wrapper, T-S08 `doctor` index-divergence check.
   ~3.7 ms, staleness-clean ~2.1 ms. The 10k acceptance-gate tuning (esp. the
   staleness fast path doing a per-file `readdir`, and `ls` row construction)
   should be revisited when the CLI read path lands.
+
+---
+
+## M2 — Interop (this session)
+
+Made `clove-import` a real crate (was a wired stub) and added the import/export/
+merge CLI surface. All five M2 tasks land, gated per `docs/M2_ACCEPTANCE_GATES.md`.
+
+- **T-M04** `clove export json|jsonl` — JSON envelope with a `data` array, or
+  NDJSON one item per line (Beads-isomorphic); `--out FILE` atomic write;
+  byte-deterministic. (`export.rs`)
+- **T-M05** `clove merge-driver <O> <A> <B> <L>` — 3-way item-file merge: scalars
+  take the changed side or conflict; lists do a sorted/deduped 3-way set union
+  with same-element remove/add conflicts isolated to that field; body delegates to
+  `git merge-file`. Writes to `%A`, exit 0 = clean / nonzero = conflict (git
+  contract). Installed via `clove init --merge-driver`. (`merge.rs`)
+- **T-M01** `clove import tk <.tickets dir>` — `task→chore`, `tags→labels`,
+  `links→relates`, H1→title (filename fallback warns), `source_system="tk"`,
+  `external_ref` = tk id. (`tk.rs`)
+- **T-M02** `clove import beads <issues.jsonl>` — full field map; `deferred`→open
+  +label; unmapped fields stashed as `external_ref="beads-meta:<json>"`;
+  `comment_count>0` warns. (`beads.rs`)
+- **T-M03** `clove import/export github` — feature-gated (`github`, default on,
+  adds `octocrab`+`tokio`); `<!-- clove-meta: {…} -->` body codec; `gh-<number>`
+  refs. (`github.rs`)
+
+**New crate layout:** `clove-import` now has `tk.rs` / `beads.rs` / `github.rs` /
+`merge.rs` / `export.rs` / `map.rs` (shared coercion + `external_ref` idempotency
+index) / `plan.rs` (`ImportPlan`/`ImportReport`) / `error.rs`. CLI handlers in
+`crates/clove/src/cmd/{import,export,merge_driver}.rs`.
+
+**`github` feature + token resolution:** `octocrab`/`tokio` are isolated behind the
+`github` cargo feature so `--no-default-features` (lean / cross) builds stay light
+(verified clippy-clean). The token resolves from `GITHUB_TOKEN`, falling back to
+`gh auth token`. Network round-trip test is `#[ignore]` + token-gated, so CI/
+sandbox stay green (offline mapping/codec tests cover the logic).
+
+**Decisions (don't relitigate):** idempotency key = `external_ref` (shared
+pre-scan); `export jsonl` is Beads-isomorphic so "re-import own export" round-trips
+through `import beads` (no separate `import json`); no schema bump, no new
+frontmatter fields. The tolerated `linked_worktree` env failure remains.
+
+New fuzz targets (`merge_driver`, `import_tk`, `import_beads`) + seed corpora are
+wired into the CI 30 s-per-target fuzz job; new benches (`bench_export`,
+`bench_import_tk`, `bench_import_beads`) compile under `cargo bench --no-run`.
+`clove agent-doc` now documents the interop surface + the §9.4 post-merge
+index-refresh note (idempotency/`--check` tests stay green).
 
 ---
 

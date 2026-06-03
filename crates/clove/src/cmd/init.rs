@@ -123,7 +123,7 @@ fn install_merge_driver(root: &Utf8Path) -> Result<(), CloveError> {
         if !existing.contains("[merge \"clove-item\"]") {
             let stanza = "\n[merge \"clove-item\"]\n\
                  \tname = clove item 3-way merge\n\
-                 \tdriver = clove merge-driver %O %A %B %P\n";
+                 \tdriver = clove merge-driver %O %A %B %L\n";
             let mut next = existing;
             next.push_str(stanza);
             write_file(&git_config, &next)?;

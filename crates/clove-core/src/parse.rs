@@ -70,6 +70,15 @@ pub fn parse_item_bytes(
     Ok(item)
 }
 
+/// Parse `bytes` into an [`Item`] **without** checking that the `id` matches any
+/// file name. Used by the git merge driver, where git hands us temp file paths
+/// (`%A`/`%B`/`%O`) whose stems are arbitrary, not the item id. Still applies all
+/// structural guards (fences, byte budgets, alias bomb guard) and field
+/// validation. `path` is used only for error context.
+pub fn parse_item_lenient(bytes: &[u8], path: &Utf8Path) -> Result<Item, CloveError> {
+    parse_item_inner(bytes, path)
+}
+
 /// Parse only the frontmatter of the file at `path`, without allocating the
 /// body — the `scan_lazy` fast path for `ls`/`ready`/`blocked` (DESIGN §13.3).
 /// Still validates the `id` matches the file name stem.
@@ -228,7 +237,11 @@ fn split_frontmatter<'a>(
 /// non-space character is `:`, `[`, `{`, or `,`. This catches `key: &a`,
 /// `[*a]`, `{&b}` while leaving free text alone (a title `Fix *the* thing` or
 /// `R&D` is not flagged, since `*`/`&` there are mid-scalar).
-fn contains_yaml_anchor_or_alias(frontmatter: &[u8]) -> bool {
+///
+/// Exposed (`pub`) so foreign-input parsers outside this crate — notably the tk
+/// importer, which feeds untrusted frontmatter to the YAML parser — can reuse
+/// the exact same guard instead of copy-pasting it.
+pub fn contains_yaml_anchor_or_alias(frontmatter: &[u8]) -> bool {
     for (index, &byte) in frontmatter.iter().enumerate() {
         if byte != b'&' && byte != b'*' {
             continue;

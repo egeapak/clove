@@ -55,7 +55,7 @@ jsonschema = "0.46"             # JSON Schema validation in tests (T-CLI14)
 # and is required for publishing clove-core to crates.io — PRD §13).
 clove-core = { path = "crates/clove-core", version = "0.1.0" }
 clove-index = { path = "crates/clove-index", version = "0.1.0" }
-clove-import = { path = "crates/clove-import", version = "0.1.0" }
+clove-import = { path = "crates/clove-import", version = "0.1.0", default-features = false }
 
 [profile.release]
 lto = "thin"
