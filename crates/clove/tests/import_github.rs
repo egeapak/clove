@@ -66,6 +66,43 @@ fn export_github_dry_run_lists_local_items_offline() {
     assert_eq!(created[0]["title"], "Fix the bug", "{v}");
 }
 
+/// Counts the `.md` item files in a repo's `.clove/issues/` (non-recursive).
+fn item_file_count(repo: &Path) -> usize {
+    std::fs::read_dir(repo.join(".clove/issues"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|x| x == "md"))
+        .count()
+}
+
+/// Gap-closing parity test: like tk/beads, `export github --dry-run` must mutate
+/// nothing on disk. Fully offline (no token).
+#[test]
+fn export_github_dry_run_writes_no_files() {
+    let dir = init_repo();
+    clove(dir.path())
+        .args(["new", "Item one", "--type", "bug"])
+        .assert()
+        .success();
+    clove(dir.path())
+        .args(["new", "Item two", "--type", "feature"])
+        .assert()
+        .success();
+    let before = item_file_count(dir.path());
+
+    clove(dir.path())
+        .args(["export", "github", "ege/clove", "--dry-run"])
+        .env_remove("GITHUB_TOKEN")
+        .assert()
+        .success();
+
+    assert_eq!(
+        item_file_count(dir.path()),
+        before,
+        "dry-run export github must not add/remove any item files"
+    );
+}
+
 /// Token-gated network round-trip: export local items to a scratch GitHub repo,
 /// then re-import them and assert idempotency.
 ///
