@@ -1094,10 +1094,10 @@ fn priority_style(p: u8) -> Style {
         0 => Color::Indexed(196),
         1 => Color::Indexed(208),
         2 => Color::Indexed(178),
-        3 => Color::Indexed(244),
-        // Lowest priority (`↓`): a dim icy blue, cool and clearly the bottom of
-        // the ramp.
-        _ => Color::Indexed(110),
+        // p3 shares the `•` with p2 and is set apart by a dim icy blue.
+        3 => Color::Indexed(110),
+        // Lowest priority (`↓`): the coolest, dimmest gray.
+        _ => Color::Indexed(244),
     };
     Style::default().fg(color)
 }

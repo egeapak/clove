@@ -51,8 +51,8 @@ Jan 24` right, day resolution); the narrow Overview is one scrolling paragraph
 (meta line, then the title, labels/dates inline). The deps *list* is in the Dep
 tree tab. The list shows a single-letter colour-coded type icon, a **short id**
 (`#42`, prefix dropped), and a **priority glyph** (`!` p0, `↑` p1, `•` p2 **and**
-p3, `↓` p4) on a graded colour ramp (red → orange → amber → gray → dim icy
-blue); p2/p3 share the `•` and are told apart by hue. Legend in the help
+p3, `↓` p4) on a graded colour ramp (red → orange → amber → dim icy blue →
+gray); p2/p3 share the `•` and are told apart by hue (amber vs icy blue). Legend in the help
 overlay. The meta line (id + priority + type) renders from a single shared
 `head_spans` for both header widths. `clove-tui` has 27 tests (data-layer + a
 `TestBackend` smoke test + insta render snapshots of 12 states × 3 terminal
