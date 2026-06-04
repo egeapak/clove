@@ -1,0 +1,52 @@
+---
+source: crates/clove-tui/src/snapshot.rs
+expression: rendered
+---
+┌ clove ───────────────────────────────┐
+│  All 2  │  Rdy 1  │  Blk 0           │
+└──────────────────────────────────────┘
+┌ Overview · Dep tree · Comments ──────┐
+│ #2  ! FEATURE                        │
+│ Implement end-to-end offline         │
+│ synchronization with conflict        │
+│ resolution and retry backoff         │
+│                                      │
+│ status     ◐ in_progress · ready     │
+│ assignee   @ada                      │
+│ deps       1                         │
+│ labels     area:sync, backend        │
+│ created    Jan 1                     │
+│ updated    Jan 20                    │
+│                                      │
+│ parent     #1                        │
+│ relates    #1                        │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+└──────────────────────────────────────┘
+2 item(s) loaded  ?·q

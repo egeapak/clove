@@ -1,0 +1,64 @@
+---
+source: crates/clove-tui/src/snapshot.rs
+expression: rendered
+---
+┌ clove ───────────────────────────────────────────────────┐
+│  All 7  │  Ready 4  │  Blocked 1                         │
+└──────────────────────────────────────────────────────────┘
+┌ Items (2/7) ─────────────────────────────────────────────┐
+│▌○ F #3 • Write integration tests ✗                       │
+│ ○ F #5 • Frontend dashboard ●                            │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│         ┌ Filter ──────────────────────────────┐         │
+│         │ Status                               │         │
+│         │  (•) open                            │         │
+│         │  ( ) in_progress                     │         │
+│         │  ( ) closed                          │         │
+│         │                                      │         │
+│         │ Type                                 │         │
+│         │  [ ] bug                             │         │
+│         │ ▌[x] feature                         │         │
+└─────────│  [ ] chore                           │─────────┘
+┌ Overview│  [ ] docs                            │─────────┐
+│ #3  • FE│  [ ] epic                            │ blocked │
+│ Write in│                                      │  deps 1 │
+│ blocked │ Priority                             │         │
+│─────────│  [ ] p0                              │─────────│
+│ End-to-e│  [ ] p1                              │         │
+│         │  [ ] p2                              │         │
+│         │  [ ] p3                              │         │
+│         │  [ ] p4                              │         │
+│         │                                      │         │
+│         │ Label                                │         │
+│         │  [ ] area:api                        │         │
+│         │  [ ] area:ci                         │         │
+│         └──────────────────────────────────────┘         │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│──────────────────────────────────────────────────────────│
+│ labels area:qa            created Jan 1 · updated Jan 12 │
+└──────────────────────────────────────────────────────────┘
+filter  ↑↓ move · space toggle · x clear · Esc close

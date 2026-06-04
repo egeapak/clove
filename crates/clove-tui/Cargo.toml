@@ -1,0 +1,24 @@
+[package]
+name = "clove-tui"
+description = "clove: read-only terminal UI for browsing work items"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+clove-core.workspace = true
+ratatui.workspace = true        # terminal UI; re-exports crossterm at `ratatui::crossterm`
+pulldown-cmark.workspace = true # Markdown body rendering in the detail pane
+anyhow.workspace = true
+camino.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+insta.workspace = true          # TUI render snapshot tests across terminal shapes
+# Screenshot tooling for the `#[ignore]`d `generate_screenshots` test (rasterizes
+# the cell buffer to PNG with a system monospace font). Not used by CI tests.
+image = { version = "0.25", default-features = false, features = ["png"] }
+ab_glyph = "0.2"

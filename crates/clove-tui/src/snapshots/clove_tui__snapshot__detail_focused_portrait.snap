@@ -1,0 +1,52 @@
+---
+source: crates/clove-tui/src/snapshot.rs
+expression: rendered
+---
+┌ clove ───────────────────────────────┐
+│  All 7  │  Rdy 4  │  Blk 1           │
+└──────────────────────────────────────┘
+┌ Overview · Dep tree · Comments ──────┐
+│ #2  ! FEATURE                        │
+│ Build REST API                       │
+│                                      │
+│ status     ◐ in_progress · ready     │
+│ assignee   @grace                    │
+│ deps       1                         │
+│ labels     area:api, backend         │
+│ created    Jan 1                     │
+│ updated    Jan 20                    │
+│                                      │
+│ ──────────────────────────────────── │
+│ Goals                                │
+│                                      │
+│ Build a REST API with axum; see      │
+│ docs/api.md.                         │
+│                                      │
+│ • CRUD endpoints                     │
+│ • Auth middleware                    │
+│                                      │
+│ Steps                                │
+│                                      │
+│ 1. Define routes                     │
+│ 2. Wire handlers                     │
+│                                      │
+│ │ Blocked on the schema work until   │
+│ it lands.                            │
+│                                      │
+│ ──────────────────────────────────── │
+│                                      │
+│ Done when the integration tests      │
+│ pass.                                │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+└──────────────────────────────────────┘
+7 item(s) loaded  ?·q

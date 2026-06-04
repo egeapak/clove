@@ -2,8 +2,9 @@
 
 **Updated:** 2026-06-04
 **State:** **M0–M3 are complete and gated; the first M4 items have landed**
-(`clove stats` + analytics history, and an exact-incremental index/daemon graph —
-see the "M4" sections below). Full CLI command surface;
+(`clove stats` + analytics history, the `clove tui` read-only browser, and an
+exact-incremental index/daemon graph — see the "M4" sections below). Full CLI
+command surface;
 the SQLite index serves `ls`/`ready`/`query` (lean covering-index scan, default
 `--limit 100`, fast staleness with `--deep`), `search`, `reindex`, and
 `doctor` divergence. **M2 (Interop)** adds import (tk/beads/github), export
@@ -30,10 +31,52 @@ published + validated. Perf/parity/fuzz/golden gates pass (M0
 except one environment-only failure (`repo::tests::linked_worktree…`, a sandbox
 git-signing artifact, not a code defect; the token-gated `github_roundtrip`
 shows as `1 ignored`).
-**M4 started:** the **`clove stats`** analytics command is now built (the first M4
-item). See the "M4 — `clove stats`" section below. **Next step:** the remaining M4
-backlog — TUI/web UI, bidirectional vendor bridges, richer history/changelog (still
-undesigned; see `IMPLEMENTATION_PLAN.md` M4 backlog).
+**M4 — Extras** has begun: two items have landed — **`clove stats`** (the
+analytics command; see the "M4 — `clove stats`" section below) and **`clove
+tui`** (T-U01), a read-only terminal browser. New crate `clove-tui` (ratatui,
+depends only on `clove-core`; reads via
+the file-store scan path so it is always correct and never touches the index or
+daemon). Master-detail UI: **All / Ready / Blocked** tabs with live counts, an
+item list sorted like `ls`, and a detail pane with **Overview / Dep tree /
+Comments** sub-views (dep tree shows status glyphs + titles inline; overview is
+triage-ordered, renders the **Markdown body** via `pulldown-cmark`); substring
+search (`/`), refresh
+(`r`), help overlay (`?`), and pane-focus keys. **Sort & filter**: `s`/`S` cycle
+the sort field/direction (default `rank` = `(priority, topo, id)`); `f` opens a
+facet filter menu (status/assignee single, type/priority multi-OR, labels
+multi-AND, over values present in the repo), AND-composed with search and tabs,
+`x` clears, with status-line chips, an `Items (N/M)` count, and an empty-result
+escape hatch. Filters/sort persist across tab-switch and refresh; selection is
+preserved by id. The wide Overview detail is a **fixed shrink-to-fit two-line header**
+(line 1: short id + priority glyph + ALL-CAPS type tag, status flush-right;
+line 2: bold title with assignee + deps *count* flush-right under the status;
+then any blockers) → **edge-to-edge rule** → **scrolling Markdown body** →
+edge-to-edge rule → **sticky footer** (labels left, `created Jan 20 · updated
+Jan 24` right, day resolution); the narrow Overview is one scrolling paragraph
+(meta line, then the title, labels/dates inline). The deps *list* is in the Dep
+tree tab. The list shows a single-letter colour-coded type icon, a **short id**
+(`#42`, prefix dropped), and a **priority glyph** (`!` p0, `↑` p1, `•` p2 **and**
+p3, `↓` p4) on a graded colour ramp (red → orange → amber → dim icy blue →
+gray); p2/p3 share the `•` and are told apart by hue (amber vs icy blue). Legend in the help
+overlay. The meta line (id + priority + type) renders from a single shared
+`head_spans` for both header widths. `clove-tui` has 27 tests (data-layer + a
+`TestBackend` smoke test + insta render snapshots of 12 states × 3 terminal
+shapes), plus an `#[ignore]`d `generate_screenshots` PNG tool (DejaVu Sans Mono;
+output gitignored under `docs/screenshots/`). The layout is **adaptive**
+(`ui::pick_layout`): side-by-side
+(≥80 cols) / stacked (50–79 & tall) / single focused pane (narrow or short), with
+width-aware list columns, a compact tab bar below 20 rows, full-screen overlays
+on small terminals, and a too-small guard. Design directions came from a
+frontend-design and a UX/IA review (larger items recorded in the M4 backlog).
+Wired as the default-on `clove tui` subcommand (interactive-only, ignores
+`--format`). Validated by **insta render snapshots** across 3 terminal shapes
+(portrait/landscape/square) for adaptive layout. Full `cargo test --workspace`,
+clippy `-D warnings`, and fmt are green. The `ratatui`/`crossterm`/
+`pulldown-cmark` tree is all MIT/Apache/Zlib/Unicode (no new `cargo deny`
+exposure).
+**Next step (rest of M4):** TUI write actions (status/priority/label edits, …),
+web UI, bidirectional vendor bridges, and richer history/changelog — see
+`IMPLEMENTATION_PLAN.md` M4 backlog. Still undesigned beyond the TUI and stats.
 
 ### Small backlog (optional M0/M1 nice-to-haves, non-blocking)
 - Broaden JSON-schema validation to more commands (version/reindex/doctor/new)

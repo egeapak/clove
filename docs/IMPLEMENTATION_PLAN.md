@@ -573,11 +573,93 @@
 
 ## M4 — Extras (Future)
 
-Tasks for M4 (TUI, web UI, vendor bridges, changelog) are not detailed here. They will be
-planned in a separate session once M3 is complete. Acceptance gates for M3 completion serve
-as the entry condition for M4 planning.
+Tasks for M4 (web UI, vendor bridges, changelog) are not detailed here. They will be
+planned in a separate session. Acceptance gates for M3 completion serve as the entry
+condition for M4 planning.
+
+---
+
+**T-U01: `clove tui` — read-only terminal browser**  — ✅ implemented
+- Files: `crates/clove-tui/src/{lib,app,ui}.rs`, `crates/clove/src/cmd/tui.rs`,
+  `crates/clove/src/cli.rs` (`Tui` subcommand).
+- Deps: T-C05, T-G01–T-G05, T-CLI01.
+- Description: New `clove-tui` crate (ratatui, which re-exports crossterm; depends
+  only on `clove-core`). `clove tui` launches a master-detail browser that reads
+  via the file-store scan path (`scan_frontmatter` + `GraphStore::build`) — always
+  correct, no index/daemon coupling, never mutates. Top tab bar **All / Ready /
+  Blocked** (with live counts), an item list (status glyph, single-letter type
+  icon, **short id** [prefix dropped, leading zeros trimmed, e.g. `#42`], a
+  **priority glyph** [`!` p0, `↑` p1, `•` p2 & p3, `↓` p4 on a graded colour ramp
+  red→amber→dim icy blue (p3)→gray (p4); p2/p3 share `•` and differ by hue], title,
+  ready/blocked badge, sorted by `(priority, topo rank, id)` like `ls`), and
+  a detail pane with three sub-views: **Overview** (wide: a **fixed, shrink-to-fit
+  two-line header** [line 1: short id + priority glyph + ALL-CAPS type tag,
+  status flush-right; line 2: bold title with assignee + a **deps count**
+  flush-right under the status], an **edge-to-edge rule**, a
+  **scrolling Markdown body**, another edge-to-edge rule, and a **sticky footer**
+  [labels left, `created Jan 20 · updated Jan 24` right at day resolution]; narrow:
+  one scrolling paragraph with the title wrapping and labels/dates inline; the deps
+  *list* lives in the Dep tree tab), **Dep tree** (status glyphs + titles inline,
+  `[ready]`/`(cycle)` markers), and **Comments**. The body is rendered from
+  CommonMark via `pulldown-cmark` (`markdown.rs`): headings, emphasis/strong/
+  strikethrough, inline + fenced code, bullet/ordered/nested lists, block quotes,
+  rules, and task-list markers; paragraphs reflow under the pane's word wrap.
+  Relative times use an injectable `App::now` (refreshed with the data; pinned by
+  tests for deterministic snapshots). Substring search (`/`) over
+  id/title/labels; `r` re-scans from disk; `?` help overlay. Keys: `j/k`+arrows,
+  `g/G`, Tab/`1`/`2`/`3`, `o`/`t`/`c`, `←/h`·`→/l`·Enter (pane focus), PgUp/PgDn,
+  `/`, `r`, `?`, `q`/Esc/Ctrl-C. **Adaptive layout** (`ui::pick_layout`): side-by-side
+  when wide (≥80 cols), list-over-detail when stacked (50–79 cols & tall), and a
+  single focused pane when narrow/short — plus width-aware list-row column dropping,
+  a compact one-line tab bar below 20 rows, content-sized/full-screen overlays, and
+  a "terminal too small" guard. Packaged as a new crate behind a default-on
+  subcommand (per the M4 scoping decision); interactive-only, so it ignores
+  `--format`. Design directions came from a frontend-design and a UX/IA review (see
+  the deferred backlog for the larger items they raised).
+- **Sort & filter** (read-only): `s` cycles the sort field
+  (rank/priority/created/updated/id — `rank` = the default `(priority, topo, id)`
+  order; topo is dropped for non-priority fields, with an `id` tiebreak), `S`
+  toggles direction; only `self.view` is re-sorted (never `self.all`). `f` opens a
+  facet **filter menu** (a scrolling popup): status/assignee are single-value
+  (radio), type/priority are multi-value OR (checkbox), labels are multi-value AND;
+  values are the ones actually present in the repo (sorted/deduped). Facets AND
+  across, composing orthogonally with `/` search and the graph-derived tabs; `x`
+  clears. Active sort/filter show as status-line chips with an `Items (N/M)` count
+  and an empty-result escape-hatch message. Filters/sort persist across tab-switch
+  and `r`; selection is preserved by id across every view change.
+- AC: data-layer unit tests (ready/blocked partition, tab + search filtering,
+  detail load, navigation clamping, **filter narrowing + multi-OR/AND semantics,
+  sort ordering, selection stability across filtering**), a `TestBackend` render
+  smoke test, and **insta render snapshots** of 12 states (overview, blocked tab,
+  dep tree, comments, search, help, detail-focused, empty, **filter menu, filtered,
+  sorted, filtered-empty**) each at three terminal shapes — portrait 40×48
+  (single), landscape 120×18 (wide + compact tabs), square 60×60 (stacked) — plus
+  Overview edge cases (**long/wrapping title, long label list with `+N` footer
+  truncation, and a scrolled detail** that keeps the pinned footer in place) —
+  validating the adaptive layout. Mutations (status/priority/label edits, create,
+  dep add/rm, comment) are a deferred follow-up — this first cut is read-only.
+- Tooling: an `#[ignore]`d `generate_screenshots` test rasterizes each screen's
+  cell buffer (colours + bold) to PNG via a system monospace font (DejaVu Sans
+  Mono preferred for glyph coverage), behind test-only `image`/`ab_glyph`
+  dev-deps. Output goes to `docs/screenshots/` (gitignored; images are not
+  committed).
 
 **M4 backlog (recorded so it is not lost; not yet task-specified):**
+- **TUI write actions** — extend `clove tui` with the common mutations (status
+  transitions, priority/assignee/label edits) and beyond, on top of the read-only
+  browser landed in T-U01.
+- **TUI read-only follow-ups** (from the T-U01 design/UX reviews; all backed by
+  existing `clove-core` APIs, no engine work): (1) inbound/"blocks" + referenced-by
+  + epic-children lists in Overview (the graph has the reverse edges); (2) a
+  navigation stack — follow a related id to its item and pop back, decoupled from
+  the active tab; (3) a **Cycles** + **Problems/doctor-lite** view (surfacing
+  `all_cycles()`, `dangling_ids()`, malformed parents, invalid priorities — items
+  currently *excluded* from both Ready and Blocked and thus invisible); (4) an
+  **Excluded/attention** tab (or fold into Problems) to complete the
+  ready∪blocked∪closed partition. *(Relative timestamps + Markdown body rendering,
+  and sort + filter controls, landed in T-U01.)* Possible later refinements to the
+  shipped sort/filter: per-namespace OR within labels, an "assigned to me" toggle,
+  and lifting a shared filter type into `clove-core` if a third consumer appears.
 - **`clove stats` — work-item analytics command** — **DONE (M4)**. A user-facing
   aggregate/statistics view: counts by status / type / priority / assignee / label,
   ready / blocked / excluded / dangling totals, dependency-cycle count, per-epic

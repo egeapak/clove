@@ -1,0 +1,64 @@
+---
+source: crates/clove-tui/src/snapshot.rs
+expression: rendered
+---
+┌ clove ───────────────────────────────────────────────────┐
+│  All 7  │  Ready 4  │  Blocked 1                         │
+└──────────────────────────────────────────────────────────┘
+┌ Items (3/7) ─────────────────────────────────────────────┐
+│▌◐ F #2 ! Build REST API ●                                │
+│ ○ F #3 • Write integration tests ✗                       │
+│ ○ F #5 • Frontend dashboard ●                            │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+┌ Overview · Dep tree · Comments ──────────────────────────┐
+│ #2  ! FEATURE                      ◐ in_progress · ready │
+│ Build REST API                           @grace · deps 1 │
+│──────────────────────────────────────────────────────────│
+│ Goals                                                    │
+│                                                          │
+│ Build a REST API with axum; see docs/api.md.             │
+│                                                          │
+│ • CRUD endpoints                                         │
+│ • Auth middleware                                        │
+│                                                          │
+│ Steps                                                    │
+│                                                          │
+│ 1. Define routes                                         │
+│ 2. Wire handlers                                         │
+│                                                          │
+│ │ Blocked on the schema work until it lands.             │
+│                                                          │
+│ ──────────────────────────────────────────────────────── │
+│                                                          │
+│ Done when the integration tests pass.                    │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│──────────────────────────────────────────────────────────│
+│ labels area:api, backend  created Jan 1 · updated Jan 20 │
+└──────────────────────────────────────────────────────────┘
+type:feature  7 item(s) loaded   ?: help · q: quit

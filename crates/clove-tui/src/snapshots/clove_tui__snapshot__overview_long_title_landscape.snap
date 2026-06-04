@@ -1,0 +1,22 @@
+---
+source: crates/clove-tui/src/snapshot.rs
+expression: rendered
+---
+  All 2  │  Ready 1  │  Blocked 0
+┌ Items (2) ───────────────────────────────────┐┌ Overview · Dep tree · Comments ──────────────────────────────────────┐
+│▌◐ F #2 ! Implement end-to-end offline synch… ││ #2  ! FEATURE                                  ◐ in_progress · ready │
+│ ● C #1 • Dependency target                   ││ Implement end-to-end offline synchronization with co…  @ada · deps 1 │
+│                                              ││──────────────────────────────────────────────────────────────────────│
+│                                              ││ parent     #1                                                        │
+│                                              ││ relates    #1                                                        │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││──────────────────────────────────────────────────────────────────────│
+│                                              ││ labels area:sync, backend             created Jan 1 · updated Jan 20 │
+└──────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────┘
+2 item(s) loaded   ?: help · q: quit
