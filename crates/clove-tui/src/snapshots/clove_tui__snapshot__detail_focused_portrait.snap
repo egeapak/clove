@@ -6,20 +6,17 @@ expression: rendered
 │  All 7  │  Rdy 4  │  Blk 1           │
 └──────────────────────────────────────┘
 ┌ Overview · Dep tree · Comments ──────┐
-│ F Build REST API                     │
-│ proj-00000002                        │
+│ FEATURE  Build REST API              │
+│ #2                                   │
 │                                      │
 │ status     ◐ in_progress · ready     │
-│ type       feature                   │
 │ priority   p0                        │
 │ assignee   grace                     │
 │ labels     area:api, backend         │
-│ created    2026-01-01 09:00 UTC  (6w │
-│ ago)                                 │
-│ updated    2026-01-20 11:30 UTC  (3w │
-│ ago)                                 │
+│ created    Jan 1                     │
+│ updated    Jan 20                    │
 │                                      │
-│ deps       proj-00000001             │
+│ deps       #1                        │
 │                                      │
 │ ── body ──────────────────────────── │
 │ Goals                                │
@@ -42,6 +39,9 @@ expression: rendered
 │                                      │
 │ Done when the integration tests      │
 │ pass.                                │
+│                                      │
+│                                      │
+│                                      │
 │                                      │
 │                                      │
 │                                      │

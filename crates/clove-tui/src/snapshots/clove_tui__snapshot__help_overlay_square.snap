@@ -6,13 +6,13 @@ expression: rendered
 │  All 7  │  Ready 4  │  Blocked 1                         │
 └──────────────────────────────────────────────────────────┘
 ┌ Items (7) ───────────────────────────────────────────────┐
-│▌◐ F proj-00000002 p0 Build REST API ●                    │
-│ ○ B proj-00000007 p1 Investigate flaky CI ●              │
-│ ● C proj-00000001 p1 Set up database schema              │
-│ ○ E proj-00000004 p2 Ship v1 release ●                   │
-│ ○ F proj-00000003 p2 Write integration tests ✗           │
-│ ○ F proj-00000005 p3 Frontend dashboard ●                │
-│ ● D proj-00000006 p4 Docs site                           │
+│▌◐ F #2 p0 Build REST API ●                               │
+│ ○ B #7 p1 Investigate flaky CI ●                         │
+│ ● C #1 p1 Set up database schema                         │
+│ ○ E #4 p2 Ship v1 release ●                              │
+│ ○ F #3 p2 Write integration tests ✗                      │
+│ ○ F #5 p3 Frontend dashboard ●                           │
+│ ● D #6 p4 Docs site                                      │
 │                                                          │
 │                                                          │
 │                                                          │
@@ -31,19 +31,16 @@ expression: rendered
 │    │ Tab / 1 2 3  All / Ready / Blocked             │    │
 └────│ o / t / c    overview / dep tree / comments    │────┘
 ┌ Ove│ →/l  ←/h     focus detail / list (narrow)      │────┐
-│ F B│ PgUp / PgDn  scroll detail                     │ady │
-│ pro│ s / S        cycle sort field / direction      │ace │
+│ FEA│ PgUp / PgDn  scroll detail                     │ady │
+│ #2 │ s / S        cycle sort field / direction      │ace │
 │    │ f            filter menu (facets)              │    │
-│ lab│ x            clear all filters                 │    │
-│ cre│ /            search id, title, labels          │    │
-│ upd│ Esc          clear search / back / close       │    │
-│    │ r            refresh from disk                 │    │
-│ dep│ ?            toggle this help                  │    │
+│    │ x            clear all filters                 │    │
+│ dep│ /            search id, title, labels          │    │
+│    │ Esc          clear search / back / close       │    │
+│ ── │ r            refresh from disk                 │─── │
+│ Goa│ ?            toggle this help                  │    │
 │    │ q            quit                              │    │
-│ ── └────────────────────────────────────────────────┘─── │
-│ Goals                                                    │
-│                                                          │
-│ Build a REST API with axum; see docs/api.md.             │
+│ Bui└────────────────────────────────────────────────┘    │
 │                                                          │
 │ • CRUD endpoints                                         │
 │ • Auth middleware                                        │
@@ -60,5 +57,8 @@ expression: rendered
 │ Done when the integration tests pass.                    │
 │                                                          │
 │                                                          │
+│                                                          │
+│                                                          │
+│ labels area:api, backend  created Jan 1 · updated Jan 20 │
 └──────────────────────────────────────────────────────────┘
 7 item(s) loaded   ?: help · q: quit

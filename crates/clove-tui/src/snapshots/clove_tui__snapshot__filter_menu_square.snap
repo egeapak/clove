@@ -6,8 +6,8 @@ expression: rendered
 │  All 7  │  Ready 4  │  Blocked 1                         │
 └──────────────────────────────────────────────────────────┘
 ┌ Items (2/7) ─────────────────────────────────────────────┐
-│▌○ F proj-00000003 p2 Write integration tests ✗           │
-│ ○ F proj-00000005 p3 Frontend dashboard ●                │
+│▌○ F #3 p2 Write integration tests ✗                      │
+│ ○ F #5 p3 Frontend dashboard ●                           │
 │                                                          │
 │                                                          │
 │                                                          │
@@ -31,18 +31,18 @@ expression: rendered
 │         │ ▌[x] feature                         │         │
 └─────────│  [ ] chore                           │─────────┘
 ┌ Overview│  [ ] docs                            │─────────┐
-│ F Write │  [ ] epic                            │ blocked │
-│ proj-000│                                      │ure · p2 │
+│ FEATURE │  [ ] epic                            │ blocked │
+│ #3      │                                      │      p2 │
 │         │ Priority                             │         │
 │ blocked │  [ ] p0                              │         │
-│ labels  │  [ ] p1                              │         │
-│ created │  [ ] p2                              │         │
-│ updated │  [ ] p3                              │         │
-│         │  [ ] p4                              │         │
-│ deps    │                                      │         │
+│         │  [ ] p1                              │         │
+│ deps    │  [ ] p2                              │         │
+│         │  [ ] p3                              │         │
+│ ── body │  [ ] p4                              │──────── │
+│ End-to-e│                                      │         │
 │         │ Label                                │         │
-│ ── body │  [ ] area:api                        │──────── │
-│ End-to-e│  [ ] area:ci                         │         │
+│         │  [ ] area:api                        │         │
+│         │  [ ] area:ci                         │         │
 │         └──────────────────────────────────────┘         │
 │                                                          │
 │                                                          │
@@ -59,6 +59,6 @@ expression: rendered
 │                                                          │
 │                                                          │
 │                                                          │
-│                                                          │
+│ labels area:qa            created Jan 1 · updated Jan 12 │
 └──────────────────────────────────────────────────────────┘
 filter  ↑↓ move · space toggle · x clear · Esc close

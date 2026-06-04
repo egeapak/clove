@@ -34,17 +34,19 @@ the file-store scan path so it is always correct and never touches the index or
 daemon). Master-detail UI: **All / Ready / Blocked** tabs with live counts, an
 item list sorted like `ls`, and a detail pane with **Overview / Dep tree /
 Comments** sub-views (dep tree shows status glyphs + titles inline; overview is
-triage-ordered, renders the **Markdown body** via `pulldown-cmark` and shows
-**relative timestamps** alongside absolute); substring search (`/`), refresh
+triage-ordered, renders the **Markdown body** via `pulldown-cmark`); substring
+search (`/`), refresh
 (`r`), help overlay (`?`), and pane-focus keys. **Sort & filter**: `s`/`S` cycle
 the sort field/direction (default `rank` = `(priority, topo, id)`); `f` opens a
 facet filter menu (status/assignee single, type/priority multi-OR, labels
 multi-AND, over values present in the repo), AND-composed with search and tabs,
 `x` clears, with status-line chips, an `Items (N/M)` count, and an empty-result
 escape hatch. Filters/sort persist across tab-switch and refresh; selection is
-preserved by id. The Overview detail uses a full-width header (type icon + title
-left, status/ready top-right, type·priority·assignee right) and the list shows a
-single-letter colour-coded type icon. `clove-tui` has 24 tests (data-layer + a
+preserved by id. The Overview detail uses a full-width header (ALL-CAPS type tag
++ title left, status/ready top-right, priority·assignee right) with a pinned
+footer (labels bottom-left, `created Jan 20 · updated Jan 24` bottom-right at day
+resolution); the list shows a single-letter colour-coded type icon and a **short
+id** (`#42`, prefix dropped). `clove-tui` has 24 tests (data-layer + a
 `TestBackend` smoke test + insta render snapshots of 12 states × 3 terminal
 shapes), plus an `#[ignore]`d `generate_screenshots` PNG tool (DejaVu Sans Mono;
 output gitignored under `docs/screenshots/`). The layout is **adaptive**

@@ -588,13 +588,14 @@ condition for M4 planning.
   via the file-store scan path (`scan_frontmatter` + `GraphStore::build`) — always
   correct, no index/daemon coupling, never mutates. Top tab bar **All / Ready /
   Blocked** (with live counts), an item list (status glyph, single-letter type
-  icon, id, priority, title, ready/blocked badge, sorted by `(priority, topo rank,
-  id)` like `ls`), and
-  a detail pane with three sub-views: **Overview** (a full-width header — type
-  icon + title left, status/ready pinned top-right, type·priority·assignee on a
-  second right-aligned line when wide — then blockers, metadata with **relative
-  timestamps** ["3d ago"] alongside absolute, relationships, and the
-  **Markdown-rendered body**), **Dep tree** (status glyphs + titles inline,
+  icon, **short id** [prefix dropped, leading zeros trimmed, e.g. `#42`], priority,
+  title, ready/blocked badge, sorted by `(priority, topo rank, id)` like `ls`), and
+  a detail pane with three sub-views: **Overview** (a full-width header — an
+  ALL-CAPS type tag + title left, status/ready pinned top-right, priority·assignee
+  on a second right-aligned line when wide — then blockers and the
+  **Markdown-rendered body**, with a **pinned footer** holding labels bottom-left
+  and `created Jan 20 · updated Jan 24` bottom-right at day resolution; narrow
+  panes inline these instead), **Dep tree** (status glyphs + titles inline,
   `[ready]`/`(cycle)` markers), and **Comments**. The body is rendered from
   CommonMark via `pulldown-cmark` (`markdown.rs`): headings, emphasis/strong/
   strikethrough, inline + fenced code, bullet/ordered/nested lists, block quotes,

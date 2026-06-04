@@ -13,7 +13,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Padding, Paragraph, Tabs, Wrap};
 use ratatui::Frame;
 
-use crate::app::{fmt_relative, fmt_ts, App, Detail, DetailTab, Focus, Mode, SortField, Tab};
+use crate::app::{fmt_day, fmt_ts, App, Detail, DetailTab, Focus, Mode, SortField, Tab};
 use crate::markdown;
 
 // Structural chrome uses indexed grays (consistent on 256-color terminals);
@@ -207,9 +207,16 @@ fn render_list(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
+    // Size the short-id column to the widest visible ref, so titles stay aligned.
+    let id_w = app
+        .visible()
+        .map(|fm| short_ref(&fm.id).chars().count())
+        .max()
+        .unwrap_or(2)
+        .clamp(2, 10);
     let items: Vec<ListItem> = app
         .visible()
-        .map(|fm| ListItem::new(list_row(app, fm, inner_w)))
+        .map(|fm| ListItem::new(list_row(app, fm, inner_w, id_w)))
         .collect();
     let list = List::new(items)
         .block(block)
@@ -225,9 +232,9 @@ fn render_list(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 /// One width-aware line in the item list: a status glyph, a single-letter type
-/// icon, the id (when there's room), priority, the title, and a ready/blocked
-/// badge. The title budget is computed from the actual pane width.
-fn list_row(app: &App, fm: &ItemFrontmatter, inner_w: u16) -> Line<'static> {
+/// icon, the short id (right-aligned in `id_w`), priority, the title, and a
+/// ready/blocked badge. The title budget is computed from the actual pane width.
+fn list_row(app: &App, fm: &ItemFrontmatter, inner_w: u16, id_w: usize) -> Line<'static> {
     let inner = inner_w as usize;
     let mut spans = vec![
         Span::styled(status_glyph(fm.status), status_style(fm.status)),
@@ -237,15 +244,11 @@ fn list_row(app: &App, fm: &ItemFrontmatter, inner_w: u16) -> Line<'static> {
             type_style(fm.item_type).add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
-    ];
-
-    if inner >= 36 {
-        spans.push(Span::styled(
-            format!("{:<13}", fm.id.as_str()),
+        Span::styled(
+            format!("{:>id_w$} ", short_ref(&fm.id)),
             Style::default().fg(LABEL),
-        ));
-        spans.push(Span::raw(" "));
-    }
+        ),
+    ];
     spans.push(Span::styled(
         format!("p{} ", fm.priority.get()),
         priority_style(fm.priority.get()),
@@ -266,32 +269,53 @@ fn list_row(app: &App, fm: &ItemFrontmatter, inner_w: u16) -> Line<'static> {
 
 fn render_detail(f: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Focus::Detail;
-    let inner_w = area.width.saturating_sub(4); // borders + horizontal padding
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style(focused))
         .padding(Padding::new(1, 1, 0, 0))
         .title(detail_title(app));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
 
     let Some(detail) = &app.detail else {
-        let p = Paragraph::new("No item selected.")
-            .block(block)
-            .style(Style::default().fg(DIM));
-        f.render_widget(p, area);
+        f.render_widget(
+            Paragraph::new("No item selected.").style(Style::default().fg(DIM)),
+            inner,
+        );
         return;
     };
 
+    // On the Overview tab, pin a 1-line footer (labels left, dates right) at the
+    // bottom of the pane when there's room; the body scrolls above it.
+    let footer = app.detail_tab == DetailTab::Overview && inner.width >= 40;
+    let (body_area, footer_area) = if footer {
+        let parts = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(3), Constraint::Length(1)])
+            .split(inner);
+        (parts[0], Some(parts[1]))
+    } else {
+        (inner, None)
+    };
+
     let lines = match app.detail_tab {
-        DetailTab::Overview => overview_lines(app, detail, inner_w, app.now),
+        DetailTab::Overview => overview_lines(app, detail, body_area.width, footer),
         DetailTab::Tree => tree_lines(detail),
         DetailTab::Comments => comment_lines(detail),
     };
+    f.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((app.detail_scroll, 0)),
+        body_area,
+    );
 
-    let p = Paragraph::new(lines)
-        .block(block)
-        .wrap(Wrap { trim: false })
-        .scroll((app.detail_scroll, 0));
-    f.render_widget(p, area);
+    if let Some(fa) = footer_area {
+        f.render_widget(
+            Paragraph::new(footer_line(&detail.item.frontmatter, fa.width)),
+            fa,
+        );
+    }
 }
 
 fn detail_title(app: &App) -> Line<'static> {
@@ -314,23 +338,20 @@ fn detail_title(app: &App) -> Line<'static> {
     Line::from(spans)
 }
 
-/// The overview. A header uses the full pane width — type icon + title on the
-/// left, status (and ready/blocked) pinned top-right, with type/priority/
-/// assignee on a second right-aligned line when wide — then blockers, metadata,
-/// relationships, and the Markdown body.
-fn overview_lines(
-    app: &App,
-    detail: &Detail,
-    inner_w: u16,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Vec<Line<'static>> {
+/// The overview. A header uses the full pane width — an ALL-CAPS type tag +
+/// title on the left, status (and ready/blocked) pinned top-right, with
+/// priority/assignee on a second right-aligned line when wide — then blockers
+/// and the Markdown body. When `footer` is set (wide), labels and dates live in
+/// the pinned footer; otherwise they're emitted inline here.
+fn overview_lines(app: &App, detail: &Detail, inner_w: u16, footer: bool) -> Vec<Line<'static>> {
     let fm = &detail.item.frontmatter;
     let wide = inner_w >= 50;
     let mut lines = Vec::new();
 
+    // ALL-CAPS, type-colored tag prefixing the title.
     let title_left = vec![
         Span::styled(
-            format!("{} ", type_icon(fm.item_type)),
+            format!("{}  ", fm.item_type.as_str().to_uppercase()),
             type_style(fm.item_type).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
@@ -338,39 +359,28 @@ fn overview_lines(
             Style::default().add_modifier(Modifier::BOLD),
         ),
     ];
+    let id_span = Span::styled(short_ref(&fm.id), Style::default().fg(LABEL));
 
     if wide {
         // Title left, status pinned top-right.
         lines.push(right_align(title_left, status_spans(app, fm), inner_w));
-        // id left, type · priority · assignee right.
-        let mut meta = vec![
-            Span::styled(fm.item_type.as_str().to_string(), type_style(fm.item_type)),
-            Span::styled(" · ", Style::default().fg(DIM)),
-            Span::styled(
-                format!("p{}", fm.priority.get()),
-                priority_style(fm.priority.get()),
-            ),
-        ];
+        // id left, priority · assignee right (type now lives in the title tag).
+        let mut meta = vec![Span::styled(
+            format!("p{}", fm.priority.get()),
+            priority_style(fm.priority.get()),
+        )];
         if let Some(a) = &fm.assignee {
             meta.push(Span::styled(" · ", Style::default().fg(DIM)));
             meta.push(Span::styled(format!("@{a}"), Style::default().fg(LABEL)));
         }
-        lines.push(right_align(
-            vec![Span::styled(fm.id.to_string(), Style::default().fg(LABEL))],
-            meta,
-            inner_w,
-        ));
+        lines.push(right_align(vec![id_span], meta, inner_w));
         lines.push(Line::raw(""));
     } else {
         // Narrow: stack the header fields as labelled rows.
         lines.push(Line::from(title_left));
-        lines.push(Line::from(Span::styled(
-            fm.id.to_string(),
-            Style::default().fg(LABEL),
-        )));
+        lines.push(Line::from(id_span));
         lines.push(Line::raw(""));
         lines.push(field_line("status", status_spans(app, fm)));
-        lines.push(kv("type", fm.item_type.as_str()));
         lines.push(field_line(
             "priority",
             vec![Span::styled(
@@ -420,14 +430,17 @@ fn overview_lines(
         ));
     }
 
-    // Metadata.
-    if !fm.labels.is_empty() {
-        lines.push(kv("labels", &fm.labels.join(", ")));
-    }
-    lines.push(time_field("created", fm.created, now));
-    lines.push(time_field("updated", fm.updated, now));
-    if let Some(c) = fm.closed {
-        lines.push(time_field("closed", c, now));
+    // Labels + dates: inline rows only when there is no pinned footer (narrow);
+    // wide panes show them in the footer instead.
+    if !footer {
+        if !fm.labels.is_empty() {
+            lines.push(kv("labels", &fm.labels.join(", ")));
+        }
+        lines.push(time_field("created", fm.created));
+        lines.push(time_field("updated", fm.updated));
+        if let Some(c) = fm.closed {
+            lines.push(time_field("closed", c));
+        }
     }
 
     // Relationships.
@@ -488,22 +501,78 @@ fn right_align(
     Line::from(left)
 }
 
-/// A timestamp field showing the absolute time plus a dim relative delta.
-fn time_field(
-    key: &str,
-    ts: chrono::DateTime<chrono::Utc>,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Line<'static> {
-    field_line(
-        key,
-        vec![
-            Span::raw(fmt_ts(ts)),
-            Span::styled(
-                format!("  ({})", fmt_relative(now, ts)),
+/// A day-resolution timestamp row (e.g. `created     Jan 20`).
+fn time_field(key: &str, ts: chrono::DateTime<chrono::Utc>) -> Line<'static> {
+    field_line(key, vec![Span::raw(fmt_day(ts))])
+}
+
+/// The short form of an id for display: drop the (per-repo, redundant) prefix
+/// and trim leading zeros — e.g. `proj-00000042` → `42`, `proj-7af3q2k9` →
+/// `7af3q2k9`.
+fn short_id(id: &clove_core::CloveId) -> String {
+    let s = id.as_str();
+    let suffix = s.rsplit_once('-').map(|(_, b)| b).unwrap_or(s);
+    let trimmed = suffix.trim_start_matches('0');
+    if trimmed.is_empty() {
+        "0".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+/// `short_id` with a leading `#` so it reads as a reference.
+fn short_ref(id: &clove_core::CloveId) -> String {
+    format!("#{}", short_id(id))
+}
+
+/// The pinned Overview footer: labels flush-left (truncated with `+N` to make
+/// room), created/updated (and `closed`) flush-right at day resolution.
+fn footer_line(fm: &ItemFrontmatter, width: u16) -> Line<'static> {
+    let mut right = vec![
+        Span::styled("created ", Style::default().fg(DIM)),
+        Span::raw(fmt_day(fm.created)),
+        Span::styled(" · updated ", Style::default().fg(DIM)),
+        Span::raw(fmt_day(fm.updated)),
+    ];
+    if let Some(c) = fm.closed {
+        right.push(Span::styled(" · closed ", Style::default().fg(DIM)));
+        right.push(Span::raw(fmt_day(c)));
+    }
+    let right_w: usize = right.iter().map(Span::width).sum();
+
+    let mut left = Vec::new();
+    if !fm.labels.is_empty() {
+        let key = "labels ";
+        let budget = (width as usize).saturating_sub(right_w + 2 + key.len());
+        let (text, hidden) = fit_labels(&fm.labels, budget);
+        left.push(Span::styled(key, Style::default().fg(DIM)));
+        left.push(Span::raw(text));
+        if hidden > 0 {
+            left.push(Span::styled(
+                format!(" +{hidden}"),
                 Style::default().fg(DIM),
-            ),
-        ],
-    )
+            ));
+        }
+    }
+    right_align(left, right, width)
+}
+
+/// Join as many labels as fit in `budget` columns; return the text and the
+/// count omitted.
+fn fit_labels(labels: &[String], budget: usize) -> (String, usize) {
+    let mut out = String::new();
+    let mut shown = 0;
+    for (i, l) in labels.iter().enumerate() {
+        let sep = if i == 0 { "" } else { ", " };
+        let add = sep.chars().count() + l.chars().count();
+        if shown > 0 && out.chars().count() + add > budget {
+            break;
+        }
+        out.push_str(sep);
+        out.push_str(l);
+        shown += 1;
+    }
+    (out, labels.len() - shown)
 }
 
 /// The dependency tree, rendered with status glyphs + titles inline (children
@@ -551,7 +620,7 @@ fn push_tree_node(
     ));
     spans.push(Span::raw(" "));
     spans.push(Span::styled(
-        node.id.to_string(),
+        short_ref(&node.id),
         Style::default().fg(LABEL),
     ));
     spans.push(Span::raw("  "));
@@ -879,10 +948,7 @@ fn field_line(key: &str, mut value: Vec<Span<'static>>) -> Line<'static> {
 }
 
 fn join_ids(ids: &[clove_core::CloveId]) -> String {
-    ids.iter()
-        .map(|i| i.as_str())
-        .collect::<Vec<_>>()
-        .join(", ")
+    ids.iter().map(short_ref).collect::<Vec<_>>().join(", ")
 }
 
 fn push_id_field<'a>(
@@ -890,7 +956,7 @@ fn push_id_field<'a>(
     key: &str,
     ids: impl Iterator<Item = &'a clove_core::CloveId>,
 ) {
-    let joined = ids.map(|i| i.as_str()).collect::<Vec<_>>().join(", ");
+    let joined = ids.map(short_ref).collect::<Vec<_>>().join(", ");
     if !joined.is_empty() {
         lines.push(kv(key, &joined));
     }

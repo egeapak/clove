@@ -6,9 +6,9 @@ expression: rendered
 │  All 7  │  Rdy 4  │  Blk 1           │
 └──────────────────────────────────────┘
 ┌ Items (3/7) ─────────────────────────┐
-│▌◐ F proj-00000002 p0 Build REST API  │
-│ ○ F proj-00000003 p2 Write integrat… │
-│ ○ F proj-00000005 p3 Frontend dashb… │
+│▌◐ F #2 p0 Build REST API ●           │
+│ ○ F #3 p2 Write integration tests ✗  │
+│ ○ F #5 p3 Frontend dashboard ●       │
 │                                      │
 │                                      │
 │                                      │

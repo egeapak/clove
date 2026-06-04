@@ -4,19 +4,19 @@ expression: rendered
 ---
   All 7  │  Ready 4  │  Blocked 1
 ┌ Items (1) ───────────────────────────────────┐┌ Overview · Dep tree · Comments ──────────────────────────────────────┐
-│▌○ F proj-00000003 p2 Write integration tests ││ F Write integration tests                           ○ open · blocked │
-│                                              ││ proj-00000003                                           feature · p2 │
+│▌○ F #3 p2 Write integration tests ✗          ││ FEATURE  Write integration tests                    ○ open · blocked │
+│                                              ││ #3                                                                p2 │
 │                                              ││                                                                      │
-│                                              ││ blocked by proj-00000002                                             │
-│                                              ││ labels     area:qa                                                   │
-│                                              ││ created    2026-01-01 09:00 UTC  (6w ago)                            │
-│                                              ││ updated    2026-01-12 11:30 UTC  (4w ago)                            │
+│                                              ││ blocked by #2                                                        │
 │                                              ││                                                                      │
-│                                              ││ deps       proj-00000002                                             │
+│                                              ││ deps       #2                                                        │
 │                                              ││                                                                      │
 │                                              ││ ── body ──────────────────────────────────────────────────────────── │
 │                                              ││ End-to-end coverage of the public API surface.                       │
 │                                              ││                                                                      │
 │                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││ labels area:qa                        created Jan 1 · updated Jan 12 │
 └──────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────┘
 7 item(s) loaded   ?: help · q: quit

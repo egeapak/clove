@@ -4,19 +4,19 @@ expression: rendered
 ---
   All 7  │  Ready 4  │  Blocked 1
 ┌ Items (2/7) ──────────────────────────┌ Filter ──────────────────────────────┐ ──────────────────────────────────────┐
-│▌○ F proj-00000003 p2 Write integration│ Status                               │                      ○ open · blocked │
-│ ○ F proj-00000005 p3 Frontend dashboar│  (•) open                            │                          feature · p2 │
+│▌○ F #3 p2 Write integration tests ✗   │ Status                               │ts                    ○ open · blocked │
+│ ○ F #5 p3 Frontend dashboard ●        │  (•) open                            │                                    p2 │
 │                                       │  ( ) in_progress                     │                                       │
 │                                       │  ( ) closed                          │                                       │
 │                                       │                                      │                                       │
-│                                       │ Type                                 │C  (6w ago)                            │
-│                                       │  [ ] bug                             │C  (4w ago)                            │
-│                                       │ ▌[x] feature                         │                                       │
-│                                       │  [ ] chore                           │                                       │
+│                                       │ Type                                 │                                       │
+│                                       │  [ ] bug                             │                                       │
+│                                       │ ▌[x] feature                         │────────────────────────────────────── │
+│                                       │  [ ] chore                           │lic API surface.                       │
 │                                       │  [ ] docs                            │                                       │
-│                                       │  [ ] epic                            │────────────────────────────────────── │
-│                                       │                                      │lic API surface.                       │
+│                                       │  [ ] epic                            │                                       │
+│                                       │                                      │                                       │
 │                                       │ Priority                             │                                       │
-│                                       │  [ ] p0                              │                                       │
+│                                       │  [ ] p0                              │        created Jan 1 · updated Jan 12 │
 └───────────────────────────────────────└──────────────────────────────────────┘───────────────────────────────────────┘
 filter  ↑↓ move · space toggle · x clear · Esc close
