@@ -1040,4 +1040,90 @@ mod tests {
     fn tree_has_cycle_ref(node: &DepTreeNode) -> bool {
         node.cycle_ref || node.children.iter().any(tree_has_cycle_ref)
     }
+
+    /// The canonical Kahn order (P0) is a pure function of `(edges, ids)` — the
+    /// load-bearing invariant that lets the incremental index path match a full
+    /// reindex. Building the same graph from frontmatters in a different order
+    /// (and with the deps listed in a different order) must yield byte-identical
+    /// ranks, ready order, and blocked order.
+    #[test]
+    fn canonical_ranks_independent_of_insertion_order() {
+        // A diamond plus a tail: B,C depend on D; A depends on B,C; E depends on A.
+        let forward = [
+            fm(
+                "proj-AAAAAAAA",
+                ItemStatus::Open,
+                &["proj-BBBBBBBB", "proj-CCCCCCCC"],
+            ),
+            fm("proj-BBBBBBBB", ItemStatus::Open, &["proj-DDDDDDDD"]),
+            fm("proj-CCCCCCCC", ItemStatus::Open, &["proj-DDDDDDDD"]),
+            fm("proj-DDDDDDDD", ItemStatus::Closed, &[]),
+            fm("proj-EEEEEEEE", ItemStatus::Open, &["proj-AAAAAAAA"]),
+        ];
+        // Same graph, reversed node order and reversed dep lists.
+        let reversed = [
+            fm("proj-EEEEEEEE", ItemStatus::Open, &["proj-AAAAAAAA"]),
+            fm("proj-DDDDDDDD", ItemStatus::Closed, &[]),
+            fm("proj-CCCCCCCC", ItemStatus::Open, &["proj-DDDDDDDD"]),
+            fm("proj-BBBBBBBB", ItemStatus::Open, &["proj-DDDDDDDD"]),
+            fm(
+                "proj-AAAAAAAA",
+                ItemStatus::Open,
+                &["proj-CCCCCCCC", "proj-BBBBBBBB"],
+            ),
+        ];
+
+        let (g1, _) = GraphStore::build(&forward);
+        let (g2, _) = GraphStore::build(&reversed);
+
+        assert_eq!(
+            g1.topological_ranks(),
+            g2.topological_ranks(),
+            "ranks must be a pure function of (edges, ids)"
+        );
+        assert_eq!(g1.ready_items(), g2.ready_items());
+        let b1: Vec<_> = g1.blocked_items().into_iter().map(|b| b.id).collect();
+        let b2: Vec<_> = g2.blocked_items().into_iter().map(|b| b.id).collect();
+        assert_eq!(b1, b2);
+    }
+
+    /// `excluded_ids` returns every hard-cycle member and malformed-parent item,
+    /// regardless of status — including a *closed* cycle member (the case the
+    /// SQL `ready` query's open-dep check alone would miss).
+    #[test]
+    fn excluded_ids_covers_cycle_and_malformed_parent() {
+        // Cycle A↔B with B closed; a self-parent S; an independent ready item R.
+        let mut self_parent = fm("proj-SSSSSSSS", ItemStatus::Open, &[]);
+        self_parent.parent = Some(id("proj-SSSSSSSS"));
+        let items = [
+            fm("proj-AAAAAAAA", ItemStatus::Open, &["proj-BBBBBBBB"]),
+            fm("proj-BBBBBBBB", ItemStatus::Closed, &["proj-AAAAAAAA"]),
+            self_parent,
+            fm("proj-RRRRRRRR", ItemStatus::Open, &[]),
+        ];
+        let (graph, _) = GraphStore::build(&items);
+        let excluded: std::collections::HashSet<String> =
+            graph.excluded_ids().iter().map(|i| i.to_string()).collect();
+
+        assert!(excluded.contains("proj-AAAAAAAA"), "{excluded:?}");
+        assert!(
+            excluded.contains("proj-BBBBBBBB"),
+            "a closed cycle member must still be excluded: {excluded:?}"
+        );
+        assert!(
+            excluded.contains("proj-SSSSSSSS"),
+            "self-parent: {excluded:?}"
+        );
+        assert!(!excluded.contains("proj-RRRRRRRR"), "{excluded:?}");
+
+        // And the independent item is the only ready one (cycle members excluded).
+        assert_eq!(
+            graph
+                .ready_items()
+                .iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>(),
+            vec!["proj-RRRRRRRR".to_string()]
+        );
+    }
 }

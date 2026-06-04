@@ -484,6 +484,55 @@ mod tests {
     }
 
     #[test]
+    fn counts_dangling_excluded_and_cycles() {
+        // R: ready. D: depends on a missing id (dangling). A↔B: a hard cycle.
+        let r = fm(
+            "proj-RRRRRRRR",
+            ItemStatus::Open,
+            ItemType::Feature,
+            2,
+            "2026-06-01T00:00:00Z",
+        );
+        let mut d = fm(
+            "proj-DDDDDDDD",
+            ItemStatus::Open,
+            ItemType::Feature,
+            2,
+            "2026-06-01T00:00:00Z",
+        );
+        d.deps = vec![CloveId::new("proj-MISSING0").unwrap()];
+        let mut a = fm(
+            "proj-AAAAAAAA",
+            ItemStatus::Open,
+            ItemType::Feature,
+            2,
+            "2026-06-01T00:00:00Z",
+        );
+        a.deps = vec![CloveId::new("proj-BBBBBBBB").unwrap()];
+        let mut b = fm(
+            "proj-BBBBBBBB",
+            ItemStatus::Open,
+            ItemType::Feature,
+            2,
+            "2026-06-01T00:00:00Z",
+        );
+        b.deps = vec![CloveId::new("proj-AAAAAAAA").unwrap()];
+
+        let items = vec![r, d, a, b];
+        let (graph, _) = GraphStore::build(&items);
+        let report = compute(&items, &graph, now(), StatsOptions::default());
+
+        assert_eq!(report.dangling, 1, "one missing referenced id: {report:?}");
+        assert_eq!(report.cycles, 1, "one hard cycle: {report:?}");
+        assert_eq!(report.excluded, 2, "A and B are cycle members: {report:?}");
+        assert_eq!(report.ready, 1, "only R is ready: {report:?}");
+        assert_eq!(
+            report.blocked, 1,
+            "only D is blocked (dangling): {report:?}"
+        );
+    }
+
+    #[test]
     fn report_round_trips_through_json() {
         let items = vec![fm(
             "proj-AAAAAAAA",
