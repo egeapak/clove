@@ -10,11 +10,12 @@
 //! affect readiness — enforced by routing every blocking computation through the
 //! hard-dependency edge view (`is_hard_dep`).
 
-use std::collections::{HashMap, HashSet};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
-use petgraph::algo::{has_path_connecting, kosaraju_scc, toposort};
+use petgraph::algo::{has_path_connecting, kosaraju_scc};
 use petgraph::stable_graph::{NodeIndex, StableDiGraph};
-use petgraph::visit::{EdgeFiltered, EdgeRef};
+use petgraph::visit::{EdgeFiltered, EdgeRef, IntoEdgeReferences};
 use smol_str::SmolStr;
 
 use crate::id::CloveId;
@@ -356,6 +357,22 @@ impl GraphStore {
         blocked
     }
 
+    /// Every item excluded from `ready`/`blocked` because it is in a
+    /// hard-dependency cycle or has a malformed parent — **regardless of
+    /// status** (unlike [`Self::excluded_items`], which returns only the active
+    /// ones). This is what the index persists in the `excluded` column so the
+    /// SQL `ready` query can exclude cycle/malformed-parent members exactly as
+    /// the in-memory `ready_items` does. Sorted by id.
+    pub fn excluded_ids(&self) -> Vec<CloveId> {
+        let mut ids: Vec<CloveId> = self
+            .excluded_node_set()
+            .into_iter()
+            .map(|node| self.graph[node].id.clone())
+            .collect();
+        ids.sort();
+        ids
+    }
+
     /// Active items excluded from both `ready` and `blocked` because they are in
     /// a hard-dependency cycle or have a malformed parent. Sorted by id.
     pub fn excluded_items(&self) -> Vec<CloveId> {
@@ -547,15 +564,59 @@ impl GraphStore {
 
     /// Topological rank of each node over hard-dependency edges. Empty if the
     /// hard-dependency graph has a cycle (ranks are then treated as unknown).
+    ///
+    /// Uses a **canonical** Kahn topological sort: among the nodes currently
+    /// available (in-degree zero over hard edges), the one with the smallest
+    /// `id` is always emitted next. This makes the rank a pure function of
+    /// `(hard edges, ids)` — independent of node-insertion order — which is what
+    /// lets the incremental index path (`apply_staleness` recompute) produce
+    /// byte-identical ranks to a full `reindex`. (petgraph's `toposort` is also
+    /// valid but its order depends on insertion order, so it cannot be matched
+    /// incrementally.)
     fn topological_ranks_internal(&self) -> HashMap<NodeIndex, usize> {
-        let hard = EdgeFiltered::from_fn(&self.graph, |e| is_hard_dep(*e.weight()));
-        match toposort(&hard, None) {
-            Ok(order) => order
-                .into_iter()
-                .enumerate()
-                .map(|(rank, node)| (node, rank))
-                .collect(),
-            Err(_) => HashMap::new(),
+        // In-degree over hard edges only.
+        let mut in_degree: HashMap<NodeIndex, usize> =
+            self.graph.node_indices().map(|n| (n, 0usize)).collect();
+        for edge in self.graph.edge_references() {
+            if is_hard_dep(*edge.weight()) {
+                *in_degree.entry(edge.target()).or_insert(0) += 1;
+            }
+        }
+
+        // Min-heap (via Reverse) keyed by id, so ties resolve deterministically
+        // to the lowest id — the canonical choice.
+        let mut ready: BinaryHeap<Reverse<(CloveId, NodeIndex)>> = self
+            .graph
+            .node_indices()
+            .filter(|n| in_degree.get(n).copied().unwrap_or(0) == 0)
+            .map(|n| Reverse((self.graph[n].id.clone(), n)))
+            .collect();
+
+        let mut ranks = HashMap::with_capacity(self.graph.node_count());
+        let mut next_rank = 0usize;
+        while let Some(Reverse((_, node))) = ready.pop() {
+            ranks.insert(node, next_rank);
+            next_rank += 1;
+            for edge in self.graph.edges(node) {
+                if !is_hard_dep(*edge.weight()) {
+                    continue;
+                }
+                let target = edge.target();
+                if let Some(deg) = in_degree.get_mut(&target) {
+                    *deg -= 1;
+                    if *deg == 0 {
+                        ready.push(Reverse((self.graph[target].id.clone(), target)));
+                    }
+                }
+            }
+        }
+
+        // A cycle leaves some nodes unemitted → ranks unknown (matches the prior
+        // `toposort` error case).
+        if ranks.len() == self.graph.node_count() {
+            ranks
+        } else {
+            HashMap::new()
         }
     }
 
@@ -978,5 +1039,91 @@ mod tests {
     }
     fn tree_has_cycle_ref(node: &DepTreeNode) -> bool {
         node.cycle_ref || node.children.iter().any(tree_has_cycle_ref)
+    }
+
+    /// The canonical Kahn order (P0) is a pure function of `(edges, ids)` — the
+    /// load-bearing invariant that lets the incremental index path match a full
+    /// reindex. Building the same graph from frontmatters in a different order
+    /// (and with the deps listed in a different order) must yield byte-identical
+    /// ranks, ready order, and blocked order.
+    #[test]
+    fn canonical_ranks_independent_of_insertion_order() {
+        // A diamond plus a tail: B,C depend on D; A depends on B,C; E depends on A.
+        let forward = [
+            fm(
+                "proj-AAAAAAAA",
+                ItemStatus::Open,
+                &["proj-BBBBBBBB", "proj-CCCCCCCC"],
+            ),
+            fm("proj-BBBBBBBB", ItemStatus::Open, &["proj-DDDDDDDD"]),
+            fm("proj-CCCCCCCC", ItemStatus::Open, &["proj-DDDDDDDD"]),
+            fm("proj-DDDDDDDD", ItemStatus::Closed, &[]),
+            fm("proj-EEEEEEEE", ItemStatus::Open, &["proj-AAAAAAAA"]),
+        ];
+        // Same graph, reversed node order and reversed dep lists.
+        let reversed = [
+            fm("proj-EEEEEEEE", ItemStatus::Open, &["proj-AAAAAAAA"]),
+            fm("proj-DDDDDDDD", ItemStatus::Closed, &[]),
+            fm("proj-CCCCCCCC", ItemStatus::Open, &["proj-DDDDDDDD"]),
+            fm("proj-BBBBBBBB", ItemStatus::Open, &["proj-DDDDDDDD"]),
+            fm(
+                "proj-AAAAAAAA",
+                ItemStatus::Open,
+                &["proj-CCCCCCCC", "proj-BBBBBBBB"],
+            ),
+        ];
+
+        let (g1, _) = GraphStore::build(&forward);
+        let (g2, _) = GraphStore::build(&reversed);
+
+        assert_eq!(
+            g1.topological_ranks(),
+            g2.topological_ranks(),
+            "ranks must be a pure function of (edges, ids)"
+        );
+        assert_eq!(g1.ready_items(), g2.ready_items());
+        let b1: Vec<_> = g1.blocked_items().into_iter().map(|b| b.id).collect();
+        let b2: Vec<_> = g2.blocked_items().into_iter().map(|b| b.id).collect();
+        assert_eq!(b1, b2);
+    }
+
+    /// `excluded_ids` returns every hard-cycle member and malformed-parent item,
+    /// regardless of status — including a *closed* cycle member (the case the
+    /// SQL `ready` query's open-dep check alone would miss).
+    #[test]
+    fn excluded_ids_covers_cycle_and_malformed_parent() {
+        // Cycle A↔B with B closed; a self-parent S; an independent ready item R.
+        let mut self_parent = fm("proj-SSSSSSSS", ItemStatus::Open, &[]);
+        self_parent.parent = Some(id("proj-SSSSSSSS"));
+        let items = [
+            fm("proj-AAAAAAAA", ItemStatus::Open, &["proj-BBBBBBBB"]),
+            fm("proj-BBBBBBBB", ItemStatus::Closed, &["proj-AAAAAAAA"]),
+            self_parent,
+            fm("proj-RRRRRRRR", ItemStatus::Open, &[]),
+        ];
+        let (graph, _) = GraphStore::build(&items);
+        let excluded: std::collections::HashSet<String> =
+            graph.excluded_ids().iter().map(|i| i.to_string()).collect();
+
+        assert!(excluded.contains("proj-AAAAAAAA"), "{excluded:?}");
+        assert!(
+            excluded.contains("proj-BBBBBBBB"),
+            "a closed cycle member must still be excluded: {excluded:?}"
+        );
+        assert!(
+            excluded.contains("proj-SSSSSSSS"),
+            "self-parent: {excluded:?}"
+        );
+        assert!(!excluded.contains("proj-RRRRRRRR"), "{excluded:?}");
+
+        // And the independent item is the only ready one (cycle members excluded).
+        assert_eq!(
+            graph
+                .ready_items()
+                .iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>(),
+            vec!["proj-RRRRRRRR".to_string()]
+        );
     }
 }

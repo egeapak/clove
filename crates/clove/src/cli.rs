@@ -87,6 +87,8 @@ pub enum Commands {
     Comments(CommentsArgs),
     /// Full-text search.
     Search(SearchArgs),
+    /// Show work-item analytics (counts, ready/blocked, epics, throughput).
+    Stats(StatsArgs),
     /// Rebuild the SQLite index from the files.
     Reindex,
     /// Import items from another tracker (`tk|beads|github`).
@@ -347,6 +349,29 @@ pub struct SearchArgs {
     pub text: String,
     /// Maximum number of results (default 100; use `--limit 0` for no limit).
     #[arg(long)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Args)]
+pub struct StatsArgs {
+    /// Cap the assignee/label breakdowns to the N highest counts (default 10;
+    /// use `0` for no cap).
+    #[arg(long, value_name = "N")]
+    pub top: Option<usize>,
+    /// Skip the per-epic completion rollup.
+    #[arg(long)]
+    pub no_epics: bool,
+    /// Persist this report to the durable history in the index (`.clove/index.db`).
+    #[arg(long)]
+    pub snapshot: bool,
+    /// Show the recorded snapshot history instead of a live report.
+    #[arg(long)]
+    pub history: bool,
+    /// With `--history`: only snapshots at/after this RFC3339 timestamp.
+    #[arg(long, value_name = "RFC3339")]
+    pub since: Option<String>,
+    /// With `--history`: show at most this many (most recent) snapshots.
+    #[arg(long, value_name = "N")]
     pub limit: Option<usize>,
 }
 

@@ -105,7 +105,7 @@ impl Dispatcher {
         });
         match resp {
             Some(r) => Response::Graph(r),
-            None => Response::Error(ErrorResponse::new("graph_failed", "could not scan files")),
+            None => Response::Error(ErrorResponse::new("graph_failed", "could not read index")),
         }
     }
 
@@ -122,6 +122,8 @@ impl Dispatcher {
             if let Ok(report) = index.check_staleness_fast(&self.issues_dir) {
                 if !report.is_clean() && report.change_count() <= STALE_REFRESH_LIMIT {
                     let _ = index.apply_staleness(&report, &self.issues_dir);
+                    // The DB advanced; the hot graph (sourced from it) must rebuild.
+                    self.graph.mark_dirty();
                 }
             }
         }
@@ -147,6 +149,8 @@ impl Dispatcher {
             if let Ok(report) = index.check_staleness_fast(&self.issues_dir) {
                 if !report.is_clean() && report.change_count() <= STALE_REFRESH_LIMIT {
                     let _ = index.apply_staleness(&report, &self.issues_dir);
+                    // The DB advanced; the hot graph (sourced from it) must rebuild.
+                    self.graph.mark_dirty();
                 }
             }
         }
@@ -174,20 +178,34 @@ impl Dispatcher {
 
     /// Rebuild the index from files, then reopen so the daemon serves the rebuilt
     /// file rather than the replaced inode.
+    ///
+    /// The index lock is held across the whole rebuild + reopen so a concurrent
+    /// auto-snapshot (`snapshot_loop`) cannot record into the live database during
+    /// the window between `reindex`'s snapshot carry-over and its atomic rename —
+    /// which would write to the about-to-be-replaced inode and lose that history
+    /// point. Reindex is an explicit, infrequent operation, so briefly serializing
+    /// queries behind it is an acceptable trade for not dropping snapshots.
     fn handle_reindex(&self) -> Response {
         let start = Instant::now();
+        let mut index = match self.index.lock() {
+            Ok(g) => g,
+            Err(_) => {
+                return Response::Error(ErrorResponse::new("internal", "index lock poisoned"))
+            }
+        };
         let report = match clove_index::reindex(&self.issues_dir, &self.db_path) {
             Ok(report) => report,
             Err(e) => return Response::Error(ErrorResponse::new("reindex_failed", e.to_string())),
         };
-        if let (Ok(mut index), Ok(fresh)) =
-            (self.index.lock(), Index::open_or_create(&self.db_path))
-        {
+        if let Ok(fresh) = Index::open_or_create(&self.db_path) {
             *index = fresh;
             if let Ok(mut state) = self.state.lock() {
                 state.set_items_indexed(index.item_count().unwrap_or(0) as u64);
             }
         }
+        drop(index);
+        // The index was rebuilt and reopened; rebuild the hot graph from it.
+        self.graph.mark_dirty();
         Response::ReindexDone(ReindexDone {
             items_indexed: report.items_indexed as u64,
             duration_ms: start.elapsed().as_millis() as u64,

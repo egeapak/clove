@@ -660,14 +660,42 @@ condition for M4 planning.
   and sort + filter controls, landed in T-U01.)* Possible later refinements to the
   shipped sort/filter: per-namespace OR within labels, an "assigned to me" toggle,
   and lifting a shared filter type into `clove-core` if a third consumer appears.
-- **`clove stats` — work-item analytics command** *(deferred here by the M3_PLAN.md §1.1
-  CLI-surface review)*. A user-facing aggregate/statistics view: counts by status / type /
-  priority / assignee, ready / blocked / closed totals, open-cycle count, epic completion
-  rollups, and (optionally) throughput over time. Not in the PRD or DESIGN §7.2 CLI surface
-  and **not** required by M3. Natural M4 home because the M1 index already makes these
-  aggregate queries cheap (and the M3 daemon keeps that index hot). Note: this is distinct
-  from the M3 daemon `STATUS` IPC payload, which is daemon *operational* telemetry
-  (`uptime_s`, `items_indexed`, `watcher_state`, `last_event_ms`), not work-item analytics.
+- **`clove stats` — work-item analytics command** — **DONE (M4)**. A user-facing
+  aggregate/statistics view: counts by status / type / priority / assignee / label,
+  ready / blocked / excluded / dangling totals, dependency-cycle count, per-epic
+  completion rollups, and created/closed throughput over rolling windows (7d/30d/all).
+  Also surfaces daemon operational telemetry (the §8.4 `STATUS` payload) and local index
+  presence/freshness in the same report. Analytics are computed from a single file scan +
+  graph build (files are truth); the index/daemon are reported, not relied on for
+  correctness. **Persistence:** snapshots are stored in a `snapshots` table **inside
+  `.clove/index.db`** (one database for the tool, no separate file). The index is a
+  rebuildable cache, so the layer carries the `snapshots` table across its two
+  destructive ops — a full `reindex` (tmp-build + atomic rename) copies the rows
+  before the rename, and schema-mismatch recovery reads them out before the rebuild
+  and reinserts after; the table is created idempotently on open, so no
+  `user_version` bump is needed. Only raw file corruption loses history (acceptable;
+  files remain truth). `--snapshot` records; `--history [--since] [--limit]` replays.
+  Implemented across `clove-core::stats` (`StatsReport`/`compute`),
+  `clove-index::stats_store` (the `snapshots` table + `Index::record_snapshot`/
+  `snapshot_history` + reindex/recovery carry-over), and `clove/src/cmd/stats.rs`;
+  JSON schema `docs/json-schema/v1/stats.json`. A running daemon also auto-records
+  snapshots on a timer (`[daemon] stats_snapshot_min`, default 60;
+  `cloved/src/snapshot.rs`), using the same compute path so daemon and manual
+  snapshots are identical.
+- **Incremental index & daemon graph** — **DONE (M4)**. The incremental
+  `apply_staleness` path now keeps the derived graph columns exact (canonical
+  Kahn toposort in clove-core; `clove-index::derive` recomputes
+  `topological_rank`/`has_dangling_deps`/`excluded` from the index's own
+  `items`/`edges` tables, delta-only, in-transaction), so it matches a full
+  `reindex` without one (schema v4 adds `items.excluded`; SQL `ready` excludes
+  hard-cycle/malformed-parent members). The daemon's hot `GraphStore` is rebuilt
+  from the index DB (`Index::graph_frontmatters`) rather than re-scanning the item
+  files. `apply_staleness` skips the recompute entirely for content-only edits
+  (status/title/assignee/priority/labels) via a topology-change guard, recomputing
+  only when an item is added/deleted or a changed item's edge/parent signature
+  differs. True sub-linear O(region) delta mutation (Pearce–Kelly) was implemented
+  and benchmarked but rejected: its order is history-dependent, which breaks
+  clove's canonical-order parity contract (and it can't represent cycles).
 - TUI and/or web UI; bidirectional vendor bridges (GitHub/GitLab/Jira); richer
   history/changelog.
 

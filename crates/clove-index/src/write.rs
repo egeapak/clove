@@ -53,6 +53,10 @@ pub(crate) struct RowMeta {
     pub topo_rank: Option<i64>,
     /// Whether the item references at least one missing hard dependency.
     pub has_dangling_deps: bool,
+    /// Whether the item is in a hard-dependency cycle or has a malformed parent
+    /// (excluded from `ready`/`blocked`). Like `topo_rank`, this is a derived
+    /// graph property; the incremental path fixes it via `recompute_derived`.
+    pub excluded: bool,
 }
 
 /// The single public write path: upsert one item and its relationships.
@@ -69,6 +73,7 @@ pub fn upsert_item(conn: &mut Connection, item: &Item) -> Result<(), IndexError>
         content_hash: content_hash8(item.body.as_bytes()),
         topo_rank: None,
         has_dangling_deps: false,
+        excluded: false,
     };
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     write_row(&tx, item, &meta)?;
@@ -91,9 +96,9 @@ pub(crate) fn write_row(
     tx.execute(
         "INSERT OR REPLACE INTO items
             (id, title, status, item_type, priority, assignee, parent_id,
-             topological_rank, has_dangling_deps, labels, created_at, updated_at,
+             topological_rank, has_dangling_deps, excluded, labels, created_at, updated_at,
              closed_at, file_mtime, content_hash, source_system, external_ref)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         params![
             id,
             fm.title,
@@ -104,6 +109,7 @@ pub(crate) fn write_row(
             fm.parent.as_ref().map(|p| p.as_str()),
             meta.topo_rank.unwrap_or(UNRANKED_TOPO),
             meta.has_dangling_deps,
+            meta.excluded,
             labels_json,
             fm.created.to_rfc3339(),
             fm.updated.to_rfc3339(),

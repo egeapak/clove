@@ -49,6 +49,11 @@ fn where_clause(filter: &Filter) -> (String, Vec<Box<dyn ToSql>>) {
         QueryMode::Ready => {
             where_clauses.push("status IN ('open', 'in_progress')".to_owned());
             where_clauses.push("has_dangling_deps = FALSE".to_owned());
+            // Exclude hard-cycle / malformed-parent members, matching the
+            // in-memory `GraphStore::ready_items` exactly (M4 P1). `excluded` is
+            // kept current by `recompute_derived` on every reindex/incremental
+            // apply.
+            where_clauses.push("excluded = FALSE".to_owned());
             where_clauses.push(format!(
                 "NOT EXISTS (SELECT 1 FROM edges e JOIN items dep ON e.to_id = dep.id \
                  WHERE e.from_id = items.id AND e.kind = {} AND dep.status != 'closed')",

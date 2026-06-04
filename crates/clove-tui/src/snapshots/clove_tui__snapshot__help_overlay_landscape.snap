@@ -5,10 +5,10 @@ expression: rendered
   All 7  │  Ready 4  │  Blocked 1
 ┌ Items (7) ───────────────────────┌ Help ──────────────────────────────────────────┐──────────────────────────────────┐
 │▌◐ F #2 ! Build REST API ●        │ clove tui — read-only browser                  │            ◐ in_progress · ready │
-│ ○ B #7 ↑ Investigate flaky CI ●  │                                                │                  @grace · deps 1 │
-│ ● C #1 ↑ Set up database schema  │ ↑/k ↓/j      move selection                    │──────────────────────────────────│
-│ ○ E #4 • Ship v1 release ●       │ g / G        jump to top / bottom              │                                  │
-│ ○ F #3 • Write integration tests │ Tab / 1 2 3  All / Ready / Blocked             │                                  │
+│ ● C #1 ↑ Set up database schema  │                                                │                  @grace · deps 1 │
+│ ○ B #7 ↑ Investigate flaky CI ●  │ ↑/k ↓/j      move selection                    │──────────────────────────────────│
+│ ○ F #3 • Write integration tests │ g / G        jump to top / bottom              │                                  │
+│ ○ E #4 • Ship v1 release ●       │ Tab / 1 2 3  All / Ready / Blocked             │                                  │
 │ ○ F #5 • Frontend dashboard ●    │ o / t / c    overview / dep tree / comments    │s/api.md.                         │
 │ ● D #6 ↓ Docs site               │ →/l  ←/h     focus detail / list (narrow)      │                                  │
 │                                  │ PgUp / PgDn  scroll detail                     │                                  │

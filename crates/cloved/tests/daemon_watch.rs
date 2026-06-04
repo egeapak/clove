@@ -133,6 +133,64 @@ fn wait_until(timeout: Duration, mut f: impl FnMut() -> bool) -> bool {
     f()
 }
 
+/// Spawn the daemon with extra env (e.g. the snapshot/idle overrides) and wait
+/// until its pid file appears.
+fn spawn_ready_env(clove_dir: &Utf8Path, env: &[(&str, &str)]) -> Child {
+    let mut cmd = Command::new(cloved_bin());
+    cmd.arg("run").arg("--clove-dir").arg(clove_dir.as_str());
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let child = cmd.spawn().expect("spawn cloved");
+    let pid = clove_dir.join("daemon.pid");
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(5) {
+        if pid.exists() {
+            return child;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("daemon not ready");
+}
+
+/// M4: a running daemon records `clove stats` history points on its interval.
+#[test]
+fn daemon_auto_snapshots_on_interval() {
+    let repo = init_repo();
+    repo.add_item("tracked work");
+    repo.reindex();
+
+    // Snapshot every 150ms; never idle-shut-down during the test.
+    let mut child = spawn_ready_env(
+        &repo.clove_dir,
+        &[
+            ("CLOVED_STATS_SNAPSHOT_MS", "150"),
+            ("CLOVED_IDLE_SHUTDOWN_MS", "0"),
+        ],
+    );
+
+    let db = repo.clove_dir.join("index.db");
+    let recorded = wait_until(Duration::from_secs(5), || {
+        clove_index::Index::open(&db)
+            .ok()
+            .and_then(|i| i.snapshot_count().ok())
+            .unwrap_or(0)
+            >= 1
+    });
+
+    sigterm(child.id());
+    let _ = child.wait();
+
+    assert!(
+        recorded,
+        "daemon must auto-record at least one stats snapshot"
+    );
+    // The recorded snapshot reflects the one tracked item.
+    let index = clove_index::Index::open(&db).unwrap();
+    let hist = index.snapshot_history(None, Some(1)).unwrap();
+    assert_eq!(hist[0].report.total, 1);
+}
+
 #[test]
 fn startup_sweep_picks_up_out_of_band_items() {
     let repo = init_repo();

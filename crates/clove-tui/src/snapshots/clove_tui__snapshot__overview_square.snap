@@ -7,10 +7,10 @@ expression: rendered
 └──────────────────────────────────────────────────────────┘
 ┌ Items (7) ───────────────────────────────────────────────┐
 │▌◐ F #2 ! Build REST API ●                                │
-│ ○ B #7 ↑ Investigate flaky CI ●                          │
 │ ● C #1 ↑ Set up database schema                          │
-│ ○ E #4 • Ship v1 release ●                               │
+│ ○ B #7 ↑ Investigate flaky CI ●                          │
 │ ○ F #3 • Write integration tests ✗                       │
+│ ○ E #4 • Ship v1 release ●                               │
 │ ○ F #5 • Frontend dashboard ●                            │
 │ ● D #6 ↓ Docs site                                       │
 │                                                          │

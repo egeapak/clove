@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://clove.dev/schema/v1/stats.json",
+  "title": "clove stats envelope",
+  "description": "A `clove stats` analytics response: aggregate work-item counts plus daemon and index telemetry.",
+  "type": "object",
+  "required": ["v", "ok", "data"],
+  "properties": {
+    "v": { "const": 1 },
+    "ok": { "const": true },
+    "data": {
+      "type": "object",
+      "required": [
+        "total",
+        "by_status",
+        "by_type",
+        "by_priority",
+        "unassigned",
+        "by_assignee",
+        "by_label",
+        "ready",
+        "blocked",
+        "excluded",
+        "dangling",
+        "cycles",
+        "epics",
+        "throughput",
+        "daemon",
+        "index"
+      ],
+      "properties": {
+        "total": { "type": "integer", "minimum": 0 },
+        "by_status": {
+          "type": "object",
+          "required": ["open", "in_progress", "closed"],
+          "properties": {
+            "open": { "type": "integer", "minimum": 0 },
+            "in_progress": { "type": "integer", "minimum": 0 },
+            "closed": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": false
+        },
+        "by_type": {
+          "type": "object",
+          "required": ["bug", "feature", "chore", "docs", "epic"],
+          "properties": {
+            "bug": { "type": "integer", "minimum": 0 },
+            "feature": { "type": "integer", "minimum": 0 },
+            "chore": { "type": "integer", "minimum": 0 },
+            "docs": { "type": "integer", "minimum": 0 },
+            "epic": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": false
+        },
+        "by_priority": {
+          "type": "array",
+          "minItems": 5,
+          "maxItems": 5,
+          "items": { "type": "integer", "minimum": 0 }
+        },
+        "unassigned": { "type": "integer", "minimum": 0 },
+        "by_assignee": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/keyCount" }
+        },
+        "by_label": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/keyCount" }
+        },
+        "ready": { "type": "integer", "minimum": 0 },
+        "blocked": { "type": "integer", "minimum": 0 },
+        "excluded": { "type": "integer", "minimum": 0 },
+        "dangling": { "type": "integer", "minimum": 0 },
+        "cycles": { "type": "integer", "minimum": 0 },
+        "epics": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "title", "total", "closed", "pct", "completable"],
+            "properties": {
+              "id": { "type": "string" },
+              "title": { "type": "string" },
+              "total": { "type": "integer", "minimum": 0 },
+              "closed": { "type": "integer", "minimum": 0 },
+              "pct": { "type": "integer", "minimum": 0, "maximum": 100 },
+              "completable": { "type": "boolean" }
+            },
+            "additionalProperties": false
+          }
+        },
+        "throughput": {
+          "type": "object",
+          "required": [
+            "created_7d",
+            "closed_7d",
+            "created_30d",
+            "closed_30d",
+            "created_total",
+            "closed_total"
+          ],
+          "properties": {
+            "created_7d": { "type": "integer", "minimum": 0 },
+            "closed_7d": { "type": "integer", "minimum": 0 },
+            "created_30d": { "type": "integer", "minimum": 0 },
+            "closed_30d": { "type": "integer", "minimum": 0 },
+            "created_total": { "type": "integer", "minimum": 0 },
+            "closed_total": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": false
+        },
+        "daemon": {
+          "type": "object",
+          "required": ["running"],
+          "properties": { "running": { "type": "boolean" } },
+          "additionalProperties": true
+        },
+        "index": {
+          "type": "object",
+          "required": ["present"],
+          "properties": { "present": { "type": "boolean" } },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "_meta": { "type": "object" }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "keyCount": {
+      "type": "object",
+      "required": ["key", "count"],
+      "properties": {
+        "key": { "type": "string" },
+        "count": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    }
+  }
+}

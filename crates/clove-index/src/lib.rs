@@ -16,13 +16,16 @@
 //! the M0 command surface exists (IMPLEMENTATION_PLAN T-S04/S05/S06/S08).
 
 pub mod db;
+pub mod derive;
 pub mod query;
 pub mod reindex;
 pub mod stale;
+pub mod stats_store;
 pub mod write;
 
 pub use db::{Index, IndexError, ItemListRow, ItemRow, SCHEMA_VERSION};
 pub use query::{count_items, query_items, query_list, search, Filter, QueryMode};
 pub use reindex::{reindex, ReindexReport};
 pub use stale::{apply_staleness, check_staleness, check_staleness_fast, StalenessReport};
+pub use stats_store::StatsSnapshot;
 pub use write::upsert_item;

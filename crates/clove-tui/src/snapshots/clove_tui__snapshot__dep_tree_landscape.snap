@@ -5,10 +5,10 @@ expression: rendered
   All 7  │  Ready 4  │  Blocked 1
 ┌ Items (7) ───────────────────────────────────┐┌ Overview · Dep tree · Comments ──────────────────────────────────────┐
 │▌◐ F #2 ! Build REST API ●                    ││ Dependency tree (this → its dependencies)                            │
-│ ○ B #7 ↑ Investigate flaky CI ●              ││                                                                      │
-│ ● C #1 ↑ Set up database schema              ││ ◐ #2  Build REST API [ready]                                         │
-│ ○ E #4 • Ship v1 release ●                   ││ └── ● #1  Set up database schema                                     │
-│ ○ F #3 • Write integration tests ✗           ││                                                                      │
+│ ● C #1 ↑ Set up database schema              ││                                                                      │
+│ ○ B #7 ↑ Investigate flaky CI ●              ││ ◐ #2  Build REST API [ready]                                         │
+│ ○ F #3 • Write integration tests ✗           ││ └── ● #1  Set up database schema                                     │
+│ ○ E #4 • Ship v1 release ●                   ││                                                                      │
 │ ○ F #5 • Frontend dashboard ●                ││                                                                      │
 │ ● D #6 ↓ Docs site                           ││                                                                      │
 │                                              ││                                                                      │
