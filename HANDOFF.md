@@ -242,17 +242,32 @@ instead of "approximate-until-reindex" (evaluated first with a 3-agent team).
   The watcher keeps the index exact+fresh before marking the cache dirty, so the
   DB-sourced graph is parity-identical to the file scan it replaces, far cheaper.
   `QUERY`/`SEARCH` inline refresh and `REINDEX` now also invalidate the hot graph.
+- **Topology-change guard.** `apply_staleness` now runs the O(V+E)
+  `recompute_derived` **only when the dependency structure changed** (an item
+  added/deleted, or a changed item's edge/parent signature differs). A content-only
+  edit — `status`/`title`/`assignee`/`priority`/`labels`, the common case —
+  preserves its existing exact derived columns (snapshotted before the row
+  overwrite) and skips the recompute entirely. `apply_staleness_tracked` returns
+  whether the recompute ran; tests assert a status edit skips it (and stays
+  byte-identical to reindex) while a dep edit triggers it.
 
 **Decisions / scope:** the graph is **already persisted correctly** as the `edges`
 adjacency table + the `topological_rank`/`has_dangling_deps`/`excluded` columns —
 no transitive-closure table (write-storm for a rare query) and no graph engine;
 SQLite stays the single store, cycles detected in-memory during the recompute.
 Both the P1 recompute and the P3 daemon rebuild are O(V+E) **in-memory** passes
-(fast: no file I/O / YAML parse); true sub-linear O(affected-region) delta mutation
-(Pearce–Kelly-style) was evaluated and **deferred** — it was rejected for now
-because it breaks the byte-parity contract and the dominant cost (per-file YAML
-parsing) is already eliminated. An always-correct hot graph now unblocks future
-work (live ready-queue push / `SUBSCRIBE`, MCP "what's ready", per-batch analytics).
+(fast: no file I/O / YAML parse), and the topology-change guard skips even that for
+content-only edits. **Pearce–Kelly** online topological ordering (true sub-linear
+O(affected-region) maintenance) was implemented and benchmarked in a standalone
+harness (correctness verified vs. a reachability reference; ~0.2–1 µs per
+invalidating edit vs. 0.5–68 ms for a full recompute at 10k–500k nodes), then
+**rejected for clove**: PK's order is *history-dependent*, which structurally
+breaks clove's canonical-order parity contract (the daemon, the index, and the
+from-scratch file-scan path must all agree on `topological_rank`); PK also can't
+represent cycles (clove must) and only wins at a scale clove rarely hits. The
+guard is the correctness-preserving alternative. An always-correct hot graph now
+unblocks future work (live ready-queue push / `SUBSCRIBE`, MCP "what's ready",
+per-batch analytics).
 
 ## What clove is
 

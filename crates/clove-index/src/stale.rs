@@ -282,22 +282,113 @@ pub fn check_staleness_fast(
 /// full `reindex` would — list ordering and cycle/dangling exclusion no longer
 /// drift between reindexes. Files that fail to parse are skipped (the
 /// malformed-skip rule) so one bad file cannot wedge the sweep.
+///
+/// **Topology-change guard (M4):** the derived columns are a function of the
+/// dependency *structure* only, so the global recompute runs only when this batch
+/// actually changed it (an item added/deleted, or a changed item's edge/parent
+/// set differs). A content-only edit — `status`, `title`, `assignee`, `priority`,
+/// `labels` — preserves its existing exact derived values and skips the O(V+E)
+/// recompute entirely.
 pub fn apply_staleness(
     conn: &mut Connection,
     report: &StalenessReport,
     issues_dir: &Utf8Path,
 ) -> Result<(), IndexError> {
-    if report.is_clean() {
-        return Ok(());
+    apply_staleness_tracked(conn, report, issues_dir).map(|_| ())
+}
+
+/// The dependency-structure signature of an item: its outgoing edges (by kind)
+/// plus its parent. Two items with equal signatures yield identical derived
+/// columns, so a batch that does not change any signature can skip the recompute.
+#[derive(PartialEq, Eq)]
+struct Signature {
+    edges: std::collections::BTreeSet<(u8, String)>,
+    parent: Option<String>,
+}
+
+/// The derived columns of one row, snapshotted before an overwrite so a
+/// content-only edit can write them straight back unchanged.
+struct DerivedCols {
+    topo_rank: i64,
+    has_dangling: bool,
+    excluded: bool,
+}
+
+/// Read an item's pre-write signature and derived columns from the index.
+fn read_snapshot(conn: &Connection, id: &str) -> Result<(Signature, DerivedCols), IndexError> {
+    let (topo_rank, has_dangling, excluded, parent): (i64, bool, bool, Option<String>) = conn
+        .query_row(
+            "SELECT topological_rank, has_dangling_deps, excluded, parent_id \
+             FROM items WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
+    let mut edges = std::collections::BTreeSet::new();
+    {
+        let mut stmt = conn.prepare_cached("SELECT to_id, kind FROM edges WHERE from_id = ?1")?;
+        let rows = stmt.query_map([id], |r| Ok((r.get::<_, u8>(1)?, r.get::<_, String>(0)?)))?;
+        for row in rows {
+            let (kind, to) = row?;
+            edges.insert((kind, to));
+        }
     }
-    // The set of ids that exist on disk now, to resolve dangling hard deps.
-    let now_ms = chrono::Utc::now().timestamp_millis();
-    let (entries, _) = scan_dir(issues_dir, now_ms)?;
-    let live: std::collections::HashSet<String> =
-        entries.iter().map(|e| e.id.as_str().to_owned()).collect();
+    Ok((
+        Signature { edges, parent },
+        DerivedCols {
+            topo_rank,
+            has_dangling,
+            excluded,
+        },
+    ))
+}
+
+/// The structure signature of a freshly parsed item.
+fn signature_of(fm: &clove_core::ItemFrontmatter) -> Signature {
+    use clove_core::graph::EdgeKind;
+    let mut edges = std::collections::BTreeSet::new();
+    let mut add = |kind: EdgeKind, ids: &[CloveId]| {
+        for to in ids {
+            edges.insert((kind as u8, to.as_str().to_owned()));
+        }
+    };
+    add(EdgeKind::DependsOn, &fm.deps);
+    add(EdgeKind::Relates, &fm.relates);
+    add(EdgeKind::Duplicates, &fm.duplicates);
+    add(EdgeKind::Supersedes, &fm.supersedes);
+    Signature {
+        edges,
+        parent: fm.parent.as_ref().map(|p| p.as_str().to_owned()),
+    }
+}
+
+/// Like [`apply_staleness`], but returns whether the dependency topology changed
+/// (i.e. whether the global derived-column recompute ran). Tests use the flag to
+/// assert the content-only fast path.
+pub(crate) fn apply_staleness_tracked(
+    conn: &mut Connection,
+    report: &StalenessReport,
+    issues_dir: &Utf8Path,
+) -> Result<bool, IndexError> {
+    if report.is_clean() {
+        return Ok(false);
+    }
 
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    for id in report.new_ids.iter().chain(report.stale_ids.iter()) {
+
+    // Snapshot each changed-content item's signature + derived columns BEFORE any
+    // write overwrites them.
+    let mut snapshot: std::collections::HashMap<String, (Signature, DerivedCols)> =
+        std::collections::HashMap::new();
+    for id in &report.stale_ids {
+        snapshot.insert(id.as_str().to_owned(), read_snapshot(&tx, id.as_str())?);
+    }
+
+    // Adding or removing an item always changes the graph.
+    let mut topology_changed = !report.new_ids.is_empty() || !report.deleted_ids.is_empty();
+
+    // New items: a node addition always triggers the recompute below, so the
+    // derived placeholders here are fixed up before commit.
+    for id in &report.new_ids {
         let path = issues_dir.join(format!("{id}.md"));
         let Ok(bytes) = std::fs::read(&path) else {
             continue; // file vanished mid-sweep
@@ -305,33 +396,53 @@ pub fn apply_staleness(
         let Ok(item) = parse_item_bytes(&bytes, &path, id) else {
             continue; // malformed-skip
         };
-        let has_dangling_deps = item
-            .frontmatter
-            .deps
-            .iter()
-            .any(|d| !live.contains(d.as_str()));
         let meta = RowMeta {
             file_mtime_ms: file_mtime_ms(&path)?,
             content_hash: content_hash8(&bytes),
-            // `topo_rank`/`excluded` are placeholders here; `recompute_derived`
-            // below fixes the whole graph's derived columns exactly, in this txn.
             topo_rank: None,
-            has_dangling_deps,
+            has_dangling_deps: false,
             excluded: false,
         };
         write_row(&tx, &item, &meta)?;
     }
+
+    // Changed-content items: preserve their exact derived columns. If the topology
+    // turns out unchanged this is the final, correct value (and we skip recompute);
+    // if it changed, the recompute overwrites it.
+    for id in &report.stale_ids {
+        let path = issues_dir.join(format!("{id}.md"));
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(item) = parse_item_bytes(&bytes, &path, id) else {
+            continue;
+        };
+        let (old_sig, old_derived) = snapshot.get(id.as_str()).expect("snapshotted above");
+        if !topology_changed && *old_sig != signature_of(&item.frontmatter) {
+            topology_changed = true;
+        }
+        let meta = RowMeta {
+            file_mtime_ms: file_mtime_ms(&path)?,
+            content_hash: content_hash8(&bytes),
+            topo_rank: Some(old_derived.topo_rank),
+            has_dangling_deps: old_derived.has_dangling,
+            excluded: old_derived.excluded,
+        };
+        write_row(&tx, &item, &meta)?;
+    }
+
     for id in &report.deleted_ids {
         delete_row(&tx, id.as_str())?;
     }
-    // Now that the items/edges reflect the change, recompute the derived graph
-    // columns (topological_rank, has_dangling_deps, excluded) exactly — from the
-    // index's own tables, no file re-scan — so incremental output matches a full
-    // reindex (M4, P1). This also fixes reverse dangling: an item that gains/loses
-    // a referenced id has its dependents' flags refreshed here.
-    crate::derive::recompute_derived(&tx)?;
+
+    // Recompute the derived graph columns exactly — but only when this batch
+    // changed the dependency structure. A content-only edit keeps the preserved
+    // values and avoids the O(V+E) pass (M4 topology-change guard).
+    if topology_changed {
+        crate::derive::recompute_derived(&tx)?;
+    }
     tx.commit()?;
-    Ok(())
+    Ok(topology_changed)
 }
 
 /// Remove an item and its edges/labels/FTS shadow row.
@@ -598,5 +709,143 @@ mod tests {
             1,
             "deep path stats the file and catches the change"
         );
+    }
+
+    // ---- topology-change guard (M4) ----------------------------------------
+
+    /// Write an item with explicit status + hard deps.
+    fn item_with(id: &str, status: &str, deps: &[&str]) -> String {
+        let mut s = format!(
+            "---\nschema: 1\nid: {id}\ntitle: {id}\nstatus: {status}\ntype: feature\n\
+             priority: 2\ncreated: 2026-06-02T10:00:00Z\nupdated: 2026-06-02T10:00:00Z\n"
+        );
+        if status == "closed" {
+            s.push_str("closed: 2026-06-02T11:00:00Z\n");
+        }
+        if !deps.is_empty() {
+            s.push_str("deps:\n");
+            for d in deps {
+                s.push_str(&format!("  - {d}\n"));
+            }
+        }
+        s.push_str("---\nbody\n");
+        s
+    }
+
+    fn derived(index: &Index) -> Vec<(String, i64, bool, bool)> {
+        let mut stmt = index
+            .conn()
+            .prepare(
+                "SELECT id, topological_rank, has_dangling_deps, excluded \
+                 FROM items ORDER BY id",
+            )
+            .unwrap();
+        stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, bool>(2)?,
+                r.get::<_, bool>(3)?,
+            ))
+        })
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+    }
+
+    /// Fresh reindex of the same files → the "gold" derived state.
+    fn gold(issues: &Utf8Path) -> Vec<(String, i64, bool, bool)> {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Utf8PathBuf::from_path_buf(dir.path().join("gold.db")).unwrap();
+        reindex(issues, &db).unwrap();
+        derived(&Index::open(&db).unwrap())
+    }
+
+    #[test]
+    fn status_only_edit_skips_recompute_and_stays_exact() {
+        let fx = fixture(0);
+        std::fs::write(
+            fx.issues.join("proj-AAAAAAAA.md"),
+            item_with("proj-AAAAAAAA", "open", &[]),
+        )
+        .unwrap();
+        std::fs::write(
+            fx.issues.join("proj-BBBBBBBB.md"),
+            item_with("proj-BBBBBBBB", "open", &["proj-AAAAAAAA"]),
+        )
+        .unwrap();
+        reindex(&fx.issues, &fx.db).unwrap();
+
+        let mut index = Index::open(&fx.db).unwrap();
+        let before = derived(&index);
+
+        // Content-only edit: flip B's status, deps unchanged.
+        std::fs::write(
+            fx.issues.join("proj-BBBBBBBB.md"),
+            item_with("proj-BBBBBBBB", "in_progress", &["proj-AAAAAAAA"]),
+        )
+        .unwrap();
+        let report = index.check_staleness(&fx.issues).unwrap();
+        assert_eq!(report.stale_ids.len(), 1);
+
+        let recomputed = apply_staleness_tracked(index.conn_mut(), &report, &fx.issues).unwrap();
+        assert!(
+            !recomputed,
+            "a status-only edit must skip the derived recompute"
+        );
+
+        // Derived columns are unchanged and still exactly match a fresh reindex.
+        assert_eq!(derived(&index), before);
+        assert_eq!(derived(&index), gold(&fx.issues));
+    }
+
+    #[test]
+    fn dep_edit_triggers_recompute_and_matches_reindex() {
+        let fx = fixture(0);
+        std::fs::write(
+            fx.issues.join("proj-AAAAAAAA.md"),
+            item_with("proj-AAAAAAAA", "open", &[]),
+        )
+        .unwrap();
+        std::fs::write(
+            fx.issues.join("proj-BBBBBBBB.md"),
+            item_with("proj-BBBBBBBB", "open", &["proj-AAAAAAAA"]),
+        )
+        .unwrap();
+        reindex(&fx.issues, &fx.db).unwrap();
+        let mut index = Index::open(&fx.db).unwrap();
+
+        // Structural edit: drop B's dependency on A.
+        std::fs::write(
+            fx.issues.join("proj-BBBBBBBB.md"),
+            item_with("proj-BBBBBBBB", "open", &[]),
+        )
+        .unwrap();
+        let report = index.check_staleness(&fx.issues).unwrap();
+        let recomputed = apply_staleness_tracked(index.conn_mut(), &report, &fx.issues).unwrap();
+        assert!(recomputed, "a dependency edit must trigger the recompute");
+        assert_eq!(derived(&index), gold(&fx.issues));
+    }
+
+    #[test]
+    fn new_item_triggers_recompute() {
+        let fx = fixture(0);
+        std::fs::write(
+            fx.issues.join("proj-AAAAAAAA.md"),
+            item_with("proj-AAAAAAAA", "open", &[]),
+        )
+        .unwrap();
+        reindex(&fx.issues, &fx.db).unwrap();
+        let mut index = Index::open(&fx.db).unwrap();
+
+        std::fs::write(
+            fx.issues.join("proj-BBBBBBBB.md"),
+            item_with("proj-BBBBBBBB", "open", &["proj-AAAAAAAA"]),
+        )
+        .unwrap();
+        let report = index.check_staleness(&fx.issues).unwrap();
+        let recomputed = apply_staleness_tracked(index.conn_mut(), &report, &fx.issues).unwrap();
+        assert!(recomputed, "adding an item must trigger the recompute");
+        assert_eq!(derived(&index), gold(&fx.issues));
     }
 }

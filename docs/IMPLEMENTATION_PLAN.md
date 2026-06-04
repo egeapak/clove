@@ -605,9 +605,12 @@ as the entry condition for M4 planning.
   `reindex` without one (schema v4 adds `items.excluded`; SQL `ready` excludes
   hard-cycle/malformed-parent members). The daemon's hot `GraphStore` is rebuilt
   from the index DB (`Index::graph_frontmatters`) rather than re-scanning the item
-  files. True sub-linear O(region) delta mutation is a deferred future
-  optimization (rejected for now: breaks byte-parity and the dominant per-file
-  YAML-parse cost is already removed).
+  files. `apply_staleness` skips the recompute entirely for content-only edits
+  (status/title/assignee/priority/labels) via a topology-change guard, recomputing
+  only when an item is added/deleted or a changed item's edge/parent signature
+  differs. True sub-linear O(region) delta mutation (Pearce–Kelly) was implemented
+  and benchmarked but rejected: its order is history-dependent, which breaks
+  clove's canonical-order parity contract (and it can't represent cycles).
 - TUI and/or web UI; bidirectional vendor bridges (GitHub/GitLab/Jira); richer
   history/changelog.
 
