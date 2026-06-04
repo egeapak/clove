@@ -336,6 +336,28 @@ mod tests {
     }
 
     #[test]
+    fn schema_mismatch_rebuild_preserves_history() {
+        let (_dir, path) = tmp_db();
+        {
+            let index = Index::open(&path).unwrap();
+            index.record_snapshot(Utc::now(), &empty_report()).unwrap();
+            // Simulate a future/incompatible *cache* schema version: open_or_create
+            // must drop-and-rebuild the cache tables but carry the durable history
+            // across (db.rs preserves it via preserve_from/insert_raw).
+            index
+                .conn()
+                .pragma_update(None, "user_version", 999_i64)
+                .unwrap();
+        }
+        let index = Index::open_or_create(&path).unwrap();
+        assert_eq!(
+            index.snapshot_count().unwrap(),
+            1,
+            "history must survive a schema-mismatch rebuild"
+        );
+    }
+
+    #[test]
     fn preserve_roundtrip_across_files() {
         // Simulate the reindex carry-over: read from one db, insert into another.
         let (_dir, src) = tmp_db();

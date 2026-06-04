@@ -1,7 +1,9 @@
 # clove — Session Handoff
 
 **Updated:** 2026-06-04
-**State:** **M0, M1, M2, and M3 are complete and gated.** Full CLI command surface;
+**State:** **M0–M3 are complete and gated; the first M4 items have landed**
+(`clove stats` + analytics history, and an exact-incremental index/daemon graph —
+see the "M4" sections below). Full CLI command surface;
 the SQLite index serves `ls`/`ready`/`query` (lean covering-index scan, default
 `--limit 100`, fast staleness with `--deep`), `search`, `reindex`, and
 `doctor` divergence. **M2 (Interop)** adds import (tk/beads/github), export
@@ -355,8 +357,10 @@ comment layout, empty-array serialization, cycle exit codes).
 
 ## Open / deferred (decide when you get there)
 
-- **M4 is undesigned** (TUI, web UI, bidirectional vendor bridges, richer
-  changelog) — plan it in its own session after M3.
+- **M4 in progress:** `clove stats` (+ durable history, daemon auto-snapshot) and
+  the exact-incremental index/daemon graph are **done** (see the M4 sections
+  above). The **remaining** M4 items are undesigned (TUI, web UI, bidirectional
+  vendor bridges, richer changelog) — plan each in its own session.
 - **Vendor bridges** (GitHub/GitLab/Jira) are documented for import/export, not
   built in M0–M3.
 - **Optional soft dep cap** (warn past N deps/item) — offered but not added; add

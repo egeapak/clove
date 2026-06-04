@@ -572,7 +572,12 @@ and SIMD-accelerated). Stored as `BLOB(8)`.
 
 **Schema version** is stored in `PRAGMA user_version` (built-in SQLite mechanism, more
 reliable than a custom table row). Checked on every `Index::open`. Mismatch → drop and
-rebuild.
+rebuild. Current version is **v4** (v2 covering index + sentinel rank; v3
+`file_mtimes.synced_at`; v4 `items.excluded`, the persisted hard-cycle /
+malformed-parent flag the SQL `ready` query filters on — see §6.5). The same `index.db`
+also holds a durable `snapshots` history table (`clove stats --snapshot`/`--history`),
+created idempotently and **carried across reindex / schema-rebuild** so it is not a
+cache-only artifact (M4).
 
 ### 6.2 Staleness Detection (Two-Level)
 
@@ -1023,6 +1028,7 @@ the git index update.
 git_sync = false          # opt-in auto-commit
 watch_debounce_ms = 200   # per-file debounce window
 idle_shutdown_min = 240   # default 4h; 0 = never; N = self-terminate after N idle minutes
+stats_snapshot_min = 60   # auto-record a `clove stats` history point every N min; 0 = off
 ```
 
 **Idle self-shutdown defaults to 4 hours.** Every clove command (and watcher
@@ -1147,6 +1153,7 @@ auto_refresh = true
 git_sync = false
 watch_debounce_ms = 200
 idle_shutdown_min = 0
+stats_snapshot_min = 60   # auto-record a `clove stats` history point every N min; 0 = off
 ```
 
 **Validation rules (enforced on every startup, not just on `init`):**
