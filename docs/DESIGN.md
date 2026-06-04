@@ -929,15 +929,16 @@ version.
   derived from the resolved `.clove/` path, so the daemon is keyed to the project,
   not the cwd, and is reachable from any subdirectory of it.
 - `tokio::runtime::Builder::new_multi_thread()` with 2 worker threads (watcher + IPC).
-- **One daemon per repository regardless of worktree count** — achieved by the
-  resolved-path keying, not special-casing: linked git worktrees that share a
-  single `.clove/` (the main worktree's, via `find_repo_root`'s git-common-dir
-  resolution, §2.1) resolve to the *same* `.clove/` path → one shared daemon,
-  enforced by the per-directory `daemon.lock`. Worktrees that each check out their
-  own `.clove/issues/` (e.g. on different branches) are genuinely different data
-  sets and correctly get separate daemons. A system-wide multiplexing daemon was
-  evaluated and rejected for v1 (no hot-path speedup; large lifecycle/security/
-  blast-radius cost) — see the M3 evaluation notes.
+- **One daemon per repository, shared across all worktrees.** `clove` is a
+  per-project tracker: work items belong to the *project*, not a branch, so **all
+  git worktrees of a project share the main worktree's `.clove/`** (and thus one
+  index + one daemon). `find_repo_root` (clove-core `repo.rs`) resolves a linked
+  worktree — even one with its own checked-out `.clove/` — to the main worktree's
+  `.clove/` via `git rev-parse --git-common-dir`; the daemon keys on that shared
+  path, and the per-directory `daemon.lock` makes it a singleton. The main worktree
+  stays subprocess-free (its `.git` is a directory); only linked worktrees pay the
+  one `git` call. A system-wide multiplexing daemon was evaluated and rejected for
+  v1 (no hot-path speedup; large lifecycle/security/blast-radius cost).
 
 ### 8.2 Socket / PID Layout
 
@@ -1019,14 +1020,18 @@ the git index update.
 [daemon]
 git_sync = false          # opt-in auto-commit
 watch_debounce_ms = 200   # per-file debounce window
-idle_shutdown_min = 30    # default 30; 0 = never; N = self-terminate after N idle minutes
+idle_shutdown_min = 240   # default 4h; 0 = never; N = self-terminate after N idle minutes
 ```
 
-**Idle self-shutdown defaults to 30 minutes** (not `0`): an idle daemon
-self-terminates so process count stays bounded without a manual `clove daemon
-stop`. It stays hot during active work and cleans up after a long idle. Set `0`
-to keep a daemon running indefinitely; `CLOVED_IDLE_SHUTDOWN_MS` overrides it
-(sub-minute) for tests/CI.
+**Idle self-shutdown defaults to 4 hours.** Every clove command (and watcher
+batch) is a heartbeat that resets the idle timer (`DaemonState::mark_event`), so
+an actively-used daemon never times out — it only self-terminates after this long
+with *no* clove activity at all, keeping process count bounded without a manual
+`clove daemon stop`. **There is no auto-restart yet:** after an idle shutdown the
+next read falls back to the local path until `clove daemon start` (a future MCP
+server would hold a session heartbeat to keep the daemon alive). Set `0` to keep a
+daemon running indefinitely; `CLOVED_IDLE_SHUTDOWN_MS` overrides it (sub-minute)
+for tests/CI.
 
 ### 8.9 SIGTERM / Clean Shutdown
 

@@ -123,12 +123,14 @@ fn default_true() -> bool {
 fn default_debounce_ms() -> u64 {
     200
 }
-/// Default idle self-shutdown window (minutes). Non-zero so an idle daemon does
-/// not linger indefinitely — it self-terminates after this long with no activity,
-/// keeping process count in check (set to `0` to disable). 30 min stays hot during
-/// active work but cleans up overnight.
+/// Default idle self-shutdown window (minutes). Every clove command is a
+/// heartbeat that resets this timer, so an actively-used daemon never times out;
+/// it only self-terminates after this long with *no* clove activity at all. There
+/// is no auto-restart yet (a future MCP session would hold a heartbeat), so the
+/// default is generous — 4 hours survives normal workday gaps (meetings, lunch)
+/// and cleans up overnight. `0` disables idle shutdown entirely.
 fn default_idle_shutdown_min() -> u64 {
-    30
+    240
 }
 fn default_config_schema() -> u32 {
     CURRENT_CONFIG_SCHEMA
