@@ -597,6 +597,17 @@ as the entry condition for M4 planning.
   `clove-index::stats_store` (the `snapshots` table + `Index::record_snapshot`/
   `snapshot_history` + reindex/recovery carry-over), and `clove/src/cmd/stats.rs`;
   JSON schema `docs/json-schema/v1/stats.json`.
+- **Incremental index & daemon graph** — **DONE (M4)**. The incremental
+  `apply_staleness` path now keeps the derived graph columns exact (canonical
+  Kahn toposort in clove-core; `clove-index::derive` recomputes
+  `topological_rank`/`has_dangling_deps`/`excluded` from the index's own
+  `items`/`edges` tables, delta-only, in-transaction), so it matches a full
+  `reindex` without one (schema v4 adds `items.excluded`; SQL `ready` excludes
+  hard-cycle/malformed-parent members). The daemon's hot `GraphStore` is rebuilt
+  from the index DB (`Index::graph_frontmatters`) rather than re-scanning the item
+  files. True sub-linear O(region) delta mutation is a deferred future
+  optimization (rejected for now: breaks byte-parity and the dominant per-file
+  YAML-parse cost is already removed).
 - TUI and/or web UI; bidirectional vendor bridges (GitHub/GitLab/Jira); richer
   history/changelog.
 

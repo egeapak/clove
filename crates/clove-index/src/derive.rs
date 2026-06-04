@@ -199,6 +199,16 @@ impl crate::db::Index {
     pub fn recompute_derived(&self) -> Result<(), IndexError> {
         recompute_derived(self.conn())
     }
+
+    /// Reconstruct the graph-relevant frontmatters from the index tables, so a
+    /// caller can build a `clove_core::GraphStore` **without re-reading the item
+    /// files**. The daemon uses this to keep its hot dependency graph in sync from
+    /// the (already-fresh) index rather than re-scanning `.clove/issues/` on every
+    /// change (M4, P3). The result is graph-equivalent to scanning the files,
+    /// because the index `items`/`edges` tables are an exact mirror of them.
+    pub fn graph_frontmatters(&self) -> Result<Vec<ItemFrontmatter>, IndexError> {
+        reconstruct_frontmatters(self.conn())
+    }
 }
 
 #[cfg(test)]

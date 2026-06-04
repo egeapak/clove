@@ -105,7 +105,7 @@ impl Dispatcher {
         });
         match resp {
             Some(r) => Response::Graph(r),
-            None => Response::Error(ErrorResponse::new("graph_failed", "could not scan files")),
+            None => Response::Error(ErrorResponse::new("graph_failed", "could not read index")),
         }
     }
 
@@ -122,6 +122,8 @@ impl Dispatcher {
             if let Ok(report) = index.check_staleness_fast(&self.issues_dir) {
                 if !report.is_clean() && report.change_count() <= STALE_REFRESH_LIMIT {
                     let _ = index.apply_staleness(&report, &self.issues_dir);
+                    // The DB advanced; the hot graph (sourced from it) must rebuild.
+                    self.graph.mark_dirty();
                 }
             }
         }
@@ -147,6 +149,8 @@ impl Dispatcher {
             if let Ok(report) = index.check_staleness_fast(&self.issues_dir) {
                 if !report.is_clean() && report.change_count() <= STALE_REFRESH_LIMIT {
                     let _ = index.apply_staleness(&report, &self.issues_dir);
+                    // The DB advanced; the hot graph (sourced from it) must rebuild.
+                    self.graph.mark_dirty();
                 }
             }
         }
@@ -188,6 +192,8 @@ impl Dispatcher {
                 state.set_items_indexed(index.item_count().unwrap_or(0) as u64);
             }
         }
+        // The index was rebuilt and reopened; rebuild the hot graph from it.
+        self.graph.mark_dirty();
         Response::ReindexDone(ReindexDone {
             items_indexed: report.items_indexed as u64,
             duration_ms: start.elapsed().as_millis() as u64,

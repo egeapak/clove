@@ -215,6 +215,45 @@ auto-snapshot was considered and left for later. Analytics compute from files fo
 correctness; no new frontmatter fields, no index `user_version` bump (the
 `snapshots` table is additive/idempotent).
 
+## M4 — Incremental index & daemon graph (this session)
+
+Made the index/daemon maintain the dependency graph's derived state incrementally
+instead of "approximate-until-reindex" (evaluated first with a 3-agent team).
+
+- **P0 — canonical toposort.** `clove_core::graph::topological_ranks_internal` now
+  uses a deterministic Kahn sort (smallest-id-first tie-break) instead of
+  petgraph's insertion-order-dependent `toposort`, making `topological_rank` a
+  **pure function of `(hard edges, ids)`**. This is the prerequisite that lets the
+  incremental path produce ranks byte-identical to a full reindex.
+- **P1 — exact incremental derived state.** New `clove-index/src/derive.rs`
+  reconstructs the graph from the index's own `items`/`edges` tables (no file
+  re-scan), runs the same `GraphStore` the file path uses, and writes back exact
+  `topological_rank` / `has_dangling_deps` / `excluded` — **delta-only** (only rows
+  whose values changed, so the `idx_items_list` covering index isn't churned per
+  batch). `apply_staleness` calls it in its transaction, so an incremental sweep
+  now equals a full reindex. Fixes two latent bugs: reverse-dangling (dependents of
+  a newly created/deleted item are refreshed) and the index `ready` not excluding
+  hard-cycle / malformed-parent members. New **schema v4** column `items.excluded`;
+  the SQL `ready` filters `excluded = FALSE`. Differential tests assert incremental
+  == reindex for the derived columns (chain re-rank, dangling resolution, cycle).
+- **P3 — daemon graph from the DB, not files.** `cloved`'s `graph_cache` rebuilds
+  its hot `GraphStore` from `Index::graph_frontmatters` (two indexed table scans)
+  instead of re-scanning + re-parsing every `.clove/issues/*.md` on each change.
+  The watcher keeps the index exact+fresh before marking the cache dirty, so the
+  DB-sourced graph is parity-identical to the file scan it replaces, far cheaper.
+  `QUERY`/`SEARCH` inline refresh and `REINDEX` now also invalidate the hot graph.
+
+**Decisions / scope:** the graph is **already persisted correctly** as the `edges`
+adjacency table + the `topological_rank`/`has_dangling_deps`/`excluded` columns —
+no transitive-closure table (write-storm for a rare query) and no graph engine;
+SQLite stays the single store, cycles detected in-memory during the recompute.
+Both the P1 recompute and the P3 daemon rebuild are O(V+E) **in-memory** passes
+(fast: no file I/O / YAML parse); true sub-linear O(affected-region) delta mutation
+(Pearce–Kelly-style) was evaluated and **deferred** — it was rejected for now
+because it breaks the byte-parity contract and the dominant cost (per-file YAML
+parsing) is already eliminated. An always-correct hot graph now unblocks future
+work (live ready-queue push / `SUBSCRIBE`, MCP "what's ready", per-batch analytics).
+
 ## What clove is
 
 A fast, git-native, **dependency-aware** work-item tracker for AI coding agents

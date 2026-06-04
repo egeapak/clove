@@ -76,7 +76,7 @@ pub fn run(clove_dir: &Utf8Path) -> anyhow::Result<()> {
         repo_root: repo_root.clone(),
         git_sync,
     };
-    let graph = Arc::new(crate::graph_cache::GraphCache::new(repo_root));
+    let graph = Arc::new(crate::graph_cache::GraphCache::new(index.clone()));
 
     // 3. Tokio runtime — 2 workers (IPC + watcher), per DESIGN §8.1.
     let runtime = tokio::runtime::Builder::new_multi_thread()
