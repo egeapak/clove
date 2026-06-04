@@ -6,10 +6,10 @@ expression: rendered
 │  All 2  │  Rdy 1  │  Blk 0           │
 └──────────────────────────────────────┘
 ┌ Overview · Dep tree · Comments ──────┐
-│ #2  FEATURE  Short title             │
+│ #2  ! FEATURE  Short title           │
 │                                      │
 │ status     ◐ in_progress · ready     │
-│ priority   ! · @ada                  │
+│ assignee   @ada                      │
 │ deps       1                         │
 │ labels     area:mobile, area:sync,   │
 │ backend, flaky, frontend, infra,     │

@@ -6,9 +6,8 @@ expression: wide
 │  All 2  │  Ready 1  │  Blocked 1                                                                                     │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌ Items (2) ───────────────────────────────────┐┌ Overview · Dep tree · Comments ──────────────────────────────────────┐
-│▌◐ F #2 ! Implement end-to-end offline synch… ││ #2  FEATURE  Implement end-to-end offline …  ◐ in_progress · blocked │
-│ ○ C #1 • Dependency target ●                 ││ ! · @ada                                                             │
-│                                              ││ deps 1                                                               │
+│▌◐ F #2 ! Implement end-to-end offline synch… ││ #2  ! FEATURE  Implement end-to-end offlin…  ◐ in_progress · blocked │
+│ ○ C #1 • Dependency target ●                 ││                                                        @ada · deps 1 │
 │                                              ││ blocked by #1                                                        │
 │                                              ││──────────────────────────────────────────────────────────────────────│
 │                                              ││                                                                      │
@@ -22,6 +21,7 @@ expression: wide
 │                                              ││ while the fixed header and pinned footer stay put.                   │
 │                                              ││                                                                      │
 │                                              ││ Notes                                                                │
+│                                              ││                                                                      │
 │                                              ││──────────────────────────────────────────────────────────────────────│
 │                                              ││ labels area:mobile, area:sync +8      created Jan 1 · updated Jan 20 │
 └──────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────┘

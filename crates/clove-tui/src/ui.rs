@@ -368,12 +368,18 @@ fn detail_title(app: &App) -> Line<'static> {
     Line::from(spans)
 }
 
-/// The id (`#42`) + ALL-CAPS type tag + title spans, with the title styled bold.
+/// The id (`#42`) + priority glyph + ALL-CAPS type tag + title spans, with the
+/// title styled bold. Shared by the wide and narrow headers so priority always
+/// reads from the same place.
 fn head_spans(fm: &ItemFrontmatter, title: String) -> Vec<Span<'static>> {
     vec![
         Span::styled(
             format!("{}  ", short_ref(&fm.id)),
             Style::default().fg(LABEL),
+        ),
+        Span::styled(
+            format!("{} ", priority_glyph(fm.priority.get())),
+            priority_style(fm.priority.get()),
         ),
         Span::styled(
             format!("{}  ", fm.item_type.as_str().to_uppercase()),
@@ -383,16 +389,21 @@ fn head_spans(fm: &ItemFrontmatter, title: String) -> Vec<Span<'static>> {
     ]
 }
 
-/// `p0`/`@assignee` spans (priority then assignee), used on the left of the
-/// header.
-fn priority_assignee(fm: &ItemFrontmatter) -> Vec<Span<'static>> {
-    let mut v = vec![Span::styled(
-        priority_glyph(fm.priority.get()),
-        priority_style(fm.priority.get()),
-    )];
+/// `@assignee · deps N` spans (omitting whichever is absent), shown to the right
+/// under the status in the wide header.
+fn assignee_deps_spans(fm: &ItemFrontmatter) -> Vec<Span<'static>> {
+    let mut v = Vec::new();
     if let Some(a) = &fm.assignee {
-        v.push(Span::styled(" · ", Style::default().fg(DIM)));
         v.push(Span::styled(format!("@{a}"), Style::default().fg(LABEL)));
+    }
+    if !fm.deps.is_empty() {
+        if !v.is_empty() {
+            v.push(Span::styled(" · ", Style::default().fg(DIM)));
+        }
+        v.push(Span::styled(
+            format!("deps {}", fm.deps.len()),
+            Style::default().fg(LABEL),
+        ));
     }
     v
 }
@@ -439,42 +450,42 @@ fn blocker_lines(detail: &Detail, lines: &mut Vec<Line<'static>>) {
 /// Relationship rows (deps omitted — the Dep tree tab has the list).
 fn relation_lines(fm: &ItemFrontmatter) -> Vec<Line<'static>> {
     let mut rel = Vec::new();
-    push_id_field(&mut rel, "parent", fm.parent.as_ref().into_iter());
+    push_id_field(&mut rel, "parent", fm.parent.as_ref());
     push_id_field(&mut rel, "relates", fm.relates.iter());
     push_id_field(&mut rel, "duplicates", fm.duplicates.iter());
     push_id_field(&mut rel, "supersedes", fm.supersedes.iter());
     rel
 }
 
-/// The wide Overview's fixed header: id/type/title with status top-right, then
-/// priority/assignee (left), a deps count, and any blockers. Sized to its
-/// content so the body gets the rest of the pane.
+/// The wide Overview's fixed header (two lines before any blockers): line 1 is
+/// id/priority/type/title with the status flush-right; line 2 carries the
+/// assignee and deps count flush-right under the status. Sized to its content so
+/// the body gets the rest of the pane.
 fn overview_header(app: &App, detail: &Detail, inner_w: u16) -> Vec<Line<'static>> {
     let fm = &detail.item.frontmatter;
 
-    // Title truncated so the header line fits beside the status.
+    // Title truncated so the first line fits beside the status. The fixed prefix
+    // is id + priority glyph + ALL-CAPS type, with their trailing spaces.
     let status = status_spans(app, fm);
-    let prefix_w =
-        short_ref(&fm.id).chars().count() + 2 + fm.item_type.as_str().chars().count() + 2;
+    let prefix_w = short_ref(&fm.id).chars().count()
+        + 2
+        + priority_glyph(fm.priority.get()).chars().count()
+        + 1
+        + fm.item_type.as_str().chars().count()
+        + 2;
     let status_w: usize = status.iter().map(Span::width).sum();
     let title_budget = (inner_w as usize)
         .saturating_sub(prefix_w + status_w + 2)
         .max(8);
 
-    // Title + status (right); priority · assignee on the left, deps count below.
-    let mut lines = vec![
-        right_align(
-            head_spans(fm, truncate(&fm.title, title_budget)),
-            status,
-            inner_w,
-        ),
-        Line::from(priority_assignee(fm)),
-    ];
-    if !fm.deps.is_empty() {
-        lines.push(Line::from(Span::styled(
-            format!("deps {}", fm.deps.len()),
-            Style::default().fg(LABEL),
-        )));
+    let mut lines = vec![right_align(
+        head_spans(fm, truncate(&fm.title, title_budget)),
+        status,
+        inner_w,
+    )];
+    let assignee_deps = assignee_deps_spans(fm);
+    if !assignee_deps.is_empty() {
+        lines.push(right_align(Vec::new(), assignee_deps, inner_w));
     }
     blocker_lines(detail, &mut lines);
     lines
@@ -503,8 +514,10 @@ fn overview_lines(app: &App, detail: &Detail, inner_w: u16) -> Vec<Line<'static>
         Line::from(head_spans(fm, fm.title.clone())),
         Line::raw(""),
         field_line("status", status_spans(app, fm)),
-        field_line("priority", priority_assignee(fm)),
     ];
+    if let Some(a) = &fm.assignee {
+        lines.push(kv("assignee", &format!("@{a}")));
+    }
     if !fm.deps.is_empty() {
         lines.push(kv("deps", &fm.deps.len().to_string()));
     }
@@ -1022,16 +1035,19 @@ fn field_line(key: &str, mut value: Vec<Span<'static>>) -> Line<'static> {
     Line::from(spans)
 }
 
-fn join_ids(ids: &[clove_core::CloveId]) -> String {
-    ids.iter().map(short_ref).collect::<Vec<_>>().join(", ")
+fn join_ids<'a>(ids: impl IntoIterator<Item = &'a clove_core::CloveId>) -> String {
+    ids.into_iter()
+        .map(short_ref)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn push_id_field<'a>(
     lines: &mut Vec<Line<'static>>,
     key: &str,
-    ids: impl Iterator<Item = &'a clove_core::CloveId>,
+    ids: impl IntoIterator<Item = &'a clove_core::CloveId>,
 ) {
-    let joined = ids.map(short_ref).collect::<Vec<_>>().join(", ");
+    let joined = join_ids(ids);
     if !joined.is_empty() {
         lines.push(kv(key, &joined));
     }
@@ -1083,7 +1099,9 @@ fn priority_style(p: u8) -> Style {
         1 => Color::Indexed(208),
         2 => Color::Indexed(178),
         3 => Color::Indexed(244),
-        _ => Color::Indexed(240),
+        // Lowest priority: a dim icy blue, distinct from the gray `·` separator
+        // (the p4 glyph is itself a `·`).
+        _ => Color::Indexed(110),
     };
     Style::default().fg(color)
 }

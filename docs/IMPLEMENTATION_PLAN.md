@@ -592,8 +592,9 @@ condition for M4 planning.
   **priority glyph** [`!`/`↑`/`•`/`↓`/`·` for p0→p4, graded color], title,
   ready/blocked badge, sorted by `(priority, topo rank, id)` like `ls`), and
   a detail pane with three sub-views: **Overview** (wide: a **fixed, shrink-to-fit
-  header** [short id + ALL-CAPS type tag + truncated title, status top-right,
-  priority·assignee and a **deps count** on the left], an **edge-to-edge rule**, a
+  two-line header** [line 1: short id + priority glyph + ALL-CAPS type tag +
+  truncated title, status flush-right; line 2: assignee + a **deps count**
+  flush-right under the status], an **edge-to-edge rule**, a
   **scrolling Markdown body**, another edge-to-edge rule, and a **sticky footer**
   [labels left, `created Jan 20 · updated Jan 24` right at day resolution]; narrow:
   one scrolling paragraph with the title wrapping and labels/dates inline; the deps

@@ -4,10 +4,9 @@ expression: rendered
 ---
   All 7  │  Ready 4  │  Blocked 1
 ┌ Items (3/7) ─────────────────────────────────┐┌ Overview · Dep tree · Comments ──────────────────────────────────────┐
-│▌◐ F #2 ! Build REST API ●                    ││ #2  FEATURE  Build REST API                    ◐ in_progress · ready │
-│ ○ F #3 • Write integration tests ✗           ││ ! · @grace                                                           │
-│ ○ F #5 ↓ Frontend dashboard ●                ││ deps 1                                                               │
-│                                              ││──────────────────────────────────────────────────────────────────────│
+│▌◐ F #2 ! Build REST API ●                    ││ #2  ! FEATURE  Build REST API                  ◐ in_progress · ready │
+│ ○ F #3 • Write integration tests ✗           ││                                                      @grace · deps 1 │
+│ ○ F #5 ↓ Frontend dashboard ●                ││──────────────────────────────────────────────────────────────────────│
 │                                              ││ Goals                                                                │
 │                                              ││                                                                      │
 │                                              ││ Build a REST API with axum; see docs/api.md.                         │
@@ -16,6 +15,7 @@ expression: rendered
 │                                              ││ • Auth middleware                                                    │
 │                                              ││                                                                      │
 │                                              ││ Steps                                                                │
+│                                              ││                                                                      │
 │                                              ││──────────────────────────────────────────────────────────────────────│
 │                                              ││ labels area:api, backend              created Jan 1 · updated Jan 20 │
 └──────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────┘

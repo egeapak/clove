@@ -31,12 +31,12 @@ expression: rendered
 │                                                          │
 └──────────────────────────────────────────────────────────┘
 ┌ Overview · Dep tree · Comments ──────────────────────────┐
-│ #2  FEATURE  Short title           ◐ in_progress · ready │
-│ ! · @ada                                                 │
-│ deps 1                                                   │
+│ #2  ! FEATURE  Short title         ◐ in_progress · ready │
+│                                            @ada · deps 1 │
 │──────────────────────────────────────────────────────────│
 │ parent     #1                                            │
 │ relates    #1                                            │
+│                                                          │
 │                                                          │
 │                                                          │
 │                                                          │

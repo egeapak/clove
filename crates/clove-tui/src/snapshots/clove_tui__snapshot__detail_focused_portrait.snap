@@ -6,10 +6,10 @@ expression: rendered
 │  All 7  │  Rdy 4  │  Blk 1           │
 └──────────────────────────────────────┘
 ┌ Overview · Dep tree · Comments ──────┐
-│ #2  FEATURE  Build REST API          │
+│ #2  ! FEATURE  Build REST API        │
 │                                      │
 │ status     ◐ in_progress · ready     │
-│ priority   ! · @grace                │
+│ assignee   @grace                    │
 │ deps       1                         │
 │ labels     area:api, backend         │
 │ created    Jan 1                     │

@@ -32,16 +32,15 @@ expression: rendered
 └────│ o / t / c    overview / dep tree / comments    │────┘
 ┌ Ove│ →/l  ←/h     focus detail / list (narrow)      │────┐
 │ #2 │ PgUp / PgDn  scroll detail                     │ady │
-│ ! ·│ s / S        cycle sort field / direction      │    │
-│ dep│ f            filter menu (facets)              │    │
-│────│ x            clear all filters                 │────│
-│ Goa│ /            search id, title, labels          │    │
-│    │ Esc          clear search / back / close       │    │
-│ Bui│ r            refresh from disk                 │    │
-│    │ ?            toggle this help                  │    │
-│ • C│ q            quit                              │    │
-│ • A└────────────────────────────────────────────────┘    │
-│                                                          │
+│    │ s / S        cycle sort field / direction      │s 1 │
+│────│ f            filter menu (facets)              │────│
+│ Goa│ x            clear all filters                 │    │
+│    │ /            search id, title, labels          │    │
+│ Bui│ Esc          clear search / back / close       │    │
+│    │ r            refresh from disk                 │    │
+│ • C│ ?            toggle this help                  │    │
+│ • A│ q            quit                              │    │
+│    └────────────────────────────────────────────────┘    │
 │ Steps                                                    │
 │                                                          │
 │ 1. Define routes                                         │
@@ -52,6 +51,7 @@ expression: rendered
 │ ──────────────────────────────────────────────────────── │
 │                                                          │
 │ Done when the integration tests pass.                    │
+│                                                          │
 │                                                          │
 │                                                          │
 │                                                          │

@@ -31,12 +31,12 @@ expression: rendered
 │                                                          │
 └──────────────────────────────────────────────────────────┘
 ┌ Overview · Dep tree · Comments ──────────────────────────┐
-│ #3  FEATURE  Write integration tests    ○ open · blocked │
-│ •                                                        │
-│ deps 1                                                   │
+│ #3  • FEATURE  Write integration tests  ○ open · blocked │
+│                                                   deps 1 │
 │ blocked by #2                                            │
 │──────────────────────────────────────────────────────────│
 │ End-to-end coverage of the public API surface.           │
+│                                                          │
 │                                                          │
 │                                                          │
 │                                                          │
