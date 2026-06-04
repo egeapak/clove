@@ -217,3 +217,40 @@ fn daemons_are_per_project_and_independent() {
         serde_json::json!(false)
     );
 }
+
+/// The daemon is keyed to the repo's resolved `.clove/` (not the cwd): a daemon
+/// started at the repo root is reachable — and serves reads — from any nested
+/// subdirectory. This is the same path-resolution that makes git worktrees which
+/// share one `.clove/` share one daemon (and prevents per-subdir sprawl).
+#[test]
+fn daemon_is_reachable_from_any_subdirectory() {
+    if !cloved_built() {
+        eprintln!("skipping: cloved not built (run via `cargo test --workspace`)");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    init(root);
+    clove(root).args(["new", "x"]).assert().success();
+    clove(root).args(["daemon", "start"]).assert().success();
+
+    let sub = root.join("a").join("b").join("c");
+    std::fs::create_dir_all(&sub).unwrap();
+
+    // status from the subdirectory resolves to the same daemon.
+    let s = daemon_status(&sub);
+    assert_eq!(s["data"]["running"], serde_json::json!(true));
+    assert_eq!(s["data"]["items_indexed"], serde_json::json!(1));
+
+    // and a read from the subdirectory is daemon-served.
+    let v = json(
+        &clove(&sub)
+            .args(["ls", "-f", "json"])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    assert_eq!(v["_meta"]["source"], serde_json::json!("daemon"));
+
+    clove(root).args(["daemon", "stop"]).assert().success();
+}

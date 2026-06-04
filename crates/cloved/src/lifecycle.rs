@@ -57,8 +57,13 @@ pub fn run(clove_dir: &Utf8Path) -> anyhow::Result<()> {
     let auto_refresh = config.as_ref().is_none_or(|c| c.index.auto_refresh);
     let debounce =
         Duration::from_millis(config.as_ref().map_or(200, |c| c.daemon.watch_debounce_ms));
-    let idle_shutdown =
-        idle_shutdown_duration(config.as_ref().map_or(0, |c| c.daemon.idle_shutdown_min));
+    // Falls back to the `DaemonConfig` default (non-zero) when no config loads,
+    // so an idle daemon never lingers indefinitely.
+    let idle_min = config.as_ref().map_or_else(
+        || clove_core::DaemonConfig::default().idle_shutdown_min,
+        |c| c.daemon.idle_shutdown_min,
+    );
+    let idle_shutdown = idle_shutdown_duration(idle_min);
     let git_sync = config.as_ref().is_some_and(|c| c.daemon.git_sync);
     if git_sync && !cfg!(feature = "git-sync") {
         eprintln!(

@@ -69,7 +69,7 @@ pub struct DaemonConfig {
     pub git_sync: bool,
     #[serde(default = "default_debounce_ms")]
     pub watch_debounce_ms: u64,
-    #[serde(default)]
+    #[serde(default = "default_idle_shutdown_min")]
     pub idle_shutdown_min: u64,
 }
 
@@ -77,8 +77,8 @@ impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
             git_sync: false,
-            watch_debounce_ms: 200,
-            idle_shutdown_min: 0,
+            watch_debounce_ms: default_debounce_ms(),
+            idle_shutdown_min: default_idle_shutdown_min(),
         }
     }
 }
@@ -122,6 +122,13 @@ fn default_true() -> bool {
 }
 fn default_debounce_ms() -> u64 {
     200
+}
+/// Default idle self-shutdown window (minutes). Non-zero so an idle daemon does
+/// not linger indefinitely — it self-terminates after this long with no activity,
+/// keeping process count in check (set to `0` to disable). 30 min stays hot during
+/// active work but cleans up overnight.
+fn default_idle_shutdown_min() -> u64 {
+    30
 }
 fn default_config_schema() -> u32 {
     CURRENT_CONFIG_SCHEMA

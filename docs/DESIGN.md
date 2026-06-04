@@ -924,9 +924,20 @@ version.
 
 ### 8.1 Process Model
 
-- Single long-lived `cloved` process per `.clove/` directory.
+- Single long-lived `cloved` process **per `.clove/` directory** (per project) —
+  never system-wide. The socket, pid, lock, and Windows pipe/event names are all
+  derived from the resolved `.clove/` path, so the daemon is keyed to the project,
+  not the cwd, and is reachable from any subdirectory of it.
 - `tokio::runtime::Builder::new_multi_thread()` with 2 worker threads (watcher + IPC).
-- One daemon per repository regardless of worktree count.
+- **One daemon per repository regardless of worktree count** — achieved by the
+  resolved-path keying, not special-casing: linked git worktrees that share a
+  single `.clove/` (the main worktree's, via `find_repo_root`'s git-common-dir
+  resolution, §2.1) resolve to the *same* `.clove/` path → one shared daemon,
+  enforced by the per-directory `daemon.lock`. Worktrees that each check out their
+  own `.clove/issues/` (e.g. on different branches) are genuinely different data
+  sets and correctly get separate daemons. A system-wide multiplexing daemon was
+  evaluated and rejected for v1 (no hot-path speedup; large lifecycle/security/
+  blast-radius cost) — see the M3 evaluation notes.
 
 ### 8.2 Socket / PID Layout
 
@@ -1008,8 +1019,14 @@ the git index update.
 [daemon]
 git_sync = false          # opt-in auto-commit
 watch_debounce_ms = 200   # per-file debounce window
-idle_shutdown_min = 0     # 0 = never; N = self-terminate after N idle minutes (useful for CI)
+idle_shutdown_min = 30    # default 30; 0 = never; N = self-terminate after N idle minutes
 ```
+
+**Idle self-shutdown defaults to 30 minutes** (not `0`): an idle daemon
+self-terminates so process count stays bounded without a manual `clove daemon
+stop`. It stays hot during active work and cleans up after a long idle. Set `0`
+to keep a daemon running indefinitely; `CLOVED_IDLE_SHUTDOWN_MS` overrides it
+(sub-minute) for tests/CI.
 
 ### 8.9 SIGTERM / Clean Shutdown
 

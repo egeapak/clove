@@ -14,7 +14,11 @@ a `doctor` daemon-health check — see `docs/M3_PLAN.md` and
 running the CLI defers read/graph work to it — `ls`/`ready`/`query` (lean index),
 `search` (FTS), `blocked`/`dep tree`/`dep cycle`/`dep add` cycle-check (cached
 graph), and `reindex` (delegated so the daemon stays coherent) — all with a clean
-local fallback; see the routing matrix in `docs/M3_ACCEPTANCE_GATES.md`. All five JSON schemas
+local fallback; see the routing matrix in `docs/M3_ACCEPTANCE_GATES.md`. The daemon
+is **per-project** (one per resolved `.clove/`, reachable from any subdir; worktrees
+sharing one `.clove/` share one daemon) — a system-wide daemon was evaluated and
+rejected for v1 (DESIGN §8.1). **Idle self-shutdown now defaults to 30 min** so idle
+daemons don't linger (`0` = never; `CLOVED_IDLE_SHUTDOWN_MS` overrides for tests). All five JSON schemas
 published + validated. Perf/parity/fuzz/golden gates pass (M0
 `docs/IMPLEMENTATION_PLAN.md`, M1 `docs/M1_ACCEPTANCE_GATES.md`, M2
 `docs/M2_ACCEPTANCE_GATES.md`, M3 `docs/M3_ACCEPTANCE_GATES.md`). Tests green

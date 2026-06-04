@@ -97,7 +97,8 @@ fn render_config(prefix: &str) -> String {
          [daemon]\n\
          git_sync = false\n\
          watch_debounce_ms = 200\n\
-         idle_shutdown_min = 0\n"
+         # Idle minutes before the daemon self-terminates (0 = never).\n\
+         idle_shutdown_min = 30\n"
     )
 }
 
