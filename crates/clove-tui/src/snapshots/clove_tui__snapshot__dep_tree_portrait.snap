@@ -1,0 +1,52 @@
+---
+source: crates/clove-tui/src/snapshot.rs
+expression: rendered
+---
+┌ clove ───────────────────────────────┐
+│  All 7  │  Rdy 4  │  Blk 1           │
+└──────────────────────────────────────┘
+┌ Items (7) ───────────────────────────┐
+│▌◐  p0 Build REST API ●               │
+│ ○  p1 Investigate flaky CI ●         │
+│ ●  p1 Set up database schema         │
+│ ○  p2 Ship v1 release ●              │
+│ ○  p2 Write integration tests ✗      │
+│ ○  p3 Frontend dashboard ●           │
+│ ●  p4 Docs site                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+└──────────────────────────────────────┘
+7 item(s) loaded  ?·q

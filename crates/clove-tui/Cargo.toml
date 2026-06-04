@@ -16,3 +16,4 @@ chrono.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+insta.workspace = true          # TUI render snapshot tests across terminal shapes

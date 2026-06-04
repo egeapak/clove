@@ -587,25 +587,47 @@ condition for M4 planning.
   only on `clove-core`). `clove tui` launches a master-detail browser that reads
   via the file-store scan path (`scan_frontmatter` + `GraphStore::build`) — always
   correct, no index/daemon coupling, never mutates. Top tab bar **All / Ready /
-  Blocked** (with live counts), left item list (status glyph, id, priority, type,
-  title, ready/blocked badge, sorted by `(priority, topo rank, id)` like `ls`),
-  right detail pane with three sub-views: **Overview** (full frontmatter + relations
-  + block reasons + epic roll-up + body), **Dep tree** (`render_dep_tree_human`),
-  and **Comments**. Substring search (`/`) over id/title/labels; `r` re-scans from
-  disk; `?` help overlay. Keys: `j/k`+arrows, `g/G`, Tab/`1`/`2`/`3`, `o`/`t`/`c`,
-  PgUp/PgDn, `/`, `r`, `?`, `q`/Esc/Ctrl-C. Packaged as a new crate behind a
-  default-on subcommand (per the M4 scoping decision); interactive-only, so it
-  ignores `--format`.
+  Blocked** (with live counts), an item list (status glyph, id, priority, type,
+  title, ready/blocked badge, sorted by `(priority, topo rank, id)` like `ls`), and
+  a detail pane with three sub-views: **Overview** (triage-ordered: identity →
+  decision block [status/ready/blockers/priority/assignee] → metadata →
+  relationships → lightly-styled body), **Dep tree** (status glyphs + titles inline,
+  `[ready]`/`(cycle)` markers), and **Comments**. Substring search (`/`) over
+  id/title/labels; `r` re-scans from disk; `?` help overlay. Keys: `j/k`+arrows,
+  `g/G`, Tab/`1`/`2`/`3`, `o`/`t`/`c`, `←/h`·`→/l`·Enter (pane focus), PgUp/PgDn,
+  `/`, `r`, `?`, `q`/Esc/Ctrl-C. **Adaptive layout** (`ui::pick_layout`): side-by-side
+  when wide (≥80 cols), list-over-detail when stacked (50–79 cols & tall), and a
+  single focused pane when narrow/short — plus width-aware list-row column dropping,
+  a compact one-line tab bar below 20 rows, content-sized/full-screen overlays, and
+  a "terminal too small" guard. Packaged as a new crate behind a default-on
+  subcommand (per the M4 scoping decision); interactive-only, so it ignores
+  `--format`. Design directions came from a frontend-design and a UX/IA review (see
+  the deferred backlog for the larger items they raised).
 - AC: data-layer unit tests (ready/blocked partition, tab + search filtering,
-  detail load incl. body/block-reasons/dep-tree, navigation clamping) and a
-  `TestBackend` render smoke test covering every view + the help/search overlays.
-  Mutations (status/priority/label edits, create, dep add/rm, comment) are a
-  deferred follow-up — this first cut is read-only.
+  detail load incl. body/block-reasons/dep-tree, navigation clamping), a
+  `TestBackend` render smoke test, and **insta render snapshots** of 8 states
+  (overview, blocked tab, dep tree, comments, search, help, detail-focused, empty)
+  each at three terminal shapes — portrait 40×48 (single), landscape 120×18 (wide +
+  compact tabs), square 60×60 (stacked) — validating the adaptive layout. Mutations
+  (status/priority/label edits, create, dep add/rm, comment) are a deferred
+  follow-up — this first cut is read-only.
 
 **M4 backlog (recorded so it is not lost; not yet task-specified):**
 - **TUI write actions** — extend `clove tui` with the common mutations (status
   transitions, priority/assignee/label edits) and beyond, on top of the read-only
   browser landed in T-U01.
+- **TUI read-only follow-ups** (from the T-U01 design/UX reviews; all backed by
+  existing `clove-core` APIs, no engine work): (1) inbound/"blocks" + referenced-by
+  + epic-children lists in Overview (the graph has the reverse edges); (2) a
+  navigation stack — follow a related id to its item and pop back, decoupled from
+  the active tab; (3) sort control (id/priority/created/updated + direction) and
+  structured filter chips (status/type/label/assignee/priority) composing with
+  search; (4) a **Cycles** + **Problems/doctor-lite** view (surfacing
+  `all_cycles()`, `dangling_ids()`, malformed parents, invalid priorities — items
+  currently *excluded* from both Ready and Blocked and thus invisible); (5) an
+  **Excluded/attention** tab (or fold into Problems) to complete the
+  ready∪blocked∪closed partition; (6) relative timestamps and richer Markdown body
+  rendering.
 - **`clove stats` — work-item analytics command** *(deferred here by the M3_PLAN.md §1.1
   CLI-surface review)*. A user-facing aggregate/statistics view: counts by status / type /
   priority / assignee, ready / blocked / closed totals, open-cycle count, epic completion

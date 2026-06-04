@@ -560,6 +560,7 @@ dependencies = [
  "camino",
  "chrono",
  "clove-core",
+ "insta",
  "ratatui",
  "tempfile",
 ]

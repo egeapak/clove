@@ -8,9 +8,9 @@
 use std::collections::{HashMap, HashSet};
 
 use chrono::Utc;
-use clove_core::graph::render_dep_tree_human;
 use clove_core::{
-    BlockedItem, ChildrenSummary, CloveId, Comment, GraphStore, Item, ItemFrontmatter, ItemStore,
+    BlockedItem, ChildrenSummary, CloveId, Comment, DepTreeNode, GraphStore, Item, ItemFrontmatter,
+    ItemStore,
 };
 use ratatui::widgets::ListState;
 
@@ -67,6 +67,15 @@ pub enum Mode {
     Search,
 }
 
+/// Which pane holds focus. Only visible in the single-pane (narrow) layout,
+/// where it decides which pane is shown; in side-by-side / stacked layouts both
+/// panes render and focus just marks the active border.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    List,
+    Detail,
+}
+
 /// Everything loaded for the currently-selected item, computed lazily when the
 /// selection changes (the body and comments are not part of the list scan).
 pub struct Detail {
@@ -78,8 +87,8 @@ pub struct Detail {
     pub dangling_deps: Vec<CloveId>,
     /// Direct-children roll-up when the item is an epic.
     pub children: Option<ChildrenSummary>,
-    /// Pre-rendered dependency tree (ids + cycle markers).
-    pub tree: String,
+    /// The dependency tree rooted at this item (ids, titles, status, cycles).
+    pub tree: Option<DepTreeNode>,
 }
 
 /// The TUI application state.
@@ -104,6 +113,7 @@ pub struct App {
     pub detail_tab: DetailTab,
     pub detail: Option<Detail>,
     pub detail_scroll: u16,
+    pub focus: Focus,
     pub show_help: bool,
     pub status: String,
     pub should_quit: bool,
@@ -127,6 +137,7 @@ impl App {
             detail_tab: DetailTab::Overview,
             detail: None,
             detail_scroll: 0,
+            focus: Focus::List,
             show_help: false,
             status: String::new(),
             should_quit: false,
@@ -354,6 +365,16 @@ impl App {
         self.detail_scroll = self.detail_scroll.saturating_sub(3);
     }
 
+    /// Focus the detail pane (shows it in the single-pane narrow layout).
+    pub fn focus_detail(&mut self) {
+        self.focus = Focus::Detail;
+    }
+
+    /// Focus the list pane.
+    pub fn focus_list(&mut self) {
+        self.focus = Focus::List;
+    }
+
     // --- Search -----------------------------------------------------------
 
     pub fn start_search(&mut self) {
@@ -416,11 +437,7 @@ impl App {
 
         let children = self.graph.epic_children_summary(&id);
 
-        let tree = self
-            .graph
-            .dep_tree(&id, 25)
-            .map(|node| render_dep_tree_human(&node))
-            .unwrap_or_else(|| format!("{id}\n(no dependency information)"));
+        let tree = self.graph.dep_tree(&id, 25);
 
         self.detail = Some(Detail {
             item,
@@ -531,8 +548,9 @@ mod tests {
         // It is blocked by exactly one open dependency.
         assert_eq!(detail.blocking_deps.len(), 1);
         assert!(detail.dangling_deps.is_empty());
-        // The dep tree includes the base task's id.
-        assert!(detail.tree.contains("proj-"));
+        // The dep tree roots at this item with the base task as its one child.
+        let tree = detail.tree.as_ref().expect("dep tree present");
+        assert_eq!(tree.children.len(), 1);
     }
 
     #[test]

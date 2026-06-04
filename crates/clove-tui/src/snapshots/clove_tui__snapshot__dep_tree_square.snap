@@ -1,0 +1,64 @@
+---
+source: crates/clove-tui/src/snapshot.rs
+expression: rendered
+---
+┌ clove ───────────────────────────────────────────────────┐
+│  All 7  │  Ready 4  │  Blocked 1                         │
+└──────────────────────────────────────────────────────────┘
+┌ Items (7) ───────────────────────────────────────────────┐
+│▌◐ proj-00000002 p0 feature Build REST API ●              │
+│ ○ proj-00000007 p1 bug     Investigate flaky CI ●        │
+│ ● proj-00000001 p1 chore   Set up database schema        │
+│ ○ proj-00000004 p2 epic    Ship v1 release ●             │
+│ ○ proj-00000003 p2 feature Write integration tests ✗     │
+│ ○ proj-00000005 p3 feature Frontend dashboard ●          │
+│ ● proj-00000006 p4 docs    Docs site                     │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+┌ Overview · Dep tree · Comments ──────────────────────────┐
+│ Dependency tree (this → its dependencies)                │
+│                                                          │
+│ ◐ proj-00000002  Build REST API [ready]                  │
+│ └── ● proj-00000001  Set up database schema              │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+7 item(s) loaded   ?: help · q: quit

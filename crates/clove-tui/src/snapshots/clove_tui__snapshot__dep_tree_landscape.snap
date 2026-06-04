@@ -1,0 +1,22 @@
+---
+source: crates/clove-tui/src/snapshot.rs
+expression: rendered
+---
+  All 7  │  Ready 4  │  Blocked 1
+┌ Items (7) ───────────────────────────────────┐┌ Overview · Dep tree · Comments ──────────────────────────────────────┐
+│▌◐ proj-00000002 p0 Build REST API ●          ││ Dependency tree (this → its dependencies)                            │
+│ ○ proj-00000007 p1 Investigate flaky CI ●    ││                                                                      │
+│ ● proj-00000001 p1 Set up database schema    ││ ◐ proj-00000002  Build REST API [ready]                              │
+│ ○ proj-00000004 p2 Ship v1 release ●         ││ └── ● proj-00000001  Set up database schema                          │
+│ ○ proj-00000003 p2 Write integration tests ✗ ││                                                                      │
+│ ○ proj-00000005 p3 Frontend dashboard ●      ││                                                                      │
+│ ● proj-00000006 p4 Docs site                 ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+└──────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────┘
+7 item(s) loaded   ?: help · q: quit

@@ -8,6 +8,9 @@
 mod app;
 mod ui;
 
+#[cfg(test)]
+mod snapshot;
+
 use anyhow::Result;
 use clove_core::ItemStore;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -71,8 +74,13 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     match code {
         KeyCode::Char('q') => app.should_quit = true,
         KeyCode::Esc => {
-            // Clear an active search filter if present.
-            app.cancel_search();
+            // Esc unwinds the lightest active state: clear search, else return
+            // focus to the list (matters in the single-pane narrow layout).
+            if !app.search.is_empty() {
+                app.cancel_search();
+            } else {
+                app.focus_list();
+            }
         }
         KeyCode::Char('?') => app.show_help = true,
 
@@ -89,6 +97,10 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('o') => app.set_detail_tab(DetailTab::Overview),
         KeyCode::Char('t') => app.set_detail_tab(DetailTab::Tree),
         KeyCode::Char('c') => app.set_detail_tab(DetailTab::Comments),
+
+        // Pane focus (drives which pane shows in the narrow single-pane layout).
+        KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => app.focus_detail(),
+        KeyCode::Left | KeyCode::Char('h') => app.focus_list(),
 
         KeyCode::PageDown => app.scroll_detail_down(),
         KeyCode::PageUp => app.scroll_detail_up(),

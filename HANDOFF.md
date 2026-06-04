@@ -33,12 +33,19 @@ browser. New crate `clove-tui` (ratatui, depends only on `clove-core`; reads via
 the file-store scan path so it is always correct and never touches the index or
 daemon). Master-detail UI: **All / Ready / Blocked** tabs with live counts, an
 item list sorted like `ls`, and a detail pane with **Overview / Dep tree /
-Comments** sub-views; substring search (`/`), refresh (`r`), and a help overlay
-(`?`). Wired as the default-on `clove tui` subcommand (interactive-only, ignores
-`--format`). Six `clove-tui` tests pass (data-layer + a `TestBackend` render
-smoke test); full `cargo test --workspace`, clippy `-D warnings`, and fmt are
-green. The `ratatui`/`crossterm` tree is all MIT/Apache/Zlib/Unicode (no new
-`cargo deny` exposure).
+Comments** sub-views (dep tree shows status glyphs + titles inline; overview is
+triage-ordered); substring search (`/`), refresh (`r`), help overlay (`?`), and
+pane-focus keys. The layout is **adaptive** (`ui::pick_layout`): side-by-side
+(≥80 cols) / stacked (50–79 & tall) / single focused pane (narrow or short), with
+width-aware list columns, a compact tab bar below 20 rows, full-screen overlays
+on small terminals, and a too-small guard. Design directions came from a
+frontend-design and a UX/IA review (larger items recorded in the M4 backlog).
+Wired as the default-on `clove tui` subcommand (interactive-only, ignores
+`--format`). Tests (14 in `clove-tui`): data-layer + a `TestBackend` smoke test +
+**insta render snapshots** of 8 states × 3 terminal shapes (portrait/landscape/
+square) validating the adaptive layout. Full `cargo test --workspace`, clippy
+`-D warnings`, and fmt are green. The `ratatui`/`crossterm` tree is all
+MIT/Apache/Zlib/Unicode (no new `cargo deny` exposure).
 **Next step (rest of M4):** TUI write actions (status/priority/label edits, …),
 web UI, bidirectional vendor bridges, richer history, and the deferred
 `clove stats` analytics command — see `IMPLEMENTATION_PLAN.md` M4 backlog. Still

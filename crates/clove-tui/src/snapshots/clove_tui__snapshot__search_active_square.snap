@@ -1,0 +1,64 @@
+---
+source: crates/clove-tui/src/snapshot.rs
+expression: rendered
+---
+┌ clove ───────────────────────────────────────────────────┐
+│  All 7  │  Ready 4  │  Blocked 1                         │
+└──────────────────────────────────────────────────────────┘
+┌ Items (1) ───────────────────────────────────────────────┐
+│▌◐ proj-00000002 p0 feature Build REST API ●              │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+┌ Overview · Dep tree · Comments ──────────────────────────┐
+│ Build REST API                                           │
+│ proj-00000002                                            │
+│                                                          │
+│ status     in_progress   ready                           │
+│ priority   p0                                            │
+│ assignee   grace                                         │
+│                                                          │
+│ type       feature                                       │
+│ labels     area:api, backend                             │
+│ created    2026-01-01 09:00 UTC                          │
+│ updated    2026-01-03 11:30 UTC                          │
+│                                                          │
+│ deps       proj-00000001                                 │
+│                                                          │
+│ ── body ──────────────────────────────────────────────── │
+│ ## Goals                                                 │
+│ • CRUD endpoints                                         │
+│ • Auth middleware                                        │
+│                                                          │
+│ Builds on the schema work.                               │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+/api▏   (Enter: keep · Esc: clear)

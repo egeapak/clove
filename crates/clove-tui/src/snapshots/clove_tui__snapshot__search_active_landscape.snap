@@ -1,0 +1,22 @@
+---
+source: crates/clove-tui/src/snapshot.rs
+expression: rendered
+---
+  All 7  │  Ready 4  │  Blocked 1
+┌ Items (1) ───────────────────────────────────┐┌ Overview · Dep tree · Comments ──────────────────────────────────────┐
+│▌◐ proj-00000002 p0 Build REST API ●          ││ Build REST API                                                       │
+│                                              ││ proj-00000002                                                        │
+│                                              ││                                                                      │
+│                                              ││ status     in_progress   ready                                       │
+│                                              ││ priority   p0                                                        │
+│                                              ││ assignee   grace                                                     │
+│                                              ││                                                                      │
+│                                              ││ type       feature                                                   │
+│                                              ││ labels     area:api, backend                                         │
+│                                              ││ created    2026-01-01 09:00 UTC                                      │
+│                                              ││ updated    2026-01-03 11:30 UTC                                      │
+│                                              ││                                                                      │
+│                                              ││ deps       proj-00000001                                             │
+│                                              ││                                                                      │
+└──────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────┘
+/api▏   (Enter: keep · Esc: clear)
