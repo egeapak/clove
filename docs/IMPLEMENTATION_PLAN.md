@@ -573,11 +573,39 @@
 
 ## M4 — Extras (Future)
 
-Tasks for M4 (TUI, web UI, vendor bridges, changelog) are not detailed here. They will be
-planned in a separate session once M3 is complete. Acceptance gates for M3 completion serve
-as the entry condition for M4 planning.
+Tasks for M4 (web UI, vendor bridges, changelog) are not detailed here. They will be
+planned in a separate session. Acceptance gates for M3 completion serve as the entry
+condition for M4 planning.
+
+---
+
+**T-U01: `clove tui` — read-only terminal browser**  — ✅ implemented
+- Files: `crates/clove-tui/src/{lib,app,ui}.rs`, `crates/clove/src/cmd/tui.rs`,
+  `crates/clove/src/cli.rs` (`Tui` subcommand).
+- Deps: T-C05, T-G01–T-G05, T-CLI01.
+- Description: New `clove-tui` crate (ratatui, which re-exports crossterm; depends
+  only on `clove-core`). `clove tui` launches a master-detail browser that reads
+  via the file-store scan path (`scan_frontmatter` + `GraphStore::build`) — always
+  correct, no index/daemon coupling, never mutates. Top tab bar **All / Ready /
+  Blocked** (with live counts), left item list (status glyph, id, priority, type,
+  title, ready/blocked badge, sorted by `(priority, topo rank, id)` like `ls`),
+  right detail pane with three sub-views: **Overview** (full frontmatter + relations
+  + block reasons + epic roll-up + body), **Dep tree** (`render_dep_tree_human`),
+  and **Comments**. Substring search (`/`) over id/title/labels; `r` re-scans from
+  disk; `?` help overlay. Keys: `j/k`+arrows, `g/G`, Tab/`1`/`2`/`3`, `o`/`t`/`c`,
+  PgUp/PgDn, `/`, `r`, `?`, `q`/Esc/Ctrl-C. Packaged as a new crate behind a
+  default-on subcommand (per the M4 scoping decision); interactive-only, so it
+  ignores `--format`.
+- AC: data-layer unit tests (ready/blocked partition, tab + search filtering,
+  detail load incl. body/block-reasons/dep-tree, navigation clamping) and a
+  `TestBackend` render smoke test covering every view + the help/search overlays.
+  Mutations (status/priority/label edits, create, dep add/rm, comment) are a
+  deferred follow-up — this first cut is read-only.
 
 **M4 backlog (recorded so it is not lost; not yet task-specified):**
+- **TUI write actions** — extend `clove tui` with the common mutations (status
+  transitions, priority/assignee/label edits) and beyond, on top of the read-only
+  browser landed in T-U01.
 - **`clove stats` — work-item analytics command** *(deferred here by the M3_PLAN.md §1.1
   CLI-surface review)*. A user-facing aggregate/statistics view: counts by status / type /
   priority / assignee, ready / blocked / closed totals, open-cycle count, epic completion

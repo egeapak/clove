@@ -28,9 +28,21 @@ published + validated. Perf/parity/fuzz/golden gates pass (M0
 except one environment-only failure (`repo::tests::linked_worktree…`, a sandbox
 git-signing artifact, not a code defect; the token-gated `github_roundtrip`
 shows as `1 ignored`).
-**Next step:** **M4 — Extras** (TUI/web UI, vendor bridges, richer history, and the
-deferred `clove stats` analytics command — see `IMPLEMENTATION_PLAN.md` M4 backlog).
-Still undesigned.
+**M4 — Extras** has begun: **`clove tui`** (T-U01) ships a read-only terminal
+browser. New crate `clove-tui` (ratatui, depends only on `clove-core`; reads via
+the file-store scan path so it is always correct and never touches the index or
+daemon). Master-detail UI: **All / Ready / Blocked** tabs with live counts, an
+item list sorted like `ls`, and a detail pane with **Overview / Dep tree /
+Comments** sub-views; substring search (`/`), refresh (`r`), and a help overlay
+(`?`). Wired as the default-on `clove tui` subcommand (interactive-only, ignores
+`--format`). Six `clove-tui` tests pass (data-layer + a `TestBackend` render
+smoke test); full `cargo test --workspace`, clippy `-D warnings`, and fmt are
+green. The `ratatui`/`crossterm` tree is all MIT/Apache/Zlib/Unicode (no new
+`cargo deny` exposure).
+**Next step (rest of M4):** TUI write actions (status/priority/label edits, …),
+web UI, bidirectional vendor bridges, richer history, and the deferred
+`clove stats` analytics command — see `IMPLEMENTATION_PLAN.md` M4 backlog. Still
+undesigned beyond the TUI.
 
 ### Small backlog (optional M0/M1 nice-to-haves, non-blocking)
 - Broaden JSON-schema validation to more commands (version/reindex/doctor/new)

@@ -1,0 +1,18 @@
+[package]
+name = "clove-tui"
+description = "clove: read-only terminal UI for browsing work items"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+clove-core.workspace = true
+ratatui.workspace = true        # terminal UI; re-exports crossterm at `ratatui::crossterm`
+anyhow.workspace = true
+camino.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

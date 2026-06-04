@@ -25,4 +25,5 @@ pub mod search;
 pub mod set;
 pub mod show;
 pub mod status;
+pub mod tui;
 pub mod version;

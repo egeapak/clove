@@ -5,6 +5,7 @@ members = [
     "crates/clove-index",
     "crates/clove-import",
     "crates/clove-ipc",
+    "crates/clove-tui",
     "crates/clove",
     "crates/cloved",
     "xtask",
@@ -51,6 +52,7 @@ jiff = "0.2"                    # nanosecond timestamps for comment filenames
 octocrab = "0.51"               # GitHub REST API client (clove-import, M2)
 toml = "0.8"                    # config.toml parsing
 jsonschema = "0.46"             # JSON Schema validation in tests (T-CLI14)
+ratatui = "0.29"                # terminal UI (M4 `clove tui`); re-exports crossterm
 
 # Internal crates (explicit version keeps them off cargo-deny's wildcard list
 # and is required for publishing clove-core to crates.io — PRD §13).
@@ -58,6 +60,7 @@ clove-core = { path = "crates/clove-core", version = "0.1.0" }
 clove-index = { path = "crates/clove-index", version = "0.1.0" }
 clove-import = { path = "crates/clove-import", version = "0.1.0", default-features = false }
 clove-ipc = { path = "crates/clove-ipc", version = "0.1.0" }
+clove-tui = { path = "crates/clove-tui", version = "0.1.0" }
 
 [profile.release]
 lto = "thin"

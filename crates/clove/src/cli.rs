@@ -101,6 +101,8 @@ pub enum Commands {
     Doctor(DoctorArgs),
     /// Control the optional background daemon (`start|stop|status`).
     Daemon(DaemonArgs),
+    /// Browse items in an interactive, read-only terminal UI.
+    Tui,
     /// Print version and schema information.
     Version,
 }
