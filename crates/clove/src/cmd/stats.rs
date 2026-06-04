@@ -6,13 +6,14 @@
 //! index telemetry. Analytics are computed from a single file scan + graph build
 //! (files are always truth); the index/daemon are reported, not relied on.
 //!
-//! Snapshots persist to a durable `.clove/stats.db` (created lazily) so trends can
-//! be replayed with `--history`. That store is **not** the rebuildable index — it
-//! is migrated, never dropped, so history is never lost.
+//! Snapshots persist to a `snapshots` table **inside the index database**
+//! (`.clove/index.db`) so trends can be replayed with `--history`. The index
+//! layer carries that table across its reindex/rebuild so history survives a
+//! schema bump or `clove reindex` (only true file corruption loses it).
 
 use chrono::Utc;
 use clove_core::{compute_stats, CloveError, GraphStore, OutputFormat, StatsOptions, StatsReport};
-use clove_index::{Index, StatsStore, SCHEMA_VERSION};
+use clove_index::{Index, SCHEMA_VERSION};
 use clove_ipc::DaemonClient;
 use serde_json::{json, Map, Value};
 
@@ -41,13 +42,13 @@ pub fn run(
     let now = Utc::now();
     let report = compute_stats(&frontmatters, &graph, now, opts);
 
-    // Optionally persist the snapshot to the durable history store.
+    // Optionally persist the snapshot into the index database's history table.
     if args.snapshot {
-        let path = stats_db_path(ctx)?;
-        let store = StatsStore::open_or_create(&path).map_err(|e| index_error(e, &path))?;
-        store
-            .record(now, &report)
-            .map_err(|e| index_error(e, &path))?;
+        let index =
+            Index::open_or_create(&ctx.db_path).map_err(|e| index_error(e, &ctx.db_path))?;
+        index
+            .record_snapshot(now, &report)
+            .map_err(|e| index_error(e, &ctx.db_path))?;
     }
 
     let daemon = daemon_telemetry(ctx, no_index);
@@ -72,12 +73,11 @@ pub fn run(
 
 /// Print the persisted snapshot series (`--history`).
 fn show_history(ctx: &Ctx, format: OutputFormat, args: &StatsArgs) -> Result<(), CloveError> {
-    let path = stats_db_path(ctx)?;
-    if !path.exists() {
-        // No history yet: empty series rather than an error.
+    if !ctx.db_path.exists() {
+        // No index yet → no history. Empty series rather than an error.
         match format {
             OutputFormat::Json | OutputFormat::Jsonl => {
-                print_json_list(Vec::new(), json!({ "total": 0, "source": "stats.db" }))
+                print_json_list(Vec::new(), json!({ "total": 0, "source": "index" }))
             }
             OutputFormat::Human => {
                 println!("no stats snapshots recorded yet (run `clove stats --snapshot`)")
@@ -86,10 +86,10 @@ fn show_history(ctx: &Ctx, format: OutputFormat, args: &StatsArgs) -> Result<(),
         return Ok(());
     }
 
-    let store = StatsStore::open_or_create(&path).map_err(|e| index_error(e, &path))?;
-    let snapshots = store
-        .history(args.since.as_deref(), args.limit)
-        .map_err(|e| index_error(e, &path))?;
+    let index = Index::open_or_create(&ctx.db_path).map_err(|e| index_error(e, &ctx.db_path))?;
+    let snapshots = index
+        .snapshot_history(args.since.as_deref(), args.limit)
+        .map_err(|e| index_error(e, &ctx.db_path))?;
 
     match format {
         OutputFormat::Json | OutputFormat::Jsonl => {
@@ -103,7 +103,7 @@ fn show_history(ctx: &Ctx, format: OutputFormat, args: &StatsArgs) -> Result<(),
                 })
                 .collect();
             let total = items.len();
-            print_json_list(items, json!({ "total": total, "source": "stats.db" }));
+            print_json_list(items, json!({ "total": total, "source": "index" }));
         }
         OutputFormat::Human => {
             if snapshots.is_empty() {
@@ -130,15 +130,6 @@ fn show_history(ctx: &Ctx, format: OutputFormat, args: &StatsArgs) -> Result<(),
         }
     }
     Ok(())
-}
-
-/// The durable history database path (`.clove/stats.db`).
-fn stats_db_path(ctx: &Ctx) -> Result<camino::Utf8PathBuf, CloveError> {
-    let clove_dir = ctx.issues_dir.parent().ok_or_else(|| CloveError::Io {
-        path: ctx.issues_dir.clone(),
-        source: std::io::Error::other("cannot locate .clove directory"),
-    })?;
-    Ok(clove_dir.join("stats.db"))
 }
 
 /// Probe a running daemon for its operational telemetry (non-fatal).

@@ -585,12 +585,18 @@ as the entry condition for M4 planning.
   Also surfaces daemon operational telemetry (the §8.4 `STATUS` payload) and local index
   presence/freshness in the same report. Analytics are computed from a single file scan +
   graph build (files are truth); the index/daemon are reported, not relied on for
-  correctness. **Persistence:** `--snapshot` records the report to a durable
-  `.clove/stats.db` (a dedicated SQLite store — *not* the rebuildable `index.db`; it is
-  migrated, never dropped, so history is never lost); `--history [--since] [--limit]`
-  replays the recorded series. Implemented across `clove-core::stats`
-  (`StatsReport`/`compute`), `clove-index::stats_store` (`StatsStore`), and
-  `clove/src/cmd/stats.rs`; JSON schema `docs/json-schema/v1/stats.json`.
+  correctness. **Persistence:** snapshots are stored in a `snapshots` table **inside
+  `.clove/index.db`** (one database for the tool, no separate file). The index is a
+  rebuildable cache, so the layer carries the `snapshots` table across its two
+  destructive ops — a full `reindex` (tmp-build + atomic rename) copies the rows
+  before the rename, and schema-mismatch recovery reads them out before the rebuild
+  and reinserts after; the table is created idempotently on open, so no
+  `user_version` bump is needed. Only raw file corruption loses history (acceptable;
+  files remain truth). `--snapshot` records; `--history [--since] [--limit]` replays.
+  Implemented across `clove-core::stats` (`StatsReport`/`compute`),
+  `clove-index::stats_store` (the `snapshots` table + `Index::record_snapshot`/
+  `snapshot_history` + reindex/recovery carry-over), and `clove/src/cmd/stats.rs`;
+  JSON schema `docs/json-schema/v1/stats.json`.
 - TUI and/or web UI; bidirectional vendor bridges (GitHub/GitLab/Jira); richer
   history/changelog.
 

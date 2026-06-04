@@ -134,12 +134,12 @@ fn snapshot_persists_and_history_reads_back() {
     let empty = json(clove(dir.path()).args(["stats", "--history", "--format", "json"]));
     assert_eq!(empty["data"].as_array().unwrap().len(), 0);
 
-    // Record a snapshot; the durable store appears.
+    // Record a snapshot; history now lives in the index database.
     clove(dir.path())
         .args(["stats", "--snapshot"])
         .assert()
         .success();
-    assert!(dir.path().join(".clove/stats.db").exists());
+    assert!(dir.path().join(".clove/index.db").exists());
 
     let hist = json(clove(dir.path()).args(["stats", "--history", "--format", "json"]));
     let rows = hist["data"].as_array().unwrap();

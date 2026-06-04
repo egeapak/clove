@@ -26,5 +26,5 @@ pub use db::{Index, IndexError, ItemListRow, ItemRow, SCHEMA_VERSION};
 pub use query::{count_items, query_items, query_list, search, Filter, QueryMode};
 pub use reindex::{reindex, ReindexReport};
 pub use stale::{apply_staleness, check_staleness, check_staleness_fast, StalenessReport};
-pub use stats_store::{StatsSnapshot, StatsStore, STATS_SCHEMA_VERSION};
+pub use stats_store::StatsSnapshot;
 pub use write::upsert_item;

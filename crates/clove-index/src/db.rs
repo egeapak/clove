@@ -313,6 +313,10 @@ impl Index {
                 })
             }
         }
+        // The durable stats-history table lives in this same database but is
+        // governed independently of the cache `user_version`: create it on demand
+        // so an existing index gains it without a forced rebuild (M4).
+        crate::stats_store::ensure_table(&conn)?;
         Ok(Index { conn })
     }
 
@@ -326,8 +330,15 @@ impl Index {
                 eprintln!(
                     "note: index schema changed (found {found}, expected {expected}); rebuilding {path}"
                 );
+                // The cache tables are rebuildable, but the durable stats history
+                // is not — carry it across the drop-and-rebuild (M4).
+                let preserved = crate::stats_store::preserve_from(path);
                 remove_db_files(path)?;
-                Index::open(path)
+                let index = Index::open(path)?;
+                if !preserved.is_empty() {
+                    crate::stats_store::insert_raw(index.conn(), &preserved)?;
+                }
+                Ok(index)
             }
             Err(IndexError::CorruptIndex(msg)) => {
                 eprintln!("warning: index at {path} is corrupt ({msg}); rebuilding");

@@ -60,7 +60,6 @@ fn init_is_idempotent_and_writes_gitignore() {
         "reindex.lock",
         "daemon.lock",
         "index.db.tmp",
-        "stats.db",
     ] {
         assert!(gitignore.contains(entry), "missing {entry}");
     }

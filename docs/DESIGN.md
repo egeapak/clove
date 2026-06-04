@@ -86,14 +86,13 @@ embedders who require an older toolchain).
 ```
 .clove/
   config.toml           # repo-level config — committed
-  .gitignore            # ignores: index.db, *.db-shm, *.db-wal, daemon.sock, daemon.pid, reindex.lock, daemon.lock, index.db.tmp, stats.db
+  .gitignore            # ignores: index.db, *.db-shm, *.db-wal, daemon.sock, daemon.pid, reindex.lock, daemon.lock, index.db.tmp
   issues/
     <id>.md             # one item per file — committed (source of truth)
     <id>/               # only present when comments exist (sibling dir to <id>.md)
       comments/
         <rfc3339nano>-<author-slug>-<4char-random>.md
-  index.db              # SQLite derived cache — .gitignore'd
-  stats.db              # durable SQLite analytics history (clove stats --snapshot) — .gitignore'd
+  index.db              # SQLite derived cache (also holds the durable `snapshots` history table) — .gitignore'd
   daemon.sock           # Unix socket (macOS/Linux) — .gitignore'd
   daemon.pid            # PID file — .gitignore'd
   reindex.lock          # advisory lock during reindex — .gitignore'd

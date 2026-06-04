@@ -68,6 +68,10 @@ pub fn reindex(issues_dir: &Utf8Path, db_path: &Utf8Path) -> Result<ReindexRepor
     let tmp_path = Utf8PathBuf::from(format!("{db_path}.tmp"));
     remove_db_files(&tmp_path)?;
 
+    // Carry the durable stats history (which shares this database) across the
+    // atomic tmp→live rename, so a reindex never drops snapshots (M4).
+    let preserved_snapshots = crate::stats_store::preserve_from(db_path);
+
     let mut warnings = Vec::new();
     let items_indexed = {
         let mut conn = Connection::open(&tmp_path).map_err(IndexError::SqliteError)?;
@@ -75,6 +79,7 @@ pub fn reindex(issues_dir: &Utf8Path, db_path: &Utf8Path) -> Result<ReindexRepor
         let parsed = parse_all(issues_dir, &mut warnings)?;
         write_all(&mut conn, &parsed)?;
         write_meta(&conn, issues_dir, clove_dir, parsed.len())?;
+        crate::stats_store::insert_raw(&conn, &preserved_snapshots)?;
         // Build the covering index now, in one pass, rather than maintaining it
         // across every insert above (much cheaper for a bulk load).
         conn.execute_batch(crate::db::covering_index_ddl())?;
@@ -110,6 +115,9 @@ fn init_build_conn(conn: &Connection) -> Result<(), IndexError> {
          PRAGMA cache_size=-65536;",
     )?;
     conn.execute_batch(crate::db::schema_ddl())?;
+    // The stats-history table shares this database; create it so the rebuilt
+    // index can receive the preserved snapshot rows (M4).
+    crate::stats_store::ensure_table(conn)?;
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(())
 }
