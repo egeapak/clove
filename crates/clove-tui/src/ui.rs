@@ -250,7 +250,7 @@ fn list_row(app: &App, fm: &ItemFrontmatter, inner_w: u16, id_w: usize) -> Line<
         ),
     ];
     spans.push(Span::styled(
-        format!("p{} ", fm.priority.get()),
+        format!("{} ", priority_glyph(fm.priority.get())),
         priority_style(fm.priority.get()),
     ));
 
@@ -387,7 +387,7 @@ fn head_spans(fm: &ItemFrontmatter, title: String) -> Vec<Span<'static>> {
 /// header.
 fn priority_assignee(fm: &ItemFrontmatter) -> Vec<Span<'static>> {
     let mut v = vec![Span::styled(
-        format!("p{}", fm.priority.get()),
+        priority_glyph(fm.priority.get()),
         priority_style(fm.priority.get()),
     )];
     if let Some(a) = &fm.assignee {
@@ -895,6 +895,12 @@ fn render_help(f: &mut Frame, area: Rect) {
             Span::raw(desc),
         ]));
     }
+    // Priority glyph legend.
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled(format!("{:<13}", "priority"), Style::default().fg(LABEL)),
+        Span::raw("! ↑ • ↓ ·  =  p0→p4 (high→low)"),
+    ]));
 
     // Content-sized and centered when there's room; a full-screen modal on
     // small terminals (where a centered box would be all border and no room).
@@ -1080,6 +1086,19 @@ fn priority_style(p: u8) -> Style {
         _ => Color::Indexed(240),
     };
     Style::default().fg(color)
+}
+
+/// A single-glyph priority indicator (color reinforces it): `!` critical, `↑`
+/// high, `•` normal, `↓` low, `·` trivial. Out-of-range values fall back to `pN`.
+fn priority_glyph(p: u8) -> String {
+    match p {
+        0 => "!".to_owned(),
+        1 => "↑".to_owned(),
+        2 => "•".to_owned(),
+        3 => "↓".to_owned(),
+        4 => "·".to_owned(),
+        n => format!("p{n}"),
+    }
 }
 
 fn truncate(s: &str, max: usize) -> String {

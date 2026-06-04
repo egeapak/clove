@@ -4,8 +4,8 @@ expression: narrow
 ---
   All 2  │  Rdy 1  │  Blk 1
 ┌ Items (2) ───────────────────────────┐
-│▌◐ F #2 p0 Implement end-to-end offl… │
-│ ○ C #1 p2 Dependency target ●        │
+│▌◐ F #2 ! Implement end-to-end offli… │
+│ ○ C #1 • Dependency target ●         │
 │                                      │
 │                                      │
 │                                      │

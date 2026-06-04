@@ -6,8 +6,8 @@ expression: rendered
 │  All 2  │  Ready 1  │  Blocked 0                         │
 └──────────────────────────────────────────────────────────┘
 ┌ Items (2) ───────────────────────────────────────────────┐
-│▌◐ F #2 p0 Short title ●                                  │
-│ ● C #1 p2 Dependency target                              │
+│▌◐ F #2 ! Short title ●                                   │
+│ ● C #1 • Dependency target                               │
 │                                                          │
 │                                                          │
 │                                                          │
@@ -32,7 +32,7 @@ expression: rendered
 └──────────────────────────────────────────────────────────┘
 ┌ Overview · Dep tree · Comments ──────────────────────────┐
 │ #2  FEATURE  Short title           ◐ in_progress · ready │
-│ p0 · @ada                                                │
+│ ! · @ada                                                 │
 │ deps 1                                                   │
 │──────────────────────────────────────────────────────────│
 │ parent     #1                                            │

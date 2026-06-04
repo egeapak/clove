@@ -9,7 +9,7 @@ expression: rendered
 │ #2  FEATURE  Build REST API          │
 │                                      │
 │ status     ◐ in_progress · ready     │
-│ priority   p0 · @grace               │
+│ priority   ! · @grace                │
 │ deps       1                         │
 │ labels     area:api, backend         │
 │ created    Jan 1                     │

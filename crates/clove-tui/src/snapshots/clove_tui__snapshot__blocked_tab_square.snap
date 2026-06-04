@@ -6,7 +6,7 @@ expression: rendered
 │  All 7  │  Ready 4  │  Blocked 1                         │
 └──────────────────────────────────────────────────────────┘
 ┌ Items (1) ───────────────────────────────────────────────┐
-│▌○ F #3 p2 Write integration tests ✗                      │
+│▌○ F #3 • Write integration tests ✗                       │
 │                                                          │
 │                                                          │
 │                                                          │
@@ -32,7 +32,7 @@ expression: rendered
 └──────────────────────────────────────────────────────────┘
 ┌ Overview · Dep tree · Comments ──────────────────────────┐
 │ #3  FEATURE  Write integration tests    ○ open · blocked │
-│ p2                                                       │
+│ •                                                        │
 │ deps 1                                                   │
 │ blocked by #2                                            │
 │──────────────────────────────────────────────────────────│

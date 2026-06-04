@@ -12,7 +12,7 @@ expression: rendered
 │ backoff                              │
 │                                      │
 │ status     ◐ in_progress · ready     │
-│ priority   p0 · @ada                 │
+│ priority   ! · @ada                  │
 │ deps       1                         │
 │ labels     area:sync, backend        │
 │ created    Jan 1                     │

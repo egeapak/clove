@@ -4,9 +4,9 @@ expression: rendered
 ---
   All 7  │  Ready 4  │  Blocked 1
 ┌ Items (3/7) ─────────────────────────────────┐┌ Overview · Dep tree · Comments ──────────────────────────────────────┐
-│▌◐ F #2 p0 Build REST API ●                   ││ #2  FEATURE  Build REST API                    ◐ in_progress · ready │
-│ ○ F #3 p2 Write integration tests ✗          ││ p0 · @grace                                                          │
-│ ○ F #5 p3 Frontend dashboard ●               ││ deps 1                                                               │
+│▌◐ F #2 ! Build REST API ●                    ││ #2  FEATURE  Build REST API                    ◐ in_progress · ready │
+│ ○ F #3 • Write integration tests ✗           ││ ! · @grace                                                           │
+│ ○ F #5 ↓ Frontend dashboard ●                ││ deps 1                                                               │
 │                                              ││──────────────────────────────────────────────────────────────────────│
 │                                              ││ Goals                                                                │
 │                                              ││                                                                      │

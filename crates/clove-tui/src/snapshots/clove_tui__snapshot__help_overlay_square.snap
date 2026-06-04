@@ -6,13 +6,13 @@ expression: rendered
 │  All 7  │  Ready 4  │  Blocked 1                         │
 └──────────────────────────────────────────────────────────┘
 ┌ Items (7) ───────────────────────────────────────────────┐
-│▌◐ F #2 p0 Build REST API ●                               │
-│ ○ B #7 p1 Investigate flaky CI ●                         │
-│ ● C #1 p1 Set up database schema                         │
-│ ○ E #4 p2 Ship v1 release ●                              │
-│ ○ F #3 p2 Write integration tests ✗                      │
-│ ○ F #5 p3 Frontend dashboard ●                           │
-│ ● D #6 p4 Docs site                                      │
+│▌◐ F #2 ! Build REST API ●                                │
+│ ○ B #7 ↑ Investigate flaky CI ●                          │
+│ ● C #1 ↑ Set up database schema                          │
+│ ○ E #4 • Ship v1 release ●                               │
+│ ○ F #3 • Write integration tests ✗                       │
+│ ○ F #5 ↓ Frontend dashboard ●                            │
+│ ● D #6 · Docs site                                       │
 │                                                          │
 │                                                          │
 │                                                          │
@@ -32,7 +32,7 @@ expression: rendered
 └────│ o / t / c    overview / dep tree / comments    │────┘
 ┌ Ove│ →/l  ←/h     focus detail / list (narrow)      │────┐
 │ #2 │ PgUp / PgDn  scroll detail                     │ady │
-│ p0 │ s / S        cycle sort field / direction      │    │
+│ ! ·│ s / S        cycle sort field / direction      │    │
 │ dep│ f            filter menu (facets)              │    │
 │────│ x            clear all filters                 │────│
 │ Goa│ /            search id, title, labels          │    │

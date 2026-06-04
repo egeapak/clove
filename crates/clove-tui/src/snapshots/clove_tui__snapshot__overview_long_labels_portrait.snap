@@ -9,7 +9,7 @@ expression: rendered
 │ #2  FEATURE  Short title             │
 │                                      │
 │ status     ◐ in_progress · ready     │
-│ priority   p0 · @ada                 │
+│ priority   ! · @ada                  │
 │ deps       1                         │
 │ labels     area:mobile, area:sync,   │
 │ backend, flaky, frontend, infra,     │

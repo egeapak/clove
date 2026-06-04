@@ -6,8 +6,8 @@ expression: rendered
 │  All 7  │  Ready 4  │  Blocked 1                         │
 └──────────────────────────────────────────────────────────┘
 ┌ Items (2/7) ─────────────────────────────────────────────┐
-│▌○ F #3 p2 Write integration tests ✗                      │
-│ ○ F #5 p3 Frontend dashboard ●                           │
+│▌○ F #3 • Write integration tests ✗                       │
+│ ○ F #5 ↓ Frontend dashboard ●                            │
 │                                                          │
 │                                                          │
 │                                                          │
@@ -32,7 +32,7 @@ expression: rendered
 └─────────│  [ ] chore                           │─────────┘
 ┌ Overview│  [ ] docs                            │─────────┐
 │ #3  FEAT│  [ ] epic                            │ blocked │
-│ p2      │                                      │         │
+│ •       │                                      │         │
 │ deps 1  │ Priority                             │         │
 │ blocked │  [ ] p0                              │         │
 │─────────│  [ ] p1                              │─────────│

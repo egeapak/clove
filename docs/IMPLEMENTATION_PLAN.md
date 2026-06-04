@@ -588,8 +588,9 @@ condition for M4 planning.
   via the file-store scan path (`scan_frontmatter` + `GraphStore::build`) — always
   correct, no index/daemon coupling, never mutates. Top tab bar **All / Ready /
   Blocked** (with live counts), an item list (status glyph, single-letter type
-  icon, **short id** [prefix dropped, leading zeros trimmed, e.g. `#42`], priority,
-  title, ready/blocked badge, sorted by `(priority, topo rank, id)` like `ls`), and
+  icon, **short id** [prefix dropped, leading zeros trimmed, e.g. `#42`], a
+  **priority glyph** [`!`/`↑`/`•`/`↓`/`·` for p0→p4, graded color], title,
+  ready/blocked badge, sorted by `(priority, topo rank, id)` like `ls`), and
   a detail pane with three sub-views: **Overview** (wide: a **fixed, shrink-to-fit
   header** [short id + ALL-CAPS type tag + truncated title, status top-right,
   priority·assignee and a **deps count** on the left], an **edge-to-edge rule**, a

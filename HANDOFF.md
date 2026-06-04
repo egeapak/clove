@@ -49,7 +49,8 @@ rule** → **scrolling Markdown body** → edge-to-edge rule → **sticky footer
 (labels left, `created Jan 20 · updated Jan 24` right, day resolution); the narrow
 Overview is one scrolling paragraph (title wraps, labels/dates inline). The deps
 *list* is in the Dep tree tab. The list shows a single-letter colour-coded type
-icon and a **short id** (`#42`, prefix dropped). `clove-tui` has 27 tests (data-layer + a
+icon, a **short id** (`#42`, prefix dropped), and a **priority glyph**
+(`!`/`↑`/`•`/`↓`/`·` for p0→p4, graded colour; legend in the help overlay). `clove-tui` has 27 tests (data-layer + a
 `TestBackend` smoke test + insta render snapshots of 12 states × 3 terminal
 shapes), plus an `#[ignore]`d `generate_screenshots` PNG tool (DejaVu Sans Mono;
 output gitignored under `docs/screenshots/`). The layout is **adaptive**

@@ -4,8 +4,8 @@ expression: rendered
 ---
   All 7  │  Ready 4  │  Blocked 1
 ┌ Items (2/7) ──────────────────────────┌ Filter ──────────────────────────────┐ ──────────────────────────────────────┐
-│▌○ F #3 p2 Write integration tests ✗   │ Status                               │ tests                ○ open · blocked │
-│ ○ F #5 p3 Frontend dashboard ●        │  (•) open                            │                                       │
+│▌○ F #3 • Write integration tests ✗    │ Status                               │ tests                ○ open · blocked │
+│ ○ F #5 ↓ Frontend dashboard ●         │  (•) open                            │                                       │
 │                                       │  ( ) in_progress                     │                                       │
 │                                       │  ( ) closed                          │                                       │
 │                                       │                                      │───────────────────────────────────────│

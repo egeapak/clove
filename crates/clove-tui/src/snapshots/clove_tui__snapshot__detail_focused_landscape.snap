@@ -4,13 +4,13 @@ expression: rendered
 ---
   All 7  │  Ready 4  │  Blocked 1
 ┌ Items (7) ───────────────────────────────────┐┌ Overview · Dep tree · Comments ──────────────────────────────────────┐
-│▌◐ F #2 p0 Build REST API ●                   ││ #2  FEATURE  Build REST API                    ◐ in_progress · ready │
-│ ○ B #7 p1 Investigate flaky CI ●             ││ p0 · @grace                                                          │
-│ ● C #1 p1 Set up database schema             ││ deps 1                                                               │
-│ ○ E #4 p2 Ship v1 release ●                  ││──────────────────────────────────────────────────────────────────────│
-│ ○ F #3 p2 Write integration tests ✗          ││ Goals                                                                │
-│ ○ F #5 p3 Frontend dashboard ●               ││                                                                      │
-│ ● D #6 p4 Docs site                          ││ Build a REST API with axum; see docs/api.md.                         │
+│▌◐ F #2 ! Build REST API ●                    ││ #2  FEATURE  Build REST API                    ◐ in_progress · ready │
+│ ○ B #7 ↑ Investigate flaky CI ●              ││ ! · @grace                                                           │
+│ ● C #1 ↑ Set up database schema              ││ deps 1                                                               │
+│ ○ E #4 • Ship v1 release ●                   ││──────────────────────────────────────────────────────────────────────│
+│ ○ F #3 • Write integration tests ✗           ││ Goals                                                                │
+│ ○ F #5 ↓ Frontend dashboard ●                ││                                                                      │
+│ ● D #6 · Docs site                           ││ Build a REST API with axum; see docs/api.md.                         │
 │                                              ││                                                                      │
 │                                              ││ • CRUD endpoints                                                     │
 │                                              ││ • Auth middleware                                                    │

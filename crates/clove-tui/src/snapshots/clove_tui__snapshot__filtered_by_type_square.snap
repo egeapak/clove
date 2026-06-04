@@ -6,9 +6,9 @@ expression: rendered
 │  All 7  │  Ready 4  │  Blocked 1                         │
 └──────────────────────────────────────────────────────────┘
 ┌ Items (3/7) ─────────────────────────────────────────────┐
-│▌◐ F #2 p0 Build REST API ●                               │
-│ ○ F #3 p2 Write integration tests ✗                      │
-│ ○ F #5 p3 Frontend dashboard ●                           │
+│▌◐ F #2 ! Build REST API ●                                │
+│ ○ F #3 • Write integration tests ✗                       │
+│ ○ F #5 ↓ Frontend dashboard ●                            │
 │                                                          │
 │                                                          │
 │                                                          │
@@ -32,7 +32,7 @@ expression: rendered
 └──────────────────────────────────────────────────────────┘
 ┌ Overview · Dep tree · Comments ──────────────────────────┐
 │ #2  FEATURE  Build REST API        ◐ in_progress · ready │
-│ p0 · @grace                                              │
+│ ! · @grace                                               │
 │ deps 1                                                   │
 │──────────────────────────────────────────────────────────│
 │ Goals                                                    │
