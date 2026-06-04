@@ -97,7 +97,9 @@ fn render_config(prefix: &str) -> String {
          [daemon]\n\
          git_sync = false\n\
          watch_debounce_ms = 200\n\
-         idle_shutdown_min = 0\n"
+         # Idle minutes before the daemon self-terminates (0 = never). Each clove\n\
+         # command resets this, so it only fires after a long gap of no activity.\n\
+         idle_shutdown_min = 240\n"
     )
 }
 

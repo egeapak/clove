@@ -1,19 +1,36 @@
 # clove — Session Handoff
 
 **Updated:** 2026-06-03
-**State:** **M0, M1, and M2 are complete and gated.** Full CLI command surface;
+**State:** **M0, M1, M2, and M3 are complete and gated.** Full CLI command surface;
 the SQLite index serves `ls`/`ready`/`query` (lean covering-index scan, default
 `--limit 100`, fast staleness with `--deep`), `search`, `reindex`, and
-`doctor` divergence. **M2 (Interop) adds import (tk/beads/github), export
-(json/jsonl/github), and a real 3-way `clove merge-driver`** — see
-`docs/M2_ACCEPTANCE_GATES.md`. All five JSON schemas published + validated.
-Perf/parity/fuzz/golden gates pass (M0 `docs/IMPLEMENTATION_PLAN.md`, M1
-`docs/M1_ACCEPTANCE_GATES.md`, M2 `docs/M2_ACCEPTANCE_GATES.md`). Tests green
+`doctor` divergence. **M2 (Interop)** adds import (tk/beads/github), export
+(json/jsonl/github), and a real 3-way `clove merge-driver`. **M3 (Daemon)** adds
+the optional `cloved` (file-watch incremental index, IPC, opt-in git auto-sync),
+`clove daemon start|stop|status`, transparent read routing through the daemon, and
+a `doctor` daemon-health check — see `docs/M3_PLAN.md` and
+`docs/M3_ACCEPTANCE_GATES.md` (gates M3-G01–M3-G10 all pass). New lean crate
+`clove-ipc`; index schema **v3** (`file_mtimes.synced_at`). When a daemon is
+running the CLI defers read/graph work to it — `ls`/`ready`/`query` (lean index),
+`search` (FTS), `blocked`/`dep tree`/`dep cycle`/`dep add` cycle-check (cached
+graph), and `reindex` (delegated so the daemon stays coherent) — all with a clean
+local fallback; see the routing matrix in `docs/M3_ACCEPTANCE_GATES.md`. The daemon
+is **per-project**: all git worktrees of a project share the **main worktree's**
+`.clove/` (and thus one index + one daemon) — `find_repo_root` resolves linked
+worktrees to main; a system-wide daemon was evaluated and rejected for v1
+(DESIGN §8.1). **Idle self-shutdown defaults to 4 h** (every command is a heartbeat
+that resets it; `0` = never; no auto-restart yet — a future MCP holds the
+heartbeat). The prior environment-only `linked_worktree` test failure is fixed
+(commit signing disabled in the test). All five JSON schemas
+published + validated. Perf/parity/fuzz/golden gates pass (M0
+`docs/IMPLEMENTATION_PLAN.md`, M1 `docs/M1_ACCEPTANCE_GATES.md`, M2
+`docs/M2_ACCEPTANCE_GATES.md`, M3 `docs/M3_ACCEPTANCE_GATES.md`). Tests green
 except one environment-only failure (`repo::tests::linked_worktree…`, a sandbox
 git-signing artifact, not a code defect; the token-gated `github_roundtrip`
 shows as `1 ignored`).
-**Next step:** **M3 — Daemon** (builds on the finished M1 index). M4 (TUI/web/
-vendor bridges) is still undesigned.
+**Next step:** **M4 — Extras** (TUI/web UI, vendor bridges, richer history, and the
+deferred `clove stats` analytics command — see `IMPLEMENTATION_PLAN.md` M4 backlog).
+Still undesigned.
 
 ### Small backlog (optional M0/M1 nice-to-haves, non-blocking)
 - Broaden JSON-schema validation to more commands (version/reindex/doctor/new)

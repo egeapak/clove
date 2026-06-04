@@ -114,6 +114,15 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
   (staleness is detected and the index reindexed transparently), so reads stay\n\
   correct without a manual `clove reindex`.\n\
 \n\
+## Daemon (optional)\n\
+\n\
+- `clove daemon start|stop|status` runs an optional background process that keeps\n\
+  the index hot (file-watch incremental indexing). It is never required — every\n\
+  command works identically without it; when it is running, reads are served from\n\
+  its hot index and report `_meta.source = \"daemon\"`.\n\
+- Opt-in `[daemon] git_sync = true` auto-commits clean item edits (never pushes).\n\
+- `clove doctor --fix` cleans up a stale daemon socket/pid left by a crash.\n\
+\n\
 ## Conventions\n\
 \n\
 - Labels are case-insensitive and canonicalized (`Area:iOS` → `area:ios`).\n\

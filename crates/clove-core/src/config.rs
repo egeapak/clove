@@ -69,7 +69,7 @@ pub struct DaemonConfig {
     pub git_sync: bool,
     #[serde(default = "default_debounce_ms")]
     pub watch_debounce_ms: u64,
-    #[serde(default)]
+    #[serde(default = "default_idle_shutdown_min")]
     pub idle_shutdown_min: u64,
 }
 
@@ -77,8 +77,8 @@ impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
             git_sync: false,
-            watch_debounce_ms: 200,
-            idle_shutdown_min: 0,
+            watch_debounce_ms: default_debounce_ms(),
+            idle_shutdown_min: default_idle_shutdown_min(),
         }
     }
 }
@@ -122,6 +122,15 @@ fn default_true() -> bool {
 }
 fn default_debounce_ms() -> u64 {
     200
+}
+/// Default idle self-shutdown window (minutes). Every clove command is a
+/// heartbeat that resets this timer, so an actively-used daemon never times out;
+/// it only self-terminates after this long with *no* clove activity at all. There
+/// is no auto-restart yet (a future MCP session would hold a heartbeat), so the
+/// default is generous — 4 hours survives normal workday gaps (meetings, lunch)
+/// and cleans up overnight. `0` disables idle shutdown entirely.
+fn default_idle_shutdown_min() -> u64 {
+    240
 }
 fn default_config_schema() -> u32 {
     CURRENT_CONFIG_SCHEMA

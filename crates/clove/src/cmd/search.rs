@@ -4,6 +4,8 @@
 
 use clove_core::{CloveError, CloveId, ItemFrontmatter, OutputFormat};
 
+use clove_ipc::{DaemonClient, SearchRequest};
+
 use crate::cli::SearchArgs;
 use crate::cmd::listing::{emit, objects_from_frontmatters, ListOpts};
 use crate::context::{index_error, Ctx};
@@ -15,6 +17,34 @@ pub fn run(
     no_index: bool,
 ) -> Result<(), CloveError> {
     let text = args.text;
+
+    // Daemon fast path: the daemon runs the FTS over its hot index and returns
+    // matched ids; we still read those files for full detail, so the output is
+    // identical to the local index path bar `_meta.source = "daemon"`.
+    if let Some(ids) = search_via_daemon(ctx, no_index, &text, args.limit) {
+        let frontmatters = ids
+            .iter()
+            .filter_map(|id| CloveId::new(id).ok())
+            .filter_map(|id| ctx.store.get(&id).ok())
+            .map(|item| item.frontmatter)
+            .collect();
+        let ordered = rank_title_first(frontmatters, &text);
+        let objects = objects_from_frontmatters(&ordered);
+        let total = objects.len();
+        emit(
+            format,
+            objects,
+            ListOpts {
+                total,
+                offset: 0,
+                limit: args.limit,
+                fields: None,
+                source: "daemon",
+                warnings: Vec::new(),
+            },
+        );
+        return Ok(());
+    }
 
     let (ordered, source) = if !no_index && ctx.db_path.exists() {
         match clove_index::Index::open_or_create(&ctx.db_path) {
@@ -54,6 +84,27 @@ pub fn run(
         },
     );
     Ok(())
+}
+
+/// Try the daemon's FTS, returning matched ids in rank order. `None` (→ local
+/// path) for `--no-index` or when no daemon is live.
+fn search_via_daemon(
+    ctx: &Ctx,
+    no_index: bool,
+    text: &str,
+    limit: Option<usize>,
+) -> Option<Vec<String>> {
+    if no_index {
+        return None;
+    }
+    let clove_dir = ctx.issues_dir.parent()?;
+    let mut client = DaemonClient::probe(clove_dir)?;
+    client
+        .search(SearchRequest {
+            text: text.to_owned(),
+            limit,
+        })
+        .ok()
 }
 
 /// Parallel substring scan over file content (the no-index fallback).

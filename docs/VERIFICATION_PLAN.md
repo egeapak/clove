@@ -928,19 +928,20 @@ Every gate must be green before tagging M0.
 
 ---
 
-### M3 Gates
+### M3 Gates — ✅ all passing (see `docs/M3_ACCEPTANCE_GATES.md`)
 
-| Gate | Test | Pass Condition |
-|---|---|---|
-| M3-G01 | Daemon IPC round-trip | PING/PONG < 5ms |
-| M3-G02 | Daemon startup sweep | 1k items, 50 modified → ready < 500ms |
-| M3-G03 | Clean shutdown | SIGTERM → no stale sock/pid files, exit 0 |
-| M3-G04 | Stale socket recovery | Kill with SIGKILL → next `clove ls` < 200ms |
-| M3-G05 | Feedback loop prevention | No index.db events processed after reindex |
-| M3-G06 | Debounce batching | 10 chunks × 10ms → exactly 1 SQLite update |
-| M3-G07 | git auto-sync skip-during-rebase | T-D06 AC passes |
-| M3-G08 | Two daemons prevention | Second daemon exits non-zero |
-| M3-G09 | All M2 gates still pass | Full M2 gate suite re-runs |
+| Gate | Test | Pass Condition | Status |
+|---|---|---|---|
+| M3-G01 | Daemon IPC round-trip | PING/PONG < 5ms | ✅ |
+| M3-G02 | Daemon startup sweep | 1k items, 50 modified → ready < 500ms | ✅ |
+| M3-G03 | Clean shutdown | SIGTERM → no stale sock/pid files, exit 0 | ✅ |
+| M3-G04 | Stale socket recovery | Kill with SIGKILL → next `clove ls` < 200ms | ✅ |
+| M3-G05 | Feedback loop prevention | No index.db events processed after reindex | ✅ |
+| M3-G06 | Debounce batching | 10 chunks × 10ms → exactly 1 SQLite update | ✅ |
+| M3-G07 | git auto-sync skip-during-rebase | T-D06 AC passes | ✅ |
+| M3-G08 | Two daemons prevention | Second daemon exits non-zero | ✅ |
+| M3-G09 | All M2 gates still pass | Full M2 gate suite re-runs | ✅ |
+| M3-G10 | `doctor` daemon-health | T-D07 AC: stale sock/pid flagged; `--fix` cleans a dead-daemon footprint; live daemon untouched (added by M3_PLAN.md §1.1 CLI-surface review) | ✅ |
 
 ---
 

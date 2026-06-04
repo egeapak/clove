@@ -7,7 +7,7 @@ use clove_index::QueryMode;
 use serde::Deserialize;
 
 use crate::cli::QueryArgs;
-use crate::cmd::index_read::list_via_index;
+use crate::cmd::index_read::{list_via_daemon, list_via_index};
 use crate::cmd::listing::{
     effective_limit, emit, objects_from_frontmatters, objects_from_lean_rows, ranks_of,
     sort_by_priority_topo, Filters, ListOpts,
@@ -60,6 +60,24 @@ pub fn run(
     let fields = args.fields.as_deref().map(parse_fields);
     let offset = args.offset.or(qf.offset).unwrap_or(0);
     let limit = effective_limit(args.limit.or(qf.limit));
+
+    if let Some((objects, total, warnings)) =
+        list_via_daemon(ctx, no_index, QueryMode::List, &filters, offset, limit)
+    {
+        emit(
+            format,
+            objects,
+            ListOpts {
+                total,
+                offset,
+                limit,
+                fields: fields.as_deref(),
+                source: "daemon",
+                warnings,
+            },
+        );
+        return Ok(());
+    }
 
     if let Some((rows, total, warnings)) = list_via_index(
         ctx,

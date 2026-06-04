@@ -118,7 +118,7 @@ pub struct ChildrenSummary {
 }
 
 /// A node in a rendered dependency tree.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DepTreeNode {
     pub id: CloveId,
     pub title: String,

@@ -4,6 +4,7 @@ pub mod agent_doc;
 pub mod assign;
 pub mod blocked;
 pub mod comments;
+pub mod daemon;
 pub mod dep;
 pub mod doctor;
 pub mod edit;

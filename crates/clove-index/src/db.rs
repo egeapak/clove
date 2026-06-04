@@ -14,8 +14,10 @@ use thiserror::Error;
 
 /// Index schema version. Bumped whenever the DDL below changes incompatibly;
 /// an open of an older/newer database triggers a drop-and-rebuild. v2 added the
-/// `idx_items_list` covering index and the sentinel `topological_rank`.
-pub const SCHEMA_VERSION: i64 = 2;
+/// `idx_items_list` covering index and the sentinel `topological_rank`. v3 added
+/// `file_mtimes.synced_at` for the M3 daemon git auto-sync re-commit guard
+/// (DESIGN §8.7); the index is a rebuildable cache, so the bump just rebuilds.
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Complete DDL for the index (DESIGN §6.1). Kept as one reviewable block.
 /// PRAGMAs that must run per-connection (not persisted) are applied separately
@@ -90,7 +92,8 @@ CREATE TABLE meta (
 CREATE TABLE file_mtimes (
     path TEXT PRIMARY KEY,
     mtime_ns INTEGER NOT NULL,
-    content_hash BLOB NOT NULL
+    content_hash BLOB NOT NULL,
+    synced_at INTEGER
 );
 
 CREATE TABLE fts_map (
@@ -358,6 +361,26 @@ impl Index {
             .query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))?;
         Ok(n as usize)
     }
+
+    /// Flush the WAL back into the main database file and truncate it. Run on
+    /// daemon shutdown (DESIGN §8.9) so no `-wal` work is left dangling for the
+    /// next opener.
+    pub fn checkpoint_truncate(&self) -> Result<(), IndexError> {
+        self.conn
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        Ok(())
+    }
+
+    /// Record that the item file `file_name` was just git-auto-synced, stamping
+    /// `file_mtimes.synced_at` (schema v3, DESIGN §8.7). No-op if the row is
+    /// absent (the watcher indexes before git-sync, so it normally exists).
+    pub fn set_synced_at(&self, file_name: &str, synced_at_ns: i64) -> Result<(), IndexError> {
+        self.conn.execute(
+            "UPDATE file_mtimes SET synced_at = ?1 WHERE path = ?2",
+            rusqlite::params![synced_at_ns, file_name],
+        )?;
+        Ok(())
+    }
 }
 
 /// Apply the per-connection PRAGMAs (DESIGN §6.1). `execute_batch` tolerates the
@@ -463,5 +486,25 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 5);
+    }
+
+    /// T-D01 / schema v3: `file_mtimes` carries the nullable `synced_at` column
+    /// the M3 daemon git auto-sync uses to suppress the re-commit feedback loop
+    /// (DESIGN §8.7). A fresh open must expose it.
+    #[test]
+    fn file_mtimes_has_synced_at_column() {
+        let (_dir, path) = tmp_db();
+        let index = Index::open(&path).unwrap();
+        let has_col: bool = index
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('file_mtimes') \
+                 WHERE name = 'synced_at'",
+                [],
+                |r| r.get::<_, i64>(0).map(|n| n == 1),
+            )
+            .unwrap();
+        assert!(has_col, "file_mtimes.synced_at must exist at schema v3");
+        assert_eq!(SCHEMA_VERSION, 3, "M3 ships index schema v3");
     }
 }

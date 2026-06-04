@@ -99,8 +99,28 @@ pub enum Commands {
     AgentDoc(AgentDocArgs),
     /// Check the store for problems (optionally repair safe ones).
     Doctor(DoctorArgs),
+    /// Control the optional background daemon (`start|stop|status`).
+    Daemon(DaemonArgs),
     /// Print version and schema information.
     Version,
+}
+
+/// `clove daemon <start|stop|status>` (DESIGN §7.2, §8). The daemon is optional;
+/// every read command works identically without it.
+#[derive(Debug, Args)]
+pub struct DaemonArgs {
+    #[command(subcommand)]
+    pub action: DaemonAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DaemonAction {
+    /// Start the daemon for this repository (spawns `cloved` detached).
+    Start,
+    /// Stop the running daemon.
+    Stop,
+    /// Show the running daemon's status.
+    Status,
 }
 
 /// A bare `<id>` positional argument.
