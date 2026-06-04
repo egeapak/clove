@@ -53,7 +53,7 @@ octocrab = "0.51"               # GitHub REST API client (clove-import, M2)
 toml = "0.8"                    # config.toml parsing
 jsonschema = "0.46"             # JSON Schema validation in tests (T-CLI14)
 ratatui = "0.29"                # terminal UI (M4 `clove tui`); re-exports crossterm
-pulldown-cmark = { version = "0.12", default-features = false }  # Markdown body rendering in `clove tui`
+pulldown-cmark = { version = "0.13", default-features = false }  # Markdown body rendering in `clove tui`
 
 # Internal crates (explicit version keeps them off cargo-deny's wildcard list
 # and is required for publishing clove-core to crates.io — PRD §13).
