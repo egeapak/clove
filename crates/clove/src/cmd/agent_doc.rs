@@ -87,6 +87,7 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
 - `clove ls` / `clove query [--filter JSON]` — list/query (`--fields`, `--limit`, `--offset`). Lists are capped at 100 by default (`_meta.total` is the full count; `--limit 0` for all).\n\
 - `clove comment <id> <message>` / `clove comments <id> [--limit N]`.\n\
 - `clove search <text> [--limit N]` — full-text (index) or substring (files) search.\n\
+- `clove stats [--top N] [--no-epics] [--snapshot] [--history [--since RFC3339] [--limit N]]` — work-item analytics (counts by status/type/priority/assignee/label, ready/blocked, cycles, epic rollups, throughput) plus daemon/index telemetry. `--snapshot` persists to the index's durable history (`.clove/index.db`); `--history` replays the series.\n\
 - `clove reindex` — rebuild the SQLite index. `clove doctor [--fix] [--strict]` — health check.\n\
 - `clove version` — `{{ clove, schema, git_hash, build_date }}`.\n\
 \n\
@@ -121,6 +122,9 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
   command works identically without it; when it is running, reads are served from\n\
   its hot index and report `_meta.source = \"daemon\"`.\n\
 - Opt-in `[daemon] git_sync = true` auto-commits clean item edits (never pushes).\n\
+- A running daemon auto-records `clove stats` history points on a timer\n\
+  (`[daemon] stats_snapshot_min`, default 60; `0` disables) — replay with\n\
+  `clove stats --history`.\n\
 - `clove doctor --fix` cleans up a stale daemon socket/pid left by a crash.\n\
 \n\
 ## Conventions\n\

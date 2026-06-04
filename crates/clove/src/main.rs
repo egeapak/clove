@@ -127,6 +127,7 @@ fn run_repo(
         Commands::Comment(a) => cmd::comments::add(ctx, f, &a.id, &a.message, quiet).map(|_| ok),
         Commands::Comments(a) => cmd::comments::list(ctx, f, &a.id, a.limit).map(|_| ok),
         Commands::Search(a) => cmd::search::run(ctx, f, a, no_index).map(|_| ok),
+        Commands::Stats(a) => cmd::stats::run(ctx, f, a, no_index).map(|_| ok),
         Commands::Reindex => cmd::reindex::run(ctx, f, quiet).map(|_| ok),
         Commands::Doctor(a) => cmd::doctor::run(ctx, f, a, no_index),
         Commands::Daemon(a) => cmd::daemon::run(ctx, f, a.action),

@@ -1,7 +1,9 @@
 # clove — Session Handoff
 
-**Updated:** 2026-06-03
-**State:** **M0, M1, M2, and M3 are complete and gated.** Full CLI command surface;
+**Updated:** 2026-06-04
+**State:** **M0–M3 are complete and gated; the first M4 items have landed**
+(`clove stats` + analytics history, and an exact-incremental index/daemon graph —
+see the "M4" sections below). Full CLI command surface;
 the SQLite index serves `ls`/`ready`/`query` (lean covering-index scan, default
 `--limit 100`, fast staleness with `--deep`), `search`, `reindex`, and
 `doctor` divergence. **M2 (Interop)** adds import (tk/beads/github), export
@@ -28,9 +30,10 @@ published + validated. Perf/parity/fuzz/golden gates pass (M0
 except one environment-only failure (`repo::tests::linked_worktree…`, a sandbox
 git-signing artifact, not a code defect; the token-gated `github_roundtrip`
 shows as `1 ignored`).
-**Next step:** **M4 — Extras** (TUI/web UI, vendor bridges, richer history, and the
-deferred `clove stats` analytics command — see `IMPLEMENTATION_PLAN.md` M4 backlog).
-Still undesigned.
+**M4 started:** the **`clove stats`** analytics command is now built (the first M4
+item). See the "M4 — `clove stats`" section below. **Next step:** the remaining M4
+backlog — TUI/web UI, bidirectional vendor bridges, richer history/changelog (still
+undesigned; see `IMPLEMENTATION_PLAN.md` M4 backlog).
 
 ### Small backlog (optional M0/M1 nice-to-haves, non-blocking)
 - Broaden JSON-schema validation to more commands (version/reindex/doctor/new)
@@ -164,6 +167,114 @@ index-refresh note (idempotency/`--check` tests stay green).
 
 ---
 
+## M4 — `clove stats` (this session)
+
+The first M4 item: a read-only **work-item analytics** command.
+
+- **`clove stats`** — aggregates the store into one report: `total`; counts by
+  status / type / priority / assignee / label (assignee+label capped by `--top N`,
+  default 10); `ready` / `blocked` / `excluded` / `dangling`; dependency-cycle
+  count; per-epic completion rollups (`--no-epics` to skip); and created/closed
+  **throughput** over 7d/30d/all windows. It also folds in the **daemon** §8.4
+  `STATUS` telemetry and local **index** presence/freshness, so one command shows
+  work-item *and* operational state.
+- **Compute path:** a single `scan_frontmatter()` + `GraphStore::build()` — files
+  are always truth, so the report is always correct; the index/daemon are reported,
+  not relied on. (Not a hot path; index-SQL `GROUP BY` acceleration is a noted
+  future optimization, not needed for v1.)
+- **Persistence (one SQLite database):** snapshots live in a `snapshots` **table
+  inside `.clove/index.db`** — a single database for the whole tool, not a second
+  file. `--snapshot` records the report; `clove stats --history [--since RFC3339]
+  [--limit N]` replays the series (headline scalars as columns for cheap trend SQL +
+  a `detail_json` blob for the rich breakdowns). The index is a rebuildable cache,
+  so the two destructive cache ops are taught to **carry the durable `snapshots`
+  table across them**: a full `reindex` (tmp-build + atomic rename) copies the rows
+  into the new DB before the rename, and schema-mismatch recovery reads them out
+  before the drop-and-rebuild and reinserts after. The table is created on demand
+  (`CREATE TABLE IF NOT EXISTS` on every `Index::open`), so existing indexes gain it
+  **without a forced rebuild / version bump**. The *only* loss case is true file
+  corruption (the file can't be read to copy rows out) — acceptable, since
+  snapshots are non-mandatory analytics and the item files remain truth.
+- **Layout:** `clove-core/src/stats.rs` (`StatsReport` + pure `compute`),
+  `clove-index/src/stats_store.rs` (snapshots table + `Index::{record_snapshot,
+  snapshot_history,snapshot_count}` + the `preserve_from`/`insert_raw` carry-over
+  helpers used by reindex/recovery), `clove/src/cmd/stats.rs` (orchestration +
+  human/JSON rendering). JSON schema `docs/json-schema/v1/stats.json` (validated in
+  `tests/stats.rs`). `clove stats` is wired into `agent-doc` and DESIGN §7.2. No new
+  files in `.clove/` and no new gitignore entries.
+- **Tests:** 6 `clove-core` stats unit tests, 6 `clove-index` `stats_store` tests
+  (incl. `full_reindex_preserves_snapshots`, the headline carry-over guarantee),
+  5 `clove` e2e tests (schema, empty repo, snapshot→history, `--since`, `--top`).
+  `cargo test --workspace`, `clippy -D warnings`, `fmt` all green.
+
+**Decisions (don't relitigate):** stats history lives in the **one** `index.db`
+(no separate `stats.db`); the index layer preserves the `snapshots` table across
+reindex and schema-mismatch rebuilds, so the only loss case is raw file corruption.
+This was a deliberate merge from an earlier two-file design (the rationale: one
+database, simpler layout; perf is unaffected since `index.db` is opened for stats
+only on `--snapshot`/`--history`). Snapshots are recorded manually via
+`clove stats --snapshot` **and** automatically by a running daemon on a timer
+(`[daemon] stats_snapshot_min`, default 60; `0` disables; `CLOVED_STATS_SNAPSHOT_MS`
+overrides for tests) — the daemon computes the snapshot from the same file scan +
+`compute_stats` path the CLI uses (`cloved/src/snapshot.rs`), so daemon and manual
+snapshots are byte-identical. Analytics compute from files for correctness; no new
+frontmatter fields, no index `user_version` bump (the `snapshots` table is
+additive/idempotent).
+
+## M4 — Incremental index & daemon graph (this session)
+
+Made the index/daemon maintain the dependency graph's derived state incrementally
+instead of "approximate-until-reindex" (evaluated first with a 3-agent team).
+
+- **P0 — canonical toposort.** `clove_core::graph::topological_ranks_internal` now
+  uses a deterministic Kahn sort (smallest-id-first tie-break) instead of
+  petgraph's insertion-order-dependent `toposort`, making `topological_rank` a
+  **pure function of `(hard edges, ids)`**. This is the prerequisite that lets the
+  incremental path produce ranks byte-identical to a full reindex.
+- **P1 — exact incremental derived state.** New `clove-index/src/derive.rs`
+  reconstructs the graph from the index's own `items`/`edges` tables (no file
+  re-scan), runs the same `GraphStore` the file path uses, and writes back exact
+  `topological_rank` / `has_dangling_deps` / `excluded` — **delta-only** (only rows
+  whose values changed, so the `idx_items_list` covering index isn't churned per
+  batch). `apply_staleness` calls it in its transaction, so an incremental sweep
+  now equals a full reindex. Fixes two latent bugs: reverse-dangling (dependents of
+  a newly created/deleted item are refreshed) and the index `ready` not excluding
+  hard-cycle / malformed-parent members. New **schema v4** column `items.excluded`;
+  the SQL `ready` filters `excluded = FALSE`. Differential tests assert incremental
+  == reindex for the derived columns (chain re-rank, dangling resolution, cycle).
+- **P3 — daemon graph from the DB, not files.** `cloved`'s `graph_cache` rebuilds
+  its hot `GraphStore` from `Index::graph_frontmatters` (two indexed table scans)
+  instead of re-scanning + re-parsing every `.clove/issues/*.md` on each change.
+  The watcher keeps the index exact+fresh before marking the cache dirty, so the
+  DB-sourced graph is parity-identical to the file scan it replaces, far cheaper.
+  `QUERY`/`SEARCH` inline refresh and `REINDEX` now also invalidate the hot graph.
+- **Topology-change guard.** `apply_staleness` now runs the O(V+E)
+  `recompute_derived` **only when the dependency structure changed** (an item
+  added/deleted, or a changed item's edge/parent signature differs). A content-only
+  edit — `status`/`title`/`assignee`/`priority`/`labels`, the common case —
+  preserves its existing exact derived columns (snapshotted before the row
+  overwrite) and skips the recompute entirely. `apply_staleness_tracked` returns
+  whether the recompute ran; tests assert a status edit skips it (and stays
+  byte-identical to reindex) while a dep edit triggers it.
+
+**Decisions / scope:** the graph is **already persisted correctly** as the `edges`
+adjacency table + the `topological_rank`/`has_dangling_deps`/`excluded` columns —
+no transitive-closure table (write-storm for a rare query) and no graph engine;
+SQLite stays the single store, cycles detected in-memory during the recompute.
+Both the P1 recompute and the P3 daemon rebuild are O(V+E) **in-memory** passes
+(fast: no file I/O / YAML parse), and the topology-change guard skips even that for
+content-only edits. **Pearce–Kelly** online topological ordering (true sub-linear
+O(affected-region) maintenance) was implemented and benchmarked in a standalone
+harness (correctness verified vs. a reachability reference; ~0.2–1 µs per
+invalidating edit vs. 0.5–68 ms for a full recompute at 10k–500k nodes), then
+**rejected for clove**: PK's order is *history-dependent*, which structurally
+breaks clove's canonical-order parity contract (the daemon, the index, and the
+from-scratch file-scan path must all agree on `topological_rank`); PK also can't
+represent cycles (clove must) and only wins at a scale clove rarely hits. The
+guard is the correctness-preserving alternative. An always-correct hot graph now
+unblocks future work (live ready-queue push / `SUBSCRIBE`, MCP "what's ready",
+per-batch analytics).
+
 ## What clove is
 
 A fast, git-native, **dependency-aware** work-item tracker for AI coding agents
@@ -246,8 +357,10 @@ comment layout, empty-array serialization, cycle exit codes).
 
 ## Open / deferred (decide when you get there)
 
-- **M4 is undesigned** (TUI, web UI, bidirectional vendor bridges, richer
-  changelog) — plan it in its own session after M3.
+- **M4 in progress:** `clove stats` (+ durable history, daemon auto-snapshot) and
+  the exact-incremental index/daemon graph are **done** (see the M4 sections
+  above). The **remaining** M4 items are undesigned (TUI, web UI, bidirectional
+  vendor bridges, richer changelog) — plan each in its own session.
 - **Vendor bridges** (GitHub/GitLab/Jira) are documented for import/export, not
   built in M0–M3.
 - **Optional soft dep cap** (warn past N deps/item) — offered but not added; add

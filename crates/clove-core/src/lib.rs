@@ -14,6 +14,7 @@ pub mod limits;
 pub mod model;
 pub mod parse;
 pub mod repo;
+pub mod stats;
 pub mod store;
 pub mod validate;
 pub mod write;
@@ -31,6 +32,10 @@ pub use model::{normalize_label, Item, ItemFrontmatter, ItemStatus, ItemType, Pr
 pub use parse::{
     contains_yaml_anchor_or_alias, parse_frontmatter_file, parse_item_bytes, parse_item_file,
     parse_item_lenient,
+};
+pub use stats::{
+    compute as compute_stats, EpicRollup, KeyCount, StatsOptions, StatsReport, StatusCounts,
+    Throughput, TypeCounts,
 };
 pub use store::{ItemStore, NewItem, ScanError};
 pub use validate::{validate_item, ValidationError};

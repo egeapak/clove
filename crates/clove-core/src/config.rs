@@ -71,6 +71,8 @@ pub struct DaemonConfig {
     pub watch_debounce_ms: u64,
     #[serde(default = "default_idle_shutdown_min")]
     pub idle_shutdown_min: u64,
+    #[serde(default = "default_stats_snapshot_min")]
+    pub stats_snapshot_min: u64,
 }
 
 impl Default for DaemonConfig {
@@ -79,6 +81,7 @@ impl Default for DaemonConfig {
             git_sync: false,
             watch_debounce_ms: default_debounce_ms(),
             idle_shutdown_min: default_idle_shutdown_min(),
+            stats_snapshot_min: default_stats_snapshot_min(),
         }
     }
 }
@@ -131,6 +134,14 @@ fn default_debounce_ms() -> u64 {
 /// and cleans up overnight. `0` disables idle shutdown entirely.
 fn default_idle_shutdown_min() -> u64 {
     240
+}
+/// Default interval (minutes) at which a running daemon records a work-item
+/// analytics snapshot into the index's durable `snapshots` history (the data
+/// behind `clove stats --history`). Hourly captures a useful trend without
+/// meaningful cost or growth (rows are tiny and the index is local/gitignored).
+/// `0` disables auto-snapshots; manual `clove stats --snapshot` still works.
+fn default_stats_snapshot_min() -> u64 {
+    60
 }
 fn default_config_schema() -> u32 {
     CURRENT_CONFIG_SCHEMA
