@@ -13,7 +13,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Padding, Paragraph, Tabs, Wrap};
 use ratatui::Frame;
 
-use crate::app::{fmt_relative, fmt_ts, App, Detail, DetailTab, Focus, Mode, Tab};
+use crate::app::{fmt_relative, fmt_ts, App, Detail, DetailTab, Focus, Mode, SortField, Tab};
 use crate::markdown;
 
 // Structural chrome uses indexed grays (consistent on 256-color terminals);
@@ -78,6 +78,9 @@ pub fn render(f: &mut Frame, app: &mut App) {
     render_body(f, app, chunks[1]);
     render_status(f, app, chunks[2]);
 
+    if app.mode == Mode::Filter {
+        render_filter_menu(f, app, area);
+    }
     if app.show_help {
         render_help(f, area);
     }
@@ -170,21 +173,46 @@ fn render_body(f: &mut Frame, app: &mut App, area: Rect) {
 
 fn render_list(f: &mut Frame, app: &mut App, area: Rect) {
     let inner_w = area.width.saturating_sub(2);
+    let focused = app.focus == Focus::List;
+
+    // Title shows visible/total when the view is narrowed by a filter or search.
+    let narrowed = app.filter.is_active() || !app.search.is_empty();
+    let title = if narrowed {
+        format!(" Items ({}/{}) ", app.visible_count(), app.total_count())
+    } else {
+        format!(" Items ({}) ", app.visible_count())
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style(focused))
+        .padding(Padding::new(0, 1, 0, 0))
+        .title(title);
+
+    // Distinguish "filtered to empty" (escape hatch) from "no items at all".
+    if app.visible_count() == 0 && app.total_count() > 0 {
+        let p = Paragraph::new(vec![
+            Line::from(Span::styled(
+                "No items match.",
+                Style::default().fg(Color::Yellow),
+            )),
+            Line::raw(""),
+            Line::from(Span::styled(
+                "press x to clear filters, Esc to clear search",
+                Style::default().fg(DIM),
+            )),
+        ])
+        .block(block)
+        .wrap(Wrap { trim: false });
+        f.render_widget(p, area);
+        return;
+    }
+
     let items: Vec<ListItem> = app
         .visible()
         .map(|fm| ListItem::new(list_row(app, fm, inner_w)))
         .collect();
-
-    let focused = app.focus == Focus::List;
-    let title = format!(" Items ({}) ", app.visible_count());
     let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(border_style(focused))
-                .padding(Padding::new(0, 1, 0, 0))
-                .title(title),
-        )
+        .block(block)
         .highlight_style(
             Style::default()
                 .bg(SEL_BG)
@@ -549,12 +577,37 @@ fn render_status(f: &mut Frame, app: &App, area: Rect) {
             }
             Line::from(spans)
         }
+        Mode::Filter => {
+            let mut spans = vec![Span::styled(
+                "filter",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            )];
+            if !narrow {
+                spans.push(Span::styled(
+                    "  ↑↓ move · space toggle · x clear · Esc close",
+                    Style::default().fg(DIM),
+                ));
+            }
+            Line::from(spans)
+        }
         Mode::Browse => {
             let mut spans = Vec::new();
             if !app.search.is_empty() {
                 spans.push(Span::styled(
-                    format!("filter:{}  ", app.search),
+                    format!("search:{}  ", app.search),
                     Style::default().fg(Color::Yellow),
+                ));
+            }
+            if app.filter.is_active() {
+                spans.push(Span::styled(
+                    format!("{}  ", filter_summary(app, narrow)),
+                    Style::default().fg(Color::Yellow),
+                ));
+            }
+            if app.sort.field != SortField::Default {
+                spans.push(Span::styled(
+                    format!("sort:{}{}  ", app.sort.field.label(), app.sort.dir.glyph()),
+                    Style::default().fg(ACCENT),
                 ));
             }
             spans.push(Span::styled(app.status.clone(), Style::default().fg(LABEL)));
@@ -570,6 +623,56 @@ fn render_status(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(line), area);
 }
 
+/// A compact one-line summary of the active facet filters for the status bar.
+fn filter_summary(app: &App, narrow: bool) -> String {
+    let f = &app.filter;
+    if narrow {
+        let n = [
+            f.status.is_some(),
+            f.assignee.is_some(),
+            !f.types.is_empty(),
+            !f.priorities.is_empty(),
+            !f.labels.is_empty(),
+        ]
+        .iter()
+        .filter(|b| **b)
+        .count();
+        return format!("filters:{n}");
+    }
+    let mut parts = Vec::new();
+    if let Some(s) = f.status {
+        parts.push(format!("status:{}", s.as_str()));
+    }
+    if !f.types.is_empty() {
+        let v = f
+            .types
+            .iter()
+            .map(|t| t.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        parts.push(format!("type:{v}"));
+    }
+    if !f.priorities.is_empty() {
+        let mut ps: Vec<u8> = f.priorities.clone();
+        ps.sort_unstable();
+        let v = ps
+            .iter()
+            .map(|p| format!("p{p}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        parts.push(v);
+    }
+    if let Some(a) = &f.assignee {
+        parts.push(format!("@{a}"));
+    }
+    if !f.labels.is_empty() {
+        let mut ls = f.labels.clone();
+        ls.sort();
+        parts.push(format!("label:{}", ls.join(",")));
+    }
+    parts.join(" ")
+}
+
 fn render_help(f: &mut Frame, area: Rect) {
     let rows = [
         ("↑/k ↓/j", "move selection"),
@@ -578,6 +681,9 @@ fn render_help(f: &mut Frame, area: Rect) {
         ("o / t / c", "overview / dep tree / comments"),
         ("→/l  ←/h", "focus detail / list (narrow)"),
         ("PgUp / PgDn", "scroll detail"),
+        ("s / S", "cycle sort field / direction"),
+        ("f", "filter menu (facets)"),
+        ("x", "clear all filters"),
         ("/", "search id, title, labels"),
         ("Esc", "clear search / back / close"),
         ("r", "refresh from disk"),
@@ -620,6 +726,78 @@ fn render_help(f: &mut Frame, area: Rect) {
         Paragraph::new(lines)
             .block(block)
             .wrap(Wrap { trim: false }),
+        popup,
+    );
+}
+
+/// The facet filter menu: facets grouped with headers, each value a radio
+/// (single-valued facets) or checkbox (multi-valued), the cursor row marked.
+fn render_filter_menu(f: &mut Frame, app: &App, area: Rect) {
+    let mut lines: Vec<Line> = Vec::new();
+    let mut cursor_line: u16 = 0;
+    if app.filter_menu.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "no facets to filter",
+            Style::default().fg(DIM),
+        )));
+    }
+
+    let mut last_facet = None;
+    for (i, item) in app.filter_menu.iter().enumerate() {
+        if last_facet != Some(item.facet) {
+            if last_facet.is_some() {
+                lines.push(Line::raw(""));
+            }
+            lines.push(Line::from(Span::styled(
+                item.facet.label().to_string(),
+                Style::default().fg(LABEL).add_modifier(Modifier::BOLD),
+            )));
+            last_facet = Some(item.facet);
+        }
+
+        let on = app.is_menu_selected(i);
+        let mark = match (item.facet.is_single(), on) {
+            (true, true) => "(•)",
+            (true, false) => "( )",
+            (false, true) => "[x]",
+            (false, false) => "[ ]",
+        };
+        let cursor = i == app.filter_cursor;
+        if cursor {
+            cursor_line = lines.len() as u16;
+        }
+        let pointer = if cursor { "▌" } else { " " };
+        let row_style = if cursor {
+            Style::default().bg(SEL_BG).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{pointer}{mark} "), row_style),
+            Span::styled(item.text.clone(), row_style),
+        ]));
+    }
+
+    let rows = lines.len() as u16;
+    let popup = if area.width < 50 || area.height < 18 {
+        area
+    } else {
+        let w = 40.min(area.width.saturating_sub(2));
+        let h = (rows + 2).min(area.height.saturating_sub(2)).min(24);
+        centered_fixed(area, w, h)
+    };
+    // Scroll so the cursor row stays visible when the menu exceeds the popup.
+    let inner_h = popup.height.saturating_sub(2);
+    let scroll = cursor_line.saturating_sub(inner_h.saturating_sub(1));
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT))
+        .padding(Padding::new(1, 1, 0, 0))
+        .title(" Filter ")
+        .style(Style::default().bg(Color::Black));
+    f.render_widget(Clear, popup);
+    f.render_widget(
+        Paragraph::new(lines).block(block).scroll((scroll, 0)),
         popup,
     );
 }

@@ -1,0 +1,52 @@
+---
+source: crates/clove-tui/src/snapshot.rs
+expression: rendered
+---
+┌ Filter ──────────────────────────────┐
+│ Status                               │
+│  (•) open                            │
+│  ( ) in_progress                     │
+│  ( ) closed                          │
+│                                      │
+│ Type                                 │
+│  [ ] bug                             │
+│ ▌[x] feature                         │
+│  [ ] chore                           │
+│  [ ] docs                            │
+│  [ ] epic                            │
+│                                      │
+│ Priority                             │
+│  [ ] p0                              │
+│  [ ] p1                              │
+│  [ ] p2                              │
+│  [ ] p3                              │
+│  [ ] p4                              │
+│                                      │
+│ Label                                │
+│  [ ] area:api                        │
+│  [ ] area:ci                         │
+│  [ ] area:db                         │
+│  [ ] area:qa                         │
+│  [ ] area:ui                         │
+│  [ ] backend                         │
+│  [ ] milestone                       │
+│                                      │
+│ Assignee                             │
+│  ( ) ada                             │
+│  ( ) grace                           │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+└──────────────────────────────────────┘

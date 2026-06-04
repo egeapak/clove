@@ -3,10 +3,10 @@ source: crates/clove-tui/src/snapshot.rs
 expression: rendered
 ---
   All 7  │  Ready 4  │  Blocked 1
-┌ Items (1/7) ─────────────────────────────────┐┌ Overview · Dep tree · Comments ──────────────────────────────────────┐
+┌ Items (3/7) ─────────────────────────────────┐┌ Overview · Dep tree · Comments ──────────────────────────────────────┐
 │▌◐ proj-00000002 p0 Build REST API ●          ││ Build REST API                                                       │
-│                                              ││ proj-00000002                                                        │
-│                                              ││                                                                      │
+│ ○ proj-00000003 p2 Write integration tests ✗ ││ proj-00000002                                                        │
+│ ○ proj-00000005 p3 Frontend dashboard ●      ││                                                                      │
 │                                              ││ status     in_progress   ready                                       │
 │                                              ││ priority   p0                                                        │
 │                                              ││ assignee   grace                                                     │
@@ -19,4 +19,4 @@ expression: rendered
 │                                              ││ deps       proj-00000001                                             │
 │                                              ││                                                                      │
 └──────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────┘
-/api▏   (Enter: keep · Esc: clear)
+type:feature  7 item(s) loaded   ?: help · q: quit

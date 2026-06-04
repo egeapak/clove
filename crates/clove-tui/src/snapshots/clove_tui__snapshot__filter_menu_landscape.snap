@@ -1,0 +1,22 @@
+---
+source: crates/clove-tui/src/snapshot.rs
+expression: rendered
+---
+  All 7  │  Ready 4  │  Blocked 1
+┌ Items (2/7) ──────────────────────────┌ Filter ──────────────────────────────┐ ──────────────────────────────────────┐
+│▌○ proj-00000003 p2 Write integration t│ Status                               │                                       │
+│ ○ proj-00000005 p3 Frontend dashboard │  (•) open                            │                                       │
+│                                       │  ( ) in_progress                     │                                       │
+│                                       │  ( ) closed                          │                                       │
+│                                       │                                      │                                       │
+│                                       │ Type                                 │                                       │
+│                                       │  [ ] bug                             │                                       │
+│                                       │ ▌[x] feature                         │                                       │
+│                                       │  [ ] chore                           │                                       │
+│                                       │  [ ] docs                            │C  (6w ago)                            │
+│                                       │  [ ] epic                            │C  (4w ago)                            │
+│                                       │                                      │                                       │
+│                                       │ Priority                             │                                       │
+│                                       │  [ ] p0                              │                                       │
+└───────────────────────────────────────└──────────────────────────────────────┘───────────────────────────────────────┘
+filter  ↑↓ move · space toggle · x clear · Esc close

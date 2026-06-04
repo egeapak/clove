@@ -23,25 +23,25 @@ expression: rendered
 │                                                          │
 │                                                          │
 │                                                          │
-│                                                          │
 │    ┌ Help ──────────────────────────────────────────┐    │
 │    │ clove tui — read-only browser                  │    │
 │    │                                                │    │
 │    │ ↑/k ↓/j      move selection                    │    │
 │    │ g / G        jump to top / bottom              │    │
-└────│ Tab / 1 2 3  All / Ready / Blocked             │────┘
-┌ Ove│ o / t / c    overview / dep tree / comments    │────┐
-│ Bui│ →/l  ←/h     focus detail / list (narrow)      │    │
-│ pro│ PgUp / PgDn  scroll detail                     │    │
-│    │ /            search id, title, labels          │    │
-│ sta│ Esc          clear search / back / close       │    │
-│ pri│ r            refresh from disk                 │    │
-│ ass│ ?            toggle this help                  │    │
-│    │ q            quit                              │    │
-│ typ└────────────────────────────────────────────────┘    │
-│ labels     area:api, backend                             │
-│ created    2026-01-01 09:00 UTC  (6w ago)                │
-│ updated    2026-01-03 11:30 UTC  (6w ago)                │
+│    │ Tab / 1 2 3  All / Ready / Blocked             │    │
+└────│ o / t / c    overview / dep tree / comments    │────┘
+┌ Ove│ →/l  ←/h     focus detail / list (narrow)      │────┐
+│ Bui│ PgUp / PgDn  scroll detail                     │    │
+│ pro│ s / S        cycle sort field / direction      │    │
+│    │ f            filter menu (facets)              │    │
+│ sta│ x            clear all filters                 │    │
+│ pri│ /            search id, title, labels          │    │
+│ ass│ Esc          clear search / back / close       │    │
+│    │ r            refresh from disk                 │    │
+│ typ│ ?            toggle this help                  │    │
+│ lab│ q            quit                              │    │
+│ cre└────────────────────────────────────────────────┘    │
+│ updated    2026-01-20 11:30 UTC  (3w ago)                │
 │                                                          │
 │ deps       proj-00000001                                 │
 │                                                          │

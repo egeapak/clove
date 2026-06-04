@@ -609,14 +609,26 @@ condition for M4 planning.
   subcommand (per the M4 scoping decision); interactive-only, so it ignores
   `--format`. Design directions came from a frontend-design and a UX/IA review (see
   the deferred backlog for the larger items they raised).
+- **Sort & filter** (read-only): `s` cycles the sort field
+  (rank/priority/created/updated/id — `rank` = the default `(priority, topo, id)`
+  order; topo is dropped for non-priority fields, with an `id` tiebreak), `S`
+  toggles direction; only `self.view` is re-sorted (never `self.all`). `f` opens a
+  facet **filter menu** (a scrolling popup): status/assignee are single-value
+  (radio), type/priority are multi-value OR (checkbox), labels are multi-value AND;
+  values are the ones actually present in the repo (sorted/deduped). Facets AND
+  across, composing orthogonally with `/` search and the graph-derived tabs; `x`
+  clears. Active sort/filter show as status-line chips with an `Items (N/M)` count
+  and an empty-result escape-hatch message. Filters/sort persist across tab-switch
+  and `r`; selection is preserved by id across every view change.
 - AC: data-layer unit tests (ready/blocked partition, tab + search filtering,
-  detail load incl. body/block-reasons/dep-tree, navigation clamping), a
-  `TestBackend` render smoke test, and **insta render snapshots** of 8 states
-  (overview, blocked tab, dep tree, comments, search, help, detail-focused, empty)
-  each at three terminal shapes — portrait 40×48 (single), landscape 120×18 (wide +
-  compact tabs), square 60×60 (stacked) — validating the adaptive layout. Mutations
-  (status/priority/label edits, create, dep add/rm, comment) are a deferred
-  follow-up — this first cut is read-only.
+  detail load, navigation clamping, **filter narrowing + multi-OR/AND semantics,
+  sort ordering, selection stability across filtering**), a `TestBackend` render
+  smoke test, and **insta render snapshots** of 12 states (overview, blocked tab,
+  dep tree, comments, search, help, detail-focused, empty, **filter menu, filtered,
+  sorted, filtered-empty**) each at three terminal shapes — portrait 40×48
+  (single), landscape 120×18 (wide + compact tabs), square 60×60 (stacked) —
+  validating the adaptive layout. Mutations (status/priority/label edits, create,
+  dep add/rm, comment) are a deferred follow-up — this first cut is read-only.
 
 **M4 backlog (recorded so it is not lost; not yet task-specified):**
 - **TUI write actions** — extend `clove tui` with the common mutations (status
@@ -626,14 +638,14 @@ condition for M4 planning.
   existing `clove-core` APIs, no engine work): (1) inbound/"blocks" + referenced-by
   + epic-children lists in Overview (the graph has the reverse edges); (2) a
   navigation stack — follow a related id to its item and pop back, decoupled from
-  the active tab; (3) sort control (id/priority/created/updated + direction) and
-  structured filter chips (status/type/label/assignee/priority) composing with
-  search; (4) a **Cycles** + **Problems/doctor-lite** view (surfacing
+  the active tab; (3) a **Cycles** + **Problems/doctor-lite** view (surfacing
   `all_cycles()`, `dangling_ids()`, malformed parents, invalid priorities — items
-  currently *excluded* from both Ready and Blocked and thus invisible); (5) an
+  currently *excluded* from both Ready and Blocked and thus invisible); (4) an
   **Excluded/attention** tab (or fold into Problems) to complete the
-  ready∪blocked∪closed partition. *(Relative timestamps + Markdown body rendering —
-  was item 6 — landed in T-U01.)*
+  ready∪blocked∪closed partition. *(Relative timestamps + Markdown body rendering,
+  and sort + filter controls, landed in T-U01.)* Possible later refinements to the
+  shipped sort/filter: per-namespace OR within labels, an "assigned to me" toggle,
+  and lifting a shared filter type into `clove-core` if a third consumer appears.
 - **`clove stats` — work-item analytics command** *(deferred here by the M3_PLAN.md §1.1
   CLI-surface review)*. A user-facing aggregate/statistics view: counts by status / type /
   priority / assignee, ready / blocked / closed totals, open-cycle count, epic completion

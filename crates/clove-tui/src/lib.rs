@@ -64,6 +64,21 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         return;
     }
 
+    // Filter menu owns the keyspace while open.
+    if app.mode == Mode::Filter {
+        match code {
+            KeyCode::Down | KeyCode::Char('j') => app.filter_move(1),
+            KeyCode::Up | KeyCode::Char('k') => app.filter_move(-1),
+            KeyCode::Char(' ') | KeyCode::Enter | KeyCode::Right | KeyCode::Left => {
+                app.filter_toggle()
+            }
+            KeyCode::Char('x') => app.clear_filters(),
+            KeyCode::Esc | KeyCode::Char('f') | KeyCode::Char('q') => app.exit_filter(),
+            _ => {}
+        }
+        return;
+    }
+
     // Help overlay swallows everything except its dismiss keys.
     if app.show_help {
         if matches!(code, KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q')) {
@@ -105,6 +120,12 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
 
         KeyCode::PageDown => app.scroll_detail_down(),
         KeyCode::PageUp => app.scroll_detail_up(),
+
+        // Sort + filter.
+        KeyCode::Char('s') => app.cycle_sort_field(),
+        KeyCode::Char('S') => app.toggle_sort_dir(),
+        KeyCode::Char('f') => app.start_filter(),
+        KeyCode::Char('x') => app.clear_filters(),
 
         KeyCode::Char('/') => app.start_search(),
         KeyCode::Char('r') => app.refresh(),

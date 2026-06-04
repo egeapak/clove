@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use chrono::Utc;
 use clove_core::{
     BlockedItem, ChildrenSummary, CloveId, Comment, DepTreeNode, GraphStore, Item, ItemFrontmatter,
-    ItemStore,
+    ItemStatus, ItemStore, ItemType,
 };
 use ratatui::widgets::ListState;
 
@@ -60,11 +60,169 @@ impl DetailTab {
     }
 }
 
-/// Input mode: normal browsing vs. typing a search query.
+/// Input mode: browsing, typing a search query, or the facet filter menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Browse,
     Search,
+    Filter,
+}
+
+/// The field the list is sorted by. `Default` is the canonical
+/// `(priority, topo-rank, id)` order shared with `clove ls`; the others are flat
+/// single-key sorts (topo ordering does not apply).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortField {
+    Default,
+    Priority,
+    Created,
+    Updated,
+    Id,
+}
+
+impl SortField {
+    const CYCLE: [SortField; 5] = [
+        SortField::Default,
+        SortField::Priority,
+        SortField::Created,
+        SortField::Updated,
+        SortField::Id,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SortField::Default => "rank",
+            SortField::Priority => "prio",
+            SortField::Created => "created",
+            SortField::Updated => "updated",
+            SortField::Id => "id",
+        }
+    }
+
+    fn next(self) -> SortField {
+        let i = Self::CYCLE.iter().position(|&f| f == self).unwrap_or(0);
+        Self::CYCLE[(i + 1) % Self::CYCLE.len()]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortDir {
+    Asc,
+    Desc,
+}
+
+impl SortDir {
+    pub fn glyph(self) -> &'static str {
+        match self {
+            SortDir::Asc => "↑",
+            SortDir::Desc => "↓",
+        }
+    }
+}
+
+/// The active sort: a field plus a direction.
+#[derive(Debug, Clone, Copy)]
+pub struct Sort {
+    pub field: SortField,
+    pub dir: SortDir,
+}
+
+impl Default for Sort {
+    fn default() -> Self {
+        Sort {
+            field: SortField::Default,
+            dir: SortDir::Asc,
+        }
+    }
+}
+
+/// Interactive facet filters. Empty/`None` means unconstrained. Semantics:
+/// AND across facets; OR within `types`/`priorities` (any-of); AND within
+/// `labels` (all-of); `status`/`assignee` are single-valued.
+#[derive(Debug, Default, Clone)]
+pub struct ViewFilter {
+    pub status: Option<ItemStatus>,
+    pub assignee: Option<String>,
+    pub types: Vec<ItemType>,
+    pub priorities: Vec<u8>,
+    pub labels: Vec<String>,
+}
+
+impl ViewFilter {
+    pub fn is_active(&self) -> bool {
+        self.status.is_some()
+            || self.assignee.is_some()
+            || !self.types.is_empty()
+            || !self.priorities.is_empty()
+            || !self.labels.is_empty()
+    }
+
+    fn matches(&self, fm: &ItemFrontmatter) -> bool {
+        if let Some(s) = self.status {
+            if fm.status != s {
+                return false;
+            }
+        }
+        if let Some(a) = &self.assignee {
+            if fm.assignee.as_deref() != Some(a.as_str()) {
+                return false;
+            }
+        }
+        if !self.types.is_empty() && !self.types.contains(&fm.item_type) {
+            return false;
+        }
+        if !self.priorities.is_empty() && !self.priorities.contains(&fm.priority.get()) {
+            return false;
+        }
+        // Labels are all-of (AND): every selected label must be present.
+        self.labels.iter().all(|l| fm.labels.contains(l))
+    }
+}
+
+/// One facet shown in the filter menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Facet {
+    Status,
+    Type,
+    Priority,
+    Label,
+    Assignee,
+}
+
+impl Facet {
+    pub fn label(self) -> &'static str {
+        match self {
+            Facet::Status => "Status",
+            Facet::Type => "Type",
+            Facet::Priority => "Priority",
+            Facet::Label => "Label",
+            Facet::Assignee => "Assignee",
+        }
+    }
+
+    /// Single-valued facets behave as radios (selecting one clears the rest);
+    /// multi-valued ones as checkboxes.
+    pub fn is_single(self) -> bool {
+        matches!(self, Facet::Status | Facet::Assignee)
+    }
+}
+
+/// One selectable value row in the filter menu.
+#[derive(Debug, Clone)]
+pub struct MenuItem {
+    pub facet: Facet,
+    pub value: MenuValue,
+    /// The display label for the value.
+    pub text: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum MenuValue {
+    Status(ItemStatus),
+    Type(ItemType),
+    Priority(u8),
+    Label(String),
+    Assignee(String),
 }
 
 /// Which pane holds focus. Only visible in the single-pane (narrow) layout,
@@ -120,6 +278,14 @@ pub struct App {
     /// Reference instant for relative timestamps; refreshed with the data so
     /// "3d ago" stays current (and pinned by tests for deterministic snapshots).
     pub now: chrono::DateTime<Utc>,
+
+    // Sort + filter state.
+    pub sort: Sort,
+    pub filter: ViewFilter,
+    /// The filter menu's selectable rows (built from values present in the repo).
+    pub filter_menu: Vec<MenuItem>,
+    /// Cursor into `filter_menu` while `Mode::Filter` is active.
+    pub filter_cursor: usize,
 }
 
 impl App {
@@ -145,6 +311,10 @@ impl App {
             status: String::new(),
             should_quit: false,
             now: Utc::now(),
+            sort: Sort::default(),
+            filter: ViewFilter::default(),
+            filter_menu: Vec::new(),
+            filter_cursor: 0,
         };
         app.refresh();
         app
@@ -154,7 +324,6 @@ impl App {
     /// item where possible.
     pub fn refresh(&mut self) {
         self.now = Utc::now();
-        let selected_id = self.selected_id();
 
         let (mut frontmatters, errors) = match self.store.scan_frontmatter() {
             Ok(pair) => pair,
@@ -187,14 +356,8 @@ impl App {
         self.graph = graph;
         self.load_warnings = errors.iter().map(|e| e.to_string()).collect();
 
-        self.recompute_view();
-        // Restore selection to the same id when still present.
-        if let Some(id) = selected_id {
-            if let Some(pos) = self.view.iter().position(|&i| self.all[i].id == id) {
-                self.list_state.select(Some(pos));
-            }
-        }
-        self.clamp_selection();
+        self.rebuild_facets();
+        self.recompute_view(); // preserves the selected item by id
         self.load_detail();
         self.status = format!(
             "{} item(s) loaded{}",
@@ -207,9 +370,16 @@ impl App {
         );
     }
 
-    /// Recompute the filtered view indices from the current tab + search.
+    /// Recompute the view indices from the current tab + facet filters + search,
+    /// apply the sort, and restore the selection to the same item where possible.
+    ///
+    /// The pipeline mirrors `clove`'s semantics: tab partition (graph-derived) AND
+    /// facet filters AND substring search, then sort. `self.all` stays in the
+    /// canonical `(priority, topo-rank, id)` order; only `self.view` is re-sorted.
     fn recompute_view(&mut self) {
+        let keep = self.selected_id();
         let needle = self.search.to_lowercase();
+
         self.view = self
             .all
             .iter()
@@ -219,6 +389,7 @@ impl App {
                 Tab::Ready => self.ready.contains(&fm.id),
                 Tab::Blocked => self.blocked.contains_key(&fm.id),
             })
+            .filter(|(_, fm)| self.filter.matches(fm))
             .filter(|(_, fm)| {
                 if needle.is_empty() {
                     return true;
@@ -229,7 +400,129 @@ impl App {
             })
             .map(|(i, _)| i)
             .collect();
+
+        self.apply_sort();
+        self.restore_selection(keep);
+    }
+
+    /// Re-order `self.view` by the active sort. `Default` keeps the canonical
+    /// order `self.all` is already in; other fields sort flatly with an `id`
+    /// tiebreak for determinism.
+    fn apply_sort(&mut self) {
+        if self.sort.field == SortField::Default {
+            return;
+        }
+        let all = &self.all;
+        let field = self.sort.field;
+        self.view.sort_by(|&a, &b| {
+            let (x, y) = (&all[a], &all[b]);
+            let ord = match field {
+                SortField::Priority => x.priority.cmp(&y.priority),
+                SortField::Created => x.created.cmp(&y.created),
+                SortField::Updated => x.updated.cmp(&y.updated),
+                SortField::Id => x.id.cmp(&y.id),
+                SortField::Default => std::cmp::Ordering::Equal,
+            }
+            .then_with(|| x.id.cmp(&y.id));
+            match self.sort.dir {
+                SortDir::Asc => ord,
+                SortDir::Desc => ord.reverse(),
+            }
+        });
+    }
+
+    /// Restore the list selection to item `keep` if it is still in the view;
+    /// otherwise clamp to a valid position.
+    fn restore_selection(&mut self, keep: Option<CloveId>) {
+        if let Some(id) = keep {
+            if let Some(pos) = self.view.iter().position(|&i| self.all[i].id == id) {
+                self.list_state.select(Some(pos));
+            }
+        }
         self.clamp_selection();
+    }
+
+    /// Rebuild the filter-menu candidate values from the values actually present
+    /// in the repo, in a deterministic (sorted) order.
+    fn rebuild_facets(&mut self) {
+        use std::collections::BTreeSet;
+
+        let mut statuses = Vec::new();
+        for s in [ItemStatus::Open, ItemStatus::InProgress, ItemStatus::Closed] {
+            if self.all.iter().any(|fm| fm.status == s) {
+                statuses.push(MenuValue::Status(s));
+            }
+        }
+        let mut types = Vec::new();
+        for t in [
+            ItemType::Bug,
+            ItemType::Feature,
+            ItemType::Chore,
+            ItemType::Docs,
+            ItemType::Epic,
+        ] {
+            if self.all.iter().any(|fm| fm.item_type == t) {
+                types.push(MenuValue::Type(t));
+            }
+        }
+        let mut priorities: Vec<u8> = self.all.iter().map(|fm| fm.priority.get()).collect();
+        priorities.sort_unstable();
+        priorities.dedup();
+        let labels: BTreeSet<String> = self
+            .all
+            .iter()
+            .flat_map(|fm| fm.labels.iter().cloned())
+            .collect();
+        let assignees: BTreeSet<String> = self
+            .all
+            .iter()
+            .filter_map(|fm| fm.assignee.clone())
+            .collect();
+
+        let mut menu = Vec::new();
+        for v in statuses {
+            if let MenuValue::Status(s) = &v {
+                menu.push(MenuItem {
+                    facet: Facet::Status,
+                    text: s.as_str().to_owned(),
+                    value: v.clone(),
+                });
+            }
+        }
+        for v in types {
+            if let MenuValue::Type(t) = &v {
+                menu.push(MenuItem {
+                    facet: Facet::Type,
+                    text: t.as_str().to_owned(),
+                    value: v.clone(),
+                });
+            }
+        }
+        for p in priorities {
+            menu.push(MenuItem {
+                facet: Facet::Priority,
+                text: format!("p{p}"),
+                value: MenuValue::Priority(p),
+            });
+        }
+        for l in labels {
+            menu.push(MenuItem {
+                facet: Facet::Label,
+                text: l.clone(),
+                value: MenuValue::Label(l),
+            });
+        }
+        for a in assignees {
+            menu.push(MenuItem {
+                facet: Facet::Assignee,
+                text: a.clone(),
+                value: MenuValue::Assignee(a),
+            });
+        }
+        self.filter_menu = menu;
+        if self.filter_cursor >= self.filter_menu.len() {
+            self.filter_cursor = 0;
+        }
     }
 
     /// Keep the list selection within the current view bounds.
@@ -413,6 +706,97 @@ impl App {
         }
     }
 
+    // --- Sort -------------------------------------------------------------
+
+    /// Advance the sort field through its cycle (rank → priority → … → id).
+    pub fn cycle_sort_field(&mut self) {
+        self.sort.field = self.sort.field.next();
+        // Sensible default direction per field: recency descends, others ascend.
+        self.sort.dir = match self.sort.field {
+            SortField::Created | SortField::Updated => SortDir::Desc,
+            _ => SortDir::Asc,
+        };
+        self.recompute_view();
+        self.on_selection_changed();
+    }
+
+    /// Toggle the sort direction.
+    pub fn toggle_sort_dir(&mut self) {
+        self.sort.dir = match self.sort.dir {
+            SortDir::Asc => SortDir::Desc,
+            SortDir::Desc => SortDir::Asc,
+        };
+        self.recompute_view();
+        self.on_selection_changed();
+    }
+
+    // --- Filter menu ------------------------------------------------------
+
+    /// Open the facet filter menu.
+    pub fn start_filter(&mut self) {
+        if self.filter_cursor >= self.filter_menu.len() {
+            self.filter_cursor = 0;
+        }
+        self.mode = Mode::Filter;
+    }
+
+    /// Close the filter menu, returning to browse mode.
+    pub fn exit_filter(&mut self) {
+        self.mode = Mode::Browse;
+    }
+
+    /// Move the filter-menu cursor by `delta` (clamped).
+    pub fn filter_move(&mut self, delta: i32) {
+        if self.filter_menu.is_empty() {
+            return;
+        }
+        let last = self.filter_menu.len() as i32 - 1;
+        let next = (self.filter_cursor as i32 + delta).clamp(0, last);
+        self.filter_cursor = next as usize;
+    }
+
+    /// Whether the menu item at `idx` is currently selected in the filter.
+    pub fn is_menu_selected(&self, idx: usize) -> bool {
+        let Some(item) = self.filter_menu.get(idx) else {
+            return false;
+        };
+        match &item.value {
+            MenuValue::Status(s) => self.filter.status == Some(*s),
+            MenuValue::Assignee(a) => self.filter.assignee.as_deref() == Some(a.as_str()),
+            MenuValue::Type(t) => self.filter.types.contains(t),
+            MenuValue::Priority(p) => self.filter.priorities.contains(p),
+            MenuValue::Label(l) => self.filter.labels.contains(l),
+        }
+    }
+
+    /// Toggle the value under the cursor in/out of the active filter.
+    pub fn filter_toggle(&mut self) {
+        let Some(item) = self.filter_menu.get(self.filter_cursor).cloned() else {
+            return;
+        };
+        let on = self.is_menu_selected(self.filter_cursor);
+        match item.value {
+            // Single-valued: toggling sets or clears the one value (radio).
+            MenuValue::Status(s) => self.filter.status = if on { None } else { Some(s) },
+            MenuValue::Assignee(a) => self.filter.assignee = if on { None } else { Some(a) },
+            // Multi-valued: toggle membership.
+            MenuValue::Type(t) => toggle_vec(&mut self.filter.types, t, on),
+            MenuValue::Priority(p) => toggle_vec(&mut self.filter.priorities, p, on),
+            MenuValue::Label(l) => toggle_vec(&mut self.filter.labels, l, on),
+        }
+        self.recompute_view();
+        self.on_selection_changed();
+    }
+
+    /// Clear all active facet filters (leaves tab, search, and sort intact).
+    pub fn clear_filters(&mut self) {
+        if self.filter.is_active() {
+            self.filter = ViewFilter::default();
+            self.recompute_view();
+            self.on_selection_changed();
+        }
+    }
+
     // --- Detail loading ---------------------------------------------------
 
     /// Load the body, comments, dep tree, and block reasons for the selection.
@@ -452,6 +836,16 @@ impl App {
             children,
             tree,
         });
+    }
+}
+
+/// Add or remove `value` from `vec` (used for multi-valued facets). `present`
+/// says whether it is currently in the vec.
+fn toggle_vec<T: PartialEq>(vec: &mut Vec<T>, value: T, present: bool) {
+    if present {
+        vec.retain(|v| v != &value);
+    } else {
+        vec.push(value);
     }
 }
 

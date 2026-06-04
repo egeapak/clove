@@ -1,0 +1,22 @@
+---
+source: crates/clove-tui/src/snapshot.rs
+expression: rendered
+---
+  All 7  │  Ready 4  │  Blocked 1
+┌ Items (0/7) ─────────────────────────────────┐┌ Overview · Dep tree · Comments ──────────────────────────────────────┐
+│No items match.                               ││ No item selected.                                                    │
+│                                              ││                                                                      │
+│press x to clear filters, Esc to clear search ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+└──────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────┘
+status:closed type:bug  7 item(s) loaded   ?: help · q: quit

@@ -5,14 +5,14 @@ expression: rendered
 ┌ clove ───────────────────────────────────────────────────┐
 │  All 7  │  Ready 4  │  Blocked 1                         │
 └──────────────────────────────────────────────────────────┘
-┌ Items (7) ───────────────────────────────────────────────┐
-│▌◐ proj-00000002 p0 feature Build REST API ●              │
-│ ○ proj-00000007 p1 bug     Investigate flaky CI ●        │
-│ ● proj-00000001 p1 chore   Set up database schema        │
-│ ○ proj-00000004 p2 epic    Ship v1 release ●             │
-│ ○ proj-00000003 p2 feature Write integration tests ✗     │
-│ ○ proj-00000005 p3 feature Frontend dashboard ●          │
-│ ● proj-00000006 p4 docs    Docs site                     │
+┌ Items (0/7) ─────────────────────────────────────────────┐
+│No items match.                                           │
+│                                                          │
+│press x to clear filters, Esc to clear search             │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
 │                                                          │
 │                                                          │
 │                                                          │
@@ -31,34 +31,34 @@ expression: rendered
 │                                                          │
 └──────────────────────────────────────────────────────────┘
 ┌ Overview · Dep tree · Comments ──────────────────────────┐
-│ Build REST API                                           │
-│ proj-00000002                                            │
+│ No item selected.                                        │
 │                                                          │
-│ status     in_progress   ready                           │
-│ priority   p0                                            │
-│ assignee   grace                                         │
 │                                                          │
-│ type       feature                                       │
-│ labels     area:api, backend                             │
-│ created    2026-01-01 09:00 UTC  (6w ago)                │
-│ updated    2026-01-20 11:30 UTC  (3w ago)                │
 │                                                          │
-│ deps       proj-00000001                                 │
 │                                                          │
-│ ── body ──────────────────────────────────────────────── │
-│ Goals                                                    │
 │                                                          │
-│ Build a REST API with axum; see docs/api.md.             │
 │                                                          │
-│ • CRUD endpoints                                         │
-│ • Auth middleware                                        │
 │                                                          │
-│ Steps                                                    │
 │                                                          │
-│ 1. Define routes                                         │
-│ 2. Wire handlers                                         │
 │                                                          │
-│ │ Blocked on the schema work until it lands.             │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
 │                                                          │
 └──────────────────────────────────────────────────────────┘
-7 item(s) loaded   ?: help · q: quit
+status:closed type:bug  7 item(s) loaded   ?: help · q: quit

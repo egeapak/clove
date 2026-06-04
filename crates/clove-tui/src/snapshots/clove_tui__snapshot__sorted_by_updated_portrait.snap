@@ -2,28 +2,27 @@
 source: crates/clove-tui/src/snapshot.rs
 expression: rendered
 ---
-┌ Help ────────────────────────────────┐
-│ clove tui — read-only browser        │
+┌ clove ───────────────────────────────┐
+│  All 7  │  Rdy 4  │  Blk 1           │
+└──────────────────────────────────────┘
+┌ Items (7) ───────────────────────────┐
+│ ○  p1 Investigate flaky CI ●         │
+│▌◐  p0 Build REST API ●               │
+│ ○  p3 Frontend dashboard ●           │
+│ ○  p2 Write integration tests ✗      │
+│ ●  p1 Set up database schema         │
+│ ●  p4 Docs site                      │
+│ ○  p2 Ship v1 release ●              │
 │                                      │
-│ ↑/k ↓/j      move selection          │
-│ g / G        jump to top / bottom    │
-│ Tab / 1 2 3  All / Ready / Blocked   │
-│ o / t / c    overview / dep tree /   │
-│ comments                             │
-│ →/l  ←/h     focus detail / list     │
-│ (narrow)                             │
-│ PgUp / PgDn  scroll detail           │
-│ s / S        cycle sort field /      │
-│ direction                            │
-│ f            filter menu (facets)    │
-│ x            clear all filters       │
-│ /            search id, title,       │
-│ labels                               │
-│ Esc          clear search / back /   │
-│ close                                │
-│ r            refresh from disk       │
-│ ?            toggle this help        │
-│ q            quit                    │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
 │                                      │
 │                                      │
 │                                      │
@@ -50,3 +49,4 @@ expression: rendered
 │                                      │
 │                                      │
 └──────────────────────────────────────┘
+sort:updated↓  7 item(s) loaded  ?·q

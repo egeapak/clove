@@ -12,11 +12,11 @@ expression: rendered
 │ ○ proj-00000005 p3 Frontend dashb│ o / t / c    overview / dep tree / comments    │                                  │
 │ ● proj-00000006 p4 Docs site     │ →/l  ←/h     focus detail / list (narrow)      │                                  │
 │                                  │ PgUp / PgDn  scroll detail                     │                                  │
+│                                  │ s / S        cycle sort field / direction      │                                  │
+│                                  │ f            filter menu (facets)              │w ago)                            │
+│                                  │ x            clear all filters                 │w ago)                            │
 │                                  │ /            search id, title, labels          │                                  │
-│                                  │ Esc          clear search / back / close       │w ago)                            │
-│                                  │ r            refresh from disk                 │w ago)                            │
-│                                  │ ?            toggle this help                  │                                  │
-│                                  │ q            quit                              │                                  │
-│                                  └────────────────────────────────────────────────┘                                  │
-└──────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────┘
+│                                  │ Esc          clear search / back / close       │                                  │
+│                                  │ r            refresh from disk                 │                                  │
+└──────────────────────────────────└────────────────────────────────────────────────┘──────────────────────────────────┘
 7 item(s) loaded   ?: help · q: quit

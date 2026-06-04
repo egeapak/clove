@@ -51,6 +51,18 @@ fn put(
     relates: &[&str],
     body: &str,
 ) {
+    // Distinct, non-monotonic `updated` per item so sort-by-updated visibly
+    // reorders (and differs from id order). Derived from the id's last digit.
+    let day = match id.chars().last().unwrap_or('1') {
+        '1' => 10,
+        '2' => 20,
+        '3' => 12,
+        '4' => 5,
+        '5' => 18,
+        '6' => 8,
+        '7' => 25,
+        _ => 1,
+    };
     let id = cid(id);
     let fm = ItemFrontmatter {
         schema: 1,
@@ -60,7 +72,7 @@ fn put(
         item_type,
         priority: Priority(priority),
         created: ts("2026-01-01T09:00:00Z"),
-        updated: ts("2026-01-03T11:30:00Z"),
+        updated: ts(&format!("2026-01-{day:02}T11:30:00Z")),
         closed: closed.map(ts),
         assignee: assignee.map(str::to_owned),
         parent: parent.map(cid),
@@ -317,4 +329,130 @@ fn empty_repo() {
     let mut app = App::new(ItemStore::new(root));
     app.now = ts(NOW);
     snap("empty_repo", &mut app);
+}
+
+#[test]
+fn filter_menu() {
+    // Open the menu and toggle a single-valued (status:open) and a multi-valued
+    // (type:feature) facet so the radio + checkbox states both show.
+    let mut app = app();
+    app.start_filter();
+    app.filter_toggle(); // cursor at first row = status:open
+    app.filter_cursor = 4; // a type row (after 3 status rows + header offset is by index)
+    app.filter_toggle();
+    snap("filter_menu", &mut app);
+}
+
+#[test]
+fn filtered_by_type() {
+    // Apply type=feature via the menu, then return to Browse to show the narrowed
+    // list, the Items (N/M) title, and the filter chip in the status line.
+    let mut app = app();
+    app.start_filter();
+    app.filter_cursor = 4; // type:feature row
+    app.filter_toggle();
+    app.exit_filter();
+    snap("filtered_by_type", &mut app);
+}
+
+#[test]
+fn sorted_by_updated() {
+    let mut app = app();
+    // rank → priority → created → updated
+    for _ in 0..3 {
+        app.cycle_sort_field();
+    }
+    snap("sorted_by_updated", &mut app);
+}
+
+#[test]
+fn filtered_empty() {
+    // status:closed AND type:bug matches nothing in the fixture — exercises the
+    // empty-result escape hatch.
+    let mut app = app();
+    app.start_filter();
+    app.filter_cursor = 2; // status:closed
+    app.filter_toggle();
+    app.filter_cursor = 3; // type:bug
+    app.filter_toggle();
+    app.exit_filter();
+    snap("filtered_empty", &mut app);
+}
+
+// --- data-layer unit tests (rich fixture, no snapshots) -------------------
+
+#[test]
+fn filter_menu_lists_present_values() {
+    // 3 statuses + 5 types + 5 priorities + 7 labels + 2 assignees = 22 rows.
+    let app = app();
+    assert_eq!(app.filter_menu.len(), 22);
+}
+
+#[test]
+fn filter_single_type_narrows_and_clears() {
+    let mut app = app();
+    app.start_filter();
+    app.filter_cursor = 4; // type:feature
+    app.filter_toggle();
+    app.exit_filter();
+    // Three features: Build REST API, Write integration tests, Frontend dashboard.
+    assert_eq!(app.visible_count(), 3);
+    app.clear_filters();
+    assert_eq!(app.visible_count(), 7);
+}
+
+#[test]
+fn filter_multi_type_is_or() {
+    let mut app = app();
+    app.start_filter();
+    app.filter_cursor = 3; // type:bug
+    app.filter_toggle();
+    app.filter_cursor = 4; // type:feature
+    app.filter_toggle();
+    // bug (1) OR feature (3) = 4 items.
+    assert_eq!(app.visible_count(), 4);
+}
+
+#[test]
+fn filter_across_facets_is_and() {
+    let mut app = app();
+    app.start_filter();
+    app.filter_cursor = 4; // type:feature
+    app.filter_toggle();
+    // Find the priority p0 row dynamically (index depends on present facets).
+    let p0 = app
+        .filter_menu
+        .iter()
+        .position(|m| matches!(m.value, crate::app::MenuValue::Priority(0)))
+        .unwrap();
+    app.filter_cursor = p0;
+    app.filter_toggle();
+    // feature AND p0 → only "Build REST API".
+    assert_eq!(app.visible_count(), 1);
+    assert_eq!(app.selected_frontmatter().unwrap().title, "Build REST API");
+}
+
+#[test]
+fn sort_by_id_orders_ascending() {
+    let mut app = app();
+    // rank → priority → created → updated → id
+    for _ in 0..4 {
+        app.cycle_sort_field();
+    }
+    assert_eq!(app.sort.field, crate::app::SortField::Id);
+    let first = app.visible().next().unwrap();
+    assert_eq!(first.id.as_str(), "proj-00000001");
+}
+
+#[test]
+fn selection_survives_filtering() {
+    let mut app = app();
+    // Select the (feature) item that will survive a type:feature filter.
+    app.select_first(); // Build REST API (p0 feature), the default first row
+    let before = app.selected_frontmatter().unwrap().id.clone();
+    app.start_filter();
+    app.filter_cursor = 4; // type:feature (keeps it)
+    app.filter_toggle();
+    app.exit_filter();
+    assert_eq!(app.selected_frontmatter().unwrap().id, before);
 }

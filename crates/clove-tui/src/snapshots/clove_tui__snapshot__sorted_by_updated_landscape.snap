@@ -3,14 +3,14 @@ source: crates/clove-tui/src/snapshot.rs
 expression: rendered
 ---
   All 7  │  Ready 4  │  Blocked 1
-┌ Items (1/7) ─────────────────────────────────┐┌ Overview · Dep tree · Comments ──────────────────────────────────────┐
-│▌◐ proj-00000002 p0 Build REST API ●          ││ Build REST API                                                       │
-│                                              ││ proj-00000002                                                        │
-│                                              ││                                                                      │
-│                                              ││ status     in_progress   ready                                       │
-│                                              ││ priority   p0                                                        │
-│                                              ││ assignee   grace                                                     │
-│                                              ││                                                                      │
+┌ Items (7) ───────────────────────────────────┐┌ Overview · Dep tree · Comments ──────────────────────────────────────┐
+│ ○ proj-00000007 p1 Investigate flaky CI ●    ││ Build REST API                                                       │
+│▌◐ proj-00000002 p0 Build REST API ●          ││ proj-00000002                                                        │
+│ ○ proj-00000005 p3 Frontend dashboard ●      ││                                                                      │
+│ ○ proj-00000003 p2 Write integration tests ✗ ││ status     in_progress   ready                                       │
+│ ● proj-00000001 p1 Set up database schema    ││ priority   p0                                                        │
+│ ● proj-00000006 p4 Docs site                 ││ assignee   grace                                                     │
+│ ○ proj-00000004 p2 Ship v1 release ●         ││                                                                      │
 │                                              ││ type       feature                                                   │
 │                                              ││ labels     area:api, backend                                         │
 │                                              ││ created    2026-01-01 09:00 UTC  (6w ago)                            │
@@ -19,4 +19,4 @@ expression: rendered
 │                                              ││ deps       proj-00000001                                             │
 │                                              ││                                                                      │
 └──────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────┘
-/api▏   (Enter: keep · Esc: clear)
+sort:updated↓  7 item(s) loaded   ?: help · q: quit
