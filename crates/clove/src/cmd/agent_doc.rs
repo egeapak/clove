@@ -122,6 +122,9 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
   command works identically without it; when it is running, reads are served from\n\
   its hot index and report `_meta.source = \"daemon\"`.\n\
 - Opt-in `[daemon] git_sync = true` auto-commits clean item edits (never pushes).\n\
+- A running daemon auto-records `clove stats` history points on a timer\n\
+  (`[daemon] stats_snapshot_min`, default 60; `0` disables) — replay with\n\
+  `clove stats --history`.\n\
 - `clove doctor --fix` cleans up a stale daemon socket/pid left by a crash.\n\
 \n\
 ## Conventions\n\

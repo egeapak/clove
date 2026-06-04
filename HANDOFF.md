@@ -210,10 +210,14 @@ The first M4 item: a read-only **work-item analytics** command.
 reindex and schema-mismatch rebuilds, so the only loss case is raw file corruption.
 This was a deliberate merge from an earlier two-file design (the rationale: one
 database, simpler layout; perf is unaffected since `index.db` is opened for stats
-only on `--snapshot`/`--history`). Snapshots are **manual** (`--snapshot`); a daemon
-auto-snapshot was considered and left for later. Analytics compute from files for
-correctness; no new frontmatter fields, no index `user_version` bump (the
-`snapshots` table is additive/idempotent).
+only on `--snapshot`/`--history`). Snapshots are recorded manually via
+`clove stats --snapshot` **and** automatically by a running daemon on a timer
+(`[daemon] stats_snapshot_min`, default 60; `0` disables; `CLOVED_STATS_SNAPSHOT_MS`
+overrides for tests) — the daemon computes the snapshot from the same file scan +
+`compute_stats` path the CLI uses (`cloved/src/snapshot.rs`), so daemon and manual
+snapshots are byte-identical. Analytics compute from files for correctness; no new
+frontmatter fields, no index `user_version` bump (the `snapshots` table is
+additive/idempotent).
 
 ## M4 — Incremental index & daemon graph (this session)
 

@@ -16,6 +16,7 @@ mod graph_cache;
 mod ipc;
 mod lifecycle;
 mod reindexer;
+mod snapshot;
 mod state;
 mod watcher;
 

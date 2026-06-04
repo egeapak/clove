@@ -64,6 +64,13 @@ pub fn run(clove_dir: &Utf8Path) -> anyhow::Result<()> {
         |c| c.daemon.idle_shutdown_min,
     );
     let idle_shutdown = idle_shutdown_duration(idle_min);
+    // Auto-snapshot interval (M4): records a `clove stats` history point on a timer
+    // so trends accrue without manual `--snapshot`. Falls back to the config default.
+    let snapshot_min = config.as_ref().map_or_else(
+        || clove_core::DaemonConfig::default().stats_snapshot_min,
+        |c| c.daemon.stats_snapshot_min,
+    );
+    let snapshot_interval = crate::snapshot::snapshot_interval(snapshot_min);
     let git_sync = config.as_ref().is_some_and(|c| c.daemon.git_sync);
     if git_sync && !cfg!(feature = "git-sync") {
         eprintln!(
@@ -118,6 +125,7 @@ pub fn run(clove_dir: &Utf8Path) -> anyhow::Result<()> {
             _ = accept_loop(listener, dispatcher) => {},
             _ = crate::watcher::watch(issues_dir.clone(), Arc::clone(&index), Arc::clone(&state), debounce, watch_options.clone(), Arc::clone(&graph)) => {},
             _ = idle_watchdog(Arc::clone(&state), idle_shutdown) => {},
+            _ = crate::snapshot::snapshot_loop(repo_root.clone(), Arc::clone(&index), snapshot_interval) => {},
             _ = shutdown_signal(clove_dir) => {},
         }
         Ok(())

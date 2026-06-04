@@ -596,7 +596,10 @@ as the entry condition for M4 planning.
   Implemented across `clove-core::stats` (`StatsReport`/`compute`),
   `clove-index::stats_store` (the `snapshots` table + `Index::record_snapshot`/
   `snapshot_history` + reindex/recovery carry-over), and `clove/src/cmd/stats.rs`;
-  JSON schema `docs/json-schema/v1/stats.json`.
+  JSON schema `docs/json-schema/v1/stats.json`. A running daemon also auto-records
+  snapshots on a timer (`[daemon] stats_snapshot_min`, default 60;
+  `cloved/src/snapshot.rs`), using the same compute path so daemon and manual
+  snapshots are identical.
 - **Incremental index & daemon graph** — **DONE (M4)**. The incremental
   `apply_staleness` path now keeps the derived graph columns exact (canonical
   Kahn toposort in clove-core; `clove-index::derive` recomputes
