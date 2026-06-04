@@ -368,10 +368,10 @@ fn detail_title(app: &App) -> Line<'static> {
     Line::from(spans)
 }
 
-/// The id (`#42`) + priority glyph + ALL-CAPS type tag + title spans, with the
-/// title styled bold. Shared by the wide and narrow headers so priority always
-/// reads from the same place.
-fn head_spans(fm: &ItemFrontmatter, title: String) -> Vec<Span<'static>> {
+/// The header's meta line: id (`#42`) + priority glyph + ALL-CAPS type tag.
+/// Shared by the wide and narrow headers so priority always reads from the same
+/// place; the title lives on the line below.
+fn head_spans(fm: &ItemFrontmatter) -> Vec<Span<'static>> {
     vec![
         Span::styled(
             format!("{}  ", short_ref(&fm.id)),
@@ -382,11 +382,15 @@ fn head_spans(fm: &ItemFrontmatter, title: String) -> Vec<Span<'static>> {
             priority_style(fm.priority.get()),
         ),
         Span::styled(
-            format!("{}  ", fm.item_type.as_str().to_uppercase()),
+            fm.item_type.as_str().to_uppercase(),
             type_style(fm.item_type).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(title, Style::default().add_modifier(Modifier::BOLD)),
     ]
+}
+
+/// The title span, styled bold (its own line under the meta line).
+fn title_span(title: String) -> Span<'static> {
+    Span::styled(title, Style::default().add_modifier(Modifier::BOLD))
 }
 
 /// `@assignee · deps N` spans (omitting whichever is absent), shown to the right
@@ -458,35 +462,26 @@ fn relation_lines(fm: &ItemFrontmatter) -> Vec<Line<'static>> {
 }
 
 /// The wide Overview's fixed header (two lines before any blockers): line 1 is
-/// id/priority/type/title with the status flush-right; line 2 carries the
+/// id/priority/type with the status flush-right; line 2 is the title with the
 /// assignee and deps count flush-right under the status. Sized to its content so
 /// the body gets the rest of the pane.
 fn overview_header(app: &App, detail: &Detail, inner_w: u16) -> Vec<Line<'static>> {
     let fm = &detail.item.frontmatter;
 
-    // Title truncated so the first line fits beside the status. The fixed prefix
-    // is id + priority glyph + ALL-CAPS type, with their trailing spaces.
-    let status = status_spans(app, fm);
-    let prefix_w = short_ref(&fm.id).chars().count()
-        + 2
-        + priority_glyph(fm.priority.get()).chars().count()
-        + 1
-        + fm.item_type.as_str().chars().count()
-        + 2;
-    let status_w: usize = status.iter().map(Span::width).sum();
-    let title_budget = (inner_w as usize)
-        .saturating_sub(prefix_w + status_w + 2)
-        .max(8);
-
-    let mut lines = vec![right_align(
-        head_spans(fm, truncate(&fm.title, title_budget)),
-        status,
-        inner_w,
-    )];
+    // The title shares line 2 with the assignee/deps, so it's truncated to the
+    // width those leave free.
     let assignee_deps = assignee_deps_spans(fm);
-    if !assignee_deps.is_empty() {
-        lines.push(right_align(Vec::new(), assignee_deps, inner_w));
-    }
+    let ad_w: usize = assignee_deps.iter().map(Span::width).sum();
+    let title_budget = (inner_w as usize).saturating_sub(ad_w + 2).max(8);
+
+    let mut lines = vec![
+        right_align(head_spans(fm), status_spans(app, fm), inner_w),
+        right_align(
+            vec![title_span(truncate(&fm.title, title_budget))],
+            assignee_deps,
+            inner_w,
+        ),
+    ];
     blocker_lines(detail, &mut lines);
     lines
 }
@@ -511,7 +506,8 @@ fn overview_lines(app: &App, detail: &Detail, inner_w: u16) -> Vec<Line<'static>
     let fm = &detail.item.frontmatter;
 
     let mut lines = vec![
-        Line::from(head_spans(fm, fm.title.clone())),
+        Line::from(head_spans(fm)),
+        Line::from(title_span(fm.title.clone())),
         Line::raw(""),
         field_line("status", status_spans(app, fm)),
     ];
@@ -912,7 +908,7 @@ fn render_help(f: &mut Frame, area: Rect) {
     lines.push(Line::raw(""));
     lines.push(Line::from(vec![
         Span::styled(format!("{:<13}", "priority"), Style::default().fg(LABEL)),
-        Span::raw("! ↑ • ↓ ·  =  p0→p4 (high→low)"),
+        Span::raw("! ↑ • ↓  =  p0 p1 p2/p3 p4 (by color)"),
     ]));
 
     // Content-sized and centered when there's room; a full-screen modal on
@@ -1099,22 +1095,23 @@ fn priority_style(p: u8) -> Style {
         1 => Color::Indexed(208),
         2 => Color::Indexed(178),
         3 => Color::Indexed(244),
-        // Lowest priority: a dim icy blue, distinct from the gray `·` separator
-        // (the p4 glyph is itself a `·`).
+        // Lowest priority (`↓`): a dim icy blue, cool and clearly the bottom of
+        // the ramp.
         _ => Color::Indexed(110),
     };
     Style::default().fg(color)
 }
 
-/// A single-glyph priority indicator (color reinforces it): `!` critical, `↑`
-/// high, `•` normal, `↓` low, `·` trivial. Out-of-range values fall back to `pN`.
+/// A single-glyph priority indicator; color carries the rest of the meaning so
+/// the two `•` levels (normal/low) are told apart by their amber-vs-gray hue:
+/// `!` critical, `↑` high, `•` normal (p2) / low (p3), `↓` lowest (dim blue).
+/// Out-of-range values fall back to `pN`.
 fn priority_glyph(p: u8) -> String {
     match p {
         0 => "!".to_owned(),
         1 => "↑".to_owned(),
-        2 => "•".to_owned(),
-        3 => "↓".to_owned(),
-        4 => "·".to_owned(),
+        2 | 3 => "•".to_owned(),
+        4 => "↓".to_owned(),
         n => format!("p{n}"),
     }
 }

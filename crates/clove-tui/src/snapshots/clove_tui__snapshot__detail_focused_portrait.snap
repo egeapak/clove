@@ -6,7 +6,8 @@ expression: rendered
 │  All 7  │  Rdy 4  │  Blk 1           │
 └──────────────────────────────────────┘
 ┌ Overview · Dep tree · Comments ──────┐
-│ #2  ! FEATURE  Build REST API        │
+│ #2  ! FEATURE                        │
+│ Build REST API                       │
 │                                      │
 │ status     ◐ in_progress · ready     │
 │ assignee   @grace                    │
@@ -36,7 +37,6 @@ expression: rendered
 │                                      │
 │ Done when the integration tests      │
 │ pass.                                │
-│                                      │
 │                                      │
 │                                      │
 │                                      │

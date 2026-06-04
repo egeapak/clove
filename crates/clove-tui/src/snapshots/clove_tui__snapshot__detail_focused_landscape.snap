@@ -4,13 +4,13 @@ expression: rendered
 ---
   All 7  │  Ready 4  │  Blocked 1
 ┌ Items (7) ───────────────────────────────────┐┌ Overview · Dep tree · Comments ──────────────────────────────────────┐
-│▌◐ F #2 ! Build REST API ●                    ││ #2  ! FEATURE  Build REST API                  ◐ in_progress · ready │
-│ ○ B #7 ↑ Investigate flaky CI ●              ││                                                      @grace · deps 1 │
+│▌◐ F #2 ! Build REST API ●                    ││ #2  ! FEATURE                                  ◐ in_progress · ready │
+│ ○ B #7 ↑ Investigate flaky CI ●              ││ Build REST API                                       @grace · deps 1 │
 │ ● C #1 ↑ Set up database schema              ││──────────────────────────────────────────────────────────────────────│
 │ ○ E #4 • Ship v1 release ●                   ││ Goals                                                                │
 │ ○ F #3 • Write integration tests ✗           ││                                                                      │
-│ ○ F #5 ↓ Frontend dashboard ●                ││ Build a REST API with axum; see docs/api.md.                         │
-│ ● D #6 · Docs site                           ││                                                                      │
+│ ○ F #5 • Frontend dashboard ●                ││ Build a REST API with axum; see docs/api.md.                         │
+│ ● D #6 ↓ Docs site                           ││                                                                      │
 │                                              ││ • CRUD endpoints                                                     │
 │                                              ││ • Auth middleware                                                    │
 │                                              ││                                                                      │

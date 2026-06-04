@@ -6,7 +6,8 @@ expression: rendered
 │  All 2  │  Rdy 1  │  Blk 0           │
 └──────────────────────────────────────┘
 ┌ Overview · Dep tree · Comments ──────┐
-│ #2  ! FEATURE  Short title           │
+│ #2  ! FEATURE                        │
+│ Short title                          │
 │                                      │
 │ status     ◐ in_progress · ready     │
 │ assignee   @ada                      │
@@ -20,7 +21,6 @@ expression: rendered
 │                                      │
 │ parent     #1                        │
 │ relates    #1                        │
-│                                      │
 │                                      │
 │                                      │
 │                                      │

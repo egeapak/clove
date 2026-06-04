@@ -9,8 +9,8 @@ expression: rendered
 │ ● C #1 ↑ Set up database schema              ││ ◐ #2  Build REST API [ready]                                         │
 │ ○ E #4 • Ship v1 release ●                   ││ └── ● #1  Set up database schema                                     │
 │ ○ F #3 • Write integration tests ✗           ││                                                                      │
-│ ○ F #5 ↓ Frontend dashboard ●                ││                                                                      │
-│ ● D #6 · Docs site                           ││                                                                      │
+│ ○ F #5 • Frontend dashboard ●                ││                                                                      │
+│ ● D #6 ↓ Docs site                           ││                                                                      │
 │                                              ││                                                                      │
 │                                              ││                                                                      │
 │                                              ││                                                                      │

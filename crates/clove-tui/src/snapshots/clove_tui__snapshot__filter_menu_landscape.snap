@@ -4,8 +4,8 @@ expression: rendered
 ---
   All 7  │  Ready 4  │  Blocked 1
 ┌ Items (2/7) ──────────────────────────┌ Filter ──────────────────────────────┐ ──────────────────────────────────────┐
-│▌○ F #3 • Write integration tests ✗    │ Status                               │on tests              ○ open · blocked │
-│ ○ F #5 ↓ Frontend dashboard ●         │  (•) open                            │                                deps 1 │
+│▌○ F #3 • Write integration tests ✗    │ Status                               │                      ○ open · blocked │
+│ ○ F #5 • Frontend dashboard ●         │  (•) open                            │                                deps 1 │
 │                                       │  ( ) in_progress                     │                                       │
 │                                       │  ( ) closed                          │───────────────────────────────────────│
 │                                       │                                      │lic API surface.                       │

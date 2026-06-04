@@ -43,16 +43,18 @@ multi-AND, over values present in the repo), AND-composed with search and tabs,
 `x` clears, with status-line chips, an `Items (N/M)` count, and an empty-result
 escape hatch. Filters/sort persist across tab-switch and refresh; selection is
 preserved by id. The wide Overview detail is a **fixed shrink-to-fit two-line header**
-(line 1: short id + priority glyph + ALL-CAPS type tag + truncated title, status
-flush-right; line 2: assignee + deps *count* flush-right under the status; then
-any blockers) → **edge-to-edge rule** → **scrolling Markdown body** →
+(line 1: short id + priority glyph + ALL-CAPS type tag, status flush-right;
+line 2: bold title with assignee + deps *count* flush-right under the status;
+then any blockers) → **edge-to-edge rule** → **scrolling Markdown body** →
 edge-to-edge rule → **sticky footer** (labels left, `created Jan 20 · updated
 Jan 24` right, day resolution); the narrow Overview is one scrolling paragraph
-(title wraps, labels/dates inline). The deps *list* is in the Dep tree tab. The
-list shows a single-letter colour-coded type icon, a **short id** (`#42`, prefix
-dropped), and a **priority glyph** (`!`/`↑`/`•`/`↓`/`·` for p0→p4, graded colour
-ending in a dim icy blue for p4; legend in the help overlay). Priority renders
-from a single shared `head_spans` for both header widths. `clove-tui` has 27 tests (data-layer + a
+(meta line, then the title, labels/dates inline). The deps *list* is in the Dep
+tree tab. The list shows a single-letter colour-coded type icon, a **short id**
+(`#42`, prefix dropped), and a **priority glyph** (`!` p0, `↑` p1, `•` p2 **and**
+p3, `↓` p4) on a graded colour ramp (red → orange → amber → gray → dim icy
+blue); p2/p3 share the `•` and are told apart by hue. Legend in the help
+overlay. The meta line (id + priority + type) renders from a single shared
+`head_spans` for both header widths. `clove-tui` has 27 tests (data-layer + a
 `TestBackend` smoke test + insta render snapshots of 12 states × 3 terminal
 shapes), plus an `#[ignore]`d `generate_screenshots` PNG tool (DejaVu Sans Mono;
 output gitignored under `docs/screenshots/`). The layout is **adaptive**

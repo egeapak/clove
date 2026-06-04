@@ -25,8 +25,8 @@ expression: rendered
 │ ?            toggle this help        │
 │ q            quit                    │
 │                                      │
-│ priority     ! ↑ • ↓ ·  =  p0→p4     │
-│ (high→low)                           │
+│ priority     ! ↑ • ↓  =  p0 p1 p2/p3 │
+│ p4 (by color)                        │
 │                                      │
 │                                      │
 │                                      │

@@ -6,10 +6,10 @@ expression: rendered
 │  All 2  │  Rdy 1  │  Blk 0           │
 └──────────────────────────────────────┘
 ┌ Overview · Dep tree · Comments ──────┐
-│ #2  ! FEATURE  Implement end-to-end  │
-│ offline synchronization with         │
-│ conflict resolution and retry        │
-│ backoff                              │
+│ #2  ! FEATURE                        │
+│ Implement end-to-end offline         │
+│ synchronization with conflict        │
+│ resolution and retry backoff         │
 │                                      │
 │ status     ◐ in_progress · ready     │
 │ assignee   @ada                      │

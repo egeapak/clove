@@ -8,7 +8,7 @@ expression: rendered
 ┌ Items (3/7) ─────────────────────────┐
 │▌◐ F #2 ! Build REST API ●            │
 │ ○ F #3 • Write integration tests ✗   │
-│ ○ F #5 ↓ Frontend dashboard ●        │
+│ ○ F #5 • Frontend dashboard ●        │
 │                                      │
 │                                      │
 │                                      │

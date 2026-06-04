@@ -11,8 +11,8 @@ expression: rendered
 │ ● C #1 ↑ Set up database schema      │
 │ ○ E #4 • Ship v1 release ●           │
 │ ○ F #3 • Write integration tests ✗   │
-│ ○ F #5 ↓ Frontend dashboard ●        │
-│ ● D #6 · Docs site                   │
+│ ○ F #5 • Frontend dashboard ●        │
+│ ● D #6 ↓ Docs site                   │
 │                                      │
 │                                      │
 │                                      │

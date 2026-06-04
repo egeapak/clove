@@ -31,8 +31,8 @@ expression: rendered
 │                                                          │
 └──────────────────────────────────────────────────────────┘
 ┌ Overview · Dep tree · Comments ──────────────────────────┐
-│ #2  ! FEATURE  Build REST API      ◐ in_progress · ready │
-│                                          @grace · deps 1 │
+│ #2  ! FEATURE                      ◐ in_progress · ready │
+│ Build REST API                           @grace · deps 1 │
 │──────────────────────────────────────────────────────────│
 │ Goals                                                    │
 │                                                          │

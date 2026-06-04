@@ -11,8 +11,8 @@ expression: rendered
 │ ● C #1 ↑ Set up database schema                          │
 │ ○ E #4 • Ship v1 release ●                               │
 │ ○ F #3 • Write integration tests ✗                       │
-│ ○ F #5 ↓ Frontend dashboard ●                            │
-│ ● D #6 · Docs site                                       │
+│ ○ F #5 • Frontend dashboard ●                            │
+│ ● D #6 ↓ Docs site                                       │
 │                                                          │
 │                                                          │
 │                                                          │
@@ -32,7 +32,7 @@ expression: rendered
 └────│ o / t / c    overview / dep tree / comments    │────┘
 ┌ Ove│ →/l  ←/h     focus detail / list (narrow)      │────┐
 │ #2 │ PgUp / PgDn  scroll detail                     │ady │
-│    │ s / S        cycle sort field / direction      │s 1 │
+│ Bui│ s / S        cycle sort field / direction      │s 1 │
 │────│ f            filter menu (facets)              │────│
 │ Goa│ x            clear all filters                 │    │
 │    │ /            search id, title, labels          │    │

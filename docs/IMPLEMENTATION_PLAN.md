@@ -589,11 +589,12 @@ condition for M4 planning.
   correct, no index/daemon coupling, never mutates. Top tab bar **All / Ready /
   Blocked** (with live counts), an item list (status glyph, single-letter type
   icon, **short id** [prefix dropped, leading zeros trimmed, e.g. `#42`], a
-  **priority glyph** [`!`/`↑`/`•`/`↓`/`·` for p0→p4, graded color], title,
+  **priority glyph** [`!` p0, `↑` p1, `•` p2 & p3, `↓` p4 on a graded colour ramp
+  red→…→dim icy blue; p2/p3 share `•` and differ by hue], title,
   ready/blocked badge, sorted by `(priority, topo rank, id)` like `ls`), and
   a detail pane with three sub-views: **Overview** (wide: a **fixed, shrink-to-fit
-  two-line header** [line 1: short id + priority glyph + ALL-CAPS type tag +
-  truncated title, status flush-right; line 2: assignee + a **deps count**
+  two-line header** [line 1: short id + priority glyph + ALL-CAPS type tag,
+  status flush-right; line 2: bold title with assignee + a **deps count**
   flush-right under the status], an **edge-to-edge rule**, a
   **scrolling Markdown body**, another edge-to-edge rule, and a **sticky footer**
   [labels left, `created Jan 20 · updated Jan 24` right at day resolution]; narrow:
