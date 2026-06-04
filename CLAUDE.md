@@ -31,6 +31,22 @@ shapes (portrait/landscape/square) to exercise the adaptive layout.
   INSTA_UPDATE=always cargo test -p clove-tui    # regenerate, then inspect the diff
   ```
 
+### Validating colour
+
+Colour is **not** in the render snapshots (kept text-only on purpose, for clean
+font/theme-independent diffs). Instead, the colour *semantics* are locked by
+unit tests on the style functions in `ui.rs` (`tests` module: `priority_style`,
+`status_style`, `type_style`) — these assert the `fg`/`bg` each returns, with no
+layout or cell coordinates involved, so they don't break when the layout shifts.
+**When you change a colour constant, update those tests** (and regenerate the
+screenshots to eyeball it).
+
+If you ever want end-to-end "right colour reached the right cell" coverage,
+ratatui's `Buffer` `Debug` impl prints a positional `styles:` list, so
+`insta::assert_debug_snapshot!(terminal.backend().buffer())` works — but its
+diffs are noisy under layout changes, which is why we prefer the style-function
+unit tests.
+
 ## TUI screenshots (PNG) — how to "see" the terminal
 
 The colour PNGs under `docs/screenshots/` are produced by a manual,

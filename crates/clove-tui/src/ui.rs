@@ -1137,3 +1137,44 @@ fn centered_fixed(area: Rect, w: u16, h: u16) -> Rect {
         height: h.min(area.height),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Colour-semantics tests. The render snapshots (`snapshot.rs`) flatten the
+    //! buffer to plain text and so can't catch a colour regression; these lock
+    //! the fg the style functions assign, with no layout/positions involved.
+    use super::*;
+
+    #[test]
+    fn priority_ramp_is_hot_to_cold() {
+        // p0 hottest → p4 coldest; p2 and p3 share the `•` glyph and are told
+        // apart only by hue (amber vs dim icy blue), so their colours must differ.
+        let fg = |p| priority_style(p).fg;
+        assert_eq!(fg(0), Some(Color::Indexed(196))); // red
+        assert_eq!(fg(1), Some(Color::Indexed(208))); // orange
+        assert_eq!(fg(2), Some(Color::Indexed(178))); // amber
+        assert_eq!(fg(3), Some(Color::Indexed(110))); // dim icy blue
+        assert_eq!(fg(4), Some(Color::Indexed(244))); // gray
+        assert_ne!(fg(2), fg(3));
+        // Out-of-range priorities reuse the coldest end of the ramp.
+        assert_eq!(fg(9), fg(4));
+    }
+
+    #[test]
+    fn status_colours_match_glyphs() {
+        assert_eq!(status_style(ItemStatus::Open).fg, Some(Color::Yellow));
+        assert_eq!(status_style(ItemStatus::InProgress).fg, Some(Color::Cyan));
+        // Closed reads as "done / out of the way" — gray, leaving green for ready.
+        assert_eq!(status_style(ItemStatus::Closed).fg, Some(LABEL));
+    }
+
+    #[test]
+    fn type_colours_are_distinct_per_kind() {
+        let fg = |t| type_style(t).fg;
+        assert_eq!(fg(ItemType::Bug), Some(Color::Red));
+        assert_eq!(fg(ItemType::Feature), Some(Color::Blue));
+        assert_eq!(fg(ItemType::Chore), Some(Color::Gray));
+        assert_eq!(fg(ItemType::Docs), Some(Color::Magenta));
+        assert_eq!(fg(ItemType::Epic), Some(Color::Yellow));
+    }
+}
