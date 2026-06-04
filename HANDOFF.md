@@ -42,11 +42,15 @@ facet filter menu (status/assignee single, type/priority multi-OR, labels
 multi-AND, over values present in the repo), AND-composed with search and tabs,
 `x` clears, with status-line chips, an `Items (N/M)` count, and an empty-result
 escape hatch. Filters/sort persist across tab-switch and refresh; selection is
-preserved by id. The Overview detail uses a full-width header (ALL-CAPS type tag
-+ title left, status/ready top-right, priority·assignee right) with a pinned
-footer (labels bottom-left, `created Jan 20 · updated Jan 24` bottom-right at day
-resolution); the list shows a single-letter colour-coded type icon and a **short
-id** (`#42`, prefix dropped). `clove-tui` has 24 tests (data-layer + a
+preserved by id. The Overview detail uses a full-width header (short id +
+ALL-CAPS type tag + title left [truncated/wrapping], status/ready top-right, with
+priority·assignee + a deps *count* stacked below when wide), then blockers and
+relationships (the deps *list* is in the Dep tree tab) and a trailing horizontal
+rule — no body text — with a pinned footer (labels bottom-left, `created Jan 20 ·
+updated Jan 24` bottom-right at day resolution; narrow inlines these). The list
+shows a single-letter colour-coded type icon and a **short id** (`#42`, prefix
+dropped). The Markdown renderer (`markdown.rs`) is now dormant (`#[allow(dead_code)]`)
+since the body isn't shown. `clove-tui` has 27 tests (data-layer + a
 `TestBackend` smoke test + insta render snapshots of 12 states × 3 terminal
 shapes), plus an `#[ignore]`d `generate_screenshots` PNG tool (DejaVu Sans Mono;
 output gitignored under `docs/screenshots/`). The layout is **adaptive**

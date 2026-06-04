@@ -14,7 +14,6 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Padding, Paragraph
 use ratatui::Frame;
 
 use crate::app::{fmt_day, fmt_ts, App, Detail, DetailTab, Focus, Mode, SortField, Tab};
-use crate::markdown;
 
 // Structural chrome uses indexed grays (consistent on 256-color terminals);
 // semantic foregrounds keep named ANSI colors so they respect the user's theme.
@@ -286,8 +285,9 @@ fn render_detail(f: &mut Frame, app: &App, area: Rect) {
     };
 
     // On the Overview tab, pin a 1-line footer (labels left, dates right) at the
-    // bottom of the pane when there's room; the body scrolls above it.
-    let footer = app.detail_tab == DetailTab::Overview && inner.width >= 40;
+    // bottom of the pane when the pane is wide (matching the wide body layout);
+    // narrower panes inline labels/dates instead. The body scrolls above it.
+    let footer = app.detail_tab == DetailTab::Overview && inner.width >= 50;
     let (body_area, footer_area) = if footer {
         let parts = Layout::default()
             .direction(Direction::Vertical)
@@ -338,33 +338,45 @@ fn detail_title(app: &App) -> Line<'static> {
     Line::from(spans)
 }
 
-/// The overview. A header uses the full pane width — an ALL-CAPS type tag +
-/// title on the left, status (and ready/blocked) pinned top-right, with
-/// priority/assignee on a second right-aligned line when wide — then blockers
-/// and the Markdown body. When `footer` is set (wide), labels and dates live in
-/// the pinned footer; otherwise they're emitted inline here.
+/// The overview. The header puts the short id, an ALL-CAPS type tag, and the
+/// title on the top-left and status top-right; priority/assignee and a deps
+/// count stack below the status (right) when wide. Then blockers, relationships
+/// (deps are a count here, not a list — the Dep tree tab has the list), and a
+/// trailing horizontal rule. When `footer` is set (wide), labels and dates live
+/// in the pinned footer; otherwise they're emitted inline.
 fn overview_lines(app: &App, detail: &Detail, inner_w: u16, footer: bool) -> Vec<Line<'static>> {
     let fm = &detail.item.frontmatter;
     let wide = inner_w >= 50;
     let mut lines = Vec::new();
 
-    // ALL-CAPS, type-colored tag prefixing the title.
-    let title_left = vec![
-        Span::styled(
-            format!("{}  ", fm.item_type.as_str().to_uppercase()),
-            type_style(fm.item_type).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            fm.title.clone(),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-    ];
-    let id_span = Span::styled(short_ref(&fm.id), Style::default().fg(LABEL));
+    let id = short_ref(&fm.id);
+    let type_tag = fm.item_type.as_str().to_uppercase();
+    // id + spaces + TYPE + spaces, all before the title.
+    let prefix_w = id.chars().count() + 2 + type_tag.chars().count() + 2;
+    let head = |title: String| {
+        vec![
+            Span::styled(format!("{id}  "), Style::default().fg(LABEL)),
+            Span::styled(
+                format!("{type_tag}  "),
+                type_style(fm.item_type).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(title, Style::default().add_modifier(Modifier::BOLD)),
+        ]
+    };
 
     if wide {
-        // Title left, status pinned top-right.
-        lines.push(right_align(title_left, status_spans(app, fm), inner_w));
-        // id left, priority · assignee right (type now lives in the title tag).
+        // Title truncated so the header fits on one line beside the status.
+        let status = status_spans(app, fm);
+        let status_w: usize = status.iter().map(Span::width).sum();
+        let title_budget = (inner_w as usize)
+            .saturating_sub(prefix_w + status_w + 2)
+            .max(8);
+        lines.push(right_align(
+            head(truncate(&fm.title, title_budget)),
+            status,
+            inner_w,
+        ));
+        // priority · assignee, then a deps count, stacked under the status.
         let mut meta = vec![Span::styled(
             format!("p{}", fm.priority.get()),
             priority_style(fm.priority.get()),
@@ -373,12 +385,21 @@ fn overview_lines(app: &App, detail: &Detail, inner_w: u16, footer: bool) -> Vec
             meta.push(Span::styled(" · ", Style::default().fg(DIM)));
             meta.push(Span::styled(format!("@{a}"), Style::default().fg(LABEL)));
         }
-        lines.push(right_align(vec![id_span], meta, inner_w));
+        lines.push(right_align(vec![], meta, inner_w));
+        if !fm.deps.is_empty() {
+            lines.push(right_align(
+                vec![],
+                vec![Span::styled(
+                    format!("deps {}", fm.deps.len()),
+                    Style::default().fg(LABEL),
+                )],
+                inner_w,
+            ));
+        }
         lines.push(Line::raw(""));
     } else {
-        // Narrow: stack the header fields as labelled rows.
-        lines.push(Line::from(title_left));
-        lines.push(Line::from(id_span));
+        // Narrow: the title is free to wrap (multi-line); fields stack as rows.
+        lines.push(Line::from(head(fm.title.clone())));
         lines.push(Line::raw(""));
         lines.push(field_line("status", status_spans(app, fm)));
         lines.push(field_line(
@@ -388,6 +409,9 @@ fn overview_lines(app: &App, detail: &Detail, inner_w: u16, footer: bool) -> Vec
                 priority_style(fm.priority.get()),
             )],
         ));
+        if !fm.deps.is_empty() {
+            lines.push(kv("deps", &fm.deps.len().to_string()));
+        }
         if let Some(a) = &fm.assignee {
             lines.push(kv("assignee", a));
         }
@@ -443,10 +467,9 @@ fn overview_lines(app: &App, detail: &Detail, inner_w: u16, footer: bool) -> Vec
         }
     }
 
-    // Relationships.
+    // Relationships (deps omitted — see the Dep tree tab / the deps count above).
     let mut rel = Vec::new();
     push_id_field(&mut rel, "parent", fm.parent.as_ref().into_iter());
-    push_id_field(&mut rel, "deps", fm.deps.iter());
     push_id_field(&mut rel, "relates", fm.relates.iter());
     push_id_field(&mut rel, "duplicates", fm.duplicates.iter());
     push_id_field(&mut rel, "supersedes", fm.supersedes.iter());
@@ -455,16 +478,12 @@ fn overview_lines(app: &App, detail: &Detail, inner_w: u16, footer: bool) -> Vec
         lines.extend(rel);
     }
 
-    // Body, rendered as Markdown.
-    let body = detail.item.body.trim();
-    if !body.is_empty() {
-        lines.push(Line::raw(""));
-        lines.push(Line::from(Span::styled(
-            divider("body", inner_w),
-            Style::default().fg(DIM),
-        )));
-        lines.extend(markdown::render(body, inner_w));
-    }
+    // Trailing horizontal rule (the body text is intentionally not shown here).
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "─".repeat(inner_w as usize),
+        Style::default().fg(DIM),
+    )));
 
     lines
 }
@@ -960,14 +979,6 @@ fn push_id_field<'a>(
     if !joined.is_empty() {
         lines.push(kv(key, &joined));
     }
-}
-
-/// A full-width `── label ──────` rule sized to the pane.
-fn divider(label: &str, inner_w: u16) -> String {
-    let w = inner_w as usize;
-    let head = format!("── {label} ");
-    let fill = w.saturating_sub(head.chars().count());
-    format!("{head}{}", "─".repeat(fill))
 }
 
 fn status_glyph(s: ItemStatus) -> &'static str {

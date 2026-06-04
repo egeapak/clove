@@ -6,14 +6,14 @@ expression: rendered
 ┌ Items (7) ───────────────────────┌ Help ──────────────────────────────────────────┐──────────────────────────────────┐
 │▌◐ F #2 p0 Build REST API ●       │ clove tui — read-only browser                  │            ◐ in_progress · ready │
 │ ○ B #7 p1 Investigate flaky CI ● │                                                │                      p0 · @grace │
-│ ● C #1 p1 Set up database schema │ ↑/k ↓/j      move selection                    │                                  │
+│ ● C #1 p1 Set up database schema │ ↑/k ↓/j      move selection                    │                           deps 1 │
 │ ○ E #4 p2 Ship v1 release ●      │ g / G        jump to top / bottom              │                                  │
 │ ○ F #3 p2 Write integration tests│ Tab / 1 2 3  All / Ready / Blocked             │                                  │
-│ ○ F #5 p3 Frontend dashboard ●   │ o / t / c    overview / dep tree / comments    │                                  │
-│ ● D #6 p4 Docs site              │ →/l  ←/h     focus detail / list (narrow)      │───────────────────────────────── │
+│ ○ F #5 p3 Frontend dashboard ●   │ o / t / c    overview / dep tree / comments    │───────────────────────────────── │
+│ ● D #6 p4 Docs site              │ →/l  ←/h     focus detail / list (narrow)      │                                  │
 │                                  │ PgUp / PgDn  scroll detail                     │                                  │
 │                                  │ s / S        cycle sort field / direction      │                                  │
-│                                  │ f            filter menu (facets)              │s/api.md.                         │
+│                                  │ f            filter menu (facets)              │                                  │
 │                                  │ x            clear all filters                 │                                  │
 │                                  │ /            search id, title, labels          │                                  │
 │                                  │ Esc          clear search / back / close       │                                  │

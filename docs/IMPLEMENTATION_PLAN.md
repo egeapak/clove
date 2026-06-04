@@ -590,12 +590,14 @@ condition for M4 planning.
   Blocked** (with live counts), an item list (status glyph, single-letter type
   icon, **short id** [prefix dropped, leading zeros trimmed, e.g. `#42`], priority,
   title, ready/blocked badge, sorted by `(priority, topo rank, id)` like `ls`), and
-  a detail pane with three sub-views: **Overview** (a full-width header — an
-  ALL-CAPS type tag + title left, status/ready pinned top-right, priority·assignee
-  on a second right-aligned line when wide — then blockers and the
-  **Markdown-rendered body**, with a **pinned footer** holding labels bottom-left
-  and `created Jan 20 · updated Jan 24` bottom-right at day resolution; narrow
-  panes inline these instead), **Dep tree** (status glyphs + titles inline,
+  a detail pane with three sub-views: **Overview** (a full-width header — short id
+  + ALL-CAPS type tag + title left [truncated to fit; wraps when narrow],
+  status/ready pinned top-right, with priority·assignee and a **deps count** stacked
+  below it when wide — then blockers, relationships [the deps *list* lives in the
+  Dep tree tab], and a trailing horizontal rule [no body text], with a **pinned
+  footer** holding labels bottom-left and `created Jan 20 · updated Jan 24`
+  bottom-right at day resolution; narrow panes inline these instead), **Dep tree**
+  (status glyphs + titles inline,
   `[ready]`/`(cycle)` markers), and **Comments**. The body is rendered from
   CommonMark via `pulldown-cmark` (`markdown.rs`): headings, emphasis/strong/
   strikethrough, inline + fenced code, bullet/ordered/nested lists, block quotes,
@@ -629,7 +631,9 @@ condition for M4 planning.
   smoke test, and **insta render snapshots** of 12 states (overview, blocked tab,
   dep tree, comments, search, help, detail-focused, empty, **filter menu, filtered,
   sorted, filtered-empty**) each at three terminal shapes — portrait 40×48
-  (single), landscape 120×18 (wide + compact tabs), square 60×60 (stacked) —
+  (single), landscape 120×18 (wide + compact tabs), square 60×60 (stacked) — plus
+  Overview edge cases (**long/wrapping title, long label list with `+N` footer
+  truncation, and a scrolled detail** that keeps the pinned footer in place) —
   validating the adaptive layout. Mutations (status/priority/label edits, create,
   dep add/rm, comment) are a deferred follow-up — this first cut is read-only.
 - Tooling: an `#[ignore]`d `generate_screenshots` test rasterizes each screen's

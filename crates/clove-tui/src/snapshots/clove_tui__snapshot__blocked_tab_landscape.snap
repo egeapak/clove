@@ -4,15 +4,15 @@ expression: rendered
 ---
   All 7  │  Ready 4  │  Blocked 1
 ┌ Items (1) ───────────────────────────────────┐┌ Overview · Dep tree · Comments ──────────────────────────────────────┐
-│▌○ F #3 p2 Write integration tests ✗          ││ FEATURE  Write integration tests                    ○ open · blocked │
-│                                              ││ #3                                                                p2 │
+│▌○ F #3 p2 Write integration tests ✗          ││ #3  FEATURE  Write integration tests                ○ open · blocked │
+│                                              ││                                                                   p2 │
+│                                              ││                                                               deps 1 │
 │                                              ││                                                                      │
 │                                              ││ blocked by #2                                                        │
 │                                              ││                                                                      │
-│                                              ││ deps       #2                                                        │
+│                                              ││ ──────────────────────────────────────────────────────────────────── │
 │                                              ││                                                                      │
-│                                              ││ ── body ──────────────────────────────────────────────────────────── │
-│                                              ││ End-to-end coverage of the public API surface.                       │
+│                                              ││                                                                      │
 │                                              ││                                                                      │
 │                                              ││                                                                      │
 │                                              ││                                                                      │

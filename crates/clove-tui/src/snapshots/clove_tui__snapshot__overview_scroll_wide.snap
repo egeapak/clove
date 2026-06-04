@@ -1,0 +1,18 @@
+---
+source: crates/clove-tui/src/snapshot.rs
+expression: wide
+---
+  All 2  │  Ready 1  │  Blocked 1
+┌ Items (2) ───────────────────────────────────┐┌ Overview · Dep tree · Comments ──────────────────────────────────────┐
+│▌◐ F #2 p0 Implement end-to-end offline sync… ││ blocked by #1                                                        │
+│ ○ C #1 p2 Dependency target ●                ││                                                                      │
+│                                              ││ parent     #1                                                        │
+│                                              ││ relates    #1                                                        │
+│                                              ││                                                                      │
+│                                              ││ ──────────────────────────────────────────────────────────────────── │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││ labels area:mobile, area:sync +8      created Jan 1 · updated Jan 20 │
+└──────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────┘
+2 item(s) loaded   ?: help · q: quit

@@ -3,18 +3,24 @@ source: crates/clove-tui/src/snapshot.rs
 expression: rendered
 ---
 ┌ clove ───────────────────────────────┐
-│  All 7  │  Rdy 4  │  Blk 1           │
+│  All 2  │  Rdy 1  │  Blk 0           │
 └──────────────────────────────────────┘
 ┌ Overview · Dep tree · Comments ──────┐
-│ #2  FEATURE  Build REST API          │
+│ #2  FEATURE  Implement end-to-end    │
+│ offline synchronization with         │
+│ conflict resolution and retry        │
+│ backoff                              │
 │                                      │
 │ status     ◐ in_progress · ready     │
 │ priority   p0                        │
 │ deps       1                         │
-│ assignee   grace                     │
-│ labels     area:api, backend         │
+│ assignee   ada                       │
+│ labels     area:sync, backend        │
 │ created    Jan 1                     │
 │ updated    Jan 20                    │
+│                                      │
+│ parent     #1                        │
+│ relates    #1                        │
 │                                      │
 │ ──────────────────────────────────── │
 │                                      │
@@ -42,11 +48,5 @@ expression: rendered
 │                                      │
 │                                      │
 │                                      │
-│                                      │
-│                                      │
-│                                      │
-│                                      │
-│                                      │
-│                                      │
 └──────────────────────────────────────┘
-7 item(s) loaded  ?·q
+2 item(s) loaded  ?·q

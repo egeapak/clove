@@ -2,21 +2,21 @@
 source: crates/clove-tui/src/snapshot.rs
 expression: rendered
 ---
-  All 7  │  Ready 4  │  Blocked 1
-┌ Items (1/7) ─────────────────────────────────┐┌ Overview · Dep tree · Comments ──────────────────────────────────────┐
-│▌◐ F #2 p0 Build REST API ●                   ││ #2  FEATURE  Build REST API                    ◐ in_progress · ready │
-│                                              ││                                                          p0 · @grace │
+  All 2  │  Ready 1  │  Blocked 0
+┌ Items (2) ───────────────────────────────────┐┌ Overview · Dep tree · Comments ──────────────────────────────────────┐
+│▌◐ F #2 p0 Short title ●                      ││ #2  FEATURE  Short title                       ◐ in_progress · ready │
+│ ● C #1 p2 Dependency target                  ││                                                            p0 · @ada │
 │                                              ││                                                               deps 1 │
 │                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││ parent     #1                                                        │
+│                                              ││ relates    #1                                                        │
 │                                              ││                                                                      │
 │                                              ││ ──────────────────────────────────────────────────────────────────── │
 │                                              ││                                                                      │
 │                                              ││                                                                      │
 │                                              ││                                                                      │
 │                                              ││                                                                      │
-│                                              ││                                                                      │
-│                                              ││                                                                      │
-│                                              ││                                                                      │
-│                                              ││ labels area:api, backend              created Jan 1 · updated Jan 20 │
+│                                              ││ labels area:mobile, area:sync +8      created Jan 1 · updated Jan 20 │
 └──────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────┘
-/api▏   (Enter: keep · Esc: clear)
+2 item(s) loaded   ?: help · q: quit

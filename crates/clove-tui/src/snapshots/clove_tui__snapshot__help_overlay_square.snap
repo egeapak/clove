@@ -31,30 +31,30 @@ expression: rendered
 │    │ Tab / 1 2 3  All / Ready / Blocked             │    │
 └────│ o / t / c    overview / dep tree / comments    │────┘
 ┌ Ove│ →/l  ←/h     focus detail / list (narrow)      │────┐
-│ FEA│ PgUp / PgDn  scroll detail                     │ady │
-│ #2 │ s / S        cycle sort field / direction      │ace │
-│    │ f            filter menu (facets)              │    │
+│ #2 │ PgUp / PgDn  scroll detail                     │ady │
+│    │ s / S        cycle sort field / direction      │ace │
+│    │ f            filter menu (facets)              │s 1 │
 │    │ x            clear all filters                 │    │
-│ dep│ /            search id, title, labels          │    │
-│    │ Esc          clear search / back / close       │    │
-│ ── │ r            refresh from disk                 │─── │
-│ Goa│ ?            toggle this help                  │    │
+│    │ /            search id, title, labels          │    │
+│ ───│ Esc          clear search / back / close       │─── │
+│    │ r            refresh from disk                 │    │
+│    │ ?            toggle this help                  │    │
 │    │ q            quit                              │    │
-│ Bui└────────────────────────────────────────────────┘    │
+│    └────────────────────────────────────────────────┘    │
 │                                                          │
-│ • CRUD endpoints                                         │
-│ • Auth middleware                                        │
 │                                                          │
-│ Steps                                                    │
 │                                                          │
-│ 1. Define routes                                         │
-│ 2. Wire handlers                                         │
 │                                                          │
-│ │ Blocked on the schema work until it lands.             │
 │                                                          │
-│ ──────────────────────────────────────────────────────── │
 │                                                          │
-│ Done when the integration tests pass.                    │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
 │                                                          │
 │                                                          │
 │                                                          │

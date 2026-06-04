@@ -373,6 +373,83 @@ fn filtered_empty() {
     snap("filtered_empty", &mut app);
 }
 
+// --- Overview edge cases: long title, long labels, scroll -----------------
+
+fn mk_store() -> (tempfile::TempDir, ItemStore) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
+    std::fs::create_dir_all(root.join(".clove").join("issues")).unwrap();
+    (dir, ItemStore::new(root))
+}
+
+/// A focused fixture: a dependency target plus a feature item (`#2`, priority 0
+/// so it's selected first) with the given title and labels. When `blocked`, the
+/// dep target is open so the item shows a blocker.
+fn edge_app(title: &str, labels: &[&str], blocked: bool) -> App {
+    let (dir, store) = mk_store();
+    let (dep_status, dep_closed) = if blocked {
+        (ItemStatus::Open, None)
+    } else {
+        (ItemStatus::Closed, Some("2026-02-01T12:00:00Z"))
+    };
+    #[rustfmt::skip]
+    put(&store, "proj-00000001", "Dependency target", ItemType::Chore, 2,
+        dep_status, dep_closed, None, None, &[], &[], &[], "");
+    #[rustfmt::skip]
+    put(&store, "proj-00000002", title, ItemType::Feature, 0,
+        ItemStatus::InProgress, None, Some("ada"), Some("proj-00000001"),
+        labels, &["proj-00000001"], &["proj-00000001"], "");
+    std::mem::forget(dir);
+    App::new(store)
+}
+
+const LONG_TITLE: &str =
+    "Implement end-to-end offline synchronization with conflict resolution and retry backoff";
+const MANY_LABELS: &[&str] = &[
+    "area:sync",
+    "area:mobile",
+    "backend",
+    "frontend",
+    "infra",
+    "kind:regression",
+    "needs-review",
+    "priority:high",
+    "team:platform",
+    "flaky",
+];
+
+#[test]
+fn overview_long_title() {
+    // Wide: title truncated to fit beside the status. Narrow (focused portrait):
+    // title wraps to multiple lines.
+    let mut app = edge_app(LONG_TITLE, &["area:sync", "backend"], false);
+    app.focus_detail();
+    snap("overview_long_title", &mut app);
+}
+
+#[test]
+fn overview_long_labels() {
+    // Wide: footer labels truncate with `+N`. Narrow (focused portrait): inline
+    // labels wrap.
+    let mut app = edge_app("Short title", MANY_LABELS, false);
+    app.focus_detail();
+    snap("overview_long_labels", &mut app);
+}
+
+#[test]
+fn overview_scroll() {
+    // Scrolled detail: the body region scrolls while (wide) the pinned footer
+    // stays put; (narrow) the inline content scrolls with no footer.
+    let mut app = edge_app(LONG_TITLE, MANY_LABELS, true);
+    app.detail_scroll = 4;
+    let wide = render_to_string(&mut app, 120, 14);
+    insta::assert_snapshot!("overview_scroll_wide", wide);
+
+    app.detail_scroll = 3;
+    let narrow = render_to_string(&mut app, 40, 18);
+    insta::assert_snapshot!("overview_scroll_narrow", narrow);
+}
+
 // --- PNG screenshot generation (manual, #[ignore]) ------------------------
 //
 //   cargo test -p clove-tui generate_screenshots -- --ignored --nocapture
