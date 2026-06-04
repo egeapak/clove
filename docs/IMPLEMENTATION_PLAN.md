@@ -578,14 +578,19 @@ planned in a separate session once M3 is complete. Acceptance gates for M3 compl
 as the entry condition for M4 planning.
 
 **M4 backlog (recorded so it is not lost; not yet task-specified):**
-- **`clove stats` — work-item analytics command** *(deferred here by the M3_PLAN.md §1.1
-  CLI-surface review)*. A user-facing aggregate/statistics view: counts by status / type /
-  priority / assignee, ready / blocked / closed totals, open-cycle count, epic completion
-  rollups, and (optionally) throughput over time. Not in the PRD or DESIGN §7.2 CLI surface
-  and **not** required by M3. Natural M4 home because the M1 index already makes these
-  aggregate queries cheap (and the M3 daemon keeps that index hot). Note: this is distinct
-  from the M3 daemon `STATUS` IPC payload, which is daemon *operational* telemetry
-  (`uptime_s`, `items_indexed`, `watcher_state`, `last_event_ms`), not work-item analytics.
+- **`clove stats` — work-item analytics command** — **DONE (M4)**. A user-facing
+  aggregate/statistics view: counts by status / type / priority / assignee / label,
+  ready / blocked / excluded / dangling totals, dependency-cycle count, per-epic
+  completion rollups, and created/closed throughput over rolling windows (7d/30d/all).
+  Also surfaces daemon operational telemetry (the §8.4 `STATUS` payload) and local index
+  presence/freshness in the same report. Analytics are computed from a single file scan +
+  graph build (files are truth); the index/daemon are reported, not relied on for
+  correctness. **Persistence:** `--snapshot` records the report to a durable
+  `.clove/stats.db` (a dedicated SQLite store — *not* the rebuildable `index.db`; it is
+  migrated, never dropped, so history is never lost); `--history [--since] [--limit]`
+  replays the recorded series. Implemented across `clove-core::stats`
+  (`StatsReport`/`compute`), `clove-index::stats_store` (`StatsStore`), and
+  `clove/src/cmd/stats.rs`; JSON schema `docs/json-schema/v1/stats.json`.
 - TUI and/or web UI; bidirectional vendor bridges (GitHub/GitLab/Jira); richer
   history/changelog.
 

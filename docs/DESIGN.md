@@ -86,13 +86,14 @@ embedders who require an older toolchain).
 ```
 .clove/
   config.toml           # repo-level config — committed
-  .gitignore            # ignores: index.db, *.db-shm, *.db-wal, daemon.sock, daemon.pid, reindex.lock, daemon.lock, index.db.tmp
+  .gitignore            # ignores: index.db, *.db-shm, *.db-wal, daemon.sock, daemon.pid, reindex.lock, daemon.lock, index.db.tmp, stats.db
   issues/
     <id>.md             # one item per file — committed (source of truth)
     <id>/               # only present when comments exist (sibling dir to <id>.md)
       comments/
         <rfc3339nano>-<author-slug>-<4char-random>.md
   index.db              # SQLite derived cache — .gitignore'd
+  stats.db              # durable SQLite analytics history (clove stats --snapshot) — .gitignore'd
   daemon.sock           # Unix socket (macOS/Linux) — .gitignore'd
   daemon.pid            # PID file — .gitignore'd
   reindex.lock          # advisory lock during reindex — .gitignore'd
@@ -720,6 +721,8 @@ clove ls [--status S] [--type T] [--label L] [--assignee A]
 clove query [--filter EXPR] [--format json] [--fields F,...]
             # also reads JSON filter object from stdin when stdin is non-TTY
 clove search <text> [--limit N] [--format json]
+clove stats [--top N] [--no-epics] [--snapshot]      # work-item analytics + daemon/index telemetry
+            [--history [--since RFC3339] [--limit N]] [--format json]
 clove comment <id> <message> [--format json]
 clove comments <id> [--limit N] [--format json]
 clove reindex [--force] [--format json]

@@ -1,6 +1,6 @@
 # clove — Session Handoff
 
-**Updated:** 2026-06-03
+**Updated:** 2026-06-04
 **State:** **M0, M1, M2, and M3 are complete and gated.** Full CLI command surface;
 the SQLite index serves `ls`/`ready`/`query` (lean covering-index scan, default
 `--limit 100`, fast staleness with `--deep`), `search`, `reindex`, and
@@ -28,9 +28,10 @@ published + validated. Perf/parity/fuzz/golden gates pass (M0
 except one environment-only failure (`repo::tests::linked_worktree…`, a sandbox
 git-signing artifact, not a code defect; the token-gated `github_roundtrip`
 shows as `1 ignored`).
-**Next step:** **M4 — Extras** (TUI/web UI, vendor bridges, richer history, and the
-deferred `clove stats` analytics command — see `IMPLEMENTATION_PLAN.md` M4 backlog).
-Still undesigned.
+**M4 started:** the **`clove stats`** analytics command is now built (the first M4
+item). See the "M4 — `clove stats`" section below. **Next step:** the remaining M4
+backlog — TUI/web UI, bidirectional vendor bridges, richer history/changelog (still
+undesigned; see `IMPLEMENTATION_PLAN.md` M4 backlog).
 
 ### Small backlog (optional M0/M1 nice-to-haves, non-blocking)
 - Broaden JSON-schema validation to more commands (version/reindex/doctor/new)
@@ -163,6 +164,44 @@ wired into the CI 30 s-per-target fuzz job; new benches (`bench_export`,
 index-refresh note (idempotency/`--check` tests stay green).
 
 ---
+
+## M4 — `clove stats` (this session)
+
+The first M4 item: a read-only **work-item analytics** command.
+
+- **`clove stats`** — aggregates the store into one report: `total`; counts by
+  status / type / priority / assignee / label (assignee+label capped by `--top N`,
+  default 10); `ready` / `blocked` / `excluded` / `dangling`; dependency-cycle
+  count; per-epic completion rollups (`--no-epics` to skip); and created/closed
+  **throughput** over 7d/30d/all windows. It also folds in the **daemon** §8.4
+  `STATUS` telemetry and local **index** presence/freshness, so one command shows
+  work-item *and* operational state.
+- **Compute path:** a single `scan_frontmatter()` + `GraphStore::build()` — files
+  are always truth, so the report is always correct; the index/daemon are reported,
+  not relied on. (Not a hot path; index-SQL `GROUP BY` acceleration is a noted
+  future optimization, not needed for v1.)
+- **Persistence (SQLite, durable):** `--snapshot` records the report to a dedicated
+  **`.clove/stats.db`** — *not* the rebuildable `index.db`. `StatsStore` is
+  **migrated, never dropped** on a version mismatch (losing history is data loss,
+  not a cache miss), created lazily, and `.gitignore`d (binary, local). Headline
+  scalars are columns (cheap trend SQL) + a `detail_json` blob for the rich
+  breakdowns. `clove stats --history [--since RFC3339] [--limit N]` replays the
+  series.
+- **Layout:** `clove-core/src/stats.rs` (`StatsReport` + pure `compute`),
+  `clove-index/src/stats_store.rs` (`StatsStore`, stats-schema v1),
+  `clove/src/cmd/stats.rs` (orchestration + human/JSON rendering). JSON schema
+  `docs/json-schema/v1/stats.json` (validated in `tests/stats.rs`). `clove stats`
+  is wired into `agent-doc` and DESIGN §7.2. New gitignore entry `stats.db` (root +
+  per-repo `.clove/.gitignore`).
+- **Tests:** 6 `clove-core` stats unit tests, 4 `clove-index` `stats_store` tests,
+  5 `clove` e2e tests (schema, empty repo, snapshot→history, `--since`, `--top`).
+  `cargo test --workspace`, `clippy -D warnings`, `fmt` all green.
+
+**Decisions (don't relitigate):** stats history lives in its **own** durable
+`stats.db`, never the index cache, so a schema bump or corruption rebuild of the
+index never touches it. Snapshots are **manual** (`--snapshot`); a daemon
+auto-snapshot was considered and left for later. Analytics compute from files for
+correctness; no new frontmatter fields, no index schema bump.
 
 ## What clove is
 

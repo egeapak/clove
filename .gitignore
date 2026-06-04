@@ -7,6 +7,9 @@
 .clove/index.db-shm
 .clove/index.db-wal
 .clove/index.db.tmp
+.clove/stats.db
+.clove/stats.db-shm
+.clove/stats.db-wal
 .clove/daemon.sock
 .clove/daemon.pid
 .clove/reindex.lock

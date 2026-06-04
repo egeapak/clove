@@ -11,7 +11,7 @@ use crate::output::print_json_success;
 
 /// The exact `.clove/.gitignore` entries (DESIGN/T-CLI02). LF line endings on
 /// every platform.
-const GITIGNORE_ENTRIES: [&str; 8] = [
+const GITIGNORE_ENTRIES: [&str; 9] = [
     "index.db",
     "*.db-shm",
     "*.db-wal",
@@ -20,6 +20,7 @@ const GITIGNORE_ENTRIES: [&str; 8] = [
     "reindex.lock",
     "daemon.lock",
     "index.db.tmp",
+    "stats.db",
 ];
 
 pub fn run(
