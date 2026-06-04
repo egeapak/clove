@@ -196,6 +196,7 @@ fn write_all(conn: &mut Connection, parsed: &[ParsedFile]) -> Result<(), IndexEr
     let frontmatters: Vec<_> = parsed.iter().map(|p| p.item.frontmatter.clone()).collect();
     let (graph, _dangling) = GraphStore::build(&frontmatters);
     let ranks = graph.topological_ranks();
+    let excluded: std::collections::HashSet<CloveId> = graph.excluded_ids().into_iter().collect();
 
     for chunk in parsed.chunks(BATCH_SIZE) {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Exclusive)?;
@@ -210,6 +211,7 @@ fn write_all(conn: &mut Connection, parsed: &[ParsedFile]) -> Result<(), IndexEr
                 content_hash: pf.content_hash,
                 topo_rank: ranks.get(id).map(|r| *r as i64),
                 has_dangling_deps,
+                excluded: excluded.contains(id),
             };
             write_row(&tx, &pf.item, &meta)?;
             tx.execute(

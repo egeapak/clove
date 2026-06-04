@@ -10,11 +10,12 @@
 //! affect readiness — enforced by routing every blocking computation through the
 //! hard-dependency edge view (`is_hard_dep`).
 
-use std::collections::{HashMap, HashSet};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
-use petgraph::algo::{has_path_connecting, kosaraju_scc, toposort};
+use petgraph::algo::{has_path_connecting, kosaraju_scc};
 use petgraph::stable_graph::{NodeIndex, StableDiGraph};
-use petgraph::visit::{EdgeFiltered, EdgeRef};
+use petgraph::visit::{EdgeFiltered, EdgeRef, IntoEdgeReferences};
 use smol_str::SmolStr;
 
 use crate::id::CloveId;
@@ -356,6 +357,22 @@ impl GraphStore {
         blocked
     }
 
+    /// Every item excluded from `ready`/`blocked` because it is in a
+    /// hard-dependency cycle or has a malformed parent — **regardless of
+    /// status** (unlike [`Self::excluded_items`], which returns only the active
+    /// ones). This is what the index persists in the `excluded` column so the
+    /// SQL `ready` query can exclude cycle/malformed-parent members exactly as
+    /// the in-memory `ready_items` does. Sorted by id.
+    pub fn excluded_ids(&self) -> Vec<CloveId> {
+        let mut ids: Vec<CloveId> = self
+            .excluded_node_set()
+            .into_iter()
+            .map(|node| self.graph[node].id.clone())
+            .collect();
+        ids.sort();
+        ids
+    }
+
     /// Active items excluded from both `ready` and `blocked` because they are in
     /// a hard-dependency cycle or have a malformed parent. Sorted by id.
     pub fn excluded_items(&self) -> Vec<CloveId> {
@@ -547,15 +564,59 @@ impl GraphStore {
 
     /// Topological rank of each node over hard-dependency edges. Empty if the
     /// hard-dependency graph has a cycle (ranks are then treated as unknown).
+    ///
+    /// Uses a **canonical** Kahn topological sort: among the nodes currently
+    /// available (in-degree zero over hard edges), the one with the smallest
+    /// `id` is always emitted next. This makes the rank a pure function of
+    /// `(hard edges, ids)` — independent of node-insertion order — which is what
+    /// lets the incremental index path (`apply_staleness` recompute) produce
+    /// byte-identical ranks to a full `reindex`. (petgraph's `toposort` is also
+    /// valid but its order depends on insertion order, so it cannot be matched
+    /// incrementally.)
     fn topological_ranks_internal(&self) -> HashMap<NodeIndex, usize> {
-        let hard = EdgeFiltered::from_fn(&self.graph, |e| is_hard_dep(*e.weight()));
-        match toposort(&hard, None) {
-            Ok(order) => order
-                .into_iter()
-                .enumerate()
-                .map(|(rank, node)| (node, rank))
-                .collect(),
-            Err(_) => HashMap::new(),
+        // In-degree over hard edges only.
+        let mut in_degree: HashMap<NodeIndex, usize> =
+            self.graph.node_indices().map(|n| (n, 0usize)).collect();
+        for edge in self.graph.edge_references() {
+            if is_hard_dep(*edge.weight()) {
+                *in_degree.entry(edge.target()).or_insert(0) += 1;
+            }
+        }
+
+        // Min-heap (via Reverse) keyed by id, so ties resolve deterministically
+        // to the lowest id — the canonical choice.
+        let mut ready: BinaryHeap<Reverse<(CloveId, NodeIndex)>> = self
+            .graph
+            .node_indices()
+            .filter(|n| in_degree.get(n).copied().unwrap_or(0) == 0)
+            .map(|n| Reverse((self.graph[n].id.clone(), n)))
+            .collect();
+
+        let mut ranks = HashMap::with_capacity(self.graph.node_count());
+        let mut next_rank = 0usize;
+        while let Some(Reverse((_, node))) = ready.pop() {
+            ranks.insert(node, next_rank);
+            next_rank += 1;
+            for edge in self.graph.edges(node) {
+                if !is_hard_dep(*edge.weight()) {
+                    continue;
+                }
+                let target = edge.target();
+                if let Some(deg) = in_degree.get_mut(&target) {
+                    *deg -= 1;
+                    if *deg == 0 {
+                        ready.push(Reverse((self.graph[target].id.clone(), target)));
+                    }
+                }
+            }
+        }
+
+        // A cycle leaves some nodes unemitted → ranks unknown (matches the prior
+        // `toposort` error case).
+        if ranks.len() == self.graph.node_count() {
+            ranks
+        } else {
+            HashMap::new()
         }
     }
 

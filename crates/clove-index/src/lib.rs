@@ -16,6 +16,7 @@
 //! the M0 command surface exists (IMPLEMENTATION_PLAN T-S04/S05/S06/S08).
 
 pub mod db;
+pub mod derive;
 pub mod query;
 pub mod reindex;
 pub mod stale;

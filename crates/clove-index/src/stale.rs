@@ -272,13 +272,16 @@ pub fn check_staleness_fast(
 }
 
 /// Apply a [`StalenessReport`]: re-parse and upsert new/changed items, delete
-/// removed ones, all in one transaction (T-S03).
+/// removed ones, then recompute the derived graph columns — all in one
+/// transaction (T-S03; M4 P1 made the derived columns exact).
 ///
-/// Incremental sync is approximate by design: `topological_rank` is left unset
-/// for resynced items and `has_dangling_deps` is computed against the current
-/// on-disk id set. A periodic `reindex` restores exact ranks. Files that fail to
-/// parse are skipped (the malformed-skip rule) so one bad file cannot wedge the
-/// sweep.
+/// After the row writes, [`crate::derive::recompute_derived`] rebuilds the
+/// dependency graph from the index's own `items`/`edges` tables and writes back
+/// exact `topological_rank`, `has_dangling_deps`, and `excluded` values (no file
+/// re-scan). So an incremental apply now produces the **same** derived state a
+/// full `reindex` would — list ordering and cycle/dangling exclusion no longer
+/// drift between reindexes. Files that fail to parse are skipped (the
+/// malformed-skip rule) so one bad file cannot wedge the sweep.
 pub fn apply_staleness(
     conn: &mut Connection,
     report: &StalenessReport,
@@ -310,14 +313,23 @@ pub fn apply_staleness(
         let meta = RowMeta {
             file_mtime_ms: file_mtime_ms(&path)?,
             content_hash: content_hash8(&bytes),
+            // `topo_rank`/`excluded` are placeholders here; `recompute_derived`
+            // below fixes the whole graph's derived columns exactly, in this txn.
             topo_rank: None,
             has_dangling_deps,
+            excluded: false,
         };
         write_row(&tx, &item, &meta)?;
     }
     for id in &report.deleted_ids {
         delete_row(&tx, id.as_str())?;
     }
+    // Now that the items/edges reflect the change, recompute the derived graph
+    // columns (topological_rank, has_dangling_deps, excluded) exactly — from the
+    // index's own tables, no file re-scan — so incremental output matches a full
+    // reindex (M4, P1). This also fixes reverse dangling: an item that gains/loses
+    // a referenced id has its dependents' flags refreshed here.
+    crate::derive::recompute_derived(&tx)?;
     tx.commit()?;
     Ok(())
 }

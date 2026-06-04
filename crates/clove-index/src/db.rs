@@ -16,8 +16,12 @@ use thiserror::Error;
 /// an open of an older/newer database triggers a drop-and-rebuild. v2 added the
 /// `idx_items_list` covering index and the sentinel `topological_rank`. v3 added
 /// `file_mtimes.synced_at` for the M3 daemon git auto-sync re-commit guard
-/// (DESIGN §8.7); the index is a rebuildable cache, so the bump just rebuilds.
-pub const SCHEMA_VERSION: i64 = 3;
+/// (DESIGN §8.7). v4 added `items.excluded` (the persisted hard-cycle /
+/// malformed-parent exclusion flag) so the SQL `ready` query matches the
+/// in-memory `ready_items` exactly, and the incremental path now keeps
+/// `topological_rank`/`has_dangling_deps`/`excluded` exact (no longer
+/// reindex-only). The index is a rebuildable cache, so each bump just rebuilds.
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// Complete DDL for the index (DESIGN §6.1). Kept as one reviewable block.
 /// PRAGMAs that must run per-connection (not persisted) are applied separately
@@ -50,6 +54,7 @@ CREATE TABLE items (
     parent_id TEXT,
     topological_rank INTEGER,
     has_dangling_deps BOOLEAN NOT NULL DEFAULT FALSE,
+    excluded BOOLEAN NOT NULL DEFAULT FALSE,
     labels TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -515,7 +520,10 @@ mod tests {
                 |r| r.get::<_, i64>(0).map(|n| n == 1),
             )
             .unwrap();
-        assert!(has_col, "file_mtimes.synced_at must exist at schema v3");
-        assert_eq!(SCHEMA_VERSION, 3, "M3 ships index schema v3");
+        assert!(has_col, "file_mtimes.synced_at must exist at schema v3+");
+        assert_eq!(
+            SCHEMA_VERSION, 4,
+            "M4 incremental graph ships index schema v4"
+        );
     }
 }
