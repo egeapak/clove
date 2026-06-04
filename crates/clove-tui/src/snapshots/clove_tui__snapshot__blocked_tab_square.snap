@@ -38,7 +38,7 @@ expression: rendered
 │ blocked by #2                                            │
 │                                                          │
 │ ──────────────────────────────────────────────────────── │
-│                                                          │
+│ End-to-end coverage of the public API surface.           │
 │                                                          │
 │                                                          │
 │                                                          │

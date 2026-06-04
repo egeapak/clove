@@ -11,7 +11,7 @@ expression: rendered
 │                                       │                                      │                                       │
 │                                       │ Type                                 │                                       │
 │                                       │  [ ] bug                             │────────────────────────────────────── │
-│                                       │ ▌[x] feature                         │                                       │
+│                                       │ ▌[x] feature                         │lic API surface.                       │
 │                                       │  [ ] chore                           │                                       │
 │                                       │  [ ] docs                            │                                       │
 │                                       │  [ ] epic                            │                                       │

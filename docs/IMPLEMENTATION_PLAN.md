@@ -594,8 +594,8 @@ condition for M4 planning.
   + ALL-CAPS type tag + title left [truncated to fit; wraps when narrow],
   status/ready pinned top-right, with priority·assignee and a **deps count** stacked
   below it when wide — then blockers, relationships [the deps *list* lives in the
-  Dep tree tab], and a trailing horizontal rule [no body text], with a **pinned
-  footer** holding labels bottom-left and `created Jan 20 · updated Jan 24`
+  Dep tree tab], and the **Markdown-rendered body** under a plain rule, with a
+  **pinned footer** holding labels bottom-left and `created Jan 20 · updated Jan 24`
   bottom-right at day resolution; narrow panes inline these instead), **Dep tree**
   (status glyphs + titles inline,
   `[ready]`/`(cycle)` markers), and **Comments**. The body is rendered from

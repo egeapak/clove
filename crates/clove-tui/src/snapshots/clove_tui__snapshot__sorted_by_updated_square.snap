@@ -37,23 +37,23 @@ expression: rendered
 │                                                          │
 │                                                          │
 │ ──────────────────────────────────────────────────────── │
+│ Goals                                                    │
 │                                                          │
+│ Build a REST API with axum; see docs/api.md.             │
 │                                                          │
+│ • CRUD endpoints                                         │
+│ • Auth middleware                                        │
 │                                                          │
+│ Steps                                                    │
 │                                                          │
+│ 1. Define routes                                         │
+│ 2. Wire handlers                                         │
 │                                                          │
+│ │ Blocked on the schema work until it lands.             │
 │                                                          │
+│ ──────────────────────────────────────────────────────── │
 │                                                          │
-│                                                          │
-│                                                          │
-│                                                          │
-│                                                          │
-│                                                          │
-│                                                          │
-│                                                          │
-│                                                          │
-│                                                          │
-│                                                          │
+│ Done when the integration tests pass.                    │
 │                                                          │
 │                                                          │
 │                                                          │

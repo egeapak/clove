@@ -38,7 +38,7 @@ expression: rendered
 │ blocked │  [ ] p1                              │         │
 │         │  [ ] p2                              │         │
 │ ────────│  [ ] p3                              │──────── │
-│         │  [ ] p4                              │         │
+│ End-to-e│  [ ] p4                              │         │
 │         │                                      │         │
 │         │ Label                                │         │
 │         │  [ ] area:api                        │         │

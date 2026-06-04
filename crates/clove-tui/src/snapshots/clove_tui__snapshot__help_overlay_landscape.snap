@@ -12,7 +12,7 @@ expression: rendered
 │ ○ F #5 p3 Frontend dashboard ●   │ o / t / c    overview / dep tree / comments    │───────────────────────────────── │
 │ ● D #6 p4 Docs site              │ →/l  ←/h     focus detail / list (narrow)      │                                  │
 │                                  │ PgUp / PgDn  scroll detail                     │                                  │
-│                                  │ s / S        cycle sort field / direction      │                                  │
+│                                  │ s / S        cycle sort field / direction      │s/api.md.                         │
 │                                  │ f            filter menu (facets)              │                                  │
 │                                  │ x            clear all filters                 │                                  │
 │                                  │ /            search id, title, labels          │                                  │

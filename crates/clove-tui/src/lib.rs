@@ -6,9 +6,6 @@
 //! It never mutates the store; refresh (`r`) re-scans from disk.
 
 mod app;
-// Markdown body rendering — currently dormant (the Overview shows no body text);
-// kept so it can be re-enabled without re-adding the dependency.
-#[allow(dead_code)]
 mod markdown;
 mod ui;
 

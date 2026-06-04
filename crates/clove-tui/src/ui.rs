@@ -14,6 +14,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Padding, Paragraph
 use ratatui::Frame;
 
 use crate::app::{fmt_day, fmt_ts, App, Detail, DetailTab, Focus, Mode, SortField, Tab};
+use crate::markdown;
 
 // Structural chrome uses indexed grays (consistent on 256-color terminals);
 // semantic foregrounds keep named ANSI colors so they respect the user's theme.
@@ -478,12 +479,16 @@ fn overview_lines(app: &App, detail: &Detail, inner_w: u16, footer: bool) -> Vec
         lines.extend(rel);
     }
 
-    // Trailing horizontal rule (the body text is intentionally not shown here).
-    lines.push(Line::raw(""));
-    lines.push(Line::from(Span::styled(
-        "─".repeat(inner_w as usize),
-        Style::default().fg(DIM),
-    )));
+    // Body, rendered as Markdown under a plain (unlabeled) horizontal rule.
+    let body = detail.item.body.trim();
+    if !body.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            "─".repeat(inner_w as usize),
+            Style::default().fg(DIM),
+        )));
+        lines.extend(markdown::render(body, inner_w));
+    }
 
     lines
 }

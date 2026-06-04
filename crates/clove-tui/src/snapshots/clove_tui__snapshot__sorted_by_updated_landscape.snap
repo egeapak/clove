@@ -10,12 +10,12 @@ expression: rendered
 │ ○ F #3 p2 Write integration tests ✗          ││                                                                      │
 │ ● C #1 p1 Set up database schema             ││                                                                      │
 │ ● D #6 p4 Docs site                          ││ ──────────────────────────────────────────────────────────────────── │
-│ ○ E #4 p2 Ship v1 release ●                  ││                                                                      │
+│ ○ E #4 p2 Ship v1 release ●                  ││ Goals                                                                │
 │                                              ││                                                                      │
+│                                              ││ Build a REST API with axum; see docs/api.md.                         │
 │                                              ││                                                                      │
-│                                              ││                                                                      │
-│                                              ││                                                                      │
-│                                              ││                                                                      │
+│                                              ││ • CRUD endpoints                                                     │
+│                                              ││ • Auth middleware                                                    │
 │                                              ││                                                                      │
 │                                              ││ labels area:api, backend              created Jan 1 · updated Jan 20 │
 └──────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────┘
