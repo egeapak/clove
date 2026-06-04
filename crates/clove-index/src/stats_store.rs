@@ -182,14 +182,27 @@ impl Index {
 
     /// Read recorded snapshots, most recent first. `since` (an RFC3339 lower
     /// bound, inclusive) and `limit` are optional; `None`/`0` mean unbounded.
+    ///
+    /// `captured_at` is stored via [`chrono::DateTime::to_rfc3339`], which always
+    /// renders the `+00:00` UTC offset; the `WHERE captured_at >= ?` comparison is
+    /// lexicographic. So a `since` bound in any other equivalent form (e.g. the
+    /// `Z` suffix, `2026-06-03T00:00:00Z`) is first re-rendered to the same
+    /// canonical `to_rfc3339` form, so the string comparison agrees with the
+    /// instant comparison. An unparseable `since` is used verbatim (best effort).
     pub fn snapshot_history(
         &self,
         since: Option<&str>,
         limit: Option<usize>,
     ) -> Result<Vec<StatsSnapshot>, IndexError> {
         ensure_table(self.conn())?;
+        let since_canonical: Option<String> = since.map(|s| {
+            chrono::DateTime::parse_from_rfc3339(s)
+                .map(|dt| dt.with_timezone(&chrono::Utc).to_rfc3339())
+                .unwrap_or_else(|_| s.to_owned())
+        });
+
         let mut sql = String::from("SELECT captured_at, detail_json FROM snapshots");
-        if since.is_some() {
+        if since_canonical.is_some() {
             sql.push_str(" WHERE captured_at >= ?1");
         }
         sql.push_str(" ORDER BY captured_at DESC, id DESC");
@@ -202,7 +215,7 @@ impl Index {
         let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(String, String)> {
             Ok((row.get(0)?, row.get(1)?))
         };
-        let rows = match since {
+        let rows = match &since_canonical {
             Some(s) => stmt.query_map([s], map_row)?,
             None => stmt.query_map([], map_row)?,
         };
@@ -292,6 +305,18 @@ mod tests {
             .snapshot_history(Some("2026-06-02T00:00:00+00:00"), None)
             .unwrap();
         assert_eq!(since.len(), 2);
+
+        // A `Z`-suffixed bound is equivalent to the stored `+00:00` form and must
+        // include the boundary snapshot (regression: naive lexicographic compare
+        // would drop it because '+' < 'Z').
+        let since_z = index
+            .snapshot_history(Some("2026-06-02T00:00:00Z"), None)
+            .unwrap();
+        assert_eq!(
+            since_z.len(),
+            2,
+            "Z-form --since must match the +00:00 store"
+        );
 
         let limited = index.snapshot_history(None, Some(1)).unwrap();
         assert_eq!(limited.len(), 1);

@@ -359,7 +359,7 @@ pub struct StatsArgs {
     /// Skip the per-epic completion rollup.
     #[arg(long)]
     pub no_epics: bool,
-    /// Persist this report to the durable history store (`.clove/stats.db`).
+    /// Persist this report to the durable history in the index (`.clove/index.db`).
     #[arg(long)]
     pub snapshot: bool,
     /// Show the recorded snapshot history instead of a live report.

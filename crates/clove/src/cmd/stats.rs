@@ -293,6 +293,6 @@ fn render_human(report: &StatsReport, daemon: &Value, index: &Value, snapshotted
     }
 
     if snapshotted {
-        println!("\nsnapshot recorded to .clove/stats.db");
+        println!("\nsnapshot recorded to the index history (.clove/index.db)");
     }
 }
