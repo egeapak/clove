@@ -13,7 +13,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Padding, Paragraph, Tabs, Wrap};
 use ratatui::Frame;
 
-use crate::app::{fmt_ts, App, Detail, DetailTab, Focus, Mode, Tab};
+use crate::app::{fmt_relative, fmt_ts, App, Detail, DetailTab, Focus, Mode, Tab};
+use crate::markdown;
 
 // Structural chrome uses indexed grays (consistent on 256-color terminals);
 // semantic foregrounds keep named ANSI colors so they respect the user's theme.
@@ -253,7 +254,7 @@ fn render_detail(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let lines = match app.detail_tab {
-        DetailTab::Overview => overview_lines(app, detail, inner_w),
+        DetailTab::Overview => overview_lines(app, detail, inner_w, app.now),
         DetailTab::Tree => tree_lines(detail),
         DetailTab::Comments => comment_lines(detail),
     };
@@ -287,7 +288,12 @@ fn detail_title(app: &App) -> Line<'static> {
 
 /// The overview, ordered for triage: identity → decision block (status, ready,
 /// blockers, priority, assignee) → metadata → relationships → body.
-fn overview_lines(app: &App, detail: &Detail, inner_w: u16) -> Vec<Line<'static>> {
+fn overview_lines(
+    app: &App,
+    detail: &Detail,
+    inner_w: u16,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<Line<'static>> {
     let fm = &detail.item.frontmatter;
     let mut lines = Vec::new();
 
@@ -369,10 +375,10 @@ fn overview_lines(app: &App, detail: &Detail, inner_w: u16) -> Vec<Line<'static>
     if !fm.labels.is_empty() {
         lines.push(kv("labels", &fm.labels.join(", ")));
     }
-    lines.push(kv("created", &fmt_ts(fm.created)));
-    lines.push(kv("updated", &fmt_ts(fm.updated)));
+    lines.push(time_field("created", fm.created, now));
+    lines.push(time_field("updated", fm.updated, now));
     if let Some(c) = fm.closed {
-        lines.push(kv("closed", &fmt_ts(c)));
+        lines.push(time_field("closed", c, now));
     }
 
     // Relationships.
@@ -387,7 +393,7 @@ fn overview_lines(app: &App, detail: &Detail, inner_w: u16) -> Vec<Line<'static>
         lines.extend(rel);
     }
 
-    // Body.
+    // Body, rendered as Markdown.
     let body = detail.item.body.trim();
     if !body.is_empty() {
         lines.push(Line::raw(""));
@@ -395,12 +401,28 @@ fn overview_lines(app: &App, detail: &Detail, inner_w: u16) -> Vec<Line<'static>
             divider("body", inner_w),
             Style::default().fg(DIM),
         )));
-        for raw in body.lines() {
-            lines.push(body_line(raw));
-        }
+        lines.extend(markdown::render(body, inner_w));
     }
 
     lines
+}
+
+/// A timestamp field showing the absolute time plus a dim relative delta.
+fn time_field(
+    key: &str,
+    ts: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Line<'static> {
+    field_line(
+        key,
+        vec![
+            Span::raw(fmt_ts(ts)),
+            Span::styled(
+                format!("  ({})", fmt_relative(now, ts)),
+                Style::default().fg(DIM),
+            ),
+        ],
+    )
 }
 
 /// The dependency tree, rendered with status glyphs + titles inline (children
@@ -649,28 +671,6 @@ fn divider(label: &str, inner_w: u16) -> String {
     let head = format!("── {label} ");
     let fill = w.saturating_sub(head.chars().count());
     format!("{head}{}", "─".repeat(fill))
-}
-
-/// Lightly style a body line: `#` headings accented, `- `/`* ` bullets dimmed.
-fn body_line(raw: &str) -> Line<'static> {
-    let trimmed = raw.trim_start();
-    if trimmed.starts_with('#') {
-        Line::from(Span::styled(
-            raw.to_string(),
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ))
-    } else if let Some(rest) = trimmed
-        .strip_prefix("- ")
-        .or_else(|| trimmed.strip_prefix("* "))
-    {
-        let indent = &raw[..raw.len() - trimmed.len()];
-        Line::from(vec![
-            Span::styled(format!("{indent}• "), Style::default().fg(DIM)),
-            Span::raw(rest.to_string()),
-        ])
-    } else {
-        Line::raw(raw.to_string())
-    }
 }
 
 fn status_glyph(s: ItemStatus) -> &'static str {

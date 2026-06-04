@@ -34,8 +34,9 @@ the file-store scan path so it is always correct and never touches the index or
 daemon). Master-detail UI: **All / Ready / Blocked** tabs with live counts, an
 item list sorted like `ls`, and a detail pane with **Overview / Dep tree /
 Comments** sub-views (dep tree shows status glyphs + titles inline; overview is
-triage-ordered); substring search (`/`), refresh (`r`), help overlay (`?`), and
-pane-focus keys. The layout is **adaptive** (`ui::pick_layout`): side-by-side
+triage-ordered, renders the **Markdown body** via `pulldown-cmark` and shows
+**relative timestamps** alongside absolute); substring search (`/`), refresh
+(`r`), help overlay (`?`), and pane-focus keys. The layout is **adaptive** (`ui::pick_layout`): side-by-side
 (≥80 cols) / stacked (50–79 & tall) / single focused pane (narrow or short), with
 width-aware list columns, a compact tab bar below 20 rows, full-screen overlays
 on small terminals, and a too-small guard. Design directions came from a

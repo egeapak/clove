@@ -590,9 +590,15 @@ condition for M4 planning.
   Blocked** (with live counts), an item list (status glyph, id, priority, type,
   title, ready/blocked badge, sorted by `(priority, topo rank, id)` like `ls`), and
   a detail pane with three sub-views: **Overview** (triage-ordered: identity →
-  decision block [status/ready/blockers/priority/assignee] → metadata →
-  relationships → lightly-styled body), **Dep tree** (status glyphs + titles inline,
-  `[ready]`/`(cycle)` markers), and **Comments**. Substring search (`/`) over
+  decision block [status/ready/blockers/priority/assignee] → metadata with
+  **relative timestamps** ["3d ago"] alongside absolute → relationships →
+  **Markdown-rendered body**), **Dep tree** (status glyphs + titles inline,
+  `[ready]`/`(cycle)` markers), and **Comments**. The body is rendered from
+  CommonMark via `pulldown-cmark` (`markdown.rs`): headings, emphasis/strong/
+  strikethrough, inline + fenced code, bullet/ordered/nested lists, block quotes,
+  rules, and task-list markers; paragraphs reflow under the pane's word wrap.
+  Relative times use an injectable `App::now` (refreshed with the data; pinned by
+  tests for deterministic snapshots). Substring search (`/`) over
   id/title/labels; `r` re-scans from disk; `?` help overlay. Keys: `j/k`+arrows,
   `g/G`, Tab/`1`/`2`/`3`, `o`/`t`/`c`, `←/h`·`→/l`·Enter (pane focus), PgUp/PgDn,
   `/`, `r`, `?`, `q`/Esc/Ctrl-C. **Adaptive layout** (`ui::pick_layout`): side-by-side
@@ -626,8 +632,8 @@ condition for M4 planning.
   `all_cycles()`, `dangling_ids()`, malformed parents, invalid priorities — items
   currently *excluded* from both Ready and Blocked and thus invisible); (5) an
   **Excluded/attention** tab (or fold into Problems) to complete the
-  ready∪blocked∪closed partition; (6) relative timestamps and richer Markdown body
-  rendering.
+  ready∪blocked∪closed partition. *(Relative timestamps + Markdown body rendering —
+  was item 6 — landed in T-U01.)*
 - **`clove stats` — work-item analytics command** *(deferred here by the M3_PLAN.md §1.1
   CLI-surface review)*. A user-facing aggregate/statistics view: counts by status / type /
   priority / assignee, ready / blocked / closed totals, open-cycle count, epic completion

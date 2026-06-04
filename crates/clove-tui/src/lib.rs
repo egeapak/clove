@@ -6,6 +6,7 @@
 //! It never mutates the store; refresh (`r`) re-scans from disk.
 
 mod app;
+mod markdown;
 mod ui;
 
 #[cfg(test)]

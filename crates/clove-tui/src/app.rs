@@ -117,6 +117,9 @@ pub struct App {
     pub show_help: bool,
     pub status: String,
     pub should_quit: bool,
+    /// Reference instant for relative timestamps; refreshed with the data so
+    /// "3d ago" stays current (and pinned by tests for deterministic snapshots).
+    pub now: chrono::DateTime<Utc>,
 }
 
 impl App {
@@ -141,6 +144,7 @@ impl App {
             show_help: false,
             status: String::new(),
             should_quit: false,
+            now: Utc::now(),
         };
         app.refresh();
         app
@@ -149,6 +153,7 @@ impl App {
     /// Re-scan the store and rebuild all derived state, preserving the selected
     /// item where possible.
     pub fn refresh(&mut self) {
+        self.now = Utc::now();
         let selected_id = self.selected_id();
 
         let (mut frontmatters, errors) = match self.store.scan_frontmatter() {
@@ -453,6 +458,34 @@ impl App {
 /// Format a UTC timestamp for display (date + minute precision, local-agnostic).
 pub fn fmt_ts(ts: chrono::DateTime<Utc>) -> String {
     ts.format("%Y-%m-%d %H:%M UTC").to_string()
+}
+
+/// A compact human-relative delta from `now` to `ts`, e.g. `3d ago`, `in 2h`,
+/// or `just now`. Coarse buckets (no calendar arithmetic) keep it predictable.
+pub fn fmt_relative(now: chrono::DateTime<Utc>, ts: chrono::DateTime<Utc>) -> String {
+    let secs = (now - ts).num_seconds();
+    let future = secs < 0;
+    let s = secs.unsigned_abs();
+    let mag = if s < 45 {
+        return "just now".to_owned();
+    } else if s < 3600 {
+        format!("{}m", s / 60)
+    } else if s < 86_400 {
+        format!("{}h", s / 3600)
+    } else if s < 7 * 86_400 {
+        format!("{}d", s / 86_400)
+    } else if s < 60 * 86_400 {
+        format!("{}w", s / (7 * 86_400))
+    } else if s < 365 * 86_400 {
+        format!("{}mo", s / (30 * 86_400))
+    } else {
+        format!("{}y", s / (365 * 86_400))
+    };
+    if future {
+        format!("in {mag}")
+    } else {
+        format!("{mag} ago")
+    }
 }
 
 #[cfg(test)]

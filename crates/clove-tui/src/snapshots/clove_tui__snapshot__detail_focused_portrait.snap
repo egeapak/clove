@@ -15,34 +15,34 @@ expression: rendered
 │                                      │
 │ type       feature                   │
 │ labels     area:api, backend         │
-│ created    2026-01-01 09:00 UTC      │
-│ updated    2026-01-03 11:30 UTC      │
+│ created    2026-01-01 09:00 UTC  (6w │
+│ ago)                                 │
+│ updated    2026-01-03 11:30 UTC  (6w │
+│ ago)                                 │
 │                                      │
 │ deps       proj-00000001             │
 │                                      │
 │ ── body ──────────────────────────── │
-│ ## Goals                             │
+│ Goals                                │
+│                                      │
+│ Build a REST API with axum; see      │
+│ docs/api.md.                         │
+│                                      │
 │ • CRUD endpoints                     │
 │ • Auth middleware                    │
 │                                      │
-│ Builds on the schema work.           │
+│ Steps                                │
 │                                      │
+│ 1. Define routes                     │
+│ 2. Wire handlers                     │
 │                                      │
+│ │ Blocked on the schema work until   │
+│ it lands.                            │
 │                                      │
+│ ──────────────────────────────────── │
 │                                      │
-│                                      │
-│                                      │
-│                                      │
-│                                      │
-│                                      │
-│                                      │
-│                                      │
-│                                      │
-│                                      │
-│                                      │
-│                                      │
-│                                      │
-│                                      │
+│ Done when the integration tests      │
+│ pass.                                │
 │                                      │
 │                                      │
 │                                      │

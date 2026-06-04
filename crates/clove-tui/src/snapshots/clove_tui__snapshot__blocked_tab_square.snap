@@ -40,8 +40,8 @@ expression: rendered
 │                                                          │
 │ type       feature                                       │
 │ labels     area:qa                                       │
-│ created    2026-01-01 09:00 UTC                          │
-│ updated    2026-01-03 11:30 UTC                          │
+│ created    2026-01-01 09:00 UTC  (6w ago)                │
+│ updated    2026-01-03 11:30 UTC  (6w ago)                │
 │                                                          │
 │ deps       proj-00000002                                 │
 │                                                          │

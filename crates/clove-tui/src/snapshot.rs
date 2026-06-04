@@ -24,6 +24,9 @@ const SHAPES: [(&str, u16, u16); 3] = [
     ("square", 60, 60),
 ];
 
+/// Fixed "now" so relative timestamps are deterministic in snapshots.
+const NOW: &str = "2026-02-15T12:00:00Z";
+
 fn ts(s: &str) -> DateTime<Utc> {
     s.parse().expect("valid RFC3339")
 }
@@ -114,7 +117,7 @@ fn fixture() -> (tempfile::TempDir, ItemStore) {
         &["area:api", "backend"],
         &["proj-00000001"],
         &[],
-        "## Goals\n- CRUD endpoints\n- Auth middleware\n\nBuilds on the schema work.",
+        "## Goals\n\nBuild a **REST API** with `axum`; see `docs/api.md`.\n\n- CRUD endpoints\n- Auth middleware\n\n### Steps\n\n1. Define routes\n2. Wire handlers\n\n> Blocked on the schema work until it lands.\n\n---\n\nDone when the integration tests pass.",
     );
     put(
         &store,
@@ -219,7 +222,9 @@ fn app() -> App {
     // Keep the temp dir alive for the lifetime of the app by leaking it; the
     // process is a short-lived test binary.
     std::mem::forget(dir);
-    App::new(store)
+    let mut app = App::new(store);
+    app.now = ts(NOW); // pin relative timestamps
+    app
 }
 
 /// Flatten the rendered terminal buffer to a trimmed text grid.
@@ -310,5 +315,6 @@ fn empty_repo() {
     let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
     std::fs::create_dir_all(root.join(".clove").join("issues")).unwrap();
     let mut app = App::new(ItemStore::new(root));
+    app.now = ts(NOW);
     snap("empty_repo", &mut app);
 }

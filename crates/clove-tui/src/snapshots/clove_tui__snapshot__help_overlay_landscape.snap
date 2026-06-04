@@ -13,8 +13,8 @@ expression: rendered
 │ ● proj-00000006 p4 Docs site     │ →/l  ←/h     focus detail / list (narrow)      │                                  │
 │                                  │ PgUp / PgDn  scroll detail                     │                                  │
 │                                  │ /            search id, title, labels          │                                  │
-│                                  │ Esc          clear search / back / close       │                                  │
-│                                  │ r            refresh from disk                 │                                  │
+│                                  │ Esc          clear search / back / close       │w ago)                            │
+│                                  │ r            refresh from disk                 │w ago)                            │
 │                                  │ ?            toggle this help                  │                                  │
 │                                  │ q            quit                              │                                  │
 │                                  └────────────────────────────────────────────────┘                                  │

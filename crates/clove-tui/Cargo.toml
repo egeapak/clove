@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 clove-core.workspace = true
 ratatui.workspace = true        # terminal UI; re-exports crossterm at `ratatui::crossterm`
+pulldown-cmark.workspace = true # Markdown body rendering in the detail pane
 anyhow.workspace = true
 camino.workspace = true
 chrono.workspace = true
