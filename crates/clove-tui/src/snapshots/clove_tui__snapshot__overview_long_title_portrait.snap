@@ -12,15 +12,15 @@ expression: rendered
 │ backoff                              │
 │                                      │
 │ status     ◐ in_progress · ready     │
-│ priority   p0                        │
+│ priority   p0 · @ada                 │
 │ deps       1                         │
-│ assignee   ada                       │
 │ labels     area:sync, backend        │
 │ created    Jan 1                     │
 │ updated    Jan 20                    │
 │                                      │
 │ parent     #1                        │
 │ relates    #1                        │
+│                                      │
 │                                      │
 │                                      │
 │                                      │

@@ -383,9 +383,9 @@ fn mk_store() -> (tempfile::TempDir, ItemStore) {
 }
 
 /// A focused fixture: a dependency target plus a feature item (`#2`, priority 0
-/// so it's selected first) with the given title and labels. When `blocked`, the
-/// dep target is open so the item shows a blocker.
-fn edge_app(title: &str, labels: &[&str], blocked: bool) -> App {
+/// so it's selected first) with the given title, labels, and body. When
+/// `blocked`, the dep target is open so the item shows a blocker.
+fn edge_app(title: &str, labels: &[&str], blocked: bool, body: &str) -> App {
     let (dir, store) = mk_store();
     let (dep_status, dep_closed) = if blocked {
         (ItemStatus::Open, None)
@@ -398,7 +398,7 @@ fn edge_app(title: &str, labels: &[&str], blocked: bool) -> App {
     #[rustfmt::skip]
     put(&store, "proj-00000002", title, ItemType::Feature, 0,
         ItemStatus::InProgress, None, Some("ada"), Some("proj-00000001"),
-        labels, &["proj-00000001"], &["proj-00000001"], "");
+        labels, &["proj-00000001"], &["proj-00000001"], body);
     std::mem::forget(dir);
     App::new(store)
 }
@@ -418,11 +418,13 @@ const MANY_LABELS: &[&str] = &[
     "flaky",
 ];
 
+const SCROLL_BODY: &str = "## Overview\n\nA longer body so the detail scrolls.\n\n- point one\n- point two\n- point three\n\n## Details\n\nMore text to fill vertical space and exercise the scroll offset while the fixed header and pinned footer stay put.\n\n## Notes\n\nThe final paragraph.";
+
 #[test]
 fn overview_long_title() {
     // Wide: title truncated to fit beside the status. Narrow (focused portrait):
     // title wraps to multiple lines.
-    let mut app = edge_app(LONG_TITLE, &["area:sync", "backend"], false);
+    let mut app = edge_app(LONG_TITLE, &["area:sync", "backend"], false, "");
     app.focus_detail();
     snap("overview_long_title", &mut app);
 }
@@ -431,18 +433,18 @@ fn overview_long_title() {
 fn overview_long_labels() {
     // Wide: footer labels truncate with `+N`. Narrow (focused portrait): inline
     // labels wrap.
-    let mut app = edge_app("Short title", MANY_LABELS, false);
+    let mut app = edge_app("Short title", MANY_LABELS, false, "");
     app.focus_detail();
     snap("overview_long_labels", &mut app);
 }
 
 #[test]
 fn overview_scroll() {
-    // Scrolled detail: the body region scrolls while (wide) the pinned footer
-    // stays put; (narrow) the inline content scrolls with no footer.
-    let mut app = edge_app(LONG_TITLE, MANY_LABELS, true);
-    app.detail_scroll = 4;
-    let wide = render_to_string(&mut app, 120, 14);
+    // Scrolled detail: the body region scrolls while the wide layout's fixed
+    // header and pinned footer stay put; narrow scrolls everything (no footer).
+    let mut app = edge_app(LONG_TITLE, MANY_LABELS, true, SCROLL_BODY);
+    app.detail_scroll = 6;
+    let wide = render_to_string(&mut app, 120, 24);
     insta::assert_snapshot!("overview_scroll_wide", wide);
 
     app.detail_scroll = 3;

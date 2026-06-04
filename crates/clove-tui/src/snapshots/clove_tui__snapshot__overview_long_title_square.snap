@@ -32,10 +32,9 @@ expression: rendered
 └──────────────────────────────────────────────────────────┘
 ┌ Overview · Dep tree · Comments ──────────────────────────┐
 │ #2  FEATURE  Implement end-to-en…  ◐ in_progress · ready │
-│                                                p0 · @ada │
-│                                                   deps 1 │
-│                                                          │
-│                                                          │
+│ p0 · @ada                                                │
+│ deps 1                                                   │
+│──────────────────────────────────────────────────────────│
 │ parent     #1                                            │
 │ relates    #1                                            │
 │                                                          │
@@ -59,6 +58,7 @@ expression: rendered
 │                                                          │
 │                                                          │
 │                                                          │
+│──────────────────────────────────────────────────────────│
 │ labels area:sync +1       created Jan 1 · updated Jan 20 │
 └──────────────────────────────────────────────────────────┘
 2 item(s) loaded   ?: help · q: quit

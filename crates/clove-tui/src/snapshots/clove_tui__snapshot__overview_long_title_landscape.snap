@@ -5,10 +5,9 @@ expression: rendered
   All 2  │  Ready 1  │  Blocked 0
 ┌ Items (2) ───────────────────────────────────┐┌ Overview · Dep tree · Comments ──────────────────────────────────────┐
 │▌◐ F #2 p0 Implement end-to-end offline sync… ││ #2  FEATURE  Implement end-to-end offline sy…  ◐ in_progress · ready │
-│ ● C #1 p2 Dependency target                  ││                                                            p0 · @ada │
-│                                              ││                                                               deps 1 │
-│                                              ││                                                                      │
-│                                              ││                                                                      │
+│ ● C #1 p2 Dependency target                  ││ p0 · @ada                                                            │
+│                                              ││ deps 1                                                               │
+│                                              ││──────────────────────────────────────────────────────────────────────│
 │                                              ││ parent     #1                                                        │
 │                                              ││ relates    #1                                                        │
 │                                              ││                                                                      │
@@ -17,6 +16,7 @@ expression: rendered
 │                                              ││                                                                      │
 │                                              ││                                                                      │
 │                                              ││                                                                      │
+│                                              ││──────────────────────────────────────────────────────────────────────│
 │                                              ││ labels area:sync, backend             created Jan 1 · updated Jan 20 │
 └──────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────┘
 2 item(s) loaded   ?: help · q: quit

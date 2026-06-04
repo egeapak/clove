@@ -32,12 +32,10 @@ expression: rendered
 └──────────────────────────────────────────────────────────┘
 ┌ Overview · Dep tree · Comments ──────────────────────────┐
 │ #3  FEATURE  Write integration tests    ○ open · blocked │
-│                                                       p2 │
-│                                                   deps 1 │
-│                                                          │
+│ p2                                                       │
+│ deps 1                                                   │
 │ blocked by #2                                            │
-│                                                          │
-│ ──────────────────────────────────────────────────────── │
+│──────────────────────────────────────────────────────────│
 │ End-to-end coverage of the public API surface.           │
 │                                                          │
 │                                                          │
@@ -59,6 +57,8 @@ expression: rendered
 │                                                          │
 │                                                          │
 │                                                          │
+│                                                          │
+│──────────────────────────────────────────────────────────│
 │ labels area:qa            created Jan 1 · updated Jan 12 │
 └──────────────────────────────────────────────────────────┘
 7 item(s) loaded   ?: help · q: quit

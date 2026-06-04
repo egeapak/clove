@@ -590,14 +590,13 @@ condition for M4 planning.
   Blocked** (with live counts), an item list (status glyph, single-letter type
   icon, **short id** [prefix dropped, leading zeros trimmed, e.g. `#42`], priority,
   title, ready/blocked badge, sorted by `(priority, topo rank, id)` like `ls`), and
-  a detail pane with three sub-views: **Overview** (a full-width header — short id
-  + ALL-CAPS type tag + title left [truncated to fit; wraps when narrow],
-  status/ready pinned top-right, with priority·assignee and a **deps count** stacked
-  below it when wide — then blockers, relationships [the deps *list* lives in the
-  Dep tree tab], and the **Markdown-rendered body** under a plain rule, with a
-  **pinned footer** holding labels bottom-left and `created Jan 20 · updated Jan 24`
-  bottom-right at day resolution; narrow panes inline these instead), **Dep tree**
-  (status glyphs + titles inline,
+  a detail pane with three sub-views: **Overview** (wide: a **fixed, shrink-to-fit
+  header** [short id + ALL-CAPS type tag + truncated title, status top-right,
+  priority·assignee and a **deps count** on the left], an **edge-to-edge rule**, a
+  **scrolling Markdown body**, another edge-to-edge rule, and a **sticky footer**
+  [labels left, `created Jan 20 · updated Jan 24` right at day resolution]; narrow:
+  one scrolling paragraph with the title wrapping and labels/dates inline; the deps
+  *list* lives in the Dep tree tab), **Dep tree** (status glyphs + titles inline,
   `[ready]`/`(cycle)` markers), and **Comments**. The body is rendered from
   CommonMark via `pulldown-cmark` (`markdown.rs`): headings, emphasis/strong/
   strikethrough, inline + fenced code, bullet/ordered/nested lists, block quotes,

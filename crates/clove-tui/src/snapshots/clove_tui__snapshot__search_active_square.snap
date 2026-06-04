@@ -32,11 +32,9 @@ expression: rendered
 └──────────────────────────────────────────────────────────┘
 ┌ Overview · Dep tree · Comments ──────────────────────────┐
 │ #2  FEATURE  Build REST API        ◐ in_progress · ready │
-│                                              p0 · @grace │
-│                                                   deps 1 │
-│                                                          │
-│                                                          │
-│ ──────────────────────────────────────────────────────── │
+│ p0 · @grace                                              │
+│ deps 1                                                   │
+│──────────────────────────────────────────────────────────│
 │ Goals                                                    │
 │                                                          │
 │ Build a REST API with axum; see docs/api.md.             │
@@ -59,6 +57,8 @@ expression: rendered
 │                                                          │
 │                                                          │
 │                                                          │
+│                                                          │
+│──────────────────────────────────────────────────────────│
 │ labels area:api, backend  created Jan 1 · updated Jan 20 │
 └──────────────────────────────────────────────────────────┘
 /api▏   (Enter: keep · Esc: clear)

@@ -32,17 +32,15 @@ expression: rendered
 └────│ o / t / c    overview / dep tree / comments    │────┘
 ┌ Ove│ →/l  ←/h     focus detail / list (narrow)      │────┐
 │ #2 │ PgUp / PgDn  scroll detail                     │ady │
-│    │ s / S        cycle sort field / direction      │ace │
-│    │ f            filter menu (facets)              │s 1 │
-│    │ x            clear all filters                 │    │
-│    │ /            search id, title, labels          │    │
-│ ───│ Esc          clear search / back / close       │─── │
-│ Goa│ r            refresh from disk                 │    │
+│ p0 │ s / S        cycle sort field / direction      │    │
+│ dep│ f            filter menu (facets)              │    │
+│────│ x            clear all filters                 │────│
+│ Goa│ /            search id, title, labels          │    │
+│    │ Esc          clear search / back / close       │    │
+│ Bui│ r            refresh from disk                 │    │
 │    │ ?            toggle this help                  │    │
-│ Bui│ q            quit                              │    │
-│    └────────────────────────────────────────────────┘    │
-│ • CRUD endpoints                                         │
-│ • Auth middleware                                        │
+│ • C│ q            quit                              │    │
+│ • A└────────────────────────────────────────────────┘    │
 │                                                          │
 │ Steps                                                    │
 │                                                          │
@@ -59,6 +57,8 @@ expression: rendered
 │                                                          │
 │                                                          │
 │                                                          │
+│                                                          │
+│──────────────────────────────────────────────────────────│
 │ labels area:api, backend  created Jan 1 · updated Jan 20 │
 └──────────────────────────────────────────────────────────┘
 7 item(s) loaded   ?: help · q: quit

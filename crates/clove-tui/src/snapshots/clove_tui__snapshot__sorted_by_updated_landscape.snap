@@ -5,18 +5,18 @@ expression: rendered
   All 7  │  Ready 4  │  Blocked 1
 ┌ Items (7) ───────────────────────────────────┐┌ Overview · Dep tree · Comments ──────────────────────────────────────┐
 │ ○ B #7 p1 Investigate flaky CI ●             ││ #2  FEATURE  Build REST API                    ◐ in_progress · ready │
-│▌◐ F #2 p0 Build REST API ●                   ││                                                          p0 · @grace │
-│ ○ F #5 p3 Frontend dashboard ●               ││                                                               deps 1 │
-│ ○ F #3 p2 Write integration tests ✗          ││                                                                      │
-│ ● C #1 p1 Set up database schema             ││                                                                      │
-│ ● D #6 p4 Docs site                          ││ ──────────────────────────────────────────────────────────────────── │
-│ ○ E #4 p2 Ship v1 release ●                  ││ Goals                                                                │
-│                                              ││                                                                      │
-│                                              ││ Build a REST API with axum; see docs/api.md.                         │
+│▌◐ F #2 p0 Build REST API ●                   ││ p0 · @grace                                                          │
+│ ○ F #5 p3 Frontend dashboard ●               ││ deps 1                                                               │
+│ ○ F #3 p2 Write integration tests ✗          ││──────────────────────────────────────────────────────────────────────│
+│ ● C #1 p1 Set up database schema             ││ Goals                                                                │
+│ ● D #6 p4 Docs site                          ││                                                                      │
+│ ○ E #4 p2 Ship v1 release ●                  ││ Build a REST API with axum; see docs/api.md.                         │
 │                                              ││                                                                      │
 │                                              ││ • CRUD endpoints                                                     │
 │                                              ││ • Auth middleware                                                    │
 │                                              ││                                                                      │
+│                                              ││ Steps                                                                │
+│                                              ││──────────────────────────────────────────────────────────────────────│
 │                                              ││ labels area:api, backend              created Jan 1 · updated Jan 20 │
 └──────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────┘
 sort:updated↓  7 item(s) loaded   ?: help · q: quit

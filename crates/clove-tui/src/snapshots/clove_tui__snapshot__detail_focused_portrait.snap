@@ -9,9 +9,8 @@ expression: rendered
 │ #2  FEATURE  Build REST API          │
 │                                      │
 │ status     ◐ in_progress · ready     │
-│ priority   p0                        │
+│ priority   p0 · @grace               │
 │ deps       1                         │
-│ assignee   grace                     │
 │ labels     area:api, backend         │
 │ created    Jan 1                     │
 │ updated    Jan 20                    │
@@ -37,6 +36,7 @@ expression: rendered
 │                                      │
 │ Done when the integration tests      │
 │ pass.                                │
+│                                      │
 │                                      │
 │                                      │
 │                                      │
