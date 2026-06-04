@@ -207,3 +207,68 @@ fn tree_shape(out: &[u8]) -> String {
         .collect();
     format!("{root}:{}", kids.join(","))
 }
+
+fn sigkill(pid: u32) {
+    unsafe {
+        libc_kill(pid as i32, 9);
+    }
+}
+
+/// If the daemon crashes mid-session, the next routed read must transparently
+/// fall back to the local path with identical results, cleaning up the corpse
+/// socket on the way (DESIGN §8.3).
+#[test]
+fn routed_reads_fall_back_after_daemon_crash() {
+    let Some(bin) = cloved_bin() else {
+        eprintln!("skipping: cloved binary not built (run via `cargo test --workspace`)");
+        return;
+    };
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    assert!(run_in(root, &["init"]).status.success());
+    let a = new_id(&run_in(root, &["new", "alpha apple", "-f", "json"]).stdout);
+    let b = new_id(&run_in(root, &["new", "beta", "-f", "json"]).stdout);
+    assert!(run_in(root, &["dep", "add", &a, &b]).status.success());
+    assert!(run_in(root, &["reindex"]).status.success());
+
+    let mut want_blocked = list_ids(&run_in(root, &["--no-index", "blocked", "-f", "json"]).stdout);
+    want_blocked.sort();
+
+    let clove_dir = root.join(".clove");
+    let daemon = spawn_daemon(&clove_dir, &bin);
+
+    // Confirm it routes while alive.
+    let (_, src) = ids_and_source(&run_in(root, &["blocked", "-f", "json"]).stdout);
+    assert_eq!(src, "daemon", "blocked routes while the daemon is alive");
+
+    // Hard-kill (no clean shutdown → corpse socket/pid left behind).
+    sigkill(daemon.id());
+    let mut daemon = daemon;
+    let _ = daemon.wait();
+    assert!(
+        clove_dir.join("daemon.sock").exists(),
+        "corpse socket remains"
+    );
+
+    // Next routed reads fall back, return identical results, and clean up.
+    let (mut blocked_ids, blocked_src) =
+        ids_and_source(&run_in(root, &["blocked", "-f", "json"]).stdout);
+    assert_ne!(blocked_src, "daemon", "fell back to the local path");
+    blocked_ids.sort();
+    assert_eq!(
+        blocked_ids, want_blocked,
+        "fallback blocked set is identical"
+    );
+
+    let (search_ids, search_src) =
+        ids_and_source(&run_in(root, &["search", "apple", "-f", "json"]).stdout);
+    assert_ne!(search_src, "daemon", "search fell back");
+    assert_eq!(search_ids, vec![a], "fallback search is correct");
+
+    assert!(
+        !clove_dir.join("daemon.sock").exists(),
+        "corpse socket cleaned by the liveness probe"
+    );
+    assert!(!clove_dir.join("daemon.pid").exists(), "corpse pid cleaned");
+}

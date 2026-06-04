@@ -157,3 +157,63 @@ fn start_status_stop_round_trip() {
         .clone();
     assert_eq!(json(&out)["data"]["running"], serde_json::json!(false));
 }
+
+fn daemon_status(dir: &Path) -> serde_json::Value {
+    json(
+        &clove(dir)
+            .args(["daemon", "status", "-f", "json"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+}
+
+/// The daemon is per-project (one per `.clove/` dir), not system-wide: two repos
+/// each run their own daemon on their own socket, serving their own data, and
+/// stopping one does not touch the other.
+#[test]
+fn daemons_are_per_project_and_independent() {
+    if !cloved_built() {
+        eprintln!("skipping: cloved not built (run via `cargo test --workspace`)");
+        return;
+    }
+    let t1 = tempfile::tempdir().unwrap();
+    let t2 = tempfile::tempdir().unwrap();
+    let (d1, d2) = (t1.path(), t2.path());
+    init(d1);
+    init(d2);
+    clove(d1).args(["new", "only-one"]).assert().success();
+    clove(d2).args(["new", "a"]).assert().success();
+    clove(d2).args(["new", "b"]).assert().success();
+
+    // A daemon in each project.
+    clove(d1).args(["daemon", "start"]).assert().success();
+    clove(d2).args(["daemon", "start"]).assert().success();
+
+    // Each serves its OWN data from its OWN socket (distinct item counts).
+    let s1 = daemon_status(d1);
+    let s2 = daemon_status(d2);
+    assert_eq!(s1["data"]["running"], serde_json::json!(true));
+    assert_eq!(s1["data"]["items_indexed"], serde_json::json!(1));
+    assert_eq!(s2["data"]["running"], serde_json::json!(true));
+    assert_eq!(s2["data"]["items_indexed"], serde_json::json!(2));
+    assert!(d1.join(".clove/daemon.sock").exists());
+    assert!(d2.join(".clove/daemon.sock").exists());
+
+    // Stopping one leaves the other running (isolation).
+    clove(d1).args(["daemon", "stop"]).assert().success();
+    assert_eq!(
+        daemon_status(d1)["data"]["running"],
+        serde_json::json!(false)
+    );
+    assert_eq!(
+        daemon_status(d2)["data"]["running"],
+        serde_json::json!(true)
+    );
+
+    clove(d2).args(["daemon", "stop"]).assert().success();
+    assert_eq!(
+        daemon_status(d2)["data"]["running"],
+        serde_json::json!(false)
+    );
+}
