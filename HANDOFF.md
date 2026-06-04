@@ -42,8 +42,13 @@ facet filter menu (status/assignee single, type/priority multi-OR, labels
 multi-AND, over values present in the repo), AND-composed with search and tabs,
 `x` clears, with status-line chips, an `Items (N/M)` count, and an empty-result
 escape hatch. Filters/sort persist across tab-switch and refresh; selection is
-preserved by id. `clove-tui` has 24 tests (data-layer + a `TestBackend` smoke
-test + insta render snapshots of 12 states × 3 terminal shapes). The layout is **adaptive** (`ui::pick_layout`): side-by-side
+preserved by id. The Overview detail uses a full-width header (type icon + title
+left, status/ready top-right, type·priority·assignee right) and the list shows a
+single-letter colour-coded type icon. `clove-tui` has 24 tests (data-layer + a
+`TestBackend` smoke test + insta render snapshots of 12 states × 3 terminal
+shapes), plus an `#[ignore]`d `generate_screenshots` PNG tool (DejaVu Sans Mono;
+output gitignored under `docs/screenshots/`). The layout is **adaptive**
+(`ui::pick_layout`): side-by-side
 (≥80 cols) / stacked (50–79 & tall) / single focused pane (narrow or short), with
 width-aware list columns, a compact tab bar below 20 rows, full-screen overlays
 on small terminals, and a too-small guard. Design directions came from a

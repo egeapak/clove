@@ -587,11 +587,13 @@ condition for M4 planning.
   only on `clove-core`). `clove tui` launches a master-detail browser that reads
   via the file-store scan path (`scan_frontmatter` + `GraphStore::build`) — always
   correct, no index/daemon coupling, never mutates. Top tab bar **All / Ready /
-  Blocked** (with live counts), an item list (status glyph, id, priority, type,
-  title, ready/blocked badge, sorted by `(priority, topo rank, id)` like `ls`), and
-  a detail pane with three sub-views: **Overview** (triage-ordered: identity →
-  decision block [status/ready/blockers/priority/assignee] → metadata with
-  **relative timestamps** ["3d ago"] alongside absolute → relationships →
+  Blocked** (with live counts), an item list (status glyph, single-letter type
+  icon, id, priority, title, ready/blocked badge, sorted by `(priority, topo rank,
+  id)` like `ls`), and
+  a detail pane with three sub-views: **Overview** (a full-width header — type
+  icon + title left, status/ready pinned top-right, type·priority·assignee on a
+  second right-aligned line when wide — then blockers, metadata with **relative
+  timestamps** ["3d ago"] alongside absolute, relationships, and the
   **Markdown-rendered body**), **Dep tree** (status glyphs + titles inline,
   `[ready]`/`(cycle)` markers), and **Comments**. The body is rendered from
   CommonMark via `pulldown-cmark` (`markdown.rs`): headings, emphasis/strong/
@@ -629,6 +631,11 @@ condition for M4 planning.
   (single), landscape 120×18 (wide + compact tabs), square 60×60 (stacked) —
   validating the adaptive layout. Mutations (status/priority/label edits, create,
   dep add/rm, comment) are a deferred follow-up — this first cut is read-only.
+- Tooling: an `#[ignore]`d `generate_screenshots` test rasterizes each screen's
+  cell buffer (colours + bold) to PNG via a system monospace font (DejaVu Sans
+  Mono preferred for glyph coverage), behind test-only `image`/`ab_glyph`
+  dev-deps. Output goes to `docs/screenshots/` (gitignored; images are not
+  committed).
 
 **M4 backlog (recorded so it is not lost; not yet task-specified):**
 - **TUI write actions** — extend `clove tui` with the common mutations (status

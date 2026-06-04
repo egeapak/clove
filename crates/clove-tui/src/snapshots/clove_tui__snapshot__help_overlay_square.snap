@@ -6,13 +6,13 @@ expression: rendered
 │  All 7  │  Ready 4  │  Blocked 1                         │
 └──────────────────────────────────────────────────────────┘
 ┌ Items (7) ───────────────────────────────────────────────┐
-│▌◐ proj-00000002 p0 feature Build REST API ●              │
-│ ○ proj-00000007 p1 bug     Investigate flaky CI ●        │
-│ ● proj-00000001 p1 chore   Set up database schema        │
-│ ○ proj-00000004 p2 epic    Ship v1 release ●             │
-│ ○ proj-00000003 p2 feature Write integration tests ✗     │
-│ ○ proj-00000005 p3 feature Frontend dashboard ●          │
-│ ● proj-00000006 p4 docs    Docs site                     │
+│▌◐ F proj-00000002 p0 Build REST API ●                    │
+│ ○ B proj-00000007 p1 Investigate flaky CI ●              │
+│ ● C proj-00000001 p1 Set up database schema              │
+│ ○ E proj-00000004 p2 Ship v1 release ●                   │
+│ ○ F proj-00000003 p2 Write integration tests ✗           │
+│ ○ F proj-00000005 p3 Frontend dashboard ●                │
+│ ● D proj-00000006 p4 Docs site                           │
 │                                                          │
 │                                                          │
 │                                                          │
@@ -31,21 +31,16 @@ expression: rendered
 │    │ Tab / 1 2 3  All / Ready / Blocked             │    │
 └────│ o / t / c    overview / dep tree / comments    │────┘
 ┌ Ove│ →/l  ←/h     focus detail / list (narrow)      │────┐
-│ Bui│ PgUp / PgDn  scroll detail                     │    │
-│ pro│ s / S        cycle sort field / direction      │    │
+│ F B│ PgUp / PgDn  scroll detail                     │ady │
+│ pro│ s / S        cycle sort field / direction      │ace │
 │    │ f            filter menu (facets)              │    │
-│ sta│ x            clear all filters                 │    │
-│ pri│ /            search id, title, labels          │    │
-│ ass│ Esc          clear search / back / close       │    │
+│ lab│ x            clear all filters                 │    │
+│ cre│ /            search id, title, labels          │    │
+│ upd│ Esc          clear search / back / close       │    │
 │    │ r            refresh from disk                 │    │
-│ typ│ ?            toggle this help                  │    │
-│ lab│ q            quit                              │    │
-│ cre└────────────────────────────────────────────────┘    │
-│ updated    2026-01-20 11:30 UTC  (3w ago)                │
-│                                                          │
-│ deps       proj-00000001                                 │
-│                                                          │
-│ ── body ──────────────────────────────────────────────── │
+│ dep│ ?            toggle this help                  │    │
+│    │ q            quit                              │    │
+│ ── └────────────────────────────────────────────────┘─── │
 │ Goals                                                    │
 │                                                          │
 │ Build a REST API with axum; see docs/api.md.             │
@@ -59,6 +54,11 @@ expression: rendered
 │ 2. Wire handlers                                         │
 │                                                          │
 │ │ Blocked on the schema work until it lands.             │
+│                                                          │
+│ ──────────────────────────────────────────────────────── │
+│                                                          │
+│ Done when the integration tests pass.                    │
+│                                                          │
 │                                                          │
 └──────────────────────────────────────────────────────────┘
 7 item(s) loaded   ?: help · q: quit

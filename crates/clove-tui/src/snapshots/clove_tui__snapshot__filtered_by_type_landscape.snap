@@ -4,19 +4,19 @@ expression: rendered
 ---
   All 7  │  Ready 4  │  Blocked 1
 ┌ Items (3/7) ─────────────────────────────────┐┌ Overview · Dep tree · Comments ──────────────────────────────────────┐
-│▌◐ proj-00000002 p0 Build REST API ●          ││ Build REST API                                                       │
-│ ○ proj-00000003 p2 Write integration tests ✗ ││ proj-00000002                                                        │
-│ ○ proj-00000005 p3 Frontend dashboard ●      ││                                                                      │
-│                                              ││ status     in_progress   ready                                       │
-│                                              ││ priority   p0                                                        │
-│                                              ││ assignee   grace                                                     │
-│                                              ││                                                                      │
-│                                              ││ type       feature                                                   │
+│▌◐ F proj-00000002 p0 Build REST API ●        ││ F Build REST API                               ◐ in_progress · ready │
+│ ○ F proj-00000003 p2 Write integration tests ││ proj-00000002                                  feature · p0 · @grace │
+│ ○ F proj-00000005 p3 Frontend dashboard ●    ││                                                                      │
 │                                              ││ labels     area:api, backend                                         │
 │                                              ││ created    2026-01-01 09:00 UTC  (6w ago)                            │
 │                                              ││ updated    2026-01-20 11:30 UTC  (3w ago)                            │
 │                                              ││                                                                      │
 │                                              ││ deps       proj-00000001                                             │
+│                                              ││                                                                      │
+│                                              ││ ── body ──────────────────────────────────────────────────────────── │
+│                                              ││ Goals                                                                │
+│                                              ││                                                                      │
+│                                              ││ Build a REST API with axum; see docs/api.md.                         │
 │                                              ││                                                                      │
 └──────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────┘
 type:feature  7 item(s) loaded   ?: help · q: quit

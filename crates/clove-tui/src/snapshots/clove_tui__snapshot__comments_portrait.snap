@@ -6,13 +6,13 @@ expression: rendered
 │  All 7  │  Rdy 4  │  Blk 1           │
 └──────────────────────────────────────┘
 ┌ Items (7) ───────────────────────────┐
-│▌◐  p0 Build REST API ●               │
-│ ○  p1 Investigate flaky CI ●         │
-│ ●  p1 Set up database schema         │
-│ ○  p2 Ship v1 release ●              │
-│ ○  p2 Write integration tests ✗      │
-│ ○  p3 Frontend dashboard ●           │
-│ ●  p4 Docs site                      │
+│▌◐ F proj-00000002 p0 Build REST API  │
+│ ○ B proj-00000007 p1 Investigate fl… │
+│ ● C proj-00000001 p1 Set up databas… │
+│ ○ E proj-00000004 p2 Ship v1 release │
+│ ○ F proj-00000003 p2 Write integrat… │
+│ ○ F proj-00000005 p3 Frontend dashb… │
+│ ● D proj-00000006 p4 Docs site       │
 │                                      │
 │                                      │
 │                                      │

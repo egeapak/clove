@@ -18,3 +18,7 @@ chrono.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 insta.workspace = true          # TUI render snapshot tests across terminal shapes
+# Screenshot tooling for the `#[ignore]`d `generate_screenshots` test (rasterizes
+# the cell buffer to PNG with a system monospace font). Not used by CI tests.
+image = { version = "0.25", default-features = false, features = ["png"] }
+ab_glyph = "0.2"

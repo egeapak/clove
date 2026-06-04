@@ -6,9 +6,9 @@ expression: rendered
 │  All 7  │  Ready 4  │  Blocked 1                         │
 └──────────────────────────────────────────────────────────┘
 ┌ Items (3/7) ─────────────────────────────────────────────┐
-│▌◐ proj-00000002 p0 feature Build REST API ●              │
-│ ○ proj-00000003 p2 feature Write integration tests ✗     │
-│ ○ proj-00000005 p3 feature Frontend dashboard ●          │
+│▌◐ F proj-00000002 p0 Build REST API ●                    │
+│ ○ F proj-00000003 p2 Write integration tests ✗           │
+│ ○ F proj-00000005 p3 Frontend dashboard ●                │
 │                                                          │
 │                                                          │
 │                                                          │
@@ -31,14 +31,9 @@ expression: rendered
 │                                                          │
 └──────────────────────────────────────────────────────────┘
 ┌ Overview · Dep tree · Comments ──────────────────────────┐
-│ Build REST API                                           │
-│ proj-00000002                                            │
+│ F Build REST API                   ◐ in_progress · ready │
+│ proj-00000002                      feature · p0 · @grace │
 │                                                          │
-│ status     in_progress   ready                           │
-│ priority   p0                                            │
-│ assignee   grace                                         │
-│                                                          │
-│ type       feature                                       │
 │ labels     area:api, backend                             │
 │ created    2026-01-01 09:00 UTC  (6w ago)                │
 │ updated    2026-01-20 11:30 UTC  (3w ago)                │
@@ -59,6 +54,11 @@ expression: rendered
 │ 2. Wire handlers                                         │
 │                                                          │
 │ │ Blocked on the schema work until it lands.             │
+│                                                          │
+│ ──────────────────────────────────────────────────────── │
+│                                                          │
+│ Done when the integration tests pass.                    │
+│                                                          │
 │                                                          │
 └──────────────────────────────────────────────────────────┘
 type:feature  7 item(s) loaded   ?: help · q: quit

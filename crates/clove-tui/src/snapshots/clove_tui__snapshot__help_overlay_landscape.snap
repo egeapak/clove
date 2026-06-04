@@ -4,19 +4,19 @@ expression: rendered
 ---
   All 7  │  Ready 4  │  Blocked 1
 ┌ Items (7) ───────────────────────┌ Help ──────────────────────────────────────────┐──────────────────────────────────┐
-│▌◐ proj-00000002 p0 Build REST API│ clove tui — read-only browser                  │                                  │
-│ ○ proj-00000007 p1 Investigate fl│                                                │                                  │
-│ ● proj-00000001 p1 Set up databas│ ↑/k ↓/j      move selection                    │                                  │
-│ ○ proj-00000004 p2 Ship v1 releas│ g / G        jump to top / bottom              │                                  │
-│ ○ proj-00000003 p2 Write integrat│ Tab / 1 2 3  All / Ready / Blocked             │                                  │
-│ ○ proj-00000005 p3 Frontend dashb│ o / t / c    overview / dep tree / comments    │                                  │
-│ ● proj-00000006 p4 Docs site     │ →/l  ←/h     focus detail / list (narrow)      │                                  │
+│▌◐ F proj-00000002 p0 Build REST A│ clove tui — read-only browser                  │            ◐ in_progress · ready │
+│ ○ B proj-00000007 p1 Investigate │                                                │            feature · p0 · @grace │
+│ ● C proj-00000001 p1 Set up datab│ ↑/k ↓/j      move selection                    │                                  │
+│ ○ E proj-00000004 p2 Ship v1 rele│ g / G        jump to top / bottom              │                                  │
+│ ○ F proj-00000003 p2 Write integr│ Tab / 1 2 3  All / Ready / Blocked             │w ago)                            │
+│ ○ F proj-00000005 p3 Frontend das│ o / t / c    overview / dep tree / comments    │w ago)                            │
+│ ● D proj-00000006 p4 Docs site   │ →/l  ←/h     focus detail / list (narrow)      │                                  │
 │                                  │ PgUp / PgDn  scroll detail                     │                                  │
 │                                  │ s / S        cycle sort field / direction      │                                  │
-│                                  │ f            filter menu (facets)              │w ago)                            │
-│                                  │ x            clear all filters                 │w ago)                            │
+│                                  │ f            filter menu (facets)              │───────────────────────────────── │
+│                                  │ x            clear all filters                 │                                  │
 │                                  │ /            search id, title, labels          │                                  │
-│                                  │ Esc          clear search / back / close       │                                  │
+│                                  │ Esc          clear search / back / close       │s/api.md.                         │
 │                                  │ r            refresh from disk                 │                                  │
 └──────────────────────────────────└────────────────────────────────────────────────┘──────────────────────────────────┘
 7 item(s) loaded   ?: help · q: quit

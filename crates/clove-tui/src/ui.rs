@@ -224,32 +224,32 @@ fn render_list(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_stateful_widget(list, area, &mut app.list_state);
 }
 
-/// One width-aware line in the item list. Columns drop as space shrinks:
-/// `≥58`: glyph + id + p# + type + title; `≥40`: drop type; `<40`: glyph + p#
-/// + title. The title budget is computed from the actual pane width.
+/// One width-aware line in the item list: a status glyph, a single-letter type
+/// icon, the id (when there's room), priority, the title, and a ready/blocked
+/// badge. The title budget is computed from the actual pane width.
 fn list_row(app: &App, fm: &ItemFrontmatter, inner_w: u16) -> Line<'static> {
     let inner = inner_w as usize;
     let mut spans = vec![
         Span::styled(status_glyph(fm.status), status_style(fm.status)),
         Span::raw(" "),
+        Span::styled(
+            type_icon(fm.item_type).to_string(),
+            type_style(fm.item_type).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
     ];
 
-    if inner >= 40 {
+    if inner >= 36 {
         spans.push(Span::styled(
             format!("{:<13}", fm.id.as_str()),
             Style::default().fg(LABEL),
         ));
+        spans.push(Span::raw(" "));
     }
     spans.push(Span::styled(
-        format!(" p{} ", fm.priority.get()),
+        format!("p{} ", fm.priority.get()),
         priority_style(fm.priority.get()),
     ));
-    if inner >= 58 {
-        spans.push(Span::styled(
-            format!("{:<7} ", fm.item_type.as_str()),
-            type_style(fm.item_type),
-        ));
-    }
 
     // Reserve room for the trailing ready/blocked badge, then fit the title.
     let used: usize = spans.iter().map(|s| s.width()).sum();
@@ -314,8 +314,10 @@ fn detail_title(app: &App) -> Line<'static> {
     Line::from(spans)
 }
 
-/// The overview, ordered for triage: identity → decision block (status, ready,
-/// blockers, priority, assignee) → metadata → relationships → body.
+/// The overview. A header uses the full pane width — type icon + title on the
+/// left, status (and ready/blocked) pinned top-right, with type/priority/
+/// assignee on a second right-aligned line when wide — then blockers, metadata,
+/// relationships, and the Markdown body.
 fn overview_lines(
     app: &App,
     detail: &Detail,
@@ -323,34 +325,65 @@ fn overview_lines(
     now: chrono::DateTime<chrono::Utc>,
 ) -> Vec<Line<'static>> {
     let fm = &detail.item.frontmatter;
+    let wide = inner_w >= 50;
     let mut lines = Vec::new();
 
-    lines.push(Line::from(Span::styled(
-        fm.title.clone(),
-        Style::default().add_modifier(Modifier::BOLD),
-    )));
-    lines.push(Line::from(Span::styled(
-        fm.id.to_string(),
-        Style::default().fg(LABEL),
-    )));
-    lines.push(Line::raw(""));
+    let title_left = vec![
+        Span::styled(
+            format!("{} ", type_icon(fm.item_type)),
+            type_style(fm.item_type).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            fm.title.clone(),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+    ];
 
-    // Decision block.
-    let ready_badge = if app.is_ready(&fm.id) {
-        Span::styled("ready", Style::default().fg(Color::Green))
-    } else if app.is_blocked(&fm.id) {
-        Span::styled("blocked", Style::default().fg(Color::Red))
+    if wide {
+        // Title left, status pinned top-right.
+        lines.push(right_align(title_left, status_spans(app, fm), inner_w));
+        // id left, type · priority · assignee right.
+        let mut meta = vec![
+            Span::styled(fm.item_type.as_str().to_string(), type_style(fm.item_type)),
+            Span::styled(" · ", Style::default().fg(DIM)),
+            Span::styled(
+                format!("p{}", fm.priority.get()),
+                priority_style(fm.priority.get()),
+            ),
+        ];
+        if let Some(a) = &fm.assignee {
+            meta.push(Span::styled(" · ", Style::default().fg(DIM)));
+            meta.push(Span::styled(format!("@{a}"), Style::default().fg(LABEL)));
+        }
+        lines.push(right_align(
+            vec![Span::styled(fm.id.to_string(), Style::default().fg(LABEL))],
+            meta,
+            inner_w,
+        ));
+        lines.push(Line::raw(""));
     } else {
-        Span::styled("—", Style::default().fg(DIM))
-    };
-    lines.push(field_line(
-        "status",
-        vec![
-            Span::styled(fm.status.as_str().to_string(), status_style(fm.status)),
-            Span::raw("   "),
-            ready_badge,
-        ],
-    ));
+        // Narrow: stack the header fields as labelled rows.
+        lines.push(Line::from(title_left));
+        lines.push(Line::from(Span::styled(
+            fm.id.to_string(),
+            Style::default().fg(LABEL),
+        )));
+        lines.push(Line::raw(""));
+        lines.push(field_line("status", status_spans(app, fm)));
+        lines.push(kv("type", fm.item_type.as_str()));
+        lines.push(field_line(
+            "priority",
+            vec![Span::styled(
+                format!("p{}", fm.priority.get()),
+                priority_style(fm.priority.get()),
+            )],
+        ));
+        if let Some(a) = &fm.assignee {
+            lines.push(kv("assignee", a));
+        }
+    }
+
+    // Blockers (decision-critical, kept near the top).
     if !detail.blocking_deps.is_empty() {
         lines.push(field_line(
             "blocked by",
@@ -371,16 +404,6 @@ fn overview_lines(
             )],
         ));
     }
-    lines.push(field_line(
-        "priority",
-        vec![Span::styled(
-            format!("p{}", fm.priority.get()),
-            priority_style(fm.priority.get()),
-        )],
-    ));
-    if let Some(a) = &fm.assignee {
-        lines.push(kv("assignee", a));
-    }
     if let Some(children) = &detail.children {
         lines.push(kv(
             "children",
@@ -398,8 +421,6 @@ fn overview_lines(
     }
 
     // Metadata.
-    lines.push(Line::raw(""));
-    lines.push(kv("type", fm.item_type.as_str()));
     if !fm.labels.is_empty() {
         lines.push(kv("labels", &fm.labels.join(", ")));
     }
@@ -433,6 +454,38 @@ fn overview_lines(
     }
 
     lines
+}
+
+/// The status glyph + word, plus a `· ready`/`· blocked` suffix.
+fn status_spans(app: &App, fm: &ItemFrontmatter) -> Vec<Span<'static>> {
+    let mut v = vec![
+        Span::styled(status_glyph(fm.status), status_style(fm.status)),
+        Span::raw(" "),
+        Span::styled(fm.status.as_str().to_string(), status_style(fm.status)),
+    ];
+    if app.is_ready(&fm.id) {
+        v.push(Span::styled(" · ", Style::default().fg(DIM)));
+        v.push(Span::styled("ready", Style::default().fg(Color::Green)));
+    } else if app.is_blocked(&fm.id) {
+        v.push(Span::styled(" · ", Style::default().fg(DIM)));
+        v.push(Span::styled("blocked", Style::default().fg(Color::Red)));
+    }
+    v
+}
+
+/// Build a line with `left` flush-left and `right` flush-right within `width`
+/// (falls back to a single space between them if they don't both fit).
+fn right_align(
+    mut left: Vec<Span<'static>>,
+    right: Vec<Span<'static>>,
+    width: u16,
+) -> Line<'static> {
+    let lw: usize = left.iter().map(Span::width).sum();
+    let rw: usize = right.iter().map(Span::width).sum();
+    let pad = (width as usize).saturating_sub(lw + rw).max(1);
+    left.push(Span::raw(" ".repeat(pad)));
+    left.extend(right);
+    Line::from(left)
 }
 
 /// A timestamp field showing the absolute time plus a dim relative delta.
@@ -877,6 +930,17 @@ fn type_style(t: ItemType) -> Style {
         ItemType::Epic => Color::Yellow,
     };
     Style::default().fg(color)
+}
+
+/// A single-letter type icon (color carries the rest of the meaning).
+fn type_icon(t: ItemType) -> char {
+    match t {
+        ItemType::Bug => 'B',
+        ItemType::Feature => 'F',
+        ItemType::Chore => 'C',
+        ItemType::Docs => 'D',
+        ItemType::Epic => 'E',
+    }
 }
 
 /// Graded priority ramp: p0 hottest, p4 coldest.

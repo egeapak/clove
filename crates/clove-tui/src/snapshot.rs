@@ -379,6 +379,277 @@ fn filtered_empty() {
     snap("filtered_empty", &mut app);
 }
 
+// --- PNG screenshot generation (manual, #[ignore]) ------------------------
+//
+//   cargo test -p clove-tui generate_screenshots -- --ignored --nocapture
+//
+// Renders each screen's real cell buffer (colours + bold) to a PNG under
+// docs/screenshots/ using a system monospace font with full glyph coverage
+// (DejaVu Sans Mono preferred). Tooling, not a CI test.
+
+mod shots {
+    use super::*;
+    use ab_glyph::{Font, FontVec, PxScale, ScaleFont};
+    use image::{Rgb, RgbImage};
+    use ratatui::style::{Color, Modifier};
+
+    const BG: [u8; 3] = [0x1d, 0x20, 0x27];
+    const FG: [u8; 3] = [0xc8, 0xcc, 0xd4];
+
+    /// Monospace font candidates (regular, bold), tried in order. DejaVu Sans
+    /// Mono first for its broad box-drawing / geometric-shape coverage.
+    const FONTS: &[(&str, &str)] = &[
+        (
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
+        ),
+        (
+            "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf",
+        ),
+    ];
+
+    fn load_fonts() -> (FontVec, FontVec) {
+        for (reg, bold) in FONTS {
+            if let (Ok(r), Ok(b)) = (std::fs::read(reg), std::fs::read(bold)) {
+                return (
+                    FontVec::try_from_vec(r).expect("valid ttf"),
+                    FontVec::try_from_vec(b).expect("valid ttf"),
+                );
+            }
+        }
+        panic!("no monospace font found among {FONTS:?}");
+    }
+
+    fn rgb(c: Color, default: [u8; 3]) -> [u8; 3] {
+        match c {
+            Color::Reset => default,
+            Color::Black => [0x1d, 0x20, 0x27],
+            Color::Red => [0xe0, 0x6c, 0x75],
+            Color::Green => [0x98, 0xc3, 0x79],
+            Color::Yellow => [0xe5, 0xc0, 0x7b],
+            Color::Blue => [0x61, 0xaf, 0xef],
+            Color::Magenta => [0xc6, 0x78, 0xdd],
+            Color::Cyan => [0x56, 0xb6, 0xc2],
+            Color::Gray => [0xab, 0xb2, 0xbf],
+            Color::DarkGray => [0x5c, 0x63, 0x70],
+            Color::LightRed => [0xff, 0x8b, 0x94],
+            Color::LightGreen => [0xb5, 0xe8, 0x90],
+            Color::LightYellow => [0xff, 0xe0, 0x82],
+            Color::LightBlue => [0x8a, 0xc6, 0xff],
+            Color::LightMagenta => [0xe0, 0x9c, 0xff],
+            Color::LightCyan => [0x7f, 0xe0, 0xea],
+            Color::White => [0xff, 0xff, 0xff],
+            Color::Rgb(r, g, b) => [r, g, b],
+            Color::Indexed(n) => indexed(n),
+        }
+    }
+
+    /// The xterm 256-colour palette.
+    fn indexed(n: u8) -> [u8; 3] {
+        match n {
+            0..=15 => {
+                const C: [[u8; 3]; 16] = [
+                    [0, 0, 0],
+                    [0xcd, 0, 0],
+                    [0, 0xcd, 0],
+                    [0xcd, 0xcd, 0],
+                    [0, 0, 0xee],
+                    [0xcd, 0, 0xcd],
+                    [0, 0xcd, 0xcd],
+                    [0xe5, 0xe5, 0xe5],
+                    [0x7f, 0x7f, 0x7f],
+                    [0xff, 0, 0],
+                    [0, 0xff, 0],
+                    [0xff, 0xff, 0],
+                    [0x5c, 0x5c, 0xff],
+                    [0xff, 0, 0xff],
+                    [0, 0xff, 0xff],
+                    [0xff, 0xff, 0xff],
+                ];
+                C[n as usize]
+            }
+            16..=231 => {
+                let n = n - 16;
+                let steps = [0u8, 95, 135, 175, 215, 255];
+                [
+                    steps[(n / 36) as usize],
+                    steps[((n / 6) % 6) as usize],
+                    steps[(n % 6) as usize],
+                ]
+            }
+            232..=255 => {
+                let v = 8 + (n - 232) * 10;
+                [v, v, v]
+            }
+        }
+    }
+
+    fn blend(fg: [u8; 3], bg: [u8; 3], t: f32) -> [u8; 3] {
+        let m = |a: u8, b: u8| (a as f32 * t + b as f32 * (1.0 - t)).round() as u8;
+        [m(fg[0], bg[0]), m(fg[1], bg[1]), m(fg[2], bg[2])]
+    }
+
+    /// Last-resort substitution for any glyph the chosen font lacks.
+    fn subst(font: &FontVec, ch: char) -> char {
+        if font.glyph_id(ch).0 != 0 {
+            ch
+        } else {
+            match ch {
+                '◐' => '◑',
+                '✗' => '×',
+                '●' => '*',
+                '○' => 'o',
+                '•' => '*',
+                '▌' | '▏' => '|',
+                _ => ch,
+            }
+        }
+    }
+
+    pub fn render_png(app: &mut App, w: u16, h: u16, path: &str) {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| crate::ui::render(f, app)).unwrap();
+        let buf = term.backend().buffer().clone();
+
+        let (reg, bold) = load_fonts();
+        let scale = PxScale::from(22.0);
+        let sf = reg.as_scaled(scale);
+        let cell_w = sf.h_advance(reg.glyph_id('M')).round().max(1.0) as u32;
+        let ascent = sf.ascent();
+        let cell_h = (sf.ascent() - sf.descent() + sf.line_gap()).round() as u32;
+
+        let mut img = RgbImage::from_pixel(cell_w * w as u32, cell_h * h as u32, Rgb(BG));
+        for cy in 0..h {
+            for cx in 0..w {
+                let cell = buf.cell((cx, cy)).unwrap();
+                let m = cell.modifier;
+                let mut fg = rgb(cell.fg, FG);
+                let mut bg = rgb(cell.bg, BG);
+                if m.contains(Modifier::REVERSED) {
+                    std::mem::swap(&mut fg, &mut bg);
+                }
+                if m.contains(Modifier::DIM) {
+                    fg = blend(fg, bg, 0.5);
+                }
+                let (x0, y0) = (cx as u32 * cell_w, cy as u32 * cell_h);
+                for yy in 0..cell_h {
+                    for xx in 0..cell_w {
+                        img.put_pixel(x0 + xx, y0 + yy, Rgb(bg));
+                    }
+                }
+                let ch = cell.symbol().chars().next().unwrap_or(' ');
+                if ch == ' ' {
+                    continue;
+                }
+                let f = if m.contains(Modifier::BOLD) {
+                    &bold
+                } else {
+                    &reg
+                };
+                let ch = subst(f, ch);
+                let glyph = f
+                    .glyph_id(ch)
+                    .with_scale_and_position(scale, ab_glyph::point(x0 as f32, y0 as f32 + ascent));
+                if let Some(o) = f.outline_glyph(glyph) {
+                    let bb = o.px_bounds();
+                    o.draw(|gx, gy, cov| {
+                        let ix = bb.min.x as i32 + gx as i32;
+                        let iy = bb.min.y as i32 + gy as i32;
+                        if ix >= 0
+                            && iy >= 0
+                            && (ix as u32) < img.width()
+                            && (iy as u32) < img.height()
+                        {
+                            let under = img.get_pixel(ix as u32, iy as u32).0;
+                            img.put_pixel(ix as u32, iy as u32, Rgb(blend(fg, under, cov)));
+                        }
+                    });
+                }
+            }
+        }
+        img.save(path).unwrap();
+    }
+}
+
+#[test]
+#[ignore = "manual screenshot generation"]
+fn generate_screenshots() {
+    let out = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/screenshots");
+    std::fs::create_dir_all(out).unwrap();
+    let save = |name: &str, w: u16, h: u16, app: &mut App| {
+        shots::render_png(app, w, h, &format!("{out}/{name}.png"))
+    };
+
+    let (ww, wh) = (120u16, 34u16);
+    let (pw, ph) = (46u16, 40u16);
+
+    {
+        let mut a = app();
+        save("01-overview", ww, wh, &mut a);
+    }
+    {
+        let mut a = app();
+        a.set_detail_tab(crate::app::DetailTab::Tree);
+        save("02-dep-tree", ww, wh, &mut a);
+    }
+    {
+        let mut a = app();
+        a.set_detail_tab(crate::app::DetailTab::Comments);
+        save("03-comments", ww, wh, &mut a);
+    }
+    {
+        let mut a = app();
+        a.set_tab(crate::app::Tab::Blocked);
+        save("04-blocked", ww, wh, &mut a);
+    }
+    {
+        let mut a = app();
+        a.start_filter();
+        a.filter_toggle();
+        a.filter_cursor = 4;
+        a.filter_toggle();
+        save("05-filter-menu", 80, wh, &mut a);
+    }
+    {
+        let mut a = app();
+        a.start_filter();
+        a.filter_cursor = 4;
+        a.filter_toggle();
+        a.exit_filter();
+        save("06-filtered", ww, wh, &mut a);
+    }
+    {
+        let mut a = app();
+        for _ in 0..3 {
+            a.cycle_sort_field();
+        }
+        save("07-sorted-updated", ww, wh, &mut a);
+    }
+    {
+        let mut a = app();
+        a.start_search();
+        for c in "api".chars() {
+            a.push_search(c);
+        }
+        save("08-search", ww, wh, &mut a);
+    }
+    {
+        let mut a = app();
+        a.show_help = true;
+        save("09-help", ww, wh, &mut a);
+    }
+    {
+        let mut a = app();
+        a.focus_detail();
+        save("10-portrait-detail", pw, ph, &mut a);
+    }
+    {
+        let mut a = app();
+        save("11-portrait-list", pw, ph, &mut a);
+    }
+}
+
 // --- data-layer unit tests (rich fixture, no snapshots) -------------------
 
 #[test]
