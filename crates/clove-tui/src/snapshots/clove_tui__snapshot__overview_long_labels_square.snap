@@ -6,8 +6,8 @@ expression: rendered
 │  All 2  │  Ready 1  │  Blocked 0                         │
 └──────────────────────────────────────────────────────────┘
 ┌ Items (2) ───────────────────────────────────────────────┐
-│▌◐ F #2 ! Short title ●                                   │
-│ ● C #1 • Dependency target                               │
+│▌◐ F #9QX4D1B7 ! Short title ●                            │
+│ ● C #7AF3K2MN • Dependency target                        │
 │                                                          │
 │                                                          │
 │                                                          │
@@ -31,11 +31,11 @@ expression: rendered
 │                                                          │
 └──────────────────────────────────────────────────────────┘
 ┌ Overview · Dep tree · Comments ──────────────────────────┐
-│ #2  ! FEATURE                      ◐ in_progress · ready │
+│ #9QX4D1B7  ! FEATURE               ◐ in_progress · ready │
 │ Short title                                @ada · deps 1 │
 │──────────────────────────────────────────────────────────│
-│ parent     #1                                            │
-│ relates    #1                                            │
+│ parent     #7AF3K2MN                                     │
+│ relates    #7AF3K2MN                                     │
 │                                                          │
 │                                                          │
 │                                                          │

@@ -66,11 +66,14 @@ Details worth knowing:
 - **Output:** `docs/screenshots/*.png` (e.g. `01-overview.png`,
   `10-portrait-detail.png`). The directory is **git-ignored** — screenshots are
   artifacts for inspection, not committed.
-- **Fonts:** it loads `DejaVu Sans Mono` (regular + bold), falling back to
-  `Liberation Mono`; it panics if neither is installed. DejaVu is preferred for
-  its broad box-drawing / geometric-shape coverage (status `○ ◐ ●`, priority
-  `! ↑ • ↓`, etc.). A small `subst()` table swaps in look-alikes for any glyph a
-  font lacks. On Debian/Ubuntu: `apt-get install fonts-dejavu`.
+- **Fonts:** `DejaVu Sans Mono` (regular + bold) is **vendored** under
+  `crates/clove-tui/assets/fonts/` and loaded unconditionally (via
+  `include_bytes!`) — no system-font dependency, so the tool is cross-platform
+  (Linux/macOS/Windows/CI) and renders byte-identically everywhere. DejaVu is
+  used for its broad box-drawing / geometric-shape coverage (status `○ ◐ ●`,
+  priority `! ↑ • ↓`, etc.); a small `subst()` table swaps in look-alikes for any
+  glyph it lacks. License: `crates/clove-tui/assets/fonts/LICENSE` (Bitstream
+  Vera / DejaVu — free, redistributable).
 - **Colours:** `Color::Indexed(n)` is resolved through a built-in xterm-256
   palette and ANSI names map to a One-Dark-ish set, so the PNG closely matches a
   real terminal. If you change a colour constant (e.g. `priority_style`),

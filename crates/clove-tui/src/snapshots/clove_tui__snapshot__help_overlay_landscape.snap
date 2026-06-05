@@ -4,13 +4,13 @@ expression: rendered
 ---
   All 7  │  Ready 4  │  Blocked 1
 ┌ Items (7) ───────────────────────┌ Help ──────────────────────────────────────────┐──────────────────────────────────┐
-│▌◐ F #2 ! Build REST API ●        │ clove tui — read-only browser                  │            ◐ in_progress · ready │
-│ ● C #1 ↑ Set up database schema  │                                                │                  @grace · deps 1 │
-│ ○ B #7 ↑ Investigate flaky CI ●  │ ↑/k ↓/j      move selection                    │──────────────────────────────────│
-│ ○ F #3 • Write integration tests │ g / G        jump to top / bottom              │                                  │
-│ ○ E #4 • Ship v1 release ●       │ Tab / 1 2 3  All / Ready / Blocked             │                                  │
-│ ○ F #5 • Frontend dashboard ●    │ o / t / c    overview / dep tree / comments    │s/api.md.                         │
-│ ● D #6 ↓ Docs site               │ →/l  ←/h     focus detail / list (narrow)      │                                  │
+│▌◐ F #9QX4D1B7 ! Build REST API ● │ clove tui — read-only browser                  │            ◐ in_progress · ready │
+│ ○ B #2HZ6C3PW ↑ Investigate flaky│                                                │                  @grace · deps 1 │
+│ ● C #7AF3K2MN ↑ Set up database s│ ↑/k ↓/j      move selection                    │──────────────────────────────────│
+│ ○ E #3HT6WYG5 • Ship v1 release ●│ g / G        jump to top / bottom              │                                  │
+│ ○ F #K2M8ZP5R • Write integration│ Tab / 1 2 3  All / Ready / Blocked             │                                  │
+│ ○ F #5RB9NC2V • Frontend dashboar│ o / t / c    overview / dep tree / comments    │s/api.md.                         │
+│ ● D #8XQ4F7DM ↓ Docs site        │ →/l  ←/h     focus detail / list (narrow)      │                                  │
 │                                  │ PgUp / PgDn  scroll detail                     │                                  │
 │                                  │ s / S        cycle sort field / direction      │                                  │
 │                                  │ f            filter menu (facets)              │                                  │

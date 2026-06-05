@@ -4,13 +4,13 @@ expression: rendered
 ---
   All 7  │  Ready 4  │  Blocked 1
 ┌ Items (7) ───────────────────────────────────┐┌ Overview · Dep tree · Comments ──────────────────────────────────────┐
-│▌◐ F #2 ! Build REST API ●                    ││ Dependency tree (this → its dependencies)                            │
-│ ● C #1 ↑ Set up database schema              ││                                                                      │
-│ ○ B #7 ↑ Investigate flaky CI ●              ││ ◐ #2  Build REST API [ready]                                         │
-│ ○ F #3 • Write integration tests ✗           ││ └── ● #1  Set up database schema                                     │
-│ ○ E #4 • Ship v1 release ●                   ││                                                                      │
-│ ○ F #5 • Frontend dashboard ●                ││                                                                      │
-│ ● D #6 ↓ Docs site                           ││                                                                      │
+│▌◐ F #9QX4D1B7 ! Build REST API ●             ││ Dependency tree (this → its dependencies)                            │
+│ ○ B #2HZ6C3PW ↑ Investigate flaky CI ●       ││                                                                      │
+│ ● C #7AF3K2MN ↑ Set up database schema       ││ ◐ #9QX4D1B7  Build REST API [ready]                                  │
+│ ○ E #3HT6WYG5 • Ship v1 release ●            ││ └── ● #7AF3K2MN  Set up database schema                              │
+│ ○ F #K2M8ZP5R • Write integration tests ✗    ││                                                                      │
+│ ○ F #5RB9NC2V • Frontend dashboard ●         ││                                                                      │
+│ ● D #8XQ4F7DM ↓ Docs site                    ││                                                                      │
 │                                              ││                                                                      │
 │                                              ││                                                                      │
 │                                              ││                                                                      │

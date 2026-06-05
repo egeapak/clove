@@ -4,13 +4,13 @@ expression: rendered
 ---
   All 7  │  Ready 4  │  Blocked 1
 ┌ Items (7) ───────────────────────────────────┐┌ Overview · Dep tree · Comments ──────────────────────────────────────┐
-│ ○ B #7 ↑ Investigate flaky CI ●              ││ #2  ! FEATURE                                  ◐ in_progress · ready │
-│▌◐ F #2 ! Build REST API ●                    ││ Build REST API                                       @grace · deps 1 │
-│ ○ F #5 • Frontend dashboard ●                ││──────────────────────────────────────────────────────────────────────│
-│ ○ F #3 • Write integration tests ✗           ││ Goals                                                                │
-│ ● C #1 ↑ Set up database schema              ││                                                                      │
-│ ● D #6 ↓ Docs site                           ││ Build a REST API with axum; see docs/api.md.                         │
-│ ○ E #4 • Ship v1 release ●                   ││                                                                      │
+│ ○ B #2HZ6C3PW ↑ Investigate flaky CI ●       ││ #9QX4D1B7  ! FEATURE                           ◐ in_progress · ready │
+│▌◐ F #9QX4D1B7 ! Build REST API ●             ││ Build REST API                                       @grace · deps 1 │
+│ ○ F #5RB9NC2V • Frontend dashboard ●         ││──────────────────────────────────────────────────────────────────────│
+│ ○ F #K2M8ZP5R • Write integration tests ✗    ││ Goals                                                                │
+│ ● C #7AF3K2MN ↑ Set up database schema       ││                                                                      │
+│ ● D #8XQ4F7DM ↓ Docs site                    ││ Build a REST API with axum; see docs/api.md.                         │
+│ ○ E #3HT6WYG5 • Ship v1 release ●            ││                                                                      │
 │                                              ││ • CRUD endpoints                                                     │
 │                                              ││ • Auth middleware                                                    │
 │                                              ││                                                                      │

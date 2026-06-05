@@ -4,11 +4,11 @@ expression: rendered
 ---
   All 2  │  Ready 1  │  Blocked 0
 ┌ Items (2) ───────────────────────────────────┐┌ Overview · Dep tree · Comments ──────────────────────────────────────┐
-│▌◐ F #2 ! Short title ●                       ││ #2  ! FEATURE                                  ◐ in_progress · ready │
-│ ● C #1 • Dependency target                   ││ Short title                                            @ada · deps 1 │
+│▌◐ F #9QX4D1B7 ! Short title ●                ││ #9QX4D1B7  ! FEATURE                           ◐ in_progress · ready │
+│ ● C #7AF3K2MN • Dependency target            ││ Short title                                            @ada · deps 1 │
 │                                              ││──────────────────────────────────────────────────────────────────────│
-│                                              ││ parent     #1                                                        │
-│                                              ││ relates    #1                                                        │
+│                                              ││ parent     #7AF3K2MN                                                 │
+│                                              ││ relates    #7AF3K2MN                                                 │
 │                                              ││                                                                      │
 │                                              ││                                                                      │
 │                                              ││                                                                      │

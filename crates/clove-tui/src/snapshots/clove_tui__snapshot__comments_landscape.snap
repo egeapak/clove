@@ -4,13 +4,13 @@ expression: rendered
 ---
   All 7  │  Ready 4  │  Blocked 1
 ┌ Items (7) ───────────────────────────────────┐┌ Overview · Dep tree · Comments ──────────────────────────────────────┐
-│▌◐ F #2 ! Build REST API ●                    ││ grace-example-com  2026-01-05 10:00 UTC                              │
-│ ● C #1 ↑ Set up database schema              ││ Started on the CRUD layer.                                           │
-│ ○ B #7 ↑ Investigate flaky CI ●              ││                                                                      │
-│ ○ F #3 • Write integration tests ✗           ││ ada-example-com  2026-01-06 14:30 UTC                                │
-│ ○ E #4 • Ship v1 release ●                   ││ Schema is ready — you're unblocked.                                  │
-│ ○ F #5 • Frontend dashboard ●                ││                                                                      │
-│ ● D #6 ↓ Docs site                           ││                                                                      │
+│▌◐ F #9QX4D1B7 ! Build REST API ●             ││ grace-example-com  2026-01-05 10:00 UTC                              │
+│ ○ B #2HZ6C3PW ↑ Investigate flaky CI ●       ││ Started on the CRUD layer.                                           │
+│ ● C #7AF3K2MN ↑ Set up database schema       ││                                                                      │
+│ ○ E #3HT6WYG5 • Ship v1 release ●            ││ ada-example-com  2026-01-06 14:30 UTC                                │
+│ ○ F #K2M8ZP5R • Write integration tests ✗    ││ Schema is ready — you're unblocked.                                  │
+│ ○ F #5RB9NC2V • Frontend dashboard ●         ││                                                                      │
+│ ● D #8XQ4F7DM ↓ Docs site                    ││                                                                      │
 │                                              ││                                                                      │
 │                                              ││                                                                      │
 │                                              ││                                                                      │
