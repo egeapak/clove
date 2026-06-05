@@ -52,8 +52,6 @@ pub struct App {
     pub should_quit: bool,
     /// Whether a background operation is in progress. Always `false` today; the
     /// deferred M4 background scan flips this to drive the 10fps cadence.
-    // allow(dead_code): the next task (event-loop rewrite) wires this field.
-    #[allow(dead_code)]
     pub busy: bool,
 
     // Filter menu state.
@@ -81,14 +79,11 @@ impl App {
 
     /// Whether a background operation is in progress (hook for the deferred
     /// background scan; always `false` today).
-    // allow(dead_code): the next task (event-loop rewrite) calls is_busy/tick_interval/on_tick.
-    #[allow(dead_code)]
     pub fn is_busy(&self) -> bool {
         self.busy
     }
 
     /// The event-loop poll timeout: 10fps while busy, 1fps when idle.
-    #[allow(dead_code)]
     pub fn tick_interval(&self) -> std::time::Duration {
         if self.is_busy() {
             std::time::Duration::from_millis(100)
@@ -98,7 +93,6 @@ impl App {
     }
 
     /// Advance one idle/progress tick. A no-op today (future: spinner frame).
-    #[allow(dead_code)]
     pub fn on_tick(&mut self) {}
 
     /// Re-scan the store and rebuild all derived state, preserving the selected

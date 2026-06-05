@@ -31,17 +31,30 @@ pub fn run(store: ItemStore) -> Result<()> {
 }
 
 fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
-    while !app.should_quit {
-        terminal.draw(|f| ui::render(f, app))?;
+    // Initial frame.
+    terminal.draw(|f| ui::render(f, app))?;
 
-        // Read-only browser: block on input — no animation to drive.
-        let Event::Key(key) = event::read()? else {
-            continue;
-        };
-        if key.kind != KeyEventKind::Press {
-            continue;
+    while !app.should_quit {
+        // Cadence: 1fps idle, 10fps while busy. An input arriving before the
+        // timeout wakes us immediately.
+        if event::poll(app.tick_interval())? {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    handle_key(app, key.code, key.modifiers);
+                    // Always redraw after handling an event.
+                    terminal.draw(|f| ui::render(f, app))?;
+                }
+                Event::Resize(_, _) => {
+                    terminal.draw(|f| ui::render(f, app))?;
+                }
+                _ => {}
+            }
+        } else {
+            // Timeout elapsed: advance a tick and redraw (keeps the frame live;
+            // animates progress at 10fps once a background op sets `busy`).
+            app.on_tick();
+            terminal.draw(|f| ui::render(f, app))?;
         }
-        handle_key(app, key.code, key.modifiers);
     }
     Ok(())
 }
