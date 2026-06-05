@@ -74,6 +74,8 @@ Wired as the default-on `clove tui` subcommand (interactive-only, ignores
 clippy `-D warnings`, and fmt are green. The `ratatui`/`crossterm`/
 `pulldown-cmark` tree is all MIT/Apache/Zlib/Unicode (no new `cargo deny`
 exposure).
+**TUI internals (refactor):** `clove-tui` is now modular — `app/{mod,data,listing,detail,filter_menu}.rs` with state regrouped into `Data`/`Listing`/`DetailPane`/`FilterMenu` sub-structs (command methods stay on `App` as the coordinator), and `ui/{mod,util,style,tabs,list,status,help,filter_menu}.rs` + `ui/detail/{mod,overview,tree,comments}.rs` (per-component/per-page). The event loop is tick-driven (1fps idle / redraw-after-event / 10fps when `App::is_busy()`). The split is structural (no locks yet); the **next M4 step** is the concurrent TUI model — move the wholesale re-scan onto a background worker behind per-sub-struct locks and drive the 10fps `is_busy()` cadence with a spinner.
+
 **Next step (rest of M4):** TUI write actions (status/priority/label edits, …),
 web UI, bidirectional vendor bridges, and richer history/changelog — see
 `IMPLEMENTATION_PLAN.md` M4 backlog. Still undesigned beyond the TUI and stats.
