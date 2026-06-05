@@ -21,5 +21,10 @@
 .DS_Store
 *.swp
 
+# Local Claude Code config: ignore everything except the shared CLAUDE.md
+# (settings.local.json and handoffs/ stay local; .claude/CLAUDE.md is tracked).
+.claude/*
+!.claude/CLAUDE.md
+
 # Generated TUI screenshots (tooling output; not committed)
 /docs/screenshots/
