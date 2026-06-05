@@ -12,7 +12,7 @@ repository.workspace = true
 # non-GitHub / lean builds (`--no-default-features`) stay free of that weight.
 [features]
 default = ["github"]
-github = ["dep:octocrab", "dep:tokio"]
+github = ["dep:octocrab", "dep:tokio", "dep:rustls"]
 
 [dependencies]
 clove-core.workspace = true
@@ -27,6 +27,11 @@ chrono.workspace = true
 # GitHub-only deps, gated behind the `github` feature.
 octocrab = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
+# rustls is pulled transitively by octocrab/hyper-rustls with BOTH the ring and
+# aws-lc-rs providers compiled in (feature unification), so rustls cannot pick a
+# default and panics on first TLS use. We depend on it directly (ring) to install
+# the ring provider explicitly before building the client (see github.rs).
+rustls = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion.workspace = true     # T-X01: export throughput bench (informational)
