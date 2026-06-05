@@ -50,6 +50,11 @@ pub struct App {
     pub show_help: bool,
     pub status: String,
     pub should_quit: bool,
+    /// Whether a background operation is in progress. Always `false` today; the
+    /// deferred M4 background scan flips this to drive the 10fps cadence.
+    // allow(dead_code): the next task (event-loop rewrite) wires this field.
+    #[allow(dead_code)]
+    pub busy: bool,
 
     // Filter menu state.
     pub filter_menu: FilterMenu,
@@ -67,11 +72,34 @@ impl App {
             show_help: false,
             status: String::new(),
             should_quit: false,
+            busy: false,
             filter_menu: FilterMenu::default(),
         };
         app.refresh();
         app
     }
+
+    /// Whether a background operation is in progress (hook for the deferred
+    /// background scan; always `false` today).
+    // allow(dead_code): the next task (event-loop rewrite) calls is_busy/tick_interval/on_tick.
+    #[allow(dead_code)]
+    pub fn is_busy(&self) -> bool {
+        self.busy
+    }
+
+    /// The event-loop poll timeout: 10fps while busy, 1fps when idle.
+    #[allow(dead_code)]
+    pub fn tick_interval(&self) -> std::time::Duration {
+        if self.is_busy() {
+            std::time::Duration::from_millis(100)
+        } else {
+            std::time::Duration::from_secs(1)
+        }
+    }
+
+    /// Advance one idle/progress tick. A no-op today (future: spinner frame).
+    #[allow(dead_code)]
+    pub fn on_tick(&mut self) {}
 
     /// Re-scan the store and rebuild all derived state, preserving the selected
     /// item where possible.
@@ -716,6 +744,18 @@ mod tests {
         app.start_search();
         app.push_search('a');
         terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+    }
+
+    #[test]
+    fn tick_interval_reflects_busy_state() {
+        use std::time::Duration;
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        // Idle: 1 fps.
+        assert_eq!(app.tick_interval(), Duration::from_secs(1));
+        // Busy: 10 fps (the hook the deferred background scan will flip).
+        app.busy = true;
+        assert_eq!(app.tick_interval(), Duration::from_millis(100));
     }
 
     #[test]
