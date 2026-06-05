@@ -277,7 +277,7 @@ fn render_detail(f: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area); // padded text area
     f.render_widget(block, area);
 
-    let Some(detail) = &app.detail else {
+    let Some(detail) = &app.detail.detail else {
         f.render_widget(
             Paragraph::new("No item selected.").style(Style::default().fg(DIM)),
             inner,
@@ -288,7 +288,7 @@ fn render_detail(f: &mut Frame, app: &App, area: Rect) {
     // Wide Overview: a fixed header and a sticky footer (labels + dates) bracket
     // a scrolling body, each separated by an edge-to-edge horizontal rule. Other
     // cases render a single scrolling paragraph.
-    let wide_overview = app.detail_tab == DetailTab::Overview && inner.width >= 50;
+    let wide_overview = app.detail.detail_tab == DetailTab::Overview && inner.width >= 50;
     if wide_overview {
         let header = overview_header(app, detail, inner.width);
         let body = overview_body(detail, inner.width);
@@ -308,7 +308,7 @@ fn render_detail(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(
             Paragraph::new(body)
                 .wrap(Wrap { trim: false })
-                .scroll((app.detail_scroll, 0)),
+                .scroll((app.detail.detail_scroll, 0)),
             zones[2],
         );
         render_rule(f, area, zones[3].y);
@@ -316,7 +316,7 @@ fn render_detail(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    let lines = match app.detail_tab {
+    let lines = match app.detail.detail_tab {
         DetailTab::Overview => overview_lines(app, detail, inner.width),
         DetailTab::Tree => tree_lines(detail),
         DetailTab::Comments => comment_lines(detail),
@@ -324,7 +324,7 @@ fn render_detail(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
-            .scroll((app.detail_scroll, 0)),
+            .scroll((app.detail.detail_scroll, 0)),
         inner,
     );
 }
@@ -357,7 +357,7 @@ fn detail_title(app: &App) -> Line<'static> {
         if i > 0 {
             spans.push(Span::styled(" · ", Style::default().fg(DIM)));
         }
-        let style = if *t == app.detail_tab {
+        let style = if *t == app.detail.detail_tab {
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(LABEL)

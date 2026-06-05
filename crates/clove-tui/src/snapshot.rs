@@ -443,11 +443,11 @@ fn overview_scroll() {
     // Scrolled detail: the body region scrolls while the wide layout's fixed
     // header and pinned footer stay put; narrow scrolls everything (no footer).
     let mut app = edge_app(LONG_TITLE, MANY_LABELS, true, SCROLL_BODY);
-    app.detail_scroll = 6;
+    app.detail.detail_scroll = 6;
     let wide = render_to_string(&mut app, 120, 24);
     insta::assert_snapshot!("overview_scroll_wide", wide);
 
-    app.detail_scroll = 3;
+    app.detail.detail_scroll = 3;
     let narrow = render_to_string(&mut app, 40, 18);
     insta::assert_snapshot!("overview_scroll_narrow", narrow);
 }

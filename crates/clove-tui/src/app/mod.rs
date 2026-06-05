@@ -8,32 +8,14 @@
 mod data;
 pub use data::Data;
 
+mod detail;
+pub use detail::{Detail, DetailPane, DetailTab};
+
 mod listing;
 pub use listing::{Listing, SortDir, SortField, Tab, ViewFilter};
 
 use chrono::Utc;
-use clove_core::{
-    ChildrenSummary, CloveId, Comment, DepTreeNode, Item, ItemFrontmatter, ItemStatus, ItemStore,
-    ItemType,
-};
-
-/// Which sub-view of the detail pane is showing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DetailTab {
-    Overview,
-    Tree,
-    Comments,
-}
-
-impl DetailTab {
-    pub fn title(self) -> &'static str {
-        match self {
-            DetailTab::Overview => "Overview",
-            DetailTab::Tree => "Dep tree",
-            DetailTab::Comments => "Comments",
-        }
-    }
-}
+use clove_core::{CloveId, ItemFrontmatter, ItemStatus, ItemStore, ItemType};
 
 /// Input mode: browsing, typing a search query, or the facet filter menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,21 +80,6 @@ pub enum Focus {
     Detail,
 }
 
-/// Everything loaded for the currently-selected item, computed lazily when the
-/// selection changes (the body and comments are not part of the list scan).
-pub struct Detail {
-    pub item: Item,
-    pub comments: Vec<Comment>,
-    /// Open hard-dependency targets blocking this item.
-    pub blocking_deps: Vec<CloveId>,
-    /// Hard-dependency targets with no backing item.
-    pub dangling_deps: Vec<CloveId>,
-    /// Direct-children roll-up when the item is an epic.
-    pub children: Option<ChildrenSummary>,
-    /// The dependency tree rooted at this item (ids, titles, status, cycles).
-    pub tree: Option<DepTreeNode>,
-}
-
 /// The TUI application state.
 pub struct App {
     pub data: Data,
@@ -120,9 +87,7 @@ pub struct App {
 
     // View state.
     pub mode: Mode,
-    pub detail_tab: DetailTab,
-    pub detail: Option<Detail>,
-    pub detail_scroll: u16,
+    pub detail: DetailPane,
     pub focus: Focus,
     pub show_help: bool,
     pub status: String,
@@ -142,9 +107,7 @@ impl App {
             data: Data::new(store),
             list: Listing::default(),
             mode: Mode::Browse,
-            detail_tab: DetailTab::Overview,
-            detail: None,
-            detail_scroll: 0,
+            detail: DetailPane::default(),
             focus: Focus::List,
             show_help: false,
             status: String::new(),
@@ -454,7 +417,7 @@ impl App {
     }
 
     fn on_selection_changed(&mut self) {
-        self.detail_scroll = 0;
+        self.detail.detail_scroll = 0;
         self.load_detail();
     }
 
@@ -474,18 +437,18 @@ impl App {
     }
 
     pub fn set_detail_tab(&mut self, tab: DetailTab) {
-        if self.detail_tab != tab {
-            self.detail_tab = tab;
-            self.detail_scroll = 0;
+        if self.detail.detail_tab != tab {
+            self.detail.detail_tab = tab;
+            self.detail.detail_scroll = 0;
         }
     }
 
     pub fn scroll_detail_down(&mut self) {
-        self.detail_scroll = self.detail_scroll.saturating_add(3);
+        self.detail.detail_scroll = self.detail.detail_scroll.saturating_add(3);
     }
 
     pub fn scroll_detail_up(&mut self) {
-        self.detail_scroll = self.detail_scroll.saturating_sub(3);
+        self.detail.detail_scroll = self.detail.detail_scroll.saturating_sub(3);
     }
 
     /// Focus the detail pane (shows it in the single-pane narrow layout).
@@ -627,7 +590,7 @@ impl App {
     /// Load the body, comments, dep tree, and block reasons for the selection.
     fn load_detail(&mut self) {
         let Some(fm) = self.selected_frontmatter() else {
-            self.detail = None;
+            self.detail.detail = None;
             return;
         };
         let id = fm.id.clone();
@@ -635,7 +598,7 @@ impl App {
         let item = match self.data.store.get(&id) {
             Ok(item) => item,
             Err(e) => {
-                self.detail = None;
+                self.detail.detail = None;
                 self.status = format!("failed to load {id}: {e}");
                 return;
             }
@@ -655,7 +618,7 @@ impl App {
 
         let tree = self.data.graph.dep_tree(&id, 25);
 
-        self.detail = Some(Detail {
+        self.detail.detail = Some(Detail {
             item,
             comments,
             blocking_deps,
@@ -775,7 +738,7 @@ mod tests {
         let mut app = App::new(store);
 
         app.set_tab(Tab::Blocked);
-        let detail = app.detail.as_ref().expect("blocked item has detail");
+        let detail = app.detail.detail.as_ref().expect("blocked item has detail");
         assert!(detail.item.body.contains("Depends on base"));
         // It is blocked by exactly one open dependency.
         assert_eq!(detail.blocking_deps.len(), 1);
