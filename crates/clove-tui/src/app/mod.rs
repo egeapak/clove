@@ -11,6 +11,10 @@ pub use data::Data;
 mod detail;
 pub use detail::{Detail, DetailPane, DetailTab};
 
+mod filter_menu;
+use filter_menu::toggle_vec;
+pub use filter_menu::{Facet, FilterMenu, MenuItem, MenuValue};
+
 mod listing;
 pub use listing::{Listing, SortDir, SortField, Tab, ViewFilter};
 
@@ -23,52 +27,6 @@ pub enum Mode {
     Browse,
     Search,
     Filter,
-}
-
-/// One facet shown in the filter menu.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Facet {
-    Status,
-    Type,
-    Priority,
-    Label,
-    Assignee,
-}
-
-impl Facet {
-    pub fn label(self) -> &'static str {
-        match self {
-            Facet::Status => "Status",
-            Facet::Type => "Type",
-            Facet::Priority => "Priority",
-            Facet::Label => "Label",
-            Facet::Assignee => "Assignee",
-        }
-    }
-
-    /// Single-valued facets behave as radios (selecting one clears the rest);
-    /// multi-valued ones as checkboxes.
-    pub fn is_single(self) -> bool {
-        matches!(self, Facet::Status | Facet::Assignee)
-    }
-}
-
-/// One selectable value row in the filter menu.
-#[derive(Debug, Clone)]
-pub struct MenuItem {
-    pub facet: Facet,
-    pub value: MenuValue,
-    /// The display label for the value.
-    pub text: String,
-}
-
-#[derive(Debug, Clone)]
-pub enum MenuValue {
-    Status(ItemStatus),
-    Type(ItemType),
-    Priority(u8),
-    Label(String),
-    Assignee(String),
 }
 
 /// Which pane holds focus. Only visible in the single-pane (narrow) layout,
@@ -94,10 +52,7 @@ pub struct App {
     pub should_quit: bool,
 
     // Filter menu state.
-    /// The filter menu's selectable rows (built from values present in the repo).
-    pub filter_menu: Vec<MenuItem>,
-    /// Cursor into `filter_menu` while `Mode::Filter` is active.
-    pub filter_cursor: usize,
+    pub filter_menu: FilterMenu,
 }
 
 impl App {
@@ -112,8 +67,7 @@ impl App {
             show_help: false,
             status: String::new(),
             should_quit: false,
-            filter_menu: Vec::new(),
-            filter_cursor: 0,
+            filter_menu: FilterMenu::default(),
         };
         app.refresh();
         app
@@ -299,9 +253,9 @@ impl App {
                 value: MenuValue::Assignee(a),
             });
         }
-        self.filter_menu = menu;
-        if self.filter_cursor >= self.filter_menu.len() {
-            self.filter_cursor = 0;
+        self.filter_menu.menu = menu;
+        if self.filter_menu.cursor >= self.filter_menu.menu.len() {
+            self.filter_menu.cursor = 0;
         }
     }
 
@@ -522,8 +476,8 @@ impl App {
 
     /// Open the facet filter menu.
     pub fn start_filter(&mut self) {
-        if self.filter_cursor >= self.filter_menu.len() {
-            self.filter_cursor = 0;
+        if self.filter_menu.cursor >= self.filter_menu.menu.len() {
+            self.filter_menu.cursor = 0;
         }
         self.mode = Mode::Filter;
     }
@@ -535,17 +489,17 @@ impl App {
 
     /// Move the filter-menu cursor by `delta` (clamped).
     pub fn filter_move(&mut self, delta: i32) {
-        if self.filter_menu.is_empty() {
+        if self.filter_menu.menu.is_empty() {
             return;
         }
-        let last = self.filter_menu.len() as i32 - 1;
-        let next = (self.filter_cursor as i32 + delta).clamp(0, last);
-        self.filter_cursor = next as usize;
+        let last = self.filter_menu.menu.len() as i32 - 1;
+        let next = (self.filter_menu.cursor as i32 + delta).clamp(0, last);
+        self.filter_menu.cursor = next as usize;
     }
 
     /// Whether the menu item at `idx` is currently selected in the filter.
     pub fn is_menu_selected(&self, idx: usize) -> bool {
-        let Some(item) = self.filter_menu.get(idx) else {
+        let Some(item) = self.filter_menu.menu.get(idx) else {
             return false;
         };
         match &item.value {
@@ -559,10 +513,10 @@ impl App {
 
     /// Toggle the value under the cursor in/out of the active filter.
     pub fn filter_toggle(&mut self) {
-        let Some(item) = self.filter_menu.get(self.filter_cursor).cloned() else {
+        let Some(item) = self.filter_menu.menu.get(self.filter_menu.cursor).cloned() else {
             return;
         };
-        let on = self.is_menu_selected(self.filter_cursor);
+        let on = self.is_menu_selected(self.filter_menu.cursor);
         match item.value {
             // Single-valued: toggling sets or clears the one value (radio).
             MenuValue::Status(s) => self.list.filter.status = if on { None } else { Some(s) },
@@ -626,16 +580,6 @@ impl App {
             children,
             tree,
         });
-    }
-}
-
-/// Add or remove `value` from `vec` (used for multi-valued facets). `present`
-/// says whether it is currently in the vec.
-fn toggle_vec<T: PartialEq>(vec: &mut Vec<T>, value: T, present: bool) {
-    if present {
-        vec.retain(|v| v != &value);
-    } else {
-        vec.push(value);
     }
 }
 

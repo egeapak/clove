@@ -945,7 +945,7 @@ fn render_help(f: &mut Frame, area: Rect) {
 fn render_filter_menu(f: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
     let mut cursor_line: u16 = 0;
-    if app.filter_menu.is_empty() {
+    if app.filter_menu.menu.is_empty() {
         lines.push(Line::from(Span::styled(
             "no facets to filter",
             Style::default().fg(DIM),
@@ -953,7 +953,7 @@ fn render_filter_menu(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let mut last_facet = None;
-    for (i, item) in app.filter_menu.iter().enumerate() {
+    for (i, item) in app.filter_menu.menu.iter().enumerate() {
         if last_facet != Some(item.facet) {
             if last_facet.is_some() {
                 lines.push(Line::raw(""));
@@ -972,7 +972,7 @@ fn render_filter_menu(f: &mut Frame, app: &App, area: Rect) {
             (false, true) => "[x]",
             (false, false) => "[ ]",
         };
-        let cursor = i == app.filter_cursor;
+        let cursor = i == app.filter_menu.cursor;
         if cursor {
             cursor_line = lines.len() as u16;
         }
