@@ -5,12 +5,13 @@
 //! refresh. This keeps the TUI always-correct and decoupled from the optional
 //! SQLite index and daemon — it never mutates anything.
 
-use std::collections::{HashMap, HashSet};
+mod data;
+pub use data::Data;
 
 use chrono::Utc;
 use clove_core::{
-    BlockedItem, ChildrenSummary, CloveId, Comment, DepTreeNode, GraphStore, Item, ItemFrontmatter,
-    ItemStatus, ItemStore, ItemType,
+    ChildrenSummary, CloveId, Comment, DepTreeNode, Item, ItemFrontmatter, ItemStatus, ItemStore,
+    ItemType,
 };
 use ratatui::widgets::ListState;
 
@@ -251,15 +252,7 @@ pub struct Detail {
 
 /// The TUI application state.
 pub struct App {
-    store: ItemStore,
-
-    // Loaded data (refreshed wholesale).
-    all: Vec<ItemFrontmatter>,
-    ready: HashSet<CloveId>,
-    blocked: HashMap<CloveId, BlockedItem>,
-    graph: GraphStore,
-    /// Non-fatal load problems (e.g. files that failed to parse).
-    pub load_warnings: Vec<String>,
+    pub data: Data,
 
     // View state.
     pub tab: Tab,
@@ -289,12 +282,7 @@ impl App {
     /// Build the app from a file store, performing the initial scan.
     pub fn new(store: ItemStore) -> Self {
         let mut app = App {
-            store,
-            all: Vec::new(),
-            ready: HashSet::new(),
-            blocked: HashMap::new(),
-            graph: GraphStore::build(&[]).0,
-            load_warnings: Vec::new(),
+            data: Data::new(store),
             tab: Tab::All,
             view: Vec::new(),
             list_state: ListState::default(),
@@ -319,47 +307,21 @@ impl App {
     /// Re-scan the store and rebuild all derived state, preserving the selected
     /// item where possible.
     pub fn refresh(&mut self) {
-        let (mut frontmatters, errors) = match self.store.scan_frontmatter() {
-            Ok(pair) => pair,
-            Err(e) => {
-                self.status = format!("scan failed: {e}");
-                return;
-            }
-        };
-
-        let (graph, _dangling) = GraphStore::build(&frontmatters);
-        let ranks = graph.topological_ranks();
-        frontmatters.sort_by(|a, b| {
-            a.priority
-                .cmp(&b.priority)
-                .then_with(|| {
-                    let ra = ranks.get(&a.id).copied().unwrap_or(usize::MAX);
-                    let rb = ranks.get(&b.id).copied().unwrap_or(usize::MAX);
-                    ra.cmp(&rb)
-                })
-                .then_with(|| a.id.cmp(&b.id))
-        });
-
-        self.ready = graph.ready_items().into_iter().collect();
-        self.blocked = graph
-            .blocked_items()
-            .into_iter()
-            .map(|b| (b.id.clone(), b))
-            .collect();
-        self.all = frontmatters;
-        self.graph = graph;
-        self.load_warnings = errors.iter().map(|e| e.to_string()).collect();
+        if let Err(msg) = self.data.scan() {
+            self.status = msg;
+            return;
+        }
 
         self.rebuild_facets();
-        self.recompute_view(); // preserves the selected item by id
+        self.recompute_view();
         self.load_detail();
         self.status = format!(
             "{} item(s) loaded{}",
-            self.all.len(),
-            if self.load_warnings.is_empty() {
+            self.data.all.len(),
+            if self.data.load_warnings.is_empty() {
                 String::new()
             } else {
-                format!(" · {} warning(s)", self.load_warnings.len())
+                format!(" · {} warning(s)", self.data.load_warnings.len())
             }
         );
     }
@@ -375,13 +337,14 @@ impl App {
         let needle = self.search.to_lowercase();
 
         self.view = self
+            .data
             .all
             .iter()
             .enumerate()
             .filter(|(_, fm)| match self.tab {
                 Tab::All => true,
-                Tab::Ready => self.ready.contains(&fm.id),
-                Tab::Blocked => self.blocked.contains_key(&fm.id),
+                Tab::Ready => self.data.ready.contains(&fm.id),
+                Tab::Blocked => self.data.blocked.contains_key(&fm.id),
             })
             .filter(|(_, fm)| self.filter.matches(fm))
             .filter(|(_, fm)| {
@@ -406,7 +369,7 @@ impl App {
         if self.sort.field == SortField::Default {
             return;
         }
-        let all = &self.all;
+        let all = &self.data.all;
         let field = self.sort.field;
         self.view.sort_by(|&a, &b| {
             let (x, y) = (&all[a], &all[b]);
@@ -429,7 +392,7 @@ impl App {
     /// otherwise clamp to a valid position.
     fn restore_selection(&mut self, keep: Option<CloveId>) {
         if let Some(id) = keep {
-            if let Some(pos) = self.view.iter().position(|&i| self.all[i].id == id) {
+            if let Some(pos) = self.view.iter().position(|&i| self.data.all[i].id == id) {
                 self.list_state.select(Some(pos));
             }
         }
@@ -443,7 +406,7 @@ impl App {
 
         let mut statuses = Vec::new();
         for s in [ItemStatus::Open, ItemStatus::InProgress, ItemStatus::Closed] {
-            if self.all.iter().any(|fm| fm.status == s) {
+            if self.data.all.iter().any(|fm| fm.status == s) {
                 statuses.push(MenuValue::Status(s));
             }
         }
@@ -455,19 +418,21 @@ impl App {
             ItemType::Docs,
             ItemType::Epic,
         ] {
-            if self.all.iter().any(|fm| fm.item_type == t) {
+            if self.data.all.iter().any(|fm| fm.item_type == t) {
                 types.push(MenuValue::Type(t));
             }
         }
-        let mut priorities: Vec<u8> = self.all.iter().map(|fm| fm.priority.get()).collect();
+        let mut priorities: Vec<u8> = self.data.all.iter().map(|fm| fm.priority.get()).collect();
         priorities.sort_unstable();
         priorities.dedup();
         let labels: BTreeSet<String> = self
+            .data
             .all
             .iter()
             .flat_map(|fm| fm.labels.iter().cloned())
             .collect();
         let assignees: BTreeSet<String> = self
+            .data
             .all
             .iter()
             .filter_map(|fm| fm.assignee.clone())
@@ -535,7 +500,7 @@ impl App {
 
     /// The frontmatter rows in the current (filtered, ordered) view.
     pub fn visible(&self) -> impl Iterator<Item = &ItemFrontmatter> {
-        self.view.iter().map(move |&i| &self.all[i])
+        self.view.iter().map(move |&i| &self.data.all[i])
     }
 
     pub fn visible_count(&self) -> usize {
@@ -543,41 +508,43 @@ impl App {
     }
 
     pub fn total_count(&self) -> usize {
-        self.all.len()
+        self.data.total()
     }
 
     /// Count of items belonging to `tab` (ignoring the active search), for the
     /// tab-bar badges.
     pub fn visible_for(&self, tab: Tab) -> usize {
         match tab {
-            Tab::All => self.all.len(),
+            Tab::All => self.data.all.len(),
             Tab::Ready => self
+                .data
                 .all
                 .iter()
-                .filter(|fm| self.ready.contains(&fm.id))
+                .filter(|fm| self.data.ready.contains(&fm.id))
                 .count(),
             Tab::Blocked => self
+                .data
                 .all
                 .iter()
-                .filter(|fm| self.blocked.contains_key(&fm.id))
+                .filter(|fm| self.data.blocked.contains_key(&fm.id))
                 .count(),
         }
     }
 
     /// Whether an item is ready / blocked (for badges in the list).
     pub fn is_ready(&self, id: &CloveId) -> bool {
-        self.ready.contains(id)
+        self.data.is_ready(id)
     }
 
     pub fn is_blocked(&self, id: &CloveId) -> bool {
-        self.blocked.contains_key(id)
+        self.data.is_blocked(id)
     }
 
     /// The currently-selected item's frontmatter, if any.
     pub fn selected_frontmatter(&self) -> Option<&ItemFrontmatter> {
         let pos = self.list_state.selected()?;
         let &idx = self.view.get(pos)?;
-        self.all.get(idx)
+        self.data.all.get(idx)
     }
 
     fn selected_id(&self) -> Option<CloveId> {
@@ -801,7 +768,7 @@ impl App {
         };
         let id = fm.id.clone();
 
-        let item = match self.store.get(&id) {
+        let item = match self.data.store.get(&id) {
             Ok(item) => item,
             Err(e) => {
                 self.detail = None;
@@ -810,17 +777,19 @@ impl App {
             }
         };
 
-        let comments = clove_core::list_comments(self.store.issues_dir(), &id).unwrap_or_default();
+        let comments =
+            clove_core::list_comments(self.data.store.issues_dir(), &id).unwrap_or_default();
 
         let (blocking_deps, dangling_deps) = self
+            .data
             .blocked
             .get(&id)
             .map(|b| (b.blocking_deps.clone(), b.dangling_deps.clone()))
             .unwrap_or_default();
 
-        let children = self.graph.epic_children_summary(&id);
+        let children = self.data.graph.epic_children_summary(&id);
 
-        let tree = self.graph.dep_tree(&id, 25);
+        let tree = self.data.graph.dep_tree(&id, 25);
 
         self.detail = Some(Detail {
             item,
