@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use crate::app::{fmt_ts, Detail};
 use crate::ui::style::{ACCENT, DIM};
 
-pub(crate) fn comment_lines(detail: &Detail) -> Vec<Line<'static>> {
+pub(super) fn comment_lines(detail: &Detail) -> Vec<Line<'static>> {
     if detail.comments.is_empty() {
         return vec![Line::from(Span::styled(
             "No comments.",

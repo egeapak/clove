@@ -13,7 +13,7 @@ use crate::ui::util::{
 /// The header's meta line: id (`#42`) + priority glyph + ALL-CAPS type tag.
 /// Shared by the wide and narrow headers so priority always reads from the same
 /// place; the title lives on the line below.
-pub(crate) fn head_spans(fm: &ItemFrontmatter) -> Vec<Span<'static>> {
+pub(super) fn head_spans(fm: &ItemFrontmatter) -> Vec<Span<'static>> {
     vec![
         Span::styled(
             format!("{}  ", short_ref(&fm.id)),
@@ -31,13 +31,13 @@ pub(crate) fn head_spans(fm: &ItemFrontmatter) -> Vec<Span<'static>> {
 }
 
 /// The title span, styled bold (its own line under the meta line).
-pub(crate) fn title_span(title: String) -> Span<'static> {
+pub(super) fn title_span(title: String) -> Span<'static> {
     Span::styled(title, Style::default().add_modifier(Modifier::BOLD))
 }
 
 /// `@assignee · deps N` spans (omitting whichever is absent), shown to the right
 /// under the status in the wide header.
-pub(crate) fn assignee_deps_spans(fm: &ItemFrontmatter) -> Vec<Span<'static>> {
+pub(super) fn assignee_deps_spans(fm: &ItemFrontmatter) -> Vec<Span<'static>> {
     let mut v = Vec::new();
     if let Some(a) = &fm.assignee {
         v.push(Span::styled(format!("@{a}"), Style::default().fg(LABEL)));
@@ -55,7 +55,7 @@ pub(crate) fn assignee_deps_spans(fm: &ItemFrontmatter) -> Vec<Span<'static>> {
 }
 
 /// Blocker/children rows shared by the wide and narrow overviews.
-pub(crate) fn blocker_lines(detail: &Detail, lines: &mut Vec<Line<'static>>) {
+pub(super) fn blocker_lines(detail: &Detail, lines: &mut Vec<Line<'static>>) {
     if !detail.blocking_deps.is_empty() {
         lines.push(field_line(
             "blocked by",
@@ -94,7 +94,7 @@ pub(crate) fn blocker_lines(detail: &Detail, lines: &mut Vec<Line<'static>>) {
 }
 
 /// Relationship rows (deps omitted — the Dep tree tab has the list).
-pub(crate) fn relation_lines(fm: &ItemFrontmatter) -> Vec<Line<'static>> {
+pub(super) fn relation_lines(fm: &ItemFrontmatter) -> Vec<Line<'static>> {
     let mut rel = Vec::new();
     push_id_field(&mut rel, "parent", fm.parent.as_ref());
     push_id_field(&mut rel, "relates", fm.relates.iter());
@@ -107,7 +107,7 @@ pub(crate) fn relation_lines(fm: &ItemFrontmatter) -> Vec<Line<'static>> {
 /// id/priority/type with the status flush-right; line 2 is the title with the
 /// assignee and deps count flush-right under the status. Sized to its content so
 /// the body gets the rest of the pane.
-pub(crate) fn overview_header(app: &App, detail: &Detail, inner_w: u16) -> Vec<Line<'static>> {
+pub(super) fn overview_header(app: &App, detail: &Detail, inner_w: u16) -> Vec<Line<'static>> {
     let fm = &detail.item.frontmatter;
 
     // The title shares line 2 with the assignee/deps, so it's truncated to the
@@ -129,7 +129,7 @@ pub(crate) fn overview_header(app: &App, detail: &Detail, inner_w: u16) -> Vec<L
 }
 
 /// The wide Overview's scrolling body: relationships then the Markdown body.
-pub(crate) fn overview_body(detail: &Detail, inner_w: u16) -> Vec<Line<'static>> {
+pub(super) fn overview_body(detail: &Detail, inner_w: u16) -> Vec<Line<'static>> {
     let fm = &detail.item.frontmatter;
     let mut lines = relation_lines(fm);
     let body = detail.item.body.trim();
@@ -144,7 +144,7 @@ pub(crate) fn overview_body(detail: &Detail, inner_w: u16) -> Vec<Line<'static>>
 
 /// The narrow Overview (single scrolling paragraph, no sticky footer): the title
 /// may wrap, fields stack as rows, labels/dates inline, body under a plain rule.
-pub(crate) fn overview_lines(app: &App, detail: &Detail, inner_w: u16) -> Vec<Line<'static>> {
+pub(super) fn overview_lines(app: &App, detail: &Detail, inner_w: u16) -> Vec<Line<'static>> {
     let fm = &detail.item.frontmatter;
 
     let mut lines = vec![
@@ -190,7 +190,7 @@ pub(crate) fn overview_lines(app: &App, detail: &Detail, inner_w: u16) -> Vec<Li
 }
 
 /// The status glyph + word, plus a `· ready`/`· blocked` suffix.
-pub(crate) fn status_spans(app: &App, fm: &ItemFrontmatter) -> Vec<Span<'static>> {
+pub(super) fn status_spans(app: &App, fm: &ItemFrontmatter) -> Vec<Span<'static>> {
     let mut v = vec![
         Span::styled(status_glyph(fm.status), status_style(fm.status)),
         Span::raw(" "),
@@ -208,7 +208,7 @@ pub(crate) fn status_spans(app: &App, fm: &ItemFrontmatter) -> Vec<Span<'static>
 
 /// The pinned Overview footer: labels flush-left (truncated with `+N` to make
 /// room), created/updated (and `closed`) flush-right at day resolution.
-pub(crate) fn footer_line(fm: &ItemFrontmatter, width: u16) -> Line<'static> {
+pub(super) fn footer_line(fm: &ItemFrontmatter, width: u16) -> Line<'static> {
     let mut right = vec![
         Span::styled("created ", Style::default().fg(DIM)),
         Span::raw(fmt_day(fm.created)),
@@ -239,6 +239,6 @@ pub(crate) fn footer_line(fm: &ItemFrontmatter, width: u16) -> Line<'static> {
 }
 
 /// A day-resolution timestamp row (e.g. `created     Jan 20`).
-pub(crate) fn time_field(key: &str, ts: chrono::DateTime<chrono::Utc>) -> Line<'static> {
+pub(super) fn time_field(key: &str, ts: chrono::DateTime<chrono::Utc>) -> Line<'static> {
     field_line(key, vec![Span::raw(fmt_day(ts))])
 }

@@ -51,7 +51,7 @@ pub(crate) fn render_tabs(f: &mut Frame, app: &App, area: Rect, compact: bool) {
     f.render_widget(tabs, area);
 }
 
-pub(crate) fn short_tab(t: Tab) -> &'static str {
+fn short_tab(t: Tab) -> &'static str {
     match t {
         Tab::All => "All",
         Tab::Ready => "Rdy",

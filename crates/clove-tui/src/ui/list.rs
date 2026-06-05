@@ -78,12 +78,7 @@ pub(crate) fn render_list(f: &mut Frame, app: &mut App, area: Rect) {
 /// One width-aware line in the item list: a status glyph, a single-letter type
 /// icon, the short id (right-aligned in `id_w`), priority, the title, and a
 /// ready/blocked badge. The title budget is computed from the actual pane width.
-pub(crate) fn list_row(
-    app: &App,
-    fm: &ItemFrontmatter,
-    inner_w: u16,
-    id_w: usize,
-) -> Line<'static> {
+fn list_row(app: &App, fm: &ItemFrontmatter, inner_w: u16, id_w: usize) -> Line<'static> {
     let inner = inner_w as usize;
     let mut spans = vec![
         Span::styled(status_glyph(fm.status), status_style(fm.status)),

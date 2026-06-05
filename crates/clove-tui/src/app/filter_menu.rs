@@ -57,7 +57,7 @@ pub struct FilterMenu {
 
 /// Add or remove `value` from `vec` (used for multi-valued facets). `present`
 /// says whether it is currently in the vec.
-pub(crate) fn toggle_vec<T: PartialEq>(vec: &mut Vec<T>, value: T, present: bool) {
+pub(super) fn toggle_vec<T: PartialEq>(vec: &mut Vec<T>, value: T, present: bool) {
     if present {
         vec.retain(|v| v != &value);
     } else {

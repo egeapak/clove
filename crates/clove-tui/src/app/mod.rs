@@ -52,7 +52,7 @@ pub struct App {
     pub should_quit: bool,
     /// Whether a background operation is in progress. Always `false` today; the
     /// deferred M4 background scan flips this to drive the 10fps cadence.
-    pub busy: bool,
+    busy: bool,
 
     // Filter menu state.
     pub filter_menu: FilterMenu,

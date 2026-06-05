@@ -10,7 +10,7 @@ use crate::ui::util::{short_ref, truncate};
 
 /// The dependency tree, rendered with status glyphs + titles inline (children
 /// sorted by id for stable output).
-pub(crate) fn tree_lines(detail: &Detail) -> Vec<Line<'static>> {
+pub(super) fn tree_lines(detail: &Detail) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from(Span::styled(
             "Dependency tree (this → its dependencies)",
@@ -28,7 +28,7 @@ pub(crate) fn tree_lines(detail: &Detail) -> Vec<Line<'static>> {
     lines
 }
 
-pub(crate) fn push_tree_node(
+fn push_tree_node(
     lines: &mut Vec<Line<'static>>,
     node: &DepTreeNode,
     prefix: String,
