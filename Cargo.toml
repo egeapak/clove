@@ -50,6 +50,7 @@ git2 = "0.21"                   # M3 daemon git auto-sync only (vendored libgit2
 chrono = { version = "0.4", features = ["serde"] }  # RFC3339 timestamps
 jiff = "0.2"                    # nanosecond timestamps for comment filenames
 octocrab = "0.51"               # GitHub REST API client (clove-import, M2)
+rustls = { version = "0.23", default-features = false, features = ["ring"] }  # octocrab/hyper-rustls pull BOTH ring + aws-lc-rs via feature unification, so rustls can't auto-pick a provider and panics on first TLS use; we install the ring provider explicitly (clove-import github feature)
 toml = "0.8"                    # config.toml parsing
 jsonschema = "0.46"             # JSON Schema validation in tests (T-CLI14)
 ratatui = "0.29"                # terminal UI (M4 `clove tui`); re-exports crossterm

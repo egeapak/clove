@@ -332,7 +332,7 @@ fn filter_menu() {
     let mut app = app();
     app.start_filter();
     app.filter_toggle(); // cursor at first row = status:open
-    app.filter_cursor = 4; // a type row (after 3 status rows + header offset is by index)
+    app.filter_menu.cursor = 4; // a type row (after 3 status rows + header offset is by index)
     app.filter_toggle();
     snap("filter_menu", &mut app);
 }
@@ -343,7 +343,7 @@ fn filtered_by_type() {
     // list, the Items (N/M) title, and the filter chip in the status line.
     let mut app = app();
     app.start_filter();
-    app.filter_cursor = 4; // type:feature row
+    app.filter_menu.cursor = 4; // type:feature row
     app.filter_toggle();
     app.exit_filter();
     snap("filtered_by_type", &mut app);
@@ -365,9 +365,9 @@ fn filtered_empty() {
     // empty-result escape hatch.
     let mut app = app();
     app.start_filter();
-    app.filter_cursor = 2; // status:closed
+    app.filter_menu.cursor = 2; // status:closed
     app.filter_toggle();
-    app.filter_cursor = 3; // type:bug
+    app.filter_menu.cursor = 3; // type:bug
     app.filter_toggle();
     app.exit_filter();
     snap("filtered_empty", &mut app);
@@ -443,11 +443,11 @@ fn overview_scroll() {
     // Scrolled detail: the body region scrolls while the wide layout's fixed
     // header and pinned footer stay put; narrow scrolls everything (no footer).
     let mut app = edge_app(LONG_TITLE, MANY_LABELS, true, SCROLL_BODY);
-    app.detail_scroll = 6;
+    app.detail.detail_scroll = 6;
     let wide = render_to_string(&mut app, 120, 24);
     insta::assert_snapshot!("overview_scroll_wide", wide);
 
-    app.detail_scroll = 3;
+    app.detail.detail_scroll = 3;
     let narrow = render_to_string(&mut app, 40, 18);
     insta::assert_snapshot!("overview_scroll_narrow", narrow);
 }
@@ -680,14 +680,14 @@ fn generate_screenshots() {
         let mut a = app();
         a.start_filter();
         a.filter_toggle();
-        a.filter_cursor = 4;
+        a.filter_menu.cursor = 4;
         a.filter_toggle();
         save("05-filter-menu", 80, wh, &mut a);
     }
     {
         let mut a = app();
         a.start_filter();
-        a.filter_cursor = 4;
+        a.filter_menu.cursor = 4;
         a.filter_toggle();
         a.exit_filter();
         save("06-filtered", ww, wh, &mut a);
@@ -729,14 +729,14 @@ fn generate_screenshots() {
 fn filter_menu_lists_present_values() {
     // 3 statuses + 5 types + 5 priorities + 7 labels + 2 assignees = 22 rows.
     let app = app();
-    assert_eq!(app.filter_menu.len(), 22);
+    assert_eq!(app.filter_menu.menu.len(), 22);
 }
 
 #[test]
 fn filter_single_type_narrows_and_clears() {
     let mut app = app();
     app.start_filter();
-    app.filter_cursor = 4; // type:feature
+    app.filter_menu.cursor = 4; // type:feature
     app.filter_toggle();
     app.exit_filter();
     // Three features: Build REST API, Write integration tests, Frontend dashboard.
@@ -749,9 +749,9 @@ fn filter_single_type_narrows_and_clears() {
 fn filter_multi_type_is_or() {
     let mut app = app();
     app.start_filter();
-    app.filter_cursor = 3; // type:bug
+    app.filter_menu.cursor = 3; // type:bug
     app.filter_toggle();
-    app.filter_cursor = 4; // type:feature
+    app.filter_menu.cursor = 4; // type:feature
     app.filter_toggle();
     // bug (1) OR feature (3) = 4 items.
     assert_eq!(app.visible_count(), 4);
@@ -761,15 +761,16 @@ fn filter_multi_type_is_or() {
 fn filter_across_facets_is_and() {
     let mut app = app();
     app.start_filter();
-    app.filter_cursor = 4; // type:feature
+    app.filter_menu.cursor = 4; // type:feature
     app.filter_toggle();
     // Find the priority p0 row dynamically (index depends on present facets).
     let p0 = app
         .filter_menu
+        .menu
         .iter()
         .position(|m| matches!(m.value, crate::app::MenuValue::Priority(0)))
         .unwrap();
-    app.filter_cursor = p0;
+    app.filter_menu.cursor = p0;
     app.filter_toggle();
     // feature AND p0 → only "Build REST API".
     assert_eq!(app.visible_count(), 1);
@@ -783,7 +784,7 @@ fn sort_by_id_orders_ascending() {
     for _ in 0..4 {
         app.cycle_sort_field();
     }
-    assert_eq!(app.sort.field, crate::app::SortField::Id);
+    assert_eq!(app.list.sort.field, crate::app::SortField::Id);
     let first = app.visible().next().unwrap();
     assert_eq!(first.id.as_str(), "proj-00000001");
 }
@@ -795,7 +796,7 @@ fn selection_survives_filtering() {
     app.select_first(); // Build REST API (p0 feature), the default first row
     let before = app.selected_frontmatter().unwrap().id.clone();
     app.start_filter();
-    app.filter_cursor = 4; // type:feature (keeps it)
+    app.filter_menu.cursor = 4; // type:feature (keeps it)
     app.filter_toggle();
     app.exit_filter();
     assert_eq!(app.selected_frontmatter().unwrap().id, before);

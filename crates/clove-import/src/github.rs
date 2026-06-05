@@ -501,10 +501,28 @@ mod net {
         (!token.is_empty()).then_some(token)
     }
 
+    /// Install the rustls **ring** crypto provider as the process default, once.
+    ///
+    /// octocrab pulls `hyper-rustls`, and via Cargo feature unification *both* the
+    /// `ring` and `aws-lc-rs` rustls providers get compiled in. rustls 0.23 then
+    /// refuses to auto-select one and panics ("Could not automatically determine
+    /// the process-level CryptoProvider") on the first TLS handshake. Installing a
+    /// provider explicitly before octocrab builds its client is the documented
+    /// remedy. We prefer `ring`. The call is idempotent: a second install (or a
+    /// provider already installed elsewhere) returns `Err`, which we ignore.
+    fn install_crypto_provider() {
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        });
+    }
+
     /// Build an authenticated octocrab client from a resolved token
     /// (`GITHUB_TOKEN` or the `gh` CLI), erroring cleanly when neither is
     /// available (a network call needs it).
     fn build_client() -> Result<Octocrab, ImportError> {
+        install_crypto_provider();
         let token = resolve_github_token().ok_or_else(|| ImportError::Source {
             path: camino::Utf8PathBuf::from("<github>"),
             message: "no GitHub token: set GITHUB_TOKEN or authenticate the gh CLI \
@@ -569,12 +587,20 @@ mod net {
         prefix: &str,
     ) -> Result<(ImportPlan, Option<ImportReport>), ImportError> {
         let (owner, repo) = parse_repo_spec(spec)?;
-        let crab = build_client()?;
         let rt = tokio::runtime::Runtime::new().map_err(|err| ImportError::Source {
             path: camino::Utf8PathBuf::from("<github>"),
             message: format!("failed to start async runtime: {err}"),
         })?;
-        let issues = rt.block_on(fetch_all(&crab, &owner, &repo))?;
+        // The octocrab client must be built *inside* the runtime context: its
+        // tower `Buffer` layer spawns a worker task at build time, which panics
+        // ("there is no reactor running") if no runtime is entered. Building it
+        // within `block_on` keeps the context active. (Using `rt.enter()` here
+        // would instead panic with "Cannot start a runtime from within a
+        // runtime" once `block_on` re-enters.)
+        let issues = rt.block_on(async {
+            let crab = build_client()?;
+            fetch_all(&crab, &owner, &repo).await
+        })?;
 
         let (plan, staged) =
             plan_issues(&issues, ctx).map_err(|message| ImportError::Record { message })?;
@@ -642,12 +668,16 @@ mod net {
             return Ok((plan, None));
         }
 
-        let crab = build_client()?;
         let rt = tokio::runtime::Runtime::new().map_err(|err| ImportError::Source {
             path: camino::Utf8PathBuf::from("<github>"),
             message: format!("failed to start async runtime: {err}"),
         })?;
-        let report = rt.block_on(push_all(&crab, &owner, &repo, objs))?;
+        // Build the client inside the runtime context (see `import_github`): the
+        // octocrab/tower Buffer worker is spawned at build time and needs a reactor.
+        let report = rt.block_on(async {
+            let crab = build_client()?;
+            push_all(&crab, &owner, &repo, objs).await
+        })?;
         Ok((plan, Some(report)))
     }
 

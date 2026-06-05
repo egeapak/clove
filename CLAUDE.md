@@ -35,7 +35,7 @@ shapes (portrait/landscape/square) to exercise the adaptive layout.
 
 Colour is **not** in the render snapshots (kept text-only on purpose, for clean
 font/theme-independent diffs). Instead, the colour *semantics* are locked by
-unit tests on the style functions in `ui.rs` (`tests` module: `priority_style`,
+unit tests on the style functions in `ui/style.rs` (`tests` module: `priority_style`,
 `status_style`, `type_style`) — these assert the `fg`/`bg` each returns, with no
 layout or cell coordinates involved, so they don't break when the layout shifts.
 **When you change a colour constant, update those tests** (and regenerate the

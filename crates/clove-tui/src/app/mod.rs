@@ -5,60 +5,21 @@
 //! refresh. This keeps the TUI always-correct and decoupled from the optional
 //! SQLite index and daemon — it never mutates anything.
 
-use std::collections::{HashMap, HashSet};
+mod data;
+pub use data::Data;
+
+mod detail;
+pub use detail::{Detail, DetailPane, DetailTab};
+
+mod filter_menu;
+use filter_menu::toggle_vec;
+pub use filter_menu::{Facet, FilterMenu, MenuItem, MenuValue};
+
+mod listing;
+pub use listing::{Listing, SortDir, SortField, Tab, ViewFilter};
 
 use chrono::Utc;
-use clove_core::{
-    BlockedItem, ChildrenSummary, CloveId, Comment, DepTreeNode, GraphStore, Item, ItemFrontmatter,
-    ItemStatus, ItemStore, ItemType,
-};
-use ratatui::widgets::ListState;
-
-/// The top-level view filter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tab {
-    All,
-    Ready,
-    Blocked,
-}
-
-impl Tab {
-    pub const ALL: [Tab; 3] = [Tab::All, Tab::Ready, Tab::Blocked];
-
-    pub fn title(self) -> &'static str {
-        match self {
-            Tab::All => "All",
-            Tab::Ready => "Ready",
-            Tab::Blocked => "Blocked",
-        }
-    }
-
-    pub fn index(self) -> usize {
-        match self {
-            Tab::All => 0,
-            Tab::Ready => 1,
-            Tab::Blocked => 2,
-        }
-    }
-}
-
-/// Which sub-view of the detail pane is showing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DetailTab {
-    Overview,
-    Tree,
-    Comments,
-}
-
-impl DetailTab {
-    pub fn title(self) -> &'static str {
-        match self {
-            DetailTab::Overview => "Overview",
-            DetailTab::Tree => "Dep tree",
-            DetailTab::Comments => "Comments",
-        }
-    }
-}
+use clove_core::{CloveId, ItemFrontmatter, ItemStatus, ItemStore, ItemType};
 
 /// Input mode: browsing, typing a search query, or the facet filter menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,163 +27,6 @@ pub enum Mode {
     Browse,
     Search,
     Filter,
-}
-
-/// The field the list is sorted by. `Default` is the canonical
-/// `(priority, topo-rank, id)` order shared with `clove ls`; the others are flat
-/// single-key sorts (topo ordering does not apply).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SortField {
-    Default,
-    Priority,
-    Created,
-    Updated,
-    Id,
-}
-
-impl SortField {
-    const CYCLE: [SortField; 5] = [
-        SortField::Default,
-        SortField::Priority,
-        SortField::Created,
-        SortField::Updated,
-        SortField::Id,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            SortField::Default => "rank",
-            SortField::Priority => "prio",
-            SortField::Created => "created",
-            SortField::Updated => "updated",
-            SortField::Id => "id",
-        }
-    }
-
-    fn next(self) -> SortField {
-        let i = Self::CYCLE.iter().position(|&f| f == self).unwrap_or(0);
-        Self::CYCLE[(i + 1) % Self::CYCLE.len()]
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SortDir {
-    Asc,
-    Desc,
-}
-
-impl SortDir {
-    pub fn glyph(self) -> &'static str {
-        match self {
-            SortDir::Asc => "↑",
-            SortDir::Desc => "↓",
-        }
-    }
-}
-
-/// The active sort: a field plus a direction.
-#[derive(Debug, Clone, Copy)]
-pub struct Sort {
-    pub field: SortField,
-    pub dir: SortDir,
-}
-
-impl Default for Sort {
-    fn default() -> Self {
-        Sort {
-            field: SortField::Default,
-            dir: SortDir::Asc,
-        }
-    }
-}
-
-/// Interactive facet filters. Empty/`None` means unconstrained. Semantics:
-/// AND across facets; OR within `types`/`priorities` (any-of); AND within
-/// `labels` (all-of); `status`/`assignee` are single-valued.
-#[derive(Debug, Default, Clone)]
-pub struct ViewFilter {
-    pub status: Option<ItemStatus>,
-    pub assignee: Option<String>,
-    pub types: Vec<ItemType>,
-    pub priorities: Vec<u8>,
-    pub labels: Vec<String>,
-}
-
-impl ViewFilter {
-    pub fn is_active(&self) -> bool {
-        self.status.is_some()
-            || self.assignee.is_some()
-            || !self.types.is_empty()
-            || !self.priorities.is_empty()
-            || !self.labels.is_empty()
-    }
-
-    fn matches(&self, fm: &ItemFrontmatter) -> bool {
-        if let Some(s) = self.status {
-            if fm.status != s {
-                return false;
-            }
-        }
-        if let Some(a) = &self.assignee {
-            if fm.assignee.as_deref() != Some(a.as_str()) {
-                return false;
-            }
-        }
-        if !self.types.is_empty() && !self.types.contains(&fm.item_type) {
-            return false;
-        }
-        if !self.priorities.is_empty() && !self.priorities.contains(&fm.priority.get()) {
-            return false;
-        }
-        // Labels are all-of (AND): every selected label must be present.
-        self.labels.iter().all(|l| fm.labels.contains(l))
-    }
-}
-
-/// One facet shown in the filter menu.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Facet {
-    Status,
-    Type,
-    Priority,
-    Label,
-    Assignee,
-}
-
-impl Facet {
-    pub fn label(self) -> &'static str {
-        match self {
-            Facet::Status => "Status",
-            Facet::Type => "Type",
-            Facet::Priority => "Priority",
-            Facet::Label => "Label",
-            Facet::Assignee => "Assignee",
-        }
-    }
-
-    /// Single-valued facets behave as radios (selecting one clears the rest);
-    /// multi-valued ones as checkboxes.
-    pub fn is_single(self) -> bool {
-        matches!(self, Facet::Status | Facet::Assignee)
-    }
-}
-
-/// One selectable value row in the filter menu.
-#[derive(Debug, Clone)]
-pub struct MenuItem {
-    pub facet: Facet,
-    pub value: MenuValue,
-    /// The display label for the value.
-    pub text: String,
-}
-
-#[derive(Debug, Clone)]
-pub enum MenuValue {
-    Status(ItemStatus),
-    Type(ItemType),
-    Priority(u8),
-    Label(String),
-    Assignee(String),
 }
 
 /// Which pane holds focus. Only visible in the single-pane (narrow) layout,
@@ -234,132 +38,81 @@ pub enum Focus {
     Detail,
 }
 
-/// Everything loaded for the currently-selected item, computed lazily when the
-/// selection changes (the body and comments are not part of the list scan).
-pub struct Detail {
-    pub item: Item,
-    pub comments: Vec<Comment>,
-    /// Open hard-dependency targets blocking this item.
-    pub blocking_deps: Vec<CloveId>,
-    /// Hard-dependency targets with no backing item.
-    pub dangling_deps: Vec<CloveId>,
-    /// Direct-children roll-up when the item is an epic.
-    pub children: Option<ChildrenSummary>,
-    /// The dependency tree rooted at this item (ids, titles, status, cycles).
-    pub tree: Option<DepTreeNode>,
-}
-
 /// The TUI application state.
 pub struct App {
-    store: ItemStore,
-
-    // Loaded data (refreshed wholesale).
-    all: Vec<ItemFrontmatter>,
-    ready: HashSet<CloveId>,
-    blocked: HashMap<CloveId, BlockedItem>,
-    graph: GraphStore,
-    /// Non-fatal load problems (e.g. files that failed to parse).
-    pub load_warnings: Vec<String>,
+    pub data: Data,
+    pub list: Listing,
 
     // View state.
-    pub tab: Tab,
-    /// Indices into `all` that pass the current tab + search filter.
-    view: Vec<usize>,
-    pub list_state: ListState,
     pub mode: Mode,
-    pub search: String,
-    pub detail_tab: DetailTab,
-    pub detail: Option<Detail>,
-    pub detail_scroll: u16,
+    pub detail: DetailPane,
     pub focus: Focus,
     pub show_help: bool,
     pub status: String,
     pub should_quit: bool,
+    /// Whether a background operation is in progress. Always `false` today; the
+    /// deferred M4 background scan flips this to drive the 10fps cadence.
+    busy: bool,
 
-    // Sort + filter state.
-    pub sort: Sort,
-    pub filter: ViewFilter,
-    /// The filter menu's selectable rows (built from values present in the repo).
-    pub filter_menu: Vec<MenuItem>,
-    /// Cursor into `filter_menu` while `Mode::Filter` is active.
-    pub filter_cursor: usize,
+    // Filter menu state.
+    pub filter_menu: FilterMenu,
 }
 
 impl App {
     /// Build the app from a file store, performing the initial scan.
     pub fn new(store: ItemStore) -> Self {
         let mut app = App {
-            store,
-            all: Vec::new(),
-            ready: HashSet::new(),
-            blocked: HashMap::new(),
-            graph: GraphStore::build(&[]).0,
-            load_warnings: Vec::new(),
-            tab: Tab::All,
-            view: Vec::new(),
-            list_state: ListState::default(),
+            data: Data::new(store),
+            list: Listing::default(),
             mode: Mode::Browse,
-            search: String::new(),
-            detail_tab: DetailTab::Overview,
-            detail: None,
-            detail_scroll: 0,
+            detail: DetailPane::default(),
             focus: Focus::List,
             show_help: false,
             status: String::new(),
             should_quit: false,
-            sort: Sort::default(),
-            filter: ViewFilter::default(),
-            filter_menu: Vec::new(),
-            filter_cursor: 0,
+            busy: false,
+            filter_menu: FilterMenu::default(),
         };
         app.refresh();
         app
     }
 
+    /// Whether a background operation is in progress (hook for the deferred
+    /// background scan; always `false` today).
+    pub fn is_busy(&self) -> bool {
+        self.busy
+    }
+
+    /// The event-loop poll timeout: 10fps while busy, 1fps when idle.
+    pub fn tick_interval(&self) -> std::time::Duration {
+        if self.is_busy() {
+            std::time::Duration::from_millis(100)
+        } else {
+            std::time::Duration::from_secs(1)
+        }
+    }
+
+    /// Advance one idle/progress tick. A no-op today (future: spinner frame).
+    pub fn on_tick(&mut self) {}
+
     /// Re-scan the store and rebuild all derived state, preserving the selected
     /// item where possible.
     pub fn refresh(&mut self) {
-        let (mut frontmatters, errors) = match self.store.scan_frontmatter() {
-            Ok(pair) => pair,
-            Err(e) => {
-                self.status = format!("scan failed: {e}");
-                return;
-            }
-        };
-
-        let (graph, _dangling) = GraphStore::build(&frontmatters);
-        let ranks = graph.topological_ranks();
-        frontmatters.sort_by(|a, b| {
-            a.priority
-                .cmp(&b.priority)
-                .then_with(|| {
-                    let ra = ranks.get(&a.id).copied().unwrap_or(usize::MAX);
-                    let rb = ranks.get(&b.id).copied().unwrap_or(usize::MAX);
-                    ra.cmp(&rb)
-                })
-                .then_with(|| a.id.cmp(&b.id))
-        });
-
-        self.ready = graph.ready_items().into_iter().collect();
-        self.blocked = graph
-            .blocked_items()
-            .into_iter()
-            .map(|b| (b.id.clone(), b))
-            .collect();
-        self.all = frontmatters;
-        self.graph = graph;
-        self.load_warnings = errors.iter().map(|e| e.to_string()).collect();
+        if let Err(msg) = self.data.scan() {
+            self.status = msg;
+            return;
+        }
 
         self.rebuild_facets();
-        self.recompute_view(); // preserves the selected item by id
+        self.recompute_view();
         self.load_detail();
         self.status = format!(
             "{} item(s) loaded{}",
-            self.all.len(),
-            if self.load_warnings.is_empty() {
+            self.data.all.len(),
+            if self.data.load_warnings.is_empty() {
                 String::new()
             } else {
-                format!(" · {} warning(s)", self.load_warnings.len())
+                format!(" · {} warning(s)", self.data.load_warnings.len())
             }
         );
     }
@@ -372,18 +125,19 @@ impl App {
     /// canonical `(priority, topo-rank, id)` order; only `self.view` is re-sorted.
     fn recompute_view(&mut self) {
         let keep = self.selected_id();
-        let needle = self.search.to_lowercase();
+        let needle = self.list.search.to_lowercase();
 
-        self.view = self
+        self.list.view = self
+            .data
             .all
             .iter()
             .enumerate()
-            .filter(|(_, fm)| match self.tab {
+            .filter(|(_, fm)| match self.list.tab {
                 Tab::All => true,
-                Tab::Ready => self.ready.contains(&fm.id),
-                Tab::Blocked => self.blocked.contains_key(&fm.id),
+                Tab::Ready => self.data.ready.contains(&fm.id),
+                Tab::Blocked => self.data.blocked.contains_key(&fm.id),
             })
-            .filter(|(_, fm)| self.filter.matches(fm))
+            .filter(|(_, fm)| self.list.filter.matches(fm))
             .filter(|(_, fm)| {
                 if needle.is_empty() {
                     return true;
@@ -403,12 +157,13 @@ impl App {
     /// order `self.all` is already in; other fields sort flatly with an `id`
     /// tiebreak for determinism.
     fn apply_sort(&mut self) {
-        if self.sort.field == SortField::Default {
+        if self.list.sort.field == SortField::Default {
             return;
         }
-        let all = &self.all;
-        let field = self.sort.field;
-        self.view.sort_by(|&a, &b| {
+        let all = &self.data.all;
+        let field = self.list.sort.field;
+        let dir = self.list.sort.dir;
+        self.list.view.sort_by(|&a, &b| {
             let (x, y) = (&all[a], &all[b]);
             let ord = match field {
                 SortField::Priority => x.priority.cmp(&y.priority),
@@ -418,7 +173,7 @@ impl App {
                 SortField::Default => std::cmp::Ordering::Equal,
             }
             .then_with(|| x.id.cmp(&y.id));
-            match self.sort.dir {
+            match dir {
                 SortDir::Asc => ord,
                 SortDir::Desc => ord.reverse(),
             }
@@ -429,8 +184,13 @@ impl App {
     /// otherwise clamp to a valid position.
     fn restore_selection(&mut self, keep: Option<CloveId>) {
         if let Some(id) = keep {
-            if let Some(pos) = self.view.iter().position(|&i| self.all[i].id == id) {
-                self.list_state.select(Some(pos));
+            if let Some(pos) = self
+                .list
+                .view
+                .iter()
+                .position(|&i| self.data.all[i].id == id)
+            {
+                self.list.list_state.select(Some(pos));
             }
         }
         self.clamp_selection();
@@ -443,7 +203,7 @@ impl App {
 
         let mut statuses = Vec::new();
         for s in [ItemStatus::Open, ItemStatus::InProgress, ItemStatus::Closed] {
-            if self.all.iter().any(|fm| fm.status == s) {
+            if self.data.all.iter().any(|fm| fm.status == s) {
                 statuses.push(MenuValue::Status(s));
             }
         }
@@ -455,19 +215,21 @@ impl App {
             ItemType::Docs,
             ItemType::Epic,
         ] {
-            if self.all.iter().any(|fm| fm.item_type == t) {
+            if self.data.all.iter().any(|fm| fm.item_type == t) {
                 types.push(MenuValue::Type(t));
             }
         }
-        let mut priorities: Vec<u8> = self.all.iter().map(|fm| fm.priority.get()).collect();
+        let mut priorities: Vec<u8> = self.data.all.iter().map(|fm| fm.priority.get()).collect();
         priorities.sort_unstable();
         priorities.dedup();
         let labels: BTreeSet<String> = self
+            .data
             .all
             .iter()
             .flat_map(|fm| fm.labels.iter().cloned())
             .collect();
         let assignees: BTreeSet<String> = self
+            .data
             .all
             .iter()
             .filter_map(|fm| fm.assignee.clone())
@@ -513,71 +275,74 @@ impl App {
                 value: MenuValue::Assignee(a),
             });
         }
-        self.filter_menu = menu;
-        if self.filter_cursor >= self.filter_menu.len() {
-            self.filter_cursor = 0;
+        self.filter_menu.menu = menu;
+        if self.filter_menu.cursor >= self.filter_menu.menu.len() {
+            self.filter_menu.cursor = 0;
         }
     }
 
     /// Keep the list selection within the current view bounds.
     fn clamp_selection(&mut self) {
-        if self.view.is_empty() {
-            self.list_state.select(None);
+        if self.list.view.is_empty() {
+            self.list.list_state.select(None);
         } else {
             let sel = self
+                .list
                 .list_state
                 .selected()
                 .unwrap_or(0)
-                .min(self.view.len() - 1);
-            self.list_state.select(Some(sel));
+                .min(self.list.view.len() - 1);
+            self.list.list_state.select(Some(sel));
         }
     }
 
     /// The frontmatter rows in the current (filtered, ordered) view.
     pub fn visible(&self) -> impl Iterator<Item = &ItemFrontmatter> {
-        self.view.iter().map(move |&i| &self.all[i])
+        self.list.view.iter().map(move |&i| &self.data.all[i])
     }
 
     pub fn visible_count(&self) -> usize {
-        self.view.len()
+        self.list.view.len()
     }
 
     pub fn total_count(&self) -> usize {
-        self.all.len()
+        self.data.total()
     }
 
     /// Count of items belonging to `tab` (ignoring the active search), for the
     /// tab-bar badges.
     pub fn visible_for(&self, tab: Tab) -> usize {
         match tab {
-            Tab::All => self.all.len(),
+            Tab::All => self.data.all.len(),
             Tab::Ready => self
+                .data
                 .all
                 .iter()
-                .filter(|fm| self.ready.contains(&fm.id))
+                .filter(|fm| self.data.ready.contains(&fm.id))
                 .count(),
             Tab::Blocked => self
+                .data
                 .all
                 .iter()
-                .filter(|fm| self.blocked.contains_key(&fm.id))
+                .filter(|fm| self.data.blocked.contains_key(&fm.id))
                 .count(),
         }
     }
 
     /// Whether an item is ready / blocked (for badges in the list).
     pub fn is_ready(&self, id: &CloveId) -> bool {
-        self.ready.contains(id)
+        self.data.is_ready(id)
     }
 
     pub fn is_blocked(&self, id: &CloveId) -> bool {
-        self.blocked.contains_key(id)
+        self.data.is_blocked(id)
     }
 
     /// The currently-selected item's frontmatter, if any.
     pub fn selected_frontmatter(&self) -> Option<&ItemFrontmatter> {
-        let pos = self.list_state.selected()?;
-        let &idx = self.view.get(pos)?;
-        self.all.get(idx)
+        let pos = self.list.list_state.selected()?;
+        let &idx = self.list.view.get(pos)?;
+        self.data.all.get(idx)
     }
 
     fn selected_id(&self) -> Option<CloveId> {
@@ -587,74 +352,79 @@ impl App {
     // --- Navigation -------------------------------------------------------
 
     pub fn select_next(&mut self) {
-        if self.view.is_empty() {
+        if self.list.view.is_empty() {
             return;
         }
-        let next = match self.list_state.selected() {
-            Some(i) if i + 1 < self.view.len() => i + 1,
+        let next = match self.list.list_state.selected() {
+            Some(i) if i + 1 < self.list.view.len() => i + 1,
             Some(i) => i,
             None => 0,
         };
-        self.list_state.select(Some(next));
+        self.list.list_state.select(Some(next));
         self.on_selection_changed();
     }
 
     pub fn select_prev(&mut self) {
-        if self.view.is_empty() {
+        if self.list.view.is_empty() {
             return;
         }
-        let prev = self.list_state.selected().unwrap_or(0).saturating_sub(1);
-        self.list_state.select(Some(prev));
+        let prev = self
+            .list
+            .list_state
+            .selected()
+            .unwrap_or(0)
+            .saturating_sub(1);
+        self.list.list_state.select(Some(prev));
         self.on_selection_changed();
     }
 
     pub fn select_first(&mut self) {
-        if !self.view.is_empty() {
-            self.list_state.select(Some(0));
+        if !self.list.view.is_empty() {
+            self.list.list_state.select(Some(0));
             self.on_selection_changed();
         }
     }
 
     pub fn select_last(&mut self) {
-        if !self.view.is_empty() {
-            self.list_state.select(Some(self.view.len() - 1));
+        if !self.list.view.is_empty() {
+            self.list.list_state.select(Some(self.list.view.len() - 1));
             self.on_selection_changed();
         }
     }
 
     fn on_selection_changed(&mut self) {
-        self.detail_scroll = 0;
+        self.detail.detail_scroll = 0;
         self.load_detail();
     }
 
     // --- Tabs / detail views ---------------------------------------------
 
     pub fn set_tab(&mut self, tab: Tab) {
-        if self.tab != tab {
-            self.tab = tab;
+        if self.list.tab != tab {
+            self.list.tab = tab;
             self.recompute_view();
             self.on_selection_changed();
         }
     }
 
     pub fn next_tab(&mut self) {
-        let next = (self.tab.index() + 1) % Tab::ALL.len();
+        let next = (self.list.tab.index() + 1) % Tab::ALL.len();
         self.set_tab(Tab::ALL[next]);
     }
 
     pub fn set_detail_tab(&mut self, tab: DetailTab) {
-        if self.detail_tab != tab {
-            self.detail_tab = tab;
-            self.detail_scroll = 0;
+        if self.detail.detail_tab != tab {
+            self.detail.detail_tab = tab;
+            self.detail.detail_scroll = 0;
         }
     }
 
     pub fn scroll_detail_down(&mut self) {
-        self.detail_scroll = self.detail_scroll.saturating_add(3);
+        self.detail.detail_scroll = self.detail.detail_scroll.saturating_add(3);
     }
 
     pub fn scroll_detail_up(&mut self) {
-        self.detail_scroll = self.detail_scroll.saturating_sub(3);
+        self.detail.detail_scroll = self.detail.detail_scroll.saturating_sub(3);
     }
 
     /// Focus the detail pane (shows it in the single-pane narrow layout).
@@ -674,13 +444,13 @@ impl App {
     }
 
     pub fn push_search(&mut self, c: char) {
-        self.search.push(c);
+        self.list.search.push(c);
         self.recompute_view();
         self.on_selection_changed();
     }
 
     pub fn pop_search(&mut self) {
-        self.search.pop();
+        self.list.search.pop();
         self.recompute_view();
         self.on_selection_changed();
     }
@@ -693,8 +463,8 @@ impl App {
     /// Cancel search: clear the query and return to browse mode.
     pub fn cancel_search(&mut self) {
         self.mode = Mode::Browse;
-        if !self.search.is_empty() {
-            self.search.clear();
+        if !self.list.search.is_empty() {
+            self.list.search.clear();
             self.recompute_view();
             self.on_selection_changed();
         }
@@ -704,9 +474,9 @@ impl App {
 
     /// Advance the sort field through its cycle (rank → priority → … → id).
     pub fn cycle_sort_field(&mut self) {
-        self.sort.field = self.sort.field.next();
+        self.list.sort.field = self.list.sort.field.next();
         // Sensible default direction per field: recency descends, others ascend.
-        self.sort.dir = match self.sort.field {
+        self.list.sort.dir = match self.list.sort.field {
             SortField::Created | SortField::Updated => SortDir::Desc,
             _ => SortDir::Asc,
         };
@@ -716,7 +486,7 @@ impl App {
 
     /// Toggle the sort direction.
     pub fn toggle_sort_dir(&mut self) {
-        self.sort.dir = match self.sort.dir {
+        self.list.sort.dir = match self.list.sort.dir {
             SortDir::Asc => SortDir::Desc,
             SortDir::Desc => SortDir::Asc,
         };
@@ -728,8 +498,8 @@ impl App {
 
     /// Open the facet filter menu.
     pub fn start_filter(&mut self) {
-        if self.filter_cursor >= self.filter_menu.len() {
-            self.filter_cursor = 0;
+        if self.filter_menu.cursor >= self.filter_menu.menu.len() {
+            self.filter_menu.cursor = 0;
         }
         self.mode = Mode::Filter;
     }
@@ -741,42 +511,42 @@ impl App {
 
     /// Move the filter-menu cursor by `delta` (clamped).
     pub fn filter_move(&mut self, delta: i32) {
-        if self.filter_menu.is_empty() {
+        if self.filter_menu.menu.is_empty() {
             return;
         }
-        let last = self.filter_menu.len() as i32 - 1;
-        let next = (self.filter_cursor as i32 + delta).clamp(0, last);
-        self.filter_cursor = next as usize;
+        let last = self.filter_menu.menu.len() as i32 - 1;
+        let next = (self.filter_menu.cursor as i32 + delta).clamp(0, last);
+        self.filter_menu.cursor = next as usize;
     }
 
     /// Whether the menu item at `idx` is currently selected in the filter.
     pub fn is_menu_selected(&self, idx: usize) -> bool {
-        let Some(item) = self.filter_menu.get(idx) else {
+        let Some(item) = self.filter_menu.menu.get(idx) else {
             return false;
         };
         match &item.value {
-            MenuValue::Status(s) => self.filter.status == Some(*s),
-            MenuValue::Assignee(a) => self.filter.assignee.as_deref() == Some(a.as_str()),
-            MenuValue::Type(t) => self.filter.types.contains(t),
-            MenuValue::Priority(p) => self.filter.priorities.contains(p),
-            MenuValue::Label(l) => self.filter.labels.contains(l),
+            MenuValue::Status(s) => self.list.filter.status == Some(*s),
+            MenuValue::Assignee(a) => self.list.filter.assignee.as_deref() == Some(a.as_str()),
+            MenuValue::Type(t) => self.list.filter.types.contains(t),
+            MenuValue::Priority(p) => self.list.filter.priorities.contains(p),
+            MenuValue::Label(l) => self.list.filter.labels.contains(l),
         }
     }
 
     /// Toggle the value under the cursor in/out of the active filter.
     pub fn filter_toggle(&mut self) {
-        let Some(item) = self.filter_menu.get(self.filter_cursor).cloned() else {
+        let Some(item) = self.filter_menu.menu.get(self.filter_menu.cursor).cloned() else {
             return;
         };
-        let on = self.is_menu_selected(self.filter_cursor);
+        let on = self.is_menu_selected(self.filter_menu.cursor);
         match item.value {
             // Single-valued: toggling sets or clears the one value (radio).
-            MenuValue::Status(s) => self.filter.status = if on { None } else { Some(s) },
-            MenuValue::Assignee(a) => self.filter.assignee = if on { None } else { Some(a) },
+            MenuValue::Status(s) => self.list.filter.status = if on { None } else { Some(s) },
+            MenuValue::Assignee(a) => self.list.filter.assignee = if on { None } else { Some(a) },
             // Multi-valued: toggle membership.
-            MenuValue::Type(t) => toggle_vec(&mut self.filter.types, t, on),
-            MenuValue::Priority(p) => toggle_vec(&mut self.filter.priorities, p, on),
-            MenuValue::Label(l) => toggle_vec(&mut self.filter.labels, l, on),
+            MenuValue::Type(t) => toggle_vec(&mut self.list.filter.types, t, on),
+            MenuValue::Priority(p) => toggle_vec(&mut self.list.filter.priorities, p, on),
+            MenuValue::Label(l) => toggle_vec(&mut self.list.filter.labels, l, on),
         }
         self.recompute_view();
         self.on_selection_changed();
@@ -784,8 +554,8 @@ impl App {
 
     /// Clear all active facet filters (leaves tab, search, and sort intact).
     pub fn clear_filters(&mut self) {
-        if self.filter.is_active() {
-            self.filter = ViewFilter::default();
+        if self.list.filter.is_active() {
+            self.list.filter = ViewFilter::default();
             self.recompute_view();
             self.on_selection_changed();
         }
@@ -796,33 +566,35 @@ impl App {
     /// Load the body, comments, dep tree, and block reasons for the selection.
     fn load_detail(&mut self) {
         let Some(fm) = self.selected_frontmatter() else {
-            self.detail = None;
+            self.detail.detail = None;
             return;
         };
         let id = fm.id.clone();
 
-        let item = match self.store.get(&id) {
+        let item = match self.data.store.get(&id) {
             Ok(item) => item,
             Err(e) => {
-                self.detail = None;
+                self.detail.detail = None;
                 self.status = format!("failed to load {id}: {e}");
                 return;
             }
         };
 
-        let comments = clove_core::list_comments(self.store.issues_dir(), &id).unwrap_or_default();
+        let comments =
+            clove_core::list_comments(self.data.store.issues_dir(), &id).unwrap_or_default();
 
         let (blocking_deps, dangling_deps) = self
+            .data
             .blocked
             .get(&id)
             .map(|b| (b.blocking_deps.clone(), b.dangling_deps.clone()))
             .unwrap_or_default();
 
-        let children = self.graph.epic_children_summary(&id);
+        let children = self.data.graph.epic_children_summary(&id);
 
-        let tree = self.graph.dep_tree(&id, 25);
+        let tree = self.data.graph.dep_tree(&id, 25);
 
-        self.detail = Some(Detail {
+        self.detail.detail = Some(Detail {
             item,
             comments,
             blocking_deps,
@@ -830,16 +602,6 @@ impl App {
             children,
             tree,
         });
-    }
-}
-
-/// Add or remove `value` from `vec` (used for multi-valued facets). `present`
-/// says whether it is currently in the vec.
-fn toggle_vec<T: PartialEq>(vec: &mut Vec<T>, value: T, present: bool) {
-    if present {
-        vec.retain(|v| v != &value);
-    } else {
-        vec.push(value);
     }
 }
 
@@ -942,7 +704,7 @@ mod tests {
         let mut app = App::new(store);
 
         app.set_tab(Tab::Blocked);
-        let detail = app.detail.as_ref().expect("blocked item has detail");
+        let detail = app.detail.detail.as_ref().expect("blocked item has detail");
         assert!(detail.item.body.contains("Depends on base"));
         // It is blocked by exactly one open dependency.
         assert_eq!(detail.blocking_deps.len(), 1);
@@ -979,16 +741,28 @@ mod tests {
     }
 
     #[test]
+    fn tick_interval_reflects_busy_state() {
+        use std::time::Duration;
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        // Idle: 1 fps.
+        assert_eq!(app.tick_interval(), Duration::from_secs(1));
+        // Busy: 10 fps (the hook the deferred background scan will flip).
+        app.busy = true;
+        assert_eq!(app.tick_interval(), Duration::from_millis(100));
+    }
+
+    #[test]
     fn navigation_clamps_and_moves() {
         let (_dir, store) = fixture();
         let mut app = App::new(store);
 
         app.select_first();
-        assert_eq!(app.list_state.selected(), Some(0));
+        assert_eq!(app.list.list_state.selected(), Some(0));
         app.select_last();
-        assert_eq!(app.list_state.selected(), Some(2));
+        assert_eq!(app.list.list_state.selected(), Some(2));
         // Moving past the end stays at the end.
         app.select_next();
-        assert_eq!(app.list_state.selected(), Some(2));
+        assert_eq!(app.list.list_state.selected(), Some(2));
     }
 }
