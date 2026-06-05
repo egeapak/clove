@@ -783,7 +783,7 @@ fn sort_by_id_orders_ascending() {
     for _ in 0..4 {
         app.cycle_sort_field();
     }
-    assert_eq!(app.sort.field, crate::app::SortField::Id);
+    assert_eq!(app.list.sort.field, crate::app::SortField::Id);
     let first = app.visible().next().unwrap();
     assert_eq!(first.id.as_str(), "proj-00000001");
 }

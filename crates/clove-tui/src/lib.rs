@@ -92,7 +92,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Esc => {
             // Esc unwinds the lightest active state: clear search, else return
             // focus to the list (matters in the single-pane narrow layout).
-            if !app.search.is_empty() {
+            if !app.list.search.is_empty() {
                 app.cancel_search();
             } else {
                 app.focus_list();

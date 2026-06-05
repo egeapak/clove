@@ -121,7 +121,7 @@ fn render_tabs(f: &mut Frame, app: &App, area: Rect, compact: bool) {
     };
 
     let tabs = Tabs::new(titles)
-        .select(app.tab.index())
+        .select(app.list.tab.index())
         .block(block)
         .style(Style::default().fg(LABEL))
         .highlight_style(
@@ -176,7 +176,7 @@ fn render_list(f: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::List;
 
     // Title shows visible/total when the view is narrowed by a filter or search.
-    let narrowed = app.filter.is_active() || !app.search.is_empty();
+    let narrowed = app.list.filter.is_active() || !app.list.search.is_empty();
     let title = if narrowed {
         format!(" Items ({}/{}) ", app.visible_count(), app.total_count())
     } else {
@@ -228,7 +228,7 @@ fn render_list(f: &mut Frame, app: &mut App, area: Rect) {
         )
         .highlight_symbol("▌");
 
-    f.render_stateful_widget(list, area, &mut app.list_state);
+    f.render_stateful_widget(list, area, &mut app.list.list_state);
 }
 
 /// One width-aware line in the item list: a status glyph, a single-letter type
@@ -766,7 +766,7 @@ fn render_status(f: &mut Frame, app: &App, area: Rect) {
                     "/",
                     Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
                 ),
-                Span::raw(app.search.clone()),
+                Span::raw(app.list.search.clone()),
                 Span::styled("▏", Style::default().fg(ACCENT)),
             ];
             if !narrow {
@@ -792,21 +792,25 @@ fn render_status(f: &mut Frame, app: &App, area: Rect) {
         }
         Mode::Browse => {
             let mut spans = Vec::new();
-            if !app.search.is_empty() {
+            if !app.list.search.is_empty() {
                 spans.push(Span::styled(
-                    format!("search:{}  ", app.search),
+                    format!("search:{}  ", app.list.search),
                     Style::default().fg(Color::Yellow),
                 ));
             }
-            if app.filter.is_active() {
+            if app.list.filter.is_active() {
                 spans.push(Span::styled(
                     format!("{}  ", filter_summary(app, narrow)),
                     Style::default().fg(Color::Yellow),
                 ));
             }
-            if app.sort.field != SortField::Default {
+            if app.list.sort.field != SortField::Default {
                 spans.push(Span::styled(
-                    format!("sort:{}{}  ", app.sort.field.label(), app.sort.dir.glyph()),
+                    format!(
+                        "sort:{}{}  ",
+                        app.list.sort.field.label(),
+                        app.list.sort.dir.glyph()
+                    ),
                     Style::default().fg(ACCENT),
                 ));
             }
@@ -825,7 +829,7 @@ fn render_status(f: &mut Frame, app: &App, area: Rect) {
 
 /// A compact one-line summary of the active facet filters for the status bar.
 fn filter_summary(app: &App, narrow: bool) -> String {
-    let f = &app.filter;
+    let f = &app.list.filter;
     if narrow {
         let n = [
             f.status.is_some(),
