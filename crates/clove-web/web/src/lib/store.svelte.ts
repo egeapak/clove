@@ -107,14 +107,12 @@ function connect() {
         if (frame.data?.id) store.remove(frame.data.id);
         break;
       case 'batch': {
+        // A full rescan is sub-second even at 10k items, so any change just
+        // triggers a refetch of the (lean) list. `seq` is tracked for logging /
+        // future gap detection.
         const seq = frame.data?.seq;
-        // The granular item.upserted/item.deleted events in this batch have
-        // already been applied above; only fall back to a full refetch if the
-        // sequence shows we missed a batch (a gap), e.g. after a disconnect.
-        if (typeof seq === 'number' && lastSeq >= 0 && seq > lastSeq + 1) {
-          void store.refetch();
-        }
         lastSeq = seq ?? lastSeq;
+        void store.refetch();
         break;
       }
       case 'stats.updated':

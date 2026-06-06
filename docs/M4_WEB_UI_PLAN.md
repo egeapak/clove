@@ -38,28 +38,28 @@ Implemented and verified end-to-end:
   IPC `STATUS`. **`clove serve` detects a serving daemon and hands off** (prints
   the URL and exits 0 instead of blocking); only when no daemon (or web disabled)
   does it run a standalone server.
-- **Granular real-time push.** The watcher recomputes the store's item snapshot
-  per debounced batch and diffs it, emitting per-id `item.upserted`/`item.deleted`
-  plus a `batch{changed,deleted,seq}` for gap detection — so a topology change
-  that flips a *dependent's* `ready`/`blocked_by` is pushed too (verified: closing
-  a blocker pushed upserts for the blocker and both unblocked dependents). The SPA
-  applies these granularly and only full-refetches on a sequence gap.
-- **Frontend auto-build via `crates/clove-web/build.rs`** (replaces a manual
-  xtask): rebuilds the SvelteKit SPA with `npm run build` only when `web/` sources
-  are newer than `dist/` and `npm` is present; otherwise falls back to the
-  committed `dist/` (so a Node-free `cargo build`/CI stays hermetic).
-  `CLOVE_SKIP_WEB_BUILD=1` force-skips.
+- **Real-time push (simple full-refetch).** On any debounced `.clove/issues/`
+  change the watcher emits one `batch{seq}` event and the SPA refetches the lean
+  item list — a full rescan is sub-second even at 10k items, so per-id diffing is
+  unnecessary. `seq` is retained for reconnect gap detection. The daemon runs its
+  own clove-web watcher (a distinct, independent watch — acceptable per the design
+  review). `item.upserted`/`item.deleted` remain in the event enum for future use.
+- **Frontend build via `crates/clove-web/build.rs`; `dist/` is not committed.**
+  The build script generates `dist/`: a real `npm run build` when `npm` is present
+  and `web/` sources are newer than `dist/`, otherwise it writes a minimal
+  placeholder `index.html` so `rust-embed` still compiles and a **Node-free
+  `cargo build`/CI stays hermetic** (the binary then serves a "run npm build" page;
+  the JSON API is fully functional). `dist/` is `.gitignore`d and produced on first
+  build. `CLOVE_SKIP_WEB_BUILD=1` skips the npm build.
 - **Minor gaps closed:** web comments use a single-token author (`web`) that
   round-trips through the comment-filename parser (no more "unknown"); and
   `/stats/history` synthesizes a real daily `{date,created,closed,open}` series
   from item timestamps (no SQLite snapshots required), so the timeline throughput
   chart has data.
 
-Tests: 6 `clove-web` API integration tests + `clove-ipc`/`clove-core` suites green;
-`fmt`/`clippy -D warnings` clean. Remaining: the IPC `SUBSCRIBE` push (the daemon
-currently runs its own clove-web watcher rather than reusing the index watcher's
-batches — functionally correct, one extra inotify watch), and the `xtask
-web-build`/CI dirty-`dist` staleness check.
+Tests: 6 `clove-web` API integration tests + the full workspace suite green;
+`fmt`/`clippy -D warnings` clean workspace-wide. The daemon intentionally keeps a
+distinct clove-web watcher (no IPC `SUBSCRIBE` needed).
 
 ## 2. Invariants inherited from clove (non-negotiable)
 
