@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en" data-theme="midnight-ide">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <title>clove</title>
+    <script>
+      // Apply persisted theme before first paint to avoid a flash.
+      (function () {
+        try {
+          // Default is always midnight-ide; only a stored preference overrides it.
+          var t = localStorage.getItem('clove-theme') || 'midnight-ide';
+          document.documentElement.dataset.theme = t;
+        } catch (e) {}
+      })();
+    </script>
+    <link href="/_app/immutable/entry/start.Db5F7h54.js" rel="modulepreload">
+		<link href="/_app/immutable/chunks/D176JFoV.js" rel="modulepreload">
+		<link href="/_app/immutable/chunks/Gd05234x.js" rel="modulepreload">
+		<link href="/_app/immutable/chunks/h1bU706Q.js" rel="modulepreload">
+		<link href="/_app/immutable/chunks/KUwNc5UF.js" rel="modulepreload">
+		<link href="/_app/immutable/entry/app.DRtybadc.js" rel="modulepreload">
+		<link href="/_app/immutable/chunks/CmsKOCeN.js" rel="modulepreload">
+		<link href="/_app/immutable/chunks/Doadxagr.js" rel="modulepreload">
+		<link href="/_app/immutable/chunks/3mfHezXw.js" rel="modulepreload">
+		<link href="/_app/immutable/chunks/CGEfgb3a.js" rel="modulepreload">
+		<link href="/_app/immutable/chunks/DK18z3Lu.js" rel="modulepreload">
+		<link href="/_app/immutable/chunks/CyP9HSlW.js" rel="modulepreload">
+		<link href="/_app/immutable/nodes/0.CKWVH2K0.js" rel="modulepreload">
+		<link href="/_app/immutable/chunks/Dk0pe8qb.js" rel="modulepreload">
+		<link href="/_app/immutable/chunks/BE3kKlip.js" rel="modulepreload">
+		<link href="/_app/immutable/chunks/BuyYKtXm.js" rel="modulepreload">
+		
+		<link href="/_app/immutable/assets/0.DSYJOhW5.css" rel="stylesheet">
+  </head>
+  <body data-sveltekit-preload-data="hover">
+    <div style="display: contents">
+			<script>
+				{
+					__sveltekit_1ezwxh5 = {
+						base: ""
+					};
+
+					const element = document.currentScript.parentElement;
+
+					Promise.all([
+						import("/_app/immutable/entry/start.Db5F7h54.js"),
+						import("/_app/immutable/entry/app.DRtybadc.js")
+					]).then(([kit, app]) => {
+						kit.start(app, element);
+					});
+				}
+			</script>
+		</div>
+  </body>
+</html>

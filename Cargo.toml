@@ -6,6 +6,7 @@ members = [
     "crates/clove-import",
     "crates/clove-ipc",
     "crates/clove-tui",
+    "crates/clove-web",
     "crates/clove",
     "crates/cloved",
     "xtask",
@@ -55,6 +56,12 @@ toml = "0.8"                    # config.toml parsing
 jsonschema = "0.46"             # JSON Schema validation in tests (T-CLI14)
 ratatui = "0.29"                # terminal UI (M4 `clove tui`); re-exports crossterm
 pulldown-cmark = { version = "0.13", default-features = false }  # Markdown body rendering in `clove tui`
+# M4 web UI (clove-web): HTTP/WS server + embedded SPA assets. All MIT, same
+# tokio/hyper ecosystem already in the tree — no new cargo-deny license class.
+axum = { version = "0.7", features = ["ws"] }   # router + extractors + native WebSocket
+rust-embed = "8"                # embed the built SvelteKit `dist/` into the binary (disk-load in debug)
+mime_guess = "2"                # content-type for embedded static assets
+futures-util = "0.3"            # WS stream/sink helpers for axum::extract::ws
 
 # Internal crates (explicit version keeps them off cargo-deny's wildcard list
 # and is required for publishing clove-core to crates.io — PRD §13).
@@ -63,6 +70,7 @@ clove-index = { path = "crates/clove-index", version = "0.1.0" }
 clove-import = { path = "crates/clove-import", version = "0.1.0", default-features = false }
 clove-ipc = { path = "crates/clove-ipc", version = "0.1.0" }
 clove-tui = { path = "crates/clove-tui", version = "0.1.0" }
+clove-web = { path = "crates/clove-web", version = "0.1.0" }
 
 [profile.release]
 lto = "thin"

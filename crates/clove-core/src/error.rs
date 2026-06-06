@@ -9,8 +9,9 @@ use thiserror::Error;
 
 /// The error type for all of `clove-core`.
 ///
-/// Variants are added as tasks need them; each maps to an exit code at the CLI
-/// boundary (see DESIGN.md §7.6). Keep the mapping in one place there, not here.
+/// Variants are added as tasks need them; each maps to a stable error code +
+/// exit code via [`error_code`] (DESIGN.md §7.6) — the single mapping shared by
+/// the CLI exit table and the web API's HTTP-status mapping.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum CloveError {
@@ -124,4 +125,41 @@ pub enum CloveError {
     /// merge-driver) until each phase lands.
     #[error("not yet implemented: {feature}")]
     NotYetImplemented { feature: String },
+}
+
+/// The stable string error code and numeric exit code for a [`CloveError`]
+/// (DESIGN.md §7.3 envelope `error.code` / §7.6 exit table).
+///
+/// This is the **single** classification shared by the CLI's exit-code mapping
+/// and the web API's HTTP-status mapping, so both report the same `code`/`exit`
+/// for the same failure. The CLI maps the `exit` to its `ExitCode` enum; the web
+/// layer maps it (with a few variant-specific refinements) to an HTTP status.
+pub fn error_code(error: &CloveError) -> (&'static str, u8) {
+    match error {
+        CloveError::NotFound { .. } => ("ITEM_NOT_FOUND", 2),
+
+        CloveError::IdConflict { .. } | CloveError::CommentConflict { .. } => ("ID_CONFLICT", 4),
+        CloveError::InvalidId { .. } | CloveError::PathTraversal { .. } => ("INVALID_ID", 4),
+        CloveError::InvalidField { .. }
+        | CloveError::EmptyLabel { .. }
+        | CloveError::Invalid { .. } => ("VALIDATION_ERROR", 4),
+        CloveError::HasDependents { .. } => ("HAS_DEPENDENTS", 4),
+        CloveError::SelfDependency { .. } => ("SELF_LOOP", 4),
+        CloveError::DependencyExists { .. } => ("ALREADY_EXISTS", 4),
+        CloveError::DependencyCycle { .. } => ("CYCLE_DETECTED", 3),
+        CloveError::Config { .. } => ("CONFIG_ERROR", 4),
+
+        // Malformed item files are data problems → validation, not I/O.
+        CloveError::FrontmatterTooLarge { .. }
+        | CloveError::BodyTooLarge { .. }
+        | CloveError::AliasNotAllowed { .. }
+        | CloveError::MissingFrontmatter { .. }
+        | CloveError::UnterminatedFrontmatter { .. }
+        | CloveError::IdMismatch { .. }
+        | CloveError::InvalidYaml { .. } => ("PARSE_ERROR", 4),
+
+        CloveError::NoRepo { .. } => ("NO_REPO", 5),
+        CloveError::Io { .. } => ("IO_ERROR", 5),
+        CloveError::NotYetImplemented { .. } => ("NOT_YET_IMPLEMENTED", 1),
+    }
 }

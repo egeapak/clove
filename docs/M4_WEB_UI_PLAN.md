@@ -6,6 +6,10 @@
 > mockups under `docs/web-ui-mockups/`. No code has been written yet — the visual
 > theme is selected first (see "Design directions"), then the `T-W*` tasks below
 > are executed.
+>
+> **Decisions locked (2026-06-06):** default theme = **Midnight IDE**
+> (`midnight-ide`); frontend stack = **SvelteKit (SPA/adapter-static) + Vite +
+> TypeScript**. The other three themes ship as alternate token sets.
 
 ## 1. Goal
 
@@ -111,6 +115,18 @@ feel identical (encode these as CSS tokens generated from / matched to
 is colorblind-safe by construction (reuse the TUI's pairing). Themes plug in via
 CSS custom properties; dark + light; WCAG AA contrast; full keyboard parity with
 the TUI keys + a `?` help overlay.
+
+**Theming is runtime-updatable (locked requirement).** Themes are *not* a
+build-time choice. All four directions (and any future ones) ship as
+self-contained CSS-variable token sets keyed by `[data-theme="…"]` on `<html>`;
+the app exposes a live theme switcher, persists the choice (localStorage +
+`prefers-color-scheme` default), and applies it without a rebuild or reload. A
+theme is therefore just a `tokens.<name>.css` block — adding or editing one never
+touches component code. Components reference **only** tokens (never hardcoded
+colors), and the semantic token names are fixed (`--status-*`, `--prio-0..4`,
+`--type-*`, `--surface-*`, `--text-*`, `--accent`, radii, spacing) so every theme
+is a drop-in. A small contract test asserts each shipped theme defines the full
+token set, so a new theme can't silently break a view. Default = `midnight-ide`.
 
 ## 4. Serving modes
 
@@ -269,6 +285,17 @@ shared client interface. Frames are serde-tagged like the IPC protocol:
   doctor-style cycles/dangling/malformed parents with links).
 
 ## 8. Asset embedding & build pipeline (npm-free `cargo build`)
+
+**Bundle must be minimal (locked requirement).** Target an app-shell JS payload
+well under ~100 KB gzipped: SvelteKit `adapter-static` (no SSR runtime), Vite
+production build (minify + tree-shake + per-route code-splitting so Board/List/
+Detail/Timeline/extras load on demand), hashed `_app/immutable/*` for
+`immutable` caching, no large dependencies (hand-drawn SVG over chart libs where
+feasible; `uPlot` only on the timeline route and lazy-loaded; no moment/dayjs/
+lodash). All four theme token sets are tiny CSS and add negligible weight. A CI
+size-budget check (e.g. fail if the initial JS+CSS exceeds the budget) guards
+against regressions. Brotli/gzip pre-compression of embedded assets is served via
+`Content-Encoding` when the client supports it.
 
 - Frontend builds to `crates/clove-web/dist/`; the compiled assets are **committed**
   (precedent: vendored DejaVu fonts in `clove-tui/assets/`). `clove-web/src/assets.rs`

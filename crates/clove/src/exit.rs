@@ -42,45 +42,23 @@ impl ExitCode {
 
 /// Classify a [`CloveError`] into its exit code and stable string error code.
 ///
-/// The string code is part of the agent-facing JSON contract (§7.3).
+/// The `(code, exit)` pair comes from [`clove_core::error_code`] — the single
+/// classification shared with the web API (§7.3 envelope / §7.6 exit table) — and
+/// this maps the numeric exit to the [`ExitCode`] enum.
 pub fn classify(error: &CloveError) -> (ExitCode, &'static str) {
-    match error {
-        CloveError::NotFound { .. } => (ExitCode::NotFound, "ITEM_NOT_FOUND"),
-
-        CloveError::IdConflict { .. } | CloveError::CommentConflict { .. } => {
-            (ExitCode::Validation, "ID_CONFLICT")
-        }
-        CloveError::InvalidId { .. } | CloveError::PathTraversal { .. } => {
-            (ExitCode::Validation, "INVALID_ID")
-        }
-        CloveError::InvalidField { .. }
-        | CloveError::EmptyLabel { .. }
-        | CloveError::Invalid { .. } => (ExitCode::Validation, "VALIDATION_ERROR"),
-        CloveError::HasDependents { .. } => (ExitCode::Validation, "HAS_DEPENDENTS"),
-        CloveError::SelfDependency { .. } => (ExitCode::Validation, "SELF_LOOP"),
-        CloveError::DependencyExists { .. } => (ExitCode::Validation, "ALREADY_EXISTS"),
-        CloveError::DependencyCycle { .. } => (ExitCode::Cycle, "CYCLE_DETECTED"),
-        CloveError::Config { .. } => (ExitCode::Validation, "CONFIG_ERROR"),
-
-        // Malformed item files are data problems → validation, not I/O.
-        CloveError::FrontmatterTooLarge { .. }
-        | CloveError::BodyTooLarge { .. }
-        | CloveError::AliasNotAllowed { .. }
-        | CloveError::MissingFrontmatter { .. }
-        | CloveError::UnterminatedFrontmatter { .. }
-        | CloveError::IdMismatch { .. }
-        | CloveError::InvalidYaml { .. } => (ExitCode::Validation, "PARSE_ERROR"),
-
-        CloveError::NoRepo { .. } => (ExitCode::Io, "NO_REPO"),
-        CloveError::Io { .. } => (ExitCode::Io, "IO_ERROR"),
-
-        // A wired-but-unimplemented command (M2 scaffolding) is a usage-class
-        // failure: the surface exists, the behavior does not yet.
-        CloveError::NotYetImplemented { .. } => (ExitCode::Usage, "NOT_YET_IMPLEMENTED"),
-
-        // `CloveError` is non_exhaustive; default unknown variants to I/O.
-        _ => (ExitCode::Io, "ERROR"),
-    }
+    let (code, exit) = clove_core::error_code(error);
+    let exit_code = match exit {
+        0 => ExitCode::Success,
+        1 => ExitCode::Usage,
+        2 => ExitCode::NotFound,
+        3 => ExitCode::Cycle,
+        4 => ExitCode::Validation,
+        5 => ExitCode::Io,
+        6 => ExitCode::Index,
+        7 => ExitCode::Daemon,
+        _ => ExitCode::Io,
+    };
+    (exit_code, code)
 }
 
 #[cfg(test)]

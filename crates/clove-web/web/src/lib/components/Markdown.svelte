@@ -1,0 +1,82 @@
+<script lang="ts">
+  import { renderMarkdown } from '$lib/markdown';
+  let { source }: { source: string } = $props();
+  let html = $state('');
+
+  $effect(() => {
+    const src = source ?? '';
+    renderMarkdown(src).then((h) => (html = h));
+  });
+</script>
+
+<!-- eslint-disable-next-line svelte/no-at-html-tags -- sanitized in markdown.ts -->
+<div class="md">{@html html}</div>
+
+<style>
+  .md :global(h1),
+  .md :global(h2),
+  .md :global(h3) {
+    font-size: 14px;
+    margin: 18px 0 8px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .md :global(h1) {
+    font-size: 17px;
+  }
+  .md :global(p) {
+    color: var(--text-muted);
+    margin: 8px 0;
+  }
+  .md :global(ul),
+  .md :global(ol) {
+    margin: 8px 0;
+    padding-left: 20px;
+    color: var(--text-muted);
+  }
+  .md :global(li) {
+    margin: 3px 0;
+  }
+  .md :global(li.task) {
+    list-style: none;
+    margin-left: -20px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .md :global(li.task.done) {
+    text-decoration: line-through;
+    color: var(--text-dim);
+  }
+  .md :global(pre) {
+    background: var(--surface-inset);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 12px 14px;
+    overflow: auto;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.5;
+    margin: 10px 0;
+  }
+  .md :global(code) {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    background: var(--surface-inset);
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
+  .md :global(pre code) {
+    background: none;
+    padding: 0;
+  }
+  .md :global(a) {
+    color: var(--accent);
+  }
+  .md :global(blockquote) {
+    border-left: 3px solid var(--border-strong);
+    margin: 8px 0;
+    padding-left: 12px;
+    color: var(--text-dim);
+  }
+</style>
