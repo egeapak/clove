@@ -6,7 +6,7 @@ expression: rendered
 │  All 2  │  Rdy 1  │  Blk 0           │
 └──────────────────────────────────────┘
 ┌ Overview · Dep tree · Comments ──────┐
-│ #2  ! FEATURE                        │
+│ #9QX4D1B7  ! FEATURE                 │
 │ Short title                          │
 │                                      │
 │ status     ◐ in_progress · ready     │
@@ -19,8 +19,8 @@ expression: rendered
 │ created    Jan 1                     │
 │ updated    Jan 20                    │
 │                                      │
-│ parent     #1                        │
-│ relates    #1                        │
+│ parent     #7AF3K2MN                 │
+│ relates    #7AF3K2MN                 │
 │                                      │
 │                                      │
 │                                      │

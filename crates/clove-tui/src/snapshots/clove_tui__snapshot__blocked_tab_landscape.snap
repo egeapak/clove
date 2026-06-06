@@ -4,9 +4,9 @@ expression: rendered
 ---
   All 7  │  Ready 4  │  Blocked 1
 ┌ Items (1) ───────────────────────────────────┐┌ Overview · Dep tree · Comments ──────────────────────────────────────┐
-│▌○ F #3 • Write integration tests ✗           ││ #3  • FEATURE                                       ○ open · blocked │
+│▌○ F #K2M8ZP5R • Write integration tests ✗    ││ #K2M8ZP5R  • FEATURE                                ○ open · blocked │
 │                                              ││ Write integration tests                                       deps 1 │
-│                                              ││ blocked by #2                                                        │
+│                                              ││ blocked by #9QX4D1B7                                                 │
 │                                              ││──────────────────────────────────────────────────────────────────────│
 │                                              ││ End-to-end coverage of the public API surface.                       │
 │                                              ││                                                                      │

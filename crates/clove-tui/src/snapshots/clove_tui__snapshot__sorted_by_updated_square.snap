@@ -6,13 +6,13 @@ expression: rendered
 │  All 7  │  Ready 4  │  Blocked 1                         │
 └──────────────────────────────────────────────────────────┘
 ┌ Items (7) ───────────────────────────────────────────────┐
-│ ○ B #7 ↑ Investigate flaky CI ●                          │
-│▌◐ F #2 ! Build REST API ●                                │
-│ ○ F #5 • Frontend dashboard ●                            │
-│ ○ F #3 • Write integration tests ✗                       │
-│ ● C #1 ↑ Set up database schema                          │
-│ ● D #6 ↓ Docs site                                       │
-│ ○ E #4 • Ship v1 release ●                               │
+│ ○ B #2HZ6C3PW ↑ Investigate flaky CI ●                   │
+│▌◐ F #9QX4D1B7 ! Build REST API ●                         │
+│ ○ F #5RB9NC2V • Frontend dashboard ●                     │
+│ ○ F #K2M8ZP5R • Write integration tests ✗                │
+│ ● C #7AF3K2MN ↑ Set up database schema                   │
+│ ● D #8XQ4F7DM ↓ Docs site                                │
+│ ○ E #3HT6WYG5 • Ship v1 release ●                        │
 │                                                          │
 │                                                          │
 │                                                          │
@@ -31,7 +31,7 @@ expression: rendered
 │                                                          │
 └──────────────────────────────────────────────────────────┘
 ┌ Overview · Dep tree · Comments ──────────────────────────┐
-│ #2  ! FEATURE                      ◐ in_progress · ready │
+│ #9QX4D1B7  ! FEATURE               ◐ in_progress · ready │
 │ Build REST API                           @grace · deps 1 │
 │──────────────────────────────────────────────────────────│
 │ Goals                                                    │

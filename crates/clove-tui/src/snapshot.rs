@@ -39,6 +39,10 @@ fn put(
     title: &str,
     item_type: ItemType,
     priority: u8,
+    // Day-of-January for `updated`. Set explicitly (not derived from the id) so
+    // ids can be realistic Crockford suffixes while `updated` stays distinct and
+    // non-monotonic per item — that's what makes sort-by-updated visibly reorder.
+    updated_day: u32,
     status: ItemStatus,
     closed: Option<&str>,
     assignee: Option<&str>,
@@ -48,18 +52,6 @@ fn put(
     relates: &[&str],
     body: &str,
 ) {
-    // Distinct, non-monotonic `updated` per item so sort-by-updated visibly
-    // reorders (and differs from id order). Derived from the id's last digit.
-    let day = match id.chars().last().unwrap_or('1') {
-        '1' => 10,
-        '2' => 20,
-        '3' => 12,
-        '4' => 5,
-        '5' => 18,
-        '6' => 8,
-        '7' => 25,
-        _ => 1,
-    };
     let id = cid(id);
     let fm = ItemFrontmatter {
         schema: 1,
@@ -69,7 +61,7 @@ fn put(
         item_type,
         priority: Priority(priority),
         created: ts("2026-01-01T09:00:00Z"),
-        updated: ts(&format!("2026-01-{day:02}T11:30:00Z")),
+        updated: ts(&format!("2026-01-{updated_day:02}T11:30:00Z")),
         closed: closed.map(ts),
         assignee: assignee.map(str::to_owned),
         parent: parent.map(cid),
@@ -100,10 +92,11 @@ fn fixture() -> (tempfile::TempDir, ItemStore) {
 
     put(
         &store,
-        "proj-00000001",
+        "proj-7AF3K2MN",
         "Set up database schema",
         ItemType::Chore,
         1,
+        10,
         ItemStatus::Closed,
         Some("2026-02-01T12:00:00Z"),
         Some("ada"),
@@ -115,40 +108,43 @@ fn fixture() -> (tempfile::TempDir, ItemStore) {
     );
     put(
         &store,
-        "proj-00000002",
+        "proj-9QX4D1B7",
         "Build REST API",
         ItemType::Feature,
         0,
+        20,
         ItemStatus::InProgress,
         None,
         Some("grace"),
         None,
         &["area:api", "backend"],
-        &["proj-00000001"],
+        &["proj-7AF3K2MN"],
         &[],
         "## Goals\n\nBuild a **REST API** with `axum`; see `docs/api.md`.\n\n- CRUD endpoints\n- Auth middleware\n\n### Steps\n\n1. Define routes\n2. Wire handlers\n\n> Blocked on the schema work until it lands.\n\n---\n\nDone when the integration tests pass.",
     );
     put(
         &store,
-        "proj-00000003",
+        "proj-K2M8ZP5R",
         "Write integration tests",
         ItemType::Feature,
         2,
+        12,
         ItemStatus::Open,
         None,
         None,
         None,
         &["area:qa"],
-        &["proj-00000002"],
+        &["proj-9QX4D1B7"],
         &[],
         "End-to-end coverage of the public API surface.",
     );
     put(
         &store,
-        "proj-00000004",
+        "proj-3HT6WYG5",
         "Ship v1 release",
         ItemType::Epic,
         2,
+        5,
         ItemStatus::Open,
         None,
         None,
@@ -160,14 +156,15 @@ fn fixture() -> (tempfile::TempDir, ItemStore) {
     );
     put(
         &store,
-        "proj-00000005",
+        "proj-5RB9NC2V",
         "Frontend dashboard",
         ItemType::Feature,
         3,
+        18,
         ItemStatus::Open,
         None,
         Some("ada"),
-        Some("proj-00000004"),
+        Some("proj-3HT6WYG5"),
         &["area:ui"],
         &[],
         &[],
@@ -175,14 +172,15 @@ fn fixture() -> (tempfile::TempDir, ItemStore) {
     );
     put(
         &store,
-        "proj-00000006",
+        "proj-8XQ4F7DM",
         "Docs site",
         ItemType::Docs,
         4,
+        8,
         ItemStatus::Closed,
         Some("2026-02-02T09:00:00Z"),
         None,
-        Some("proj-00000004"),
+        Some("proj-3HT6WYG5"),
         &[],
         &[],
         &[],
@@ -190,22 +188,23 @@ fn fixture() -> (tempfile::TempDir, ItemStore) {
     );
     put(
         &store,
-        "proj-00000007",
+        "proj-2HZ6C3PW",
         "Investigate flaky CI",
         ItemType::Bug,
         1,
+        25,
         ItemStatus::Open,
         None,
         Some("grace"),
         None,
         &["area:ci"],
         &[],
-        &["proj-00000003"],
+        &["proj-K2M8ZP5R"],
         "Integration tests time out intermittently on CI.",
     );
 
     let issues = store.issues_dir();
-    let api = cid("proj-00000002");
+    let api = cid("proj-9QX4D1B7");
     add_comment_at(
         issues,
         &api,
@@ -393,12 +392,12 @@ fn edge_app(title: &str, labels: &[&str], blocked: bool, body: &str) -> App {
         (ItemStatus::Closed, Some("2026-02-01T12:00:00Z"))
     };
     #[rustfmt::skip]
-    put(&store, "proj-00000001", "Dependency target", ItemType::Chore, 2,
+    put(&store, "proj-7AF3K2MN", "Dependency target", ItemType::Chore, 2, 10,
         dep_status, dep_closed, None, None, &[], &[], &[], "");
     #[rustfmt::skip]
-    put(&store, "proj-00000002", title, ItemType::Feature, 0,
-        ItemStatus::InProgress, None, Some("ada"), Some("proj-00000001"),
-        labels, &["proj-00000001"], &["proj-00000001"], body);
+    put(&store, "proj-9QX4D1B7", title, ItemType::Feature, 0, 20,
+        ItemStatus::InProgress, None, Some("ada"), Some("proj-7AF3K2MN"),
+        labels, &["proj-7AF3K2MN"], &["proj-7AF3K2MN"], body);
     std::mem::forget(dir);
     App::new(store)
 }
@@ -469,29 +468,24 @@ mod shots {
     const BG: [u8; 3] = [0x1d, 0x20, 0x27];
     const FG: [u8; 3] = [0xc8, 0xcc, 0xd4];
 
-    /// Monospace font candidates (regular, bold), tried in order. DejaVu Sans
-    /// Mono first for its broad box-drawing / geometric-shape coverage.
-    const FONTS: &[(&str, &str)] = &[
-        (
-            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
-        ),
-        (
-            "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
-            "/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf",
-        ),
-    ];
+    /// DejaVu Sans Mono (regular + bold), vendored under
+    /// `crates/clove-tui/assets/fonts/` and used **unconditionally** — we never
+    /// read system fonts, so screenshots render byte-identically on every
+    /// platform (Linux/macOS/Windows, CI included) with zero machine-to-machine
+    /// variation. DejaVu is chosen for its broad box-drawing / geometric-shape
+    /// coverage (status `○ ◐ ●`, priority `! ↑ • ↓`, borders). License: see that
+    /// directory's `LICENSE` (Bitstream Vera / DejaVu — free, redistributable).
+    const VENDORED_REGULAR: &[u8] = include_bytes!("../assets/fonts/DejaVuSansMono.ttf");
+    const VENDORED_BOLD: &[u8] = include_bytes!("../assets/fonts/DejaVuSansMono-Bold.ttf");
 
+    /// Load the vendored (regular, bold) font pair. Cross-platform and
+    /// deterministic by construction: no system-font lookup, no `$HOME`, no
+    /// platform paths — the bytes are baked into the test binary.
     fn load_fonts() -> (FontVec, FontVec) {
-        for (reg, bold) in FONTS {
-            if let (Ok(r), Ok(b)) = (std::fs::read(reg), std::fs::read(bold)) {
-                return (
-                    FontVec::try_from_vec(r).expect("valid ttf"),
-                    FontVec::try_from_vec(b).expect("valid ttf"),
-                );
-            }
-        }
-        panic!("no monospace font found among {FONTS:?}");
+        (
+            FontVec::try_from_vec(VENDORED_REGULAR.to_vec()).expect("vendored ttf"),
+            FontVec::try_from_vec(VENDORED_BOLD.to_vec()).expect("vendored ttf"),
+        )
     }
 
     fn rgb(c: Color, default: [u8; 3]) -> [u8; 3] {
@@ -786,7 +780,8 @@ fn sort_by_id_orders_ascending() {
     }
     assert_eq!(app.list.sort.field, crate::app::SortField::Id);
     let first = app.visible().next().unwrap();
-    assert_eq!(first.id.as_str(), "proj-00000001");
+    // Ascending by id: the lexicographically smallest suffix sorts first.
+    assert_eq!(first.id.as_str(), "proj-2HZ6C3PW");
 }
 
 #[test]
