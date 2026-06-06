@@ -7,7 +7,15 @@
     theme.set(key);
     open = false;
   }
+  function onKeydown(e: KeyboardEvent) {
+    if (e.key === 'Escape' && open) {
+      e.preventDefault();
+      open = false;
+    }
+  }
 </script>
+
+<svelte:window on:keydown={onKeydown} />
 
 <div class="wrap">
   <button class="trig btn sm" aria-haspopup="menu" aria-expanded={open} onclick={() => (open = !open)}>

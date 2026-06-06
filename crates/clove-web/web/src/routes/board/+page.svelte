@@ -1,10 +1,12 @@
 <script lang="ts">
   import type { Item, Status } from '$lib/types';
-  import { store } from '$lib/store.svelte';
+  import { store, retryLoad } from '$lib/store.svelte';
   import { api } from '$lib/api';
   import { toasts } from '$lib/toast.svelte';
   import Card from '$lib/components/Card.svelte';
   import StatusGlyph from '$lib/components/StatusGlyph.svelte';
+
+  const empty = $derived(store.loaded && store.all.length === 0);
 
   const COLS: Array<{ key: Status; label: string }> = [
     { key: 'open', label: 'Open' },
@@ -57,7 +59,8 @@
     }
   }
 
-  // keyboard move-mode: focus a card, press m to cycle status
+  // Move a card's status one column left/right. Reachable via the focusable
+  // ‹/› buttons on each card (keyboard + pointer); no hidden move-mode chord.
   async function move(item: Item, dir: 1 | -1) {
     const order: Status[] = ['open', 'in_progress', 'closed'];
     const idx = order.indexOf(item.status);
@@ -77,6 +80,18 @@
   <span class="hint dim">Drag a card between columns to change status</span>
 </div>
 
+{#if store.loadError && !store.loaded}
+  <div class="panel loaderr" role="alert">
+    <div class="loaderr-title">Couldn’t reach the backend</div>
+    <p class="dim">{store.loadError}</p>
+    <button class="btn primary" onclick={() => retryLoad()}>Retry</button>
+  </div>
+{:else if empty}
+  <div class="panel board-empty dim">
+    <div class="be-title">No items yet</div>
+    <p>This repo has no items. Create one to get started.</p>
+  </div>
+{:else}
 <div class="board">
   {#each columns as col (col.key)}
     <section
@@ -110,8 +125,25 @@
     </section>
   {/each}
 </div>
+{/if}
 
 <style>
+  .loaderr,
+  .board-empty {
+    text-align: center;
+    padding: 40px 24px;
+  }
+  .loaderr-title,
+  .be-title {
+    font-size: 15px;
+    font-weight: 600;
+    margin-bottom: 6px;
+    color: var(--text);
+  }
+  .loaderr p,
+  .board-empty p {
+    margin: 0 0 14px;
+  }
   .filters {
     display: flex;
     align-items: center;

@@ -10,8 +10,13 @@ import type {
   ListQuery
 } from './types';
 import { MOCK_ITEMS, MOCK_COMMENTS, mockHistory } from './mock';
+import { applyFilters } from './filter';
+import { queryString } from './query';
 
 const BASE = '/api/v1';
+
+/** Stand-in author for mock-mode comment authorship (real server assigns it). */
+const MOCK_META_USER = 'you';
 
 /** Set true once any real backend call fails in dev, so we stop retrying. */
 let mockMode = false;
@@ -19,13 +24,15 @@ export function isMockMode() {
   return mockMode;
 }
 
-class ApiError extends Error {
+export class ApiError extends Error {
   code: string;
   exit: number;
-  constructor(code: string, message: string, exit: number) {
+  status: number;
+  constructor(code: string, message: string, exit: number, status = 0) {
     super(message);
     this.code = code;
     this.exit = exit;
+    this.status = status;
   }
 }
 
@@ -37,12 +44,20 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
       ...init?.headers
     }
   });
-  const env = (await res.json()) as Envelope<T>;
+  let env: Envelope<T> | null = null;
+  try {
+    env = (await res.json()) as Envelope<T>;
+  } catch {
+    // Non-JSON body (e.g. a bare 502 from a proxy). Surface it as an ApiError
+    // carrying the HTTP status instead of leaving an unhandled rejection.
+    throw new ApiError('NON_JSON', `HTTP ${res.status}`, 1, res.status);
+  }
   if (!env.ok || env.error) {
     throw new ApiError(
       env.error?.code ?? 'ERROR',
       env.error?.message ?? `HTTP ${res.status}`,
-      env.error?.exit ?? 1
+      env.error?.exit ?? 1,
+      res.status
     );
   }
   return env.data as T;
@@ -62,20 +77,8 @@ async function withMock<T>(real: () => Promise<T>, mock: () => T): Promise<T> {
   }
 }
 
-function qs(query: ListQuery): string {
-  const p = new URLSearchParams();
-  if (query.status) p.set('status', query.status);
-  if (query.assignee) p.set('assignee', query.assignee);
-  if (query.q) p.set('q', query.q);
-  if (query.sort) p.set('sort', query.sort);
-  if (query.dir) p.set('dir', query.dir);
-  if (query.mode && query.mode !== 'list') p.set('mode', query.mode);
-  for (const t of query.type ?? []) p.append('type', t);
-  for (const pr of query.priority ?? []) p.append('priority', String(pr));
-  for (const l of query.label ?? []) p.append('label', l);
-  const s = p.toString();
-  return s ? '?' + s : '';
-}
+// URL <-> ListQuery mapping lives in query.ts (shared with the list page).
+const qs = queryString;
 
 export const api = {
   async items(query: ListQuery = {}): Promise<Item[]> {
@@ -170,10 +173,40 @@ export const api = {
           body: JSON.stringify({ body })
         }),
       () => {
-        (MOCK_COMMENTS[id] ??= []).push({ author: 'you', timestamp: new Date().toISOString(), body });
+        // The server assigns the author; the mock stamps a stand-in so a later
+        // GET /comments reconcile has a canonical author to return.
+        (MOCK_COMMENTS[id] ??= []).push({
+          author: MOCK_META_USER,
+          timestamp: new Date().toISOString(),
+          body
+        });
         const idx = MOCK_ITEMS.findIndex((i) => i.id === id);
         MOCK_ITEMS[idx] = { ...MOCK_ITEMS[idx], comment_count: MOCK_ITEMS[idx].comment_count + 1 };
         return MOCK_ITEMS[idx];
+      }
+    );
+  },
+
+  /** Delete an item. Pass force=true to delete despite dependents (409). */
+  async delete(id: string, opts: { force?: boolean } = {}): Promise<void> {
+    return withMock(
+      async () => {
+        await req<unknown>(
+          `/items/${encodeURIComponent(id)}${opts.force ? '?force=' : ''}`,
+          { method: 'DELETE' }
+        );
+      },
+      () => {
+        const dependents = MOCK_ITEMS.filter((i) => i.deps.includes(id));
+        if (dependents.length && !opts.force) {
+          throw new ApiError('HAS_DEPENDENTS', `${dependents.length} item(s) depend on this`, 1, 409);
+        }
+        const idx = MOCK_ITEMS.findIndex((i) => i.id === id);
+        if (idx >= 0) MOCK_ITEMS.splice(idx, 1);
+        // Drop dangling refs in mock data so subsequent reads stay consistent.
+        for (const it of MOCK_ITEMS) {
+          if (it.deps.includes(id)) it.deps = it.deps.filter((d) => d !== id);
+        }
       }
     );
   },
@@ -245,22 +278,11 @@ export const api = {
 };
 
 // ---- mock helpers ----
+// Filtering uses the same shared logic as the live list page so the two can't
+// diverge. The server returns canonical rank order; the mock list is already in
+// that order (MOCK_ITEMS authoring order), so no extra sort is applied here.
 function filterMock(q: ListQuery): Item[] {
-  let items = [...MOCK_ITEMS];
-  if (q.mode === 'ready') items = items.filter((i) => i.ready && i.status !== 'closed');
-  if (q.mode === 'blocked') items = items.filter((i) => i.blocked_by.length > 0);
-  if (q.status) items = items.filter((i) => i.status === q.status);
-  if (q.assignee) items = items.filter((i) => i.assignee === q.assignee);
-  if (q.type?.length) items = items.filter((i) => q.type!.includes(i.type));
-  if (q.priority?.length) items = items.filter((i) => q.priority!.includes(i.priority));
-  if (q.label?.length) items = items.filter((i) => q.label!.every((l) => i.labels.includes(l)));
-  if (q.q) {
-    const needle = q.q.toLowerCase();
-    items = items.filter(
-      (i) => i.title.toLowerCase().includes(needle) || i.id.includes(needle) || i.body.toLowerCase().includes(needle)
-    );
-  }
-  return items;
+  return applyFilters(MOCK_ITEMS, q);
 }
 
 function mockBoard(): Board {

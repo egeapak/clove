@@ -22,6 +22,22 @@ function renderTaskLists(html: string): string {
     .replace(/<li>\s*\[[xX]\]\s*/g, '<li class="task done"><input type="checkbox" checked disabled> ');
 }
 
+// Autolink clove ids: `#prefix-XXXXXXXX` (8 Crockford base32) and the short
+// `#XXXXXXXX` form. Done on the sanitized HTML, but only OUTSIDE <code>/<pre>
+// and outside existing tags/attributes, so we don't mangle code or hrefs.
+const CLOVE_ID = /#((?:[a-z][a-z0-9]*-)?[0-9A-HJKMNP-TV-Z]{8})\b/g;
+function autolinkIds(html: string): string {
+  // Split on code/pre spans and tags; only rewrite plain text segments.
+  const parts = html.split(/(<pre[\s\S]*?<\/pre>|<code[\s\S]*?<\/code>|<[^>]+>)/g);
+  return parts
+    .map((seg, i) => {
+      // Odd indices are the captured delimiters (tags / code blocks) — leave them.
+      if (i % 2 === 1) return seg;
+      return seg.replace(CLOVE_ID, (_m, id: string) => `<a href="/items/${id}">#${id}</a>`);
+    })
+    .join('');
+}
+
 async function getMd() {
   const { default: MarkdownIt } = await import('markdown-it');
   const md = new MarkdownIt({
@@ -30,7 +46,7 @@ async function getMd() {
     breaks: false,
     typographer: true
   });
-  return (src: string) => renderTaskLists(sanitize(md.render(src)));
+  return (src: string) => autolinkIds(renderTaskLists(sanitize(md.render(src))));
 }
 
 export async function renderMarkdown(src: string): Promise<string> {

@@ -1,11 +1,11 @@
 <script lang="ts">
   import type { Item, StatsHistoryPoint } from '$lib/types';
-  import { store } from '$lib/store.svelte';
+  import { store, retryLoad } from '$lib/store.svelte';
   import { api } from '$lib/api';
   import { goto } from '$app/navigation';
   import TypeIcon from '$lib/components/TypeIcon.svelte';
   import ShortId from '$lib/components/ShortId.svelte';
-  import { shortId } from '$lib/glyphs';
+  import { shortId, typeIcon } from '$lib/glyphs';
 
   let history = $state<StatsHistoryPoint[]>([]);
   let range = $state<'30' | '90' | 'all'>('90');
@@ -16,11 +16,25 @@
 
   // ---- Gantt domain: created → (closed | now) ----
   const items = $derived(store.all);
+  // id -> item map, built once and reused (avoids O(n²) find() in arrows).
+  const byId = $derived(new Map(items.map((i) => [i.id, i])));
   const domain = $derived.by(() => {
-    const times = items.flatMap((i) => [new Date(i.created).getTime(), new Date(i.closed ?? i.updated).getTime()]);
     const now = Date.now();
-    let min = Math.min(...times, now);
-    let max = Math.max(...times, now);
+    let min = now;
+    let max = now;
+    // reduce instead of Math.min(...spread) to avoid call-stack blowups at large N
+    for (const i of items) {
+      const a = new Date(i.created).getTime();
+      const b = new Date(i.closed ?? i.updated).getTime();
+      if (isFinite(a)) {
+        if (a < min) min = a;
+        if (a > max) max = a;
+      }
+      if (isFinite(b)) {
+        if (b < min) min = b;
+        if (b > max) max = b;
+      }
+    }
     if (!isFinite(min) || !isFinite(max) || min === max) {
       min = now - 30 * 86400000;
       max = now;
@@ -49,8 +63,16 @@
     const w = Math.max(end - start, 1.5);
     return `left:${start}%;width:${w}%`;
   }
+  // Visual: closed items get a solid type-coloured bar; in-progress/open get the
+  // type colour with reduced emphasis. "blocked" is a SEPARATE concern, driven
+  // by blocked_by (not status) — see isBlocked() / the bar label.
   function barClass(i: Item): string {
-    return i.status === 'open' ? 'open' : i.type;
+    if (i.status === 'closed') return i.type + ' closed';
+    if (i.status === 'in_progress') return i.type + ' inprog';
+    return i.type + ' openbar';
+  }
+  function isBlocked(i: Item): boolean {
+    return i.blocked_by.length > 0;
   }
 
   // axis ticks (~8)
@@ -79,7 +101,8 @@
       for (const dep of it.deps) {
         const di = rowIndex.get(dep);
         if (di === undefined) continue;
-        const depItem = items.find((x) => x.id === dep)!;
+        const depItem = byId.get(dep);
+        if (!depItem) continue;
         const x1 = pct(new Date(depItem.closed ?? domain.now).getTime());
         const x2 = pct(new Date(it.created).getTime());
         out.push({ x1, y1: di * ROW_H + ROW_H / 2, x2, y2: ri * ROW_H + ROW_H / 2 });
@@ -159,16 +182,31 @@
       <div class="track" style="top:{ri * ROW_H}px">
         <button
           class="bar {barClass(it)}"
+          class:blocked={isBlocked(it)}
           style={barStyle(it)}
           onclick={() => goto(`../items/${it.id}`)}
-          title="{it.title}"
-          aria-label="{shortId(it.id)} {it.title}"
+          title="{it.type} · {it.title}{isBlocked(it) ? ' · blocked' : ''}"
+          aria-label="{shortId(it.id)} {it.type} {it.title}{isBlocked(it) ? ' (blocked)' : ''}"
         >
-          {shortId(it.id)}{#if it.status === 'open'} ·blocked{/if}
+          <span class="bar-type" aria-hidden="true">{typeIcon(it.type)}</span>
+          {shortId(it.id)}{#if isBlocked(it)} ·blocked{/if}
         </button>
       </div>
     {/each}
   </div>
+  {#if rows.length === 0}
+    <div class="tl-empty dim">
+      {#if store.loadError && !store.loaded}
+        <div class="tl-err-title">Couldn’t reach the backend</div>
+        <p>{store.loadError}</p>
+        <button class="btn primary" onclick={() => retryLoad()}>Retry</button>
+      {:else if store.loaded}
+        No items to plot on the timeline.
+      {:else}
+        Loading…
+      {/if}
+    </div>
+  {/if}
 </div>
 
 <!-- throughput -->
@@ -317,11 +355,41 @@
   .bar.docs {
     background: var(--type-docs);
   }
-  .bar.open {
-    background: transparent;
-    border: 1px dashed var(--text-muted);
-    color: var(--text-muted);
-    opacity: 0.8;
+  /* open/in-progress: lower-emphasis fill so closed (solid) reads as "done" */
+  .bar.openbar {
+    opacity: 0.55;
+  }
+  .bar.inprog {
+    opacity: 0.85;
+  }
+  .bar.closed {
+    opacity: 1;
+  }
+  /* blocked is driven by blocked_by, NOT status */
+  .bar.blocked {
+    outline: 2px solid var(--red);
+    outline-offset: -1px;
+    color: #fff;
+  }
+  .bar-type {
+    font-weight: 800;
+    margin-right: 4px;
+    opacity: 0.9;
+  }
+  .tl-empty {
+    grid-column: 1 / -1;
+    text-align: center;
+    padding: 40px 0;
+    font-size: 13px;
+  }
+  .tl-err-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 6px;
+  }
+  .tl-empty p {
+    margin: 0 0 14px;
   }
   .today {
     position: absolute;

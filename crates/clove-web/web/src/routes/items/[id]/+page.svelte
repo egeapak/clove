@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { Item, Comment, DepTreeNode, Status } from '$lib/types';
   import { store } from '$lib/store.svelte';
-  import { api } from '$lib/api';
+  import { api, ApiError } from '$lib/api';
   import { toasts } from '$lib/toast.svelte';
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
@@ -33,13 +33,19 @@
     if (!s) return fresh ?? undefined;
     if (!fresh) return s;
     // Store wins for live/optimistic fields; backfill body/comment_count when
-    // the store item (from list/board) lacks them.
+    // the store item (from the lean list/board) lacks them. Lean items carry
+    // `body: ''` and `comment_count: 0`, so use a TRUTHY fallback (||) — `??`
+    // would keep the empty string / zero and drop the full body.
     return {
       ...s,
-      body: s.body ?? fresh.body,
-      comment_count: s.comment_count ?? fresh.comment_count
+      body: s.body || fresh.body,
+      comment_count: s.comment_count || fresh.comment_count
     };
   }
+
+  // Enum options driven by store.meta, with literal fallbacks.
+  const statusOptions = $derived(store.meta?.statuses?.length ? store.meta.statuses : ['open', 'in_progress', 'closed']);
+  const prioOptions = $derived(store.meta?.priorities?.length ? store.meta.priorities : [0, 1, 2, 3, 4]);
 
   let comments = $state<Comment[]>([]);
   let deptree = $state<DepTreeNode | null>(null);
@@ -65,8 +71,17 @@
         store.upsert(it);
         if (curId === id) full = it;
       })
-      .catch(() => {});
-    api.deptree(curId).then((t) => (deptree = t)).catch(() => (deptree = null));
+      .catch((e) => {
+        console.warn('[clove] failed to load item', curId, e);
+        toasts.error('Failed to load item');
+      });
+    api
+      .deptree(curId)
+      .then((t) => (deptree = t))
+      .catch((e) => {
+        deptree = null;
+        console.warn('[clove] failed to load dep tree', curId, e);
+      });
   });
 
   // load comments only when the Comments tab is opened
@@ -101,13 +116,29 @@
   async function addComment() {
     const body = newComment.trim();
     if (!body) return;
+    const curId = id;
     newComment = '';
-    comments = [...comments, { author: 'you', timestamp: new Date().toISOString(), body }];
+    // Optimistic append (author unknown — the server assigns it). Marked pending
+    // so we can roll it back on failure; reconciled by a comments refetch.
+    const optimistic: Comment = { author: '…', timestamp: new Date().toISOString(), body };
+    comments = [...comments, optimistic];
     try {
-      const updated = await api.addComment(id, body);
+      const updated = await api.addComment(curId, body);
       store.upsert(updated);
       if (updated.id === id) full = updated;
+      // Refetch to get canonical author/timestamp (server assigns author).
+      try {
+        const fresh = await api.comments(curId);
+        if (curId === id) comments = fresh;
+      } catch {
+        // keep the optimistic comment if the reconcile read fails
+      }
     } catch {
+      // Roll back the optimistic comment and restore the draft.
+      if (curId === id) {
+        comments = comments.filter((c) => c !== optimistic);
+        if (!newComment) newComment = body;
+      }
       toasts.error('Comment failed');
     }
   }
@@ -156,6 +187,29 @@
     } catch {
       rollback();
       toasts.error('Label update failed');
+    }
+  }
+
+  // ---- delete ----
+  let confirmingDelete = $state(false);
+  let deleting = $state(false);
+  async function doDelete(force = false) {
+    deleting = true;
+    try {
+      await api.delete(id, { force });
+      store.remove(id);
+      toasts.push('Item deleted');
+      // Rely on the WS batch → refetch for any cascaded changes.
+      goto('../list');
+    } catch (e) {
+      if (e instanceof ApiError && e.code === 'HAS_DEPENDENTS') {
+        toasts.error('Other items depend on this. Use force-delete to remove anyway.');
+        confirmingDelete = true; // keep the panel open with force option
+      } else {
+        toasts.error('Delete failed: ' + (e instanceof Error ? e.message : 'error'));
+      }
+    } finally {
+      deleting = false;
     }
   }
 
@@ -211,7 +265,7 @@
         {/if}
       {:else if view === 'comments'}
         <div class="comments">
-          {#each comments as c (c.timestamp + c.author)}
+          {#each comments as c, ci (c.timestamp + '|' + c.author + '|' + ci)}
             <div class="comment">
               <Avatar name={c.author} />
               <div class="body">
@@ -240,15 +294,13 @@
       <div class="side-block">
         <div class="side-label">Status</div>
         <select value={item.status} onchange={(e) => patch({ status: e.currentTarget.value as Status })}>
-          <option value="open">Open</option>
-          <option value="in_progress">In Progress</option>
-          <option value="closed">Closed</option>
+          {#each statusOptions as s (s)}<option value={s}>{statusLabel(s as Status)}</option>{/each}
         </select>
       </div>
       <div class="side-block">
         <div class="side-label">Priority</div>
         <select value={item.priority} onchange={(e) => patch({ priority: Number(e.currentTarget.value) })}>
-          {#each [0, 1, 2, 3, 4] as p (p)}<option value={p}>{priorityLabel(p)}</option>{/each}
+          {#each prioOptions as p (p)}<option value={p}>{priorityLabel(p)}</option>{/each}
         </select>
       </div>
       <div class="side-block">
@@ -277,11 +329,26 @@
         {#each item.relates as r (r)}<div class="side-row dim mono">relates {shortId(r)}</div>{/each}
         {#if !item.blocked_by.length && !item.parent && !item.relates.length}<div class="side-row dim">None</div>{/if}
       </div>
-      <div class="side-block last">
+      <div class="side-block">
         <div class="side-label">Dates</div>
         <div class="side-row mono">created <span class="dim">{shortDate(item.created)}</span></div>
         <div class="side-row mono">updated <span class="dim">{relativeTime(item.updated)}</span></div>
         {#if item.closed}<div class="side-row mono">closed <span class="dim">{shortDate(item.closed)}</span></div>{/if}
+      </div>
+      <div class="side-block last danger">
+        <div class="side-label">Danger zone</div>
+        {#if !confirmingDelete}
+          <button class="btn danger-btn" onclick={() => (confirmingDelete = true)}>Delete item</button>
+        {:else}
+          <p class="dim confirm-text">Permanently delete {shortId(item.id)}?</p>
+          <div class="confirm-row">
+            <button class="btn" disabled={deleting} onclick={() => (confirmingDelete = false)}>Cancel</button>
+            <button class="btn danger-btn" disabled={deleting} onclick={() => doDelete(false)}>
+              {deleting ? 'Deleting…' : 'Delete'}
+            </button>
+          </div>
+          <button class="force" disabled={deleting} onclick={() => doDelete(true)}>Force-delete (ignore dependents)</button>
+        {/if}
       </div>
     </aside>
   </div>
@@ -460,6 +527,38 @@
   }
   .side-block.last {
     border-bottom: none;
+  }
+  .danger .danger-btn {
+    color: var(--red);
+    border-color: color-mix(in srgb, var(--red) 50%, var(--border));
+    width: 100%;
+  }
+  .danger .danger-btn:hover {
+    background: color-mix(in srgb, var(--red) 14%, transparent);
+  }
+  .confirm-text {
+    font-size: 12px;
+    margin: 0 0 8px;
+  }
+  .confirm-row {
+    display: flex;
+    gap: 8px;
+  }
+  .confirm-row .btn {
+    flex: 1;
+  }
+  .force {
+    margin-top: 8px;
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    font-size: 11px;
+    text-decoration: underline;
+    cursor: pointer;
+    padding: 4px 0;
+  }
+  .force:hover {
+    color: var(--red);
   }
   .side-label {
     font-size: 11px;

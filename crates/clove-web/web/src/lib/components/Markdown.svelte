@@ -5,7 +5,21 @@
 
   $effect(() => {
     const src = source ?? '';
-    renderMarkdown(src).then((h) => (html = h));
+    // Cancellation token: a stale async render must not clobber a newer one.
+    let cancelled = false;
+    renderMarkdown(src)
+      .then((h) => {
+        if (!cancelled) html = h;
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          html = '';
+          console.warn('[clove] markdown render failed', e);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
   });
 </script>
 

@@ -1,6 +1,6 @@
 <script lang="ts">
-  import type { Item, Status, ItemType } from '$lib/types';
-  import { store } from '$lib/store.svelte';
+  import type { ItemType, ListQuery } from '$lib/types';
+  import { store, retryLoad } from '$lib/store.svelte';
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import StatusGlyph from '$lib/components/StatusGlyph.svelte';
@@ -10,19 +10,26 @@
   import LabelChip from '$lib/components/LabelChip.svelte';
   import Avatar from '$lib/components/Avatar.svelte';
   import BlockedBadge from '$lib/components/BlockedBadge.svelte';
-  import { relativeTime } from '$lib/glyphs';
+  import { relativeTime, priorityLabel } from '$lib/glyphs';
+  import { parseQuery } from '$lib/query';
+  import { applyFilters, sortItems } from '$lib/filter';
+
+  // Fallbacks when /meta isn't available yet.
+  const TYPES_FALLBACK: ItemType[] = ['bug', 'feature', 'chore', 'docs', 'epic'];
+  const PRIOS_FALLBACK = [0, 1, 2, 3, 4];
 
   // ---- URL-encoded state ----
   const url = $derived($page.url);
-  const tab = $derived((url.searchParams.get('tab') as 'all' | 'ready' | 'blocked') || 'all');
-  const q = $derived(url.searchParams.get('q') || '');
-  const fStatus = $derived(url.searchParams.get('status') as Status | null);
-  const fAssignee = $derived(url.searchParams.get('assignee'));
-  const fTypes = $derived(url.searchParams.getAll('type') as ItemType[]);
-  const fPrios = $derived(url.searchParams.getAll('priority').map(Number));
-  const fLabels = $derived(url.searchParams.getAll('label'));
-  const sort = $derived(url.searchParams.get('sort') || 'updated');
-  const dir = $derived((url.searchParams.get('dir') as 'asc' | 'desc') || 'desc');
+  const query = $derived<ListQuery>(parseQuery(url.searchParams));
+  const tab = $derived(query.mode ?? 'list');
+  const q = $derived(query.q ?? '');
+  const fStatus = $derived(query.status ?? null);
+  const fAssignee = $derived(query.assignee ?? null);
+  const fTypes = $derived(query.type ?? []);
+  const fPrios = $derived(query.priority ?? []);
+  const fLabels = $derived(query.label ?? []);
+  const sort = $derived(query.sort || 'rank');
+  const dir = $derived(query.dir || 'desc');
 
   let searchInput = $state('');
   $effect(() => {
@@ -36,7 +43,12 @@
   }
 
   function setTab(t: string) {
-    setParams((p) => (t === 'all' ? p.delete('tab') : p.set('tab', t)));
+    // The list "tab" param and ListQuery "mode" are the same concept; we write
+    // `mode` (query.ts canonical name) and treat 'all' as the no-op default.
+    setParams((p) => {
+      p.delete('tab');
+      t === 'all' || t === 'list' ? p.delete('mode') : p.set('mode', t);
+    });
   }
   function toggleMulti(key: string, val: string) {
     setParams((p) => {
@@ -49,12 +61,18 @@
   function setSingle(key: string, val: string | null) {
     setParams((p) => (val ? p.set(key, val) : p.delete(key)));
   }
-  function applySearch() {
-    setParams((p) => (searchInput.trim() ? p.set('q', searchInput.trim()) : p.delete('q')));
+
+  // Debounce the search→URL write so each keystroke doesn't navigate + re-derive.
+  let searchTimer: ReturnType<typeof setTimeout> | undefined;
+  function applySearch(immediate = false) {
+    clearTimeout(searchTimer);
+    const run = () => setParams((p) => (searchInput.trim() ? p.set('q', searchInput.trim()) : p.delete('q')));
+    if (immediate) run();
+    else searchTimer = setTimeout(run, 220);
   }
   function cycleSort(col: string) {
     setParams((p) => {
-      if (p.get('sort') === col) {
+      if ((p.get('sort') || 'rank') === col) {
         p.set('dir', p.get('dir') === 'asc' ? 'desc' : 'asc');
       } else {
         p.set('sort', col);
@@ -63,13 +81,8 @@
     });
   }
 
-  // ---- derived counts & filtered list ----
+  // ---- derived counts & filtered list (shared filter/sort logic) ----
   const base = $derived(store.all);
-  function tabFilter(items: Item[], t: string): Item[] {
-    if (t === 'ready') return items.filter((i) => i.ready && i.status !== 'closed');
-    if (t === 'blocked') return items.filter((i) => i.blocked_by.length > 0);
-    return items;
-  }
 
   const counts = $derived({
     all: base.length,
@@ -78,32 +91,14 @@
   });
 
   const filtered = $derived.by(() => {
-    let items = tabFilter(base, tab);
-    if (fStatus) items = items.filter((i) => i.status === fStatus);
-    if (fAssignee) items = items.filter((i) => (i.assignee ?? '') === fAssignee);
-    if (fTypes.length) items = items.filter((i) => fTypes.includes(i.type));
-    if (fPrios.length) items = items.filter((i) => fPrios.includes(i.priority));
-    if (fLabels.length) items = items.filter((i) => fLabels.every((l) => i.labels.includes(l)));
-    if (q) {
-      const n = q.toLowerCase();
-      items = items.filter(
-        (i) => i.title.toLowerCase().includes(n) || i.id.includes(n) || i.body.toLowerCase().includes(n)
-      );
-    }
-    const mul = dir === 'asc' ? 1 : -1;
-    items = [...items].sort((a, b) => {
-      let c = 0;
-      if (sort === 'priority') c = a.priority - b.priority;
-      else if (sort === 'id') c = (Number(a.id) || 0) - (Number(b.id) || 0);
-      else if (sort === 'created') c = a.created.localeCompare(b.created);
-      else if (sort === 'updated') c = a.updated.localeCompare(b.updated);
-      else c = a.priority - b.priority; // rank ≈ priority fallback
-      return c * mul;
-    });
-    return items;
+    const out = applyFilters(base, query);
+    // 'rank' (default) preserves the server's canonical order via store.rankOf.
+    return sortItems(out, sort, dir, (id) => store.rankOf(id));
   });
 
   const meta = $derived(store.meta);
+  const typeOptions = $derived((meta?.types as ItemType[] | undefined)?.length ? (meta!.types as ItemType[]) : TYPES_FALLBACK);
+  const prioOptions = $derived(meta?.priorities?.length ? meta!.priorities : PRIOS_FALLBACK);
 
   // ---- keyboard nav ----
   let cursor = $state(0);
@@ -129,6 +124,45 @@
     if (sort !== col) return '';
     return dir === 'asc' ? '↑' : '↓';
   }
+  function ariaSort(col: string): 'ascending' | 'descending' | 'none' {
+    if (sort !== col) return 'none';
+    return dir === 'asc' ? 'ascending' : 'descending';
+  }
+  function onThKey(e: KeyboardEvent, col: string) {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      cycleSort(col);
+    }
+  }
+
+  // ---- simple row windowing ----
+  // Render only rows near the viewport (scroll offset + buffer) so large repos
+  // don't paint thousands of <tr>. Falls back to all rows below the threshold.
+  const ROW_H = 38; // approximate row height (px)
+  const BUFFER = 12;
+  const WINDOW_THRESHOLD = 200;
+  let scrollEl = $state<HTMLDivElement | undefined>();
+  let scrollTop = $state(0);
+  let viewH = $state(600);
+  function onScroll() {
+    if (scrollEl) {
+      scrollTop = scrollEl.scrollTop;
+      viewH = scrollEl.clientHeight;
+    }
+  }
+  // Measure the viewport once the scroll container mounts (windowing needs a
+  // real height before the first scroll event fires).
+  $effect(() => {
+    if (scrollEl) viewH = scrollEl.clientHeight || viewH;
+  });
+  const windowed = $derived(filtered.length > WINDOW_THRESHOLD);
+  const startRow = $derived(windowed ? Math.max(0, Math.floor(scrollTop / ROW_H) - BUFFER) : 0);
+  const endRow = $derived(
+    windowed ? Math.min(filtered.length, Math.ceil((scrollTop + viewH) / ROW_H) + BUFFER) : filtered.length
+  );
+  const visibleRows = $derived(filtered.slice(startRow, endRow));
+  const padTop = $derived(startRow * ROW_H);
+  const padBottom = $derived(Math.max(0, (filtered.length - endRow) * ROW_H));
 </script>
 
 <svelte:window on:keydown={onKey} />
@@ -150,25 +184,39 @@
   </div>
 
   <div class="multi" role="group" aria-label="Type filter">
-    {#each ['bug', 'feature', 'chore', 'docs', 'epic'] as t (t)}
-      <button class="chip" class:on={fTypes.includes(t as ItemType)} onclick={() => toggleMulti('type', t)}>
-        <TypeIcon type={t as ItemType} />
+    {#each typeOptions as t (t)}
+      <button
+        class="chip"
+        class:on={fTypes.includes(t)}
+        aria-label="Filter by type {t}"
+        aria-pressed={fTypes.includes(t)}
+        title="type: {t}"
+        onclick={() => toggleMulti('type', t)}
+      >
+        <TypeIcon type={t} />
       </button>
     {/each}
   </div>
   <div class="multi" role="group" aria-label="Priority filter">
-    {#each [0, 1, 2, 3, 4] as p (p)}
-      <button class="chip" class:on={fPrios.includes(p)} onclick={() => toggleMulti('priority', String(p))}>
+    {#each prioOptions as p (p)}
+      <button
+        class="chip"
+        class:on={fPrios.includes(p)}
+        aria-label="Filter by {priorityLabel(p)}"
+        aria-pressed={fPrios.includes(p)}
+        title={priorityLabel(p)}
+        onclick={() => toggleMulti('priority', String(p))}
+      >
         <PriorityGlyph priority={p} />
       </button>
     {/each}
   </div>
 
-  <form class="search" onsubmit={(e) => { e.preventDefault(); applySearch(); }}>
+  <form class="search" onsubmit={(e) => { e.preventDefault(); applySearch(true); }}>
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"
       ><circle cx="11" cy="11" r="7" /><path d="m21 21-4-4" /></svg
     >
-    <input bind:value={searchInput} placeholder="filter items…" oninput={applySearch} aria-label="Filter" />
+    <input bind:value={searchInput} placeholder="filter items…" oninput={() => applySearch()} aria-label="Filter" />
   </form>
 </div>
 
@@ -182,59 +230,77 @@
 {/if}
 
 <div class="ltabs" role="tablist">
-  {#each [['all', 'All'], ['ready', 'Ready'], ['blocked', 'Blocked']] as [key, label] (key)}
-    <button class="ltab" class:active={tab === key} role="tab" aria-selected={tab === key} onclick={() => setTab(key)}>
-      {label} <span class="n mono">{counts[key as keyof typeof counts]}</span>
+  {#each [['list', 'all', 'All'], ['ready', 'ready', 'Ready'], ['blocked', 'blocked', 'Blocked']] as [mode, cntKey, label] (mode)}
+    {@const active = (tab === 'list' ? 'list' : tab) === mode}
+    <button class="ltab" class:active role="tab" aria-selected={active} onclick={() => setTab(mode)}>
+      {label} <span class="n mono">{counts[cntKey as keyof typeof counts]}</span>
     </button>
   {/each}
 </div>
 
-<div class="table-wrap panel">
-  <table>
-    <thead>
-      <tr>
-        <th style="width:34px"></th>
-        <th class="sortable" style="width:60px" onclick={() => cycleSort('id')}>ID <span class="sort">{sortArrow('id')}</span></th>
-        <th style="width:42px">Type</th>
-        <th class="sortable" style="width:52px" onclick={() => cycleSort('priority')}>Pri <span class="sort">{sortArrow('priority')}</span></th>
-        <th>Title</th>
-        <th style="width:130px">Assignee</th>
-        <th style="width:220px">Labels</th>
-        <th class="sortable" style="width:110px" onclick={() => cycleSort('updated')}>Updated <span class="sort">{sortArrow('updated')}</span></th>
-      </tr>
-    </thead>
-    <tbody>
-      {#each filtered as item, i (item.id)}
-        <tr
-          class:cursor={i === cursor}
-          onclick={() => goto(`../items/${item.id}`)}
-          onmouseenter={() => (cursor = i)}
-        >
-          <td><StatusGlyph status={item.status} /></td>
-          <td><ShortId id={item.id} /></td>
-          <td><TypeIcon type={item.type} /></td>
-          <td><PriorityGlyph priority={item.priority} /></td>
-          <td class="title">
-            {item.title}
-            {#if item.blocked_by.length}<BlockedBadge blockedBy={item.blocked_by} />{/if}
-          </td>
-          <td>
-            <span class="assignee"><Avatar name={item.assignee} /> <span class="muted">{item.assignee ?? '—'}</span></span>
-          </td>
-          <td>
-            <span class="lblrow">
-              {#each item.labels.slice(0, 3) as l (l)}<LabelChip label={l} />{/each}
-            </span>
-          </td>
-          <td class="upd mono">{relativeTime(item.updated)}</td>
+{#if store.loadError && !store.loaded}
+  <div class="panel loaderr" role="alert">
+    <div class="loaderr-title">Couldn’t reach the backend</div>
+    <p class="dim">{store.loadError}</p>
+    <button class="btn primary" onclick={() => retryLoad()}>Retry</button>
+  </div>
+{:else}
+  <div class="table-wrap panel" bind:this={scrollEl} onscroll={onScroll}>
+    <table>
+      <thead>
+        <tr>
+          <th style="width:34px"></th>
+          <th class="sortable" style="width:60px" aria-sort={ariaSort('id')}>
+            <button type="button" class="th-btn" onclick={() => cycleSort('id')} onkeydown={(e) => onThKey(e, 'id')}>ID <span class="sort">{sortArrow('id')}</span></button>
+          </th>
+          <th style="width:42px">Type</th>
+          <th class="sortable" style="width:52px" aria-sort={ariaSort('priority')}>
+            <button type="button" class="th-btn" onclick={() => cycleSort('priority')} onkeydown={(e) => onThKey(e, 'priority')}>Pri <span class="sort">{sortArrow('priority')}</span></button>
+          </th>
+          <th>Title</th>
+          <th style="width:130px">Assignee</th>
+          <th style="width:220px">Labels</th>
+          <th class="sortable" style="width:110px" aria-sort={ariaSort('updated')}>
+            <button type="button" class="th-btn" onclick={() => cycleSort('updated')} onkeydown={(e) => onThKey(e, 'updated')}>Updated <span class="sort">{sortArrow('updated')}</span></button>
+          </th>
         </tr>
-      {/each}
-      {#if filtered.length === 0}
-        <tr><td colspan="8" class="empty dim">No items match these filters</td></tr>
-      {/if}
-    </tbody>
-  </table>
-</div>
+      </thead>
+      <tbody>
+        {#if padTop > 0}<tr class="spacer" style="height:{padTop}px" aria-hidden="true"><td colspan="8"></td></tr>{/if}
+        {#each visibleRows as item, vi (item.id)}
+          {@const i = startRow + vi}
+          <tr
+            class:cursor={i === cursor}
+            onclick={() => goto(`../items/${item.id}`)}
+            onmouseenter={() => (cursor = i)}
+          >
+            <td><StatusGlyph status={item.status} /></td>
+            <td><ShortId id={item.id} /></td>
+            <td><TypeIcon type={item.type} /></td>
+            <td><PriorityGlyph priority={item.priority} /></td>
+            <td class="title">
+              {item.title}
+              {#if item.blocked_by.length}<BlockedBadge blockedBy={item.blocked_by} />{/if}
+            </td>
+            <td>
+              <span class="assignee"><Avatar name={item.assignee} /> <span class="muted">{item.assignee ?? '—'}</span></span>
+            </td>
+            <td>
+              <span class="lblrow">
+                {#each item.labels.slice(0, 3) as l (l)}<LabelChip label={l} />{/each}
+              </span>
+            </td>
+            <td class="upd mono">{relativeTime(item.updated)}</td>
+          </tr>
+        {/each}
+        {#if padBottom > 0}<tr class="spacer" style="height:{padBottom}px" aria-hidden="true"><td colspan="8"></td></tr>{/if}
+        {#if filtered.length === 0}
+          <tr><td colspan="8" class="empty dim">{store.loaded ? 'No items match these filters' : 'Loading…'}</td></tr>
+        {/if}
+      </tbody>
+    </table>
+  </div>
+{/if}
 
 <style>
   .lbar {
@@ -332,6 +398,43 @@
   }
   .table-wrap {
     overflow: auto;
+    max-height: calc(100vh - 220px);
+  }
+  .loaderr {
+    text-align: center;
+    padding: 40px 24px;
+  }
+  .loaderr-title {
+    font-size: 15px;
+    font-weight: 600;
+    margin-bottom: 6px;
+  }
+  .loaderr p {
+    margin: 0 0 14px;
+  }
+  .th-btn {
+    all: unset;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font: inherit;
+    color: inherit;
+  }
+  .th-btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+    border-radius: 2px;
+  }
+  tr.spacer {
+    cursor: default;
+  }
+  tr.spacer:hover {
+    background: none;
+  }
+  tr.spacer td {
+    padding: 0;
+    border: none;
   }
   table {
     width: 100%;

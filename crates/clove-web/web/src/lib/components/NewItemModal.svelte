@@ -3,7 +3,7 @@
   import { store } from '$lib/store.svelte';
   import { toasts } from '$lib/toast.svelte';
   import { goto } from '$app/navigation';
-  import { resolveRoute } from '$app/paths';
+  import { onMount, tick } from 'svelte';
 
   let { onclose }: { onclose: () => void } = $props();
 
@@ -14,6 +14,52 @@
   let assignee = $state('');
   let body = $state('');
   let saving = $state(false);
+
+  // ---- focus management ----
+  const TYPES = $derived(store.meta?.types?.length ? store.meta.types : ['feature', 'bug', 'chore', 'docs', 'epic']);
+  const PRIOS = $derived(store.meta?.priorities?.length ? store.meta.priorities : [0, 1, 2, 3, 4]);
+
+  let dialogEl = $state<HTMLDivElement | undefined>();
+  let firstField = $state<HTMLInputElement | undefined>();
+  const opener = typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null;
+
+  onMount(() => {
+    void tick().then(() => firstField?.focus());
+    return () => {
+      // Restore focus to whatever opened the modal.
+      opener?.focus?.();
+    };
+  });
+
+  function focusables(): HTMLElement[] {
+    if (!dialogEl) return [];
+    return [
+      ...dialogEl.querySelectorAll<HTMLElement>(
+        'input, select, textarea, button, [href], [tabindex]:not([tabindex="-1"])'
+      )
+    ].filter((el) => !el.hasAttribute('disabled') && el.offsetParent !== null);
+  }
+
+  function onKeydown(e: KeyboardEvent) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      onclose();
+      return;
+    }
+    if (e.key !== 'Tab') return;
+    const els = focusables();
+    if (els.length === 0) return;
+    const first = els[0];
+    const last = els[els.length - 1];
+    const active = document.activeElement;
+    if (e.shiftKey && active === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && active === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
 
   async function submit(e: Event) {
     e.preventDefault();
@@ -44,33 +90,32 @@
 </script>
 
 <button class="scrim" aria-label="close" onclick={onclose}></button>
-<div class="modal panel" role="dialog" aria-modal="true" aria-label="Create item">
+<div
+  class="modal panel"
+  role="dialog"
+  aria-modal="true"
+  aria-label="Create item"
+  tabindex="-1"
+  bind:this={dialogEl}
+  onkeydown={onKeydown}
+>
   <h2>New item</h2>
   <form onsubmit={submit}>
     <label>
       <span>Title</span>
-      <!-- svelte-ignore a11y_autofocus -->
-      <input bind:value={title} autofocus placeholder="Short summary…" required />
+      <input bind:this={firstField} bind:value={title} placeholder="Short summary…" required />
     </label>
     <div class="row">
       <label>
         <span>Type</span>
         <select bind:value={type}>
-          <option value="feature">feature</option>
-          <option value="bug">bug</option>
-          <option value="chore">chore</option>
-          <option value="docs">docs</option>
-          <option value="epic">epic</option>
+          {#each TYPES as t (t)}<option value={t}>{t}</option>{/each}
         </select>
       </label>
       <label>
         <span>Priority</span>
         <select bind:value={priority}>
-          <option value={0}>p0</option>
-          <option value={1}>p1</option>
-          <option value={2}>p2</option>
-          <option value={3}>p3</option>
-          <option value={4}>p4</option>
+          {#each PRIOS as p (p)}<option value={p}>p{p}</option>{/each}
         </select>
       </label>
     </div>

@@ -60,15 +60,31 @@
       e.preventDefault();
       showNew = true;
     } else if (e.key === 'g') {
-      // simple chord: g then b/l/t
-      const once = (ev: KeyboardEvent) => {
-        if (ev.key === 'b') goto('./board');
-        else if (ev.key === 'l') goto('./list');
-        else if (ev.key === 't') goto('./timeline');
-        window.removeEventListener('keydown', once, true);
-      };
-      window.addEventListener('keydown', once, true);
+      armChord();
     }
+  }
+
+  // `g` chord: g then b/l/t. The one-shot listener is removed FIRST on every
+  // key (so a non-matching key can't leave it attached and stack), and a 1s
+  // timeout auto-cancels a dangling chord.
+  let chordTimer: ReturnType<typeof setTimeout> | undefined;
+  function armChord() {
+    cancelChord();
+    const once = (ev: KeyboardEvent) => {
+      cancelChord(); // remove-first, then branch
+      if (ev.key === 'b') goto('./board');
+      else if (ev.key === 'l') goto('./list');
+      else if (ev.key === 't') goto('./timeline');
+    };
+    function cancelChord() {
+      window.removeEventListener('keydown', once, true);
+      if (chordTimer) {
+        clearTimeout(chordTimer);
+        chordTimer = undefined;
+      }
+    }
+    window.addEventListener('keydown', once, true);
+    chordTimer = setTimeout(cancelChord, 1000);
   }
 </script>
 
