@@ -108,12 +108,13 @@ function connect() {
         break;
       case 'batch': {
         const seq = frame.data?.seq;
-        // gap detection → full refetch
+        // The granular item.upserted/item.deleted events in this batch have
+        // already been applied above; only fall back to a full refetch if the
+        // sequence shows we missed a batch (a gap), e.g. after a disconnect.
         if (typeof seq === 'number' && lastSeq >= 0 && seq > lastSeq + 1) {
           void store.refetch();
         }
         lastSeq = seq ?? lastSeq;
-        void store.refetch();
         break;
       }
       case 'stats.updated':

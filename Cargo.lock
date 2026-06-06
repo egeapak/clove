@@ -699,6 +699,7 @@ dependencies = [
  "clove-core",
  "clove-index",
  "clove-ipc",
+ "clove-web",
  "fd-lock",
  "git2",
  "interprocess",

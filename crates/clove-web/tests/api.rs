@@ -121,6 +121,18 @@ async fn board_groups_by_status() {
 }
 
 #[tokio::test]
+async fn stats_history_synthesizes_daily_series() {
+    let (_tmp, addr, _id) = spawn().await;
+    let (status, body) = get(addr, "/api/v1/stats/history?days=7").await;
+    assert!(status.contains("200"), "status: {status}");
+    // Seven daily points, each shaped {date, created, closed, open}.
+    assert_eq!(body.matches("\"date\"").count(), 7, "body: {body}");
+    assert!(body.contains("\"created\""));
+    assert!(body.contains("\"closed\""));
+    assert!(body.contains("\"open\""));
+}
+
+#[tokio::test]
 async fn invalid_id_returns_envelope_error() {
     let (_tmp, addr, _id) = spawn().await;
     let (status, body) = get(addr, "/api/v1/items/zzz").await;

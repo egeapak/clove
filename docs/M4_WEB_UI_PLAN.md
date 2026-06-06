@@ -22,6 +22,45 @@ to push **real-time updates** to connected browsers. The **CLI** gains a
 dedicated **`clove serve`** subcommand that serves the UI and sets up a watcher,
 working with or without a daemon.
 
+## 1a. Implementation status (2026-06-06)
+
+Implemented and verified end-to-end:
+
+- **`clove-web` crate** (axum + rust-embed): `/api/v1` REST (items/detail/comments/
+  deptree/board/stats/meta/cycles + create/patch/labels/comment/dep±/delete),
+  WebSocket `/api/v1/events`, embedded SPA + SPA fallback. Reads off file store +
+  `GraphStore`; writes through `ItemStore`. Error mapping shares
+  `clove_core::error_code` with the CLI.
+- **`clove serve`** subcommand (loopback default, `--open/--no-watch/--allow-non-loopback`).
+- **Daemon serves the web UI by default.** New `[web]` config (`enabled=true`,
+  `port=7373`). `cloved` runs the web server in its `tokio::select!` loop with a
+  per-request heartbeat that resets idle-shutdown; it advertises `web_addr` over
+  IPC `STATUS`. **`clove serve` detects a serving daemon and hands off** (prints
+  the URL and exits 0 instead of blocking); only when no daemon (or web disabled)
+  does it run a standalone server.
+- **Granular real-time push.** The watcher recomputes the store's item snapshot
+  per debounced batch and diffs it, emitting per-id `item.upserted`/`item.deleted`
+  plus a `batch{changed,deleted,seq}` for gap detection — so a topology change
+  that flips a *dependent's* `ready`/`blocked_by` is pushed too (verified: closing
+  a blocker pushed upserts for the blocker and both unblocked dependents). The SPA
+  applies these granularly and only full-refetches on a sequence gap.
+- **Frontend auto-build via `crates/clove-web/build.rs`** (replaces a manual
+  xtask): rebuilds the SvelteKit SPA with `npm run build` only when `web/` sources
+  are newer than `dist/` and `npm` is present; otherwise falls back to the
+  committed `dist/` (so a Node-free `cargo build`/CI stays hermetic).
+  `CLOVE_SKIP_WEB_BUILD=1` force-skips.
+- **Minor gaps closed:** web comments use a single-token author (`web`) that
+  round-trips through the comment-filename parser (no more "unknown"); and
+  `/stats/history` synthesizes a real daily `{date,created,closed,open}` series
+  from item timestamps (no SQLite snapshots required), so the timeline throughput
+  chart has data.
+
+Tests: 6 `clove-web` API integration tests + `clove-ipc`/`clove-core` suites green;
+`fmt`/`clippy -D warnings` clean. Remaining: the IPC `SUBSCRIBE` push (the daemon
+currently runs its own clove-web watcher rather than reusing the index watcher's
+batches — functionally correct, one extra inotify watch), and the `xtask
+web-build`/CI dirty-`dist` staleness check.
+
 ## 2. Invariants inherited from clove (non-negotiable)
 
 - **Files are truth.** Every write goes through `clove_core::ItemStore` (atomic

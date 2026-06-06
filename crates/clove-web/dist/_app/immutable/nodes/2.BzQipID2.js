@@ -1,0 +1,1 @@
+import{R as t,b as r}from"../chunks/D_PoSQEr.js";function a(e,o){throw new t(e,o.toString())}const n=()=>{throw a(307,`${r}/board`)},c=Object.freeze(Object.defineProperty({__proto__:null,load:n},Symbol.toStringTag,{value:"Module"}));export{c as universal};

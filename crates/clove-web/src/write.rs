@@ -209,7 +209,12 @@ pub async fn add_comment(
         return Err(ApiError::from(CloveError::NotFound { id: id.to_string() }));
     }
     let body = body.0;
-    let author = body.author.unwrap_or_else(|| "web@clove".to_owned());
+    // A single-token author slug round-trips cleanly through the comment-filename
+    // parser (`<ts>-<author>-<rand>.md`); an email with punctuation would not.
+    let author = body
+        .author
+        .filter(|a| !a.trim().is_empty())
+        .unwrap_or_else(|| "web".to_owned());
     core_add_comment(&state.issues_dir, &id, &author, &body.body)?;
     let item = state.store.get(&id)?;
     respond_item(&state, &item)

@@ -193,6 +193,11 @@ pub struct StatusResponse {
     /// observable; M3-G05/G06).
     #[serde(default)]
     pub batches_applied: u64,
+    /// The address the daemon serves the web UI on (`host:port`), if enabled.
+    /// Lets `clove serve` detect a serving daemon and hand off instead of binding
+    /// its own server (M4 web UI).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_addr: Option<String>,
 }
 
 /// A structured error reply.
@@ -306,6 +311,7 @@ mod tests {
                 watcher_state: "watching".to_owned(),
                 last_event_ms: Some(1200),
                 batches_applied: 3,
+                web_addr: Some("127.0.0.1:7373".to_owned()),
             }),
             Response::Error(ErrorResponse::new("bad_request", "unknown cmd")),
         ];

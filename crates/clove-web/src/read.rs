@@ -267,12 +267,67 @@ pub async fn get_stats(
     Ok(ok_data(value))
 }
 
-/// `GET /api/v1/stats/history` — historical snapshots (empty without an index;
-/// the frontend derives throughput from item timestamps as a fallback).
-pub async fn get_stats_history(State(state): State<AppState>) -> ApiResult {
+/// `GET /api/v1/stats/history?days=N` — a daily throughput series
+/// (`{date, created, closed, open}`) synthesized from item `created`/`closed`
+/// timestamps. Always correct from files alone (no SQLite snapshots required);
+/// `open` is the running net-open count, seeded from items predating the window.
+pub async fn get_stats_history(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> ApiResult {
+    use chrono::Duration;
+    use std::collections::BTreeMap;
+
+    let days: i64 = params
+        .get("days")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(90)
+        .clamp(1, 365);
+
+    let (frontmatters, _ctx) = load(&state)?;
+    let today = chrono::Utc::now().date_naive();
+    let window_start = today - Duration::days(days - 1);
+
+    let mut created_by: BTreeMap<chrono::NaiveDate, i64> = BTreeMap::new();
+    let mut closed_by: BTreeMap<chrono::NaiveDate, i64> = BTreeMap::new();
+    // Items predating the window seed the running `open` baseline.
+    let mut cum_created = 0i64;
+    let mut cum_closed = 0i64;
+    for fm in &frontmatters {
+        let d = fm.created.date_naive();
+        if d < window_start {
+            cum_created += 1;
+        } else {
+            *created_by.entry(d).or_default() += 1;
+        }
+        if let Some(closed) = fm.closed {
+            let cd = closed.date_naive();
+            if cd < window_start {
+                cum_closed += 1;
+            } else {
+                *closed_by.entry(cd).or_default() += 1;
+            }
+        }
+    }
+
+    let mut points = Vec::with_capacity(days as usize);
+    for offset in (0..days).rev() {
+        let date = today - Duration::days(offset);
+        let created = created_by.get(&date).copied().unwrap_or(0);
+        let closed = closed_by.get(&date).copied().unwrap_or(0);
+        cum_created += created;
+        cum_closed += closed;
+        points.push(json!({
+            "date": date.format("%Y-%m-%d").to_string(),
+            "created": created,
+            "closed": closed,
+            "open": (cum_created - cum_closed).max(0),
+        }));
+    }
+
     Ok(ok(
-        json!([]),
-        json!({ "source": state.source, "note": "snapshot history requires the SQLite index" }),
+        json!(points),
+        json!({ "source": state.source, "synthesized": true }),
     ))
 }
 

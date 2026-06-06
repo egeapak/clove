@@ -1,0 +1,1 @@
+import{s as o,b as p,f}from"./Doadxagr.js";import{A as m,G as i,J as n,E as d,F as h}from"./Gd05234x.js";import{s as l}from"./Wo_WFXVR.js";var c=f('<span class="id mono svelte-a4arff"> </span>');function _(t,s){m(s,!0);var a=c(),r=i(a,!0);n(a),d(e=>o(r,e),[()=>l(s.id)]),p(t,a),h()}export{_ as S};

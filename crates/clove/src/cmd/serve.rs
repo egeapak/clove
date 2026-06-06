@@ -8,12 +8,38 @@
 use std::net::{IpAddr, SocketAddr};
 
 use clove_core::CloveError;
+use clove_ipc::DaemonClient;
 use clove_web::AppState;
 
 use crate::cli::ServeArgs;
 use crate::context::Ctx;
 
 pub fn run(ctx: &Ctx, args: ServeArgs, quiet: bool) -> Result<(), CloveError> {
+    // Hand off to a running daemon if it is already serving the web UI: the
+    // daemon serves by default, so we point the user at it instead of binding a
+    // second server (and blocking this process).
+    if let Some(clove_dir) = ctx.issues_dir.parent() {
+        if let Some(mut client) = DaemonClient::probe(clove_dir) {
+            if let Ok(status) = client.status() {
+                if let Some(addr) = status.web_addr {
+                    let url = format!("http://{addr}");
+                    if !quiet {
+                        eprintln!("clove web UI served by the running daemon: {url}");
+                    }
+                    if args.open {
+                        open_browser(&url);
+                    }
+                    return Ok(());
+                } else if !quiet {
+                    eprintln!(
+                        "note: a daemon is running but web serving is disabled \
+                         ([web] enabled = false); starting a standalone server"
+                    );
+                }
+            }
+        }
+    }
+
     let ip: IpAddr = args.host.parse().map_err(|_| CloveError::InvalidField {
         field: "host".to_owned(),
         reason: format!("not a valid IP address: {}", args.host),

@@ -50,6 +50,8 @@ pub struct AppState {
     /// The real-time event fan-out channel.
     pub events: broadcast::Sender<Event>,
     seq: Arc<AtomicU64>,
+    /// Optional per-request hook (the daemon uses it to reset idle-shutdown).
+    heartbeat: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl AppState {
@@ -70,6 +72,21 @@ impl AppState {
             daemon_running,
             events,
             seq: Arc::new(AtomicU64::new(0)),
+            heartbeat: None,
+        }
+    }
+
+    /// Attach a per-request hook (the daemon passes one that resets its
+    /// idle-shutdown timer so an actively-used web session keeps it alive).
+    pub fn with_heartbeat(mut self, hook: Arc<dyn Fn() + Send + Sync>) -> Self {
+        self.heartbeat = Some(hook);
+        self
+    }
+
+    /// Invoke the heartbeat hook, if any.
+    fn beat(&self) {
+        if let Some(hook) = &self.heartbeat {
+            hook();
         }
     }
 
@@ -82,6 +99,16 @@ impl AppState {
     pub fn next_seq(&self) -> u64 {
         self.seq.fetch_add(1, Ordering::Relaxed) + 1
     }
+}
+
+/// Middleware that fires the per-request heartbeat hook before handling.
+async fn heartbeat_layer(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    state.beat();
+    next.run(request).await
 }
 
 /// Build the axum router (API + WebSocket + embedded-SPA fallback).
@@ -112,6 +139,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/cycles", get(read::get_cycles))
         .route("/api/v1/events", get(events::ws_handler))
         .fallback(assets::static_handler)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            heartbeat_layer,
+        ))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(state)
 }
