@@ -25,6 +25,7 @@ use axum::Router;
 use camino::Utf8PathBuf;
 use clove_core::ItemStore;
 use tokio::sync::broadcast;
+use tower_http::compression::CompressionLayer;
 
 pub use error::ApiError;
 pub use events::Event;
@@ -144,6 +145,11 @@ pub fn build_router(state: AppState) -> Router {
             heartbeat_layer,
         ))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        // Negotiated response compression (brotli > zstd > gzip by the client's
+        // Accept-Encoding). Outermost so it compresses both the embedded SPA
+        // assets and large API JSON (e.g. /items at 10k items). Brotli wins on
+        // ratio for our text assets (~11% smaller than gzip).
+        .layer(CompressionLayer::new())
         .with_state(state)
 }
 
