@@ -5,6 +5,7 @@
   import { toasts } from '$lib/toast.svelte';
   import Card from '$lib/components/Card.svelte';
   import StatusGlyph from '$lib/components/StatusGlyph.svelte';
+  import { Virtual } from '$lib/virtual.svelte';
 
   const empty = $derived(store.loaded && store.all.length === 0);
 
@@ -23,6 +24,56 @@
         .sort((a, b) => a.priority - b.priority || b.updated.localeCompare(a.updated))
     }))
   );
+
+  // ---- per-column virtualization (@tanstack/virtual-core) ----
+  // Cards vary in height (labels/title wrap), so we use the virtualizer's
+  // dynamic `measureElement`: each rendered card reports its real size, the
+  // estimate (CARD_EST) only seeds the first paint. Each column scrolls
+  // independently, so we keep one Virtualizer per column keyed by status.
+  // Drag-and-drop is unaffected — cards are still real <a draggable> nodes; we
+  // only position the visible slice and pad the rest with a sized container.
+  const CARD_EST = 96; // px; seed estimate for an unmeasured card
+  const scrollEls = $state<Record<Status, HTMLElement | undefined>>({
+    open: undefined,
+    in_progress: undefined,
+    closed: undefined
+  });
+
+  function colItems(key: Status): Item[] {
+    return columns.find((c) => c.key === key)?.items ?? [];
+  }
+
+  // Build a virtualizer per status column. The closures read live state lazily.
+  const virtuals = new Map<Status, Virtual>(
+    COLS.map((c) => [
+      c.key,
+      new Virtual({
+        count: 0,
+        getScrollElement: () => scrollEls[c.key] ?? null,
+        estimateSize: () => CARD_EST,
+        overscan: 6,
+        getItemKey: (i) => colItems(c.key)[i]?.id ?? i
+      })
+    ])
+  );
+
+  // Mount each virtualizer once its scroll container exists.
+  $effect(() => {
+    const cleanups = COLS.map((c) => (scrollEls[c.key] ? virtuals.get(c.key)!.attach() : undefined));
+    return () => cleanups.forEach((fn) => fn?.());
+  });
+  // Re-sync counts whenever the derived columns change (live events, drag moves).
+  $effect(() => {
+    for (const col of columns) virtuals.get(col.key)!.update({ count: col.items.length });
+  });
+
+  // Svelte action: register a card node for dynamic measurement. virtual-core
+  // reads `data-index` off the node, observes its size, and remeasures on
+  // resize; returning the unobserve keeps things tidy on unmount.
+  function measureRow(node: HTMLElement, v: Virtual) {
+    v.measure(node);
+    return { update: () => v.measure(node) };
+  }
 
   let dragId = $state<string | null>(null);
   let overCol = $state<Status | null>(null);
@@ -94,6 +145,7 @@
 {:else}
 <div class="board">
   {#each columns as col (col.key)}
+    {@const v = virtuals.get(col.key)!}
     <section
       class="col"
       class:over={overCol === col.key}
@@ -108,18 +160,29 @@
         {col.label}
         <span class="cnt mono">{col.items.length}</span>
       </header>
-      <div class="col-body">
-        {#each col.items as item (item.id)}
-          <div role="listitem" class="card-wrap" tabindex="-1">
-            <Card {item} ondragstart={(e) => onDragStart(e, item.id)} />
-            <div class="kbd-move">
-              <button class="btn sm" aria-label="move {item.id} left" onclick={() => move(item, -1)}>‹</button>
-              <button class="btn sm" aria-label="move {item.id} right" onclick={() => move(item, 1)}>›</button>
-            </div>
-          </div>
-        {/each}
+      <div class="col-body" bind:this={scrollEls[col.key]}>
         {#if col.items.length === 0}
           <div class="empty dim">No items</div>
+        {:else}
+          <div class="col-sizer" style="height:{v.total}px">
+            {#each v.items as row (row.key)}
+              {@const item = col.items[row.index]}
+              <div
+                role="listitem"
+                class="card-wrap"
+                tabindex="-1"
+                data-index={row.index}
+                use:measureRow={v}
+                style="transform:translateY({row.start}px)"
+              >
+                <Card {item} ondragstart={(e) => onDragStart(e, item.id)} />
+                <div class="kbd-move">
+                  <button class="btn sm" aria-label="move {item.id} left" onclick={() => move(item, -1)}>‹</button>
+                  <button class="btn sm" aria-label="move {item.id} right" onclick={() => move(item, 1)}>›</button>
+                </div>
+              </div>
+            {/each}
+          </div>
         {/if}
       </div>
     </section>
@@ -195,13 +258,23 @@
   }
   .col-body {
     padding: 10px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
     min-height: 120px;
+    /* scroll viewport for the virtualizer */
+    overflow-y: auto;
+    max-height: calc(100vh - 200px);
+  }
+  /* sizer holds the full virtual height; cards are absolutely placed within */
+  .col-sizer {
+    position: relative;
+    width: 100%;
   }
   .card-wrap {
-    position: relative;
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    /* leave room for the 10px gap that the old flex column provided */
+    padding-bottom: 10px;
   }
   .kbd-move {
     position: absolute;

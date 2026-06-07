@@ -13,6 +13,7 @@
   import { relativeTime, priorityLabel } from '$lib/glyphs';
   import { parseQuery } from '$lib/query';
   import { applyFilters, sortItems } from '$lib/filter';
+  import { Virtual } from '$lib/virtual.svelte';
 
   // Fallbacks when /meta isn't available yet.
   const TYPES_FALLBACK: ItemType[] = ['bug', 'feature', 'chore', 'docs', 'epic'];
@@ -135,34 +136,37 @@
     }
   }
 
-  // ---- simple row windowing ----
-  // Render only rows near the viewport (scroll offset + buffer) so large repos
-  // don't paint thousands of <tr>. Falls back to all rows below the threshold.
-  const ROW_H = 38; // approximate row height (px)
-  const BUFFER = 12;
-  const WINDOW_THRESHOLD = 200;
+  // ---- virtualized rows (@tanstack/virtual-core) ----
+  // Rows are uniform, so a fixed estimate is exact: no per-row measurement. We
+  // render only the virtual rows and bracket them with two spacer <tr> (top =
+  // first row's start offset, bottom = total - last row's end) so the <table>
+  // stays valid and the sticky <thead> keeps working.
+  const ROW_H = 38; // fixed row height (px); matches td padding + line height
   let scrollEl = $state<HTMLDivElement | undefined>();
-  let scrollTop = $state(0);
-  let viewH = $state(600);
-  function onScroll() {
-    if (scrollEl) {
-      scrollTop = scrollEl.scrollTop;
-      viewH = scrollEl.clientHeight;
-    }
-  }
-  // Measure the viewport once the scroll container mounts (windowing needs a
-  // real height before the first scroll event fires).
-  $effect(() => {
-    if (scrollEl) viewH = scrollEl.clientHeight || viewH;
+
+  // Stable key fn — reads the live `filtered` lazily (not captured at init).
+  const itemKey = (i: number) => filtered[i]?.id ?? i;
+
+  const virtual = new Virtual({
+    count: 0,
+    getScrollElement: () => scrollEl ?? null,
+    estimateSize: () => ROW_H,
+    overscan: 12,
+    getItemKey: itemKey
   });
-  const windowed = $derived(filtered.length > WINDOW_THRESHOLD);
-  const startRow = $derived(windowed ? Math.max(0, Math.floor(scrollTop / ROW_H) - BUFFER) : 0);
-  const endRow = $derived(
-    windowed ? Math.min(filtered.length, Math.ceil((scrollTop + viewH) / ROW_H) + BUFFER) : filtered.length
-  );
-  const visibleRows = $derived(filtered.slice(startRow, endRow));
-  const padTop = $derived(startRow * ROW_H);
-  const padBottom = $derived(Math.max(0, (filtered.length - endRow) * ROW_H));
+
+  // Mount once the scroll container exists; teardown on unmount.
+  $effect(() => {
+    if (scrollEl) return virtual.attach();
+  });
+  // Re-sync the virtualizer whenever the filtered set changes (count/keys).
+  $effect(() => {
+    virtual.update({ count: filtered.length, getItemKey: itemKey });
+  });
+
+  const vItems = $derived(virtual.items);
+  const padTop = $derived(vItems.length ? vItems[0].start : 0);
+  const padBottom = $derived(vItems.length ? virtual.total - vItems[vItems.length - 1].end : 0);
 </script>
 
 <svelte:window on:keydown={onKey} />
@@ -245,7 +249,7 @@
     <button class="btn primary" onclick={() => retryLoad()}>Retry</button>
   </div>
 {:else}
-  <div class="table-wrap panel" bind:this={scrollEl} onscroll={onScroll}>
+  <div class="table-wrap panel" bind:this={scrollEl}>
     <table>
       <thead>
         <tr>
@@ -267,8 +271,9 @@
       </thead>
       <tbody>
         {#if padTop > 0}<tr class="spacer" style="height:{padTop}px" aria-hidden="true"><td colspan="8"></td></tr>{/if}
-        {#each visibleRows as item, vi (item.id)}
-          {@const i = startRow + vi}
+        {#each vItems as row (row.key)}
+          {@const i = row.index}
+          {@const item = filtered[i]}
           <tr
             class:cursor={i === cursor}
             onclick={() => goto(`../items/${item.id}`)}
