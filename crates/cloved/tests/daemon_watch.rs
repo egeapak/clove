@@ -72,6 +72,7 @@ impl Repo {
 
 fn spawn_ready(clove_dir: &Utf8Path) -> Child {
     let child = Command::new(cloved_bin())
+        .env("CLOVED_DISABLE_WEB", "1") // avoid all test daemons contending for port 7373
         .arg("run")
         .arg("--clove-dir")
         .arg(clove_dir.as_str())
@@ -138,6 +139,7 @@ fn wait_until(timeout: Duration, mut f: impl FnMut() -> bool) -> bool {
 fn spawn_ready_env(clove_dir: &Utf8Path, env: &[(&str, &str)]) -> Child {
     let mut cmd = Command::new(cloved_bin());
     cmd.arg("run").arg("--clove-dir").arg(clove_dir.as_str());
+    cmd.env("CLOVED_DISABLE_WEB", "1"); // avoid all test daemons contending for port 7373
     for (k, v) in env {
         cmd.env(k, v);
     }

@@ -20,9 +20,9 @@ pub mod validate;
 pub mod write;
 
 pub use comments::{add_comment, list_comments, Comment};
-pub use config::{load_config, CloveConfig, DaemonConfig, IndexConfig, OutputFormat};
+pub use config::{load_config, CloveConfig, DaemonConfig, IndexConfig, OutputFormat, WebConfig};
 pub use doctor::{diagnose, fix as doctor_fix, DoctorIssue, DoctorReport, Severity};
-pub use error::CloveError;
+pub use error::{error_code, CloveError};
 pub use graph::{
     is_hard_dep, BlockedItem, ChildrenSummary, DanglingRef, DepTreeNode, EdgeKind, GraphStore,
     ItemMeta,

@@ -9,9 +9,11 @@ delete them and nothing is lost. Written in Rust as a single cross-platform bina
 
 ## Status
 
-M0–M3 complete and gated; M4 in progress (`clove stats` + analytics history, and an
-exact-incremental index/daemon graph). See `HANDOFF.md` for the current state and
-`docs/` for the full design.
+M0–M3 complete and gated; M4 in progress: `clove stats` + analytics history, an
+exact-incremental index/daemon graph, the read-only `clove tui` terminal browser,
+and the **`clove serve` web UI** (Kanban / list / detail / timeline). See
+`HANDOFF.md` for the current state and `docs/` for the full design
+(`docs/M4_WEB_UI_PLAN.md` for the web UI).
 
 ## Build & test
 
@@ -47,6 +49,22 @@ clove stats --snapshot        # record an analytics history point
 clove stats --history         # replay recorded snapshots (a running daemon also auto-records)
 ```
 
+### Browse: terminal & web UI
+
+```sh
+clove tui                     # read-only terminal browser (master-detail, tabs, filters)
+clove serve                   # serve the web UI on http://127.0.0.1:7373 (loopback)
+clove serve --open            # …and open it in the browser
+```
+
+`clove serve` runs an HTTP/WebSocket server with a Kanban board, a filterable
+list, an item detail view (Markdown body, dependency tree, comments, inline
+edits), and a timeline — with live updates via a file-watcher. The SPA is built
+to a single binary (no Node needed to run). When a daemon is running it serves the
+web UI itself (port `7373` by default), and `clove serve` hands off to it instead
+of starting a second server. The web API mirrors the CLI under `/api/v1` with the
+same JSON envelope and exit-code semantics.
+
 ### Interop
 
 ```sh
@@ -62,11 +80,14 @@ clove init --merge-driver               # install the 3-way git merge driver for
 | `crates/clove-core` | model, file store, dependency-graph engine, IDs (pure; no SQLite) |
 | `crates/clove-index` | optional SQLite index (FTS5, staleness, incremental derived state, stats history) |
 | `crates/clove` | the `clove` CLI |
-| `crates/cloved` | the optional `cloved` daemon |
+| `crates/cloved` | the optional `cloved` daemon (file-watch, IPC, optional git sync, web serving) |
 | `crates/clove-import` | import/export + merge driver |
 | `crates/clove-ipc` | CLI↔daemon wire protocol |
+| `crates/clove-tui` | read-only terminal browser (`clove tui`, ratatui) |
+| `crates/clove-web` | web UI server + embedded SvelteKit SPA (`clove serve`); see `web/README.md` |
 | `docs/DESIGN.md` | authoritative, implementation-ready spec |
 | `docs/IMPLEMENTATION_PLAN.md` | phased M0–M4 task plan |
+| `docs/M4_WEB_UI_PLAN.md` | web UI plan + status; `docs/web-ui-mockups/` the design themes |
 | `docs/*_ACCEPTANCE_GATES.md` | per-milestone acceptance gates |
 
 ## License

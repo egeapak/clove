@@ -85,6 +85,42 @@ pub fn run(clove_dir: &Utf8Path) -> anyhow::Result<()> {
     };
     let graph = Arc::new(crate::graph_cache::GraphCache::new(index.clone()));
 
+    // Web UI (M4): served by the daemon by default ([web] enabled, port 7373), so
+    // `clove serve` hands off to the daemon instead of binding its own server.
+    // `CLOVED_DISABLE_WEB` turns it off (used by the daemon tests to avoid all
+    // instances contending for the fixed port); `CLOVED_WEB_PORT` overrides the port.
+    let web_enabled = config.as_ref().is_none_or(|c| c.web.enabled)
+        && std::env::var_os("CLOVED_DISABLE_WEB").is_none();
+    let web_port = std::env::var("CLOVED_WEB_PORT")
+        .ok()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or_else(|| config.as_ref().map_or(7373, |c| c.web.port));
+    let id_prefix = config
+        .as_ref()
+        .map_or_else(|| "proj".to_owned(), |c| c.id_prefix.clone());
+    let web_state = web_enabled.then(|| {
+        let hb = Arc::clone(&state);
+        let heartbeat: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            if let Ok(mut s) = hb.lock() {
+                s.mark_event();
+            }
+        });
+        clove_web::AppState::new(
+            clove_core::ItemStore::new(repo_root.clone()),
+            issues_dir.clone(),
+            id_prefix,
+            "daemon",
+            true,
+        )
+        .with_heartbeat(heartbeat)
+    });
+    let web_addr: std::net::SocketAddr = (std::net::Ipv4Addr::LOCALHOST, web_port).into();
+    if web_enabled {
+        if let Ok(mut s) = state.lock() {
+            s.set_web_addr(Some(web_addr.to_string()));
+        }
+    }
+
     // 3. Tokio runtime — 2 workers (IPC + watcher), per DESIGN §8.1.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -124,6 +160,7 @@ pub fn run(clove_dir: &Utf8Path) -> anyhow::Result<()> {
         tokio::select! {
             _ = accept_loop(listener, dispatcher) => {},
             _ = crate::watcher::watch(issues_dir.clone(), Arc::clone(&index), Arc::clone(&state), debounce, watch_options.clone(), Arc::clone(&graph)) => {},
+            _ = serve_web(web_state, web_addr) => {},
             _ = idle_watchdog(Arc::clone(&state), idle_shutdown) => {},
             _ = crate::snapshot::snapshot_loop(repo_root.clone(), Arc::clone(&index), snapshot_interval) => {},
             _ = shutdown_signal(clove_dir) => {},
@@ -178,6 +215,28 @@ fn write_pid(clove_dir: &Utf8Path) -> std::io::Result<()> {
     let mut file = File::create(pid_path(clove_dir))?;
     writeln!(file, "{}", std::process::id())?;
     file.flush()
+}
+
+/// Serve the web UI (with its own debounced file-watcher for real-time push).
+/// A bind/serve failure is logged but does not bring the daemon down — the web UI
+/// is an optional accelerator like the rest of the daemon. Resolves never on the
+/// success path so the `select!` arm only completes if serving truly ends.
+async fn serve_web(state: Option<clove_web::AppState>, addr: std::net::SocketAddr) {
+    if let Some(state) = state {
+        if let Err(e) = clove_web::serve_with_watch(state, addr).await {
+            if e.kind() == std::io::ErrorKind::AddrInUse {
+                // Expected when another daemon or `clove serve` already holds the
+                // port (per-project daemons share one web port). The daemon keeps
+                // running without the web UI.
+                eprintln!(
+                    "cloved: web UI port {addr} in use; this daemon will not serve the web UI"
+                );
+            } else {
+                eprintln!("cloved: web server error ({addr}): {e}");
+            }
+        }
+    }
+    std::future::pending::<()>().await
 }
 
 /// Accept connections forever, serving each on its own task.
