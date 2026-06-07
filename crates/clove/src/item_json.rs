@@ -7,25 +7,15 @@
 use std::collections::HashMap;
 
 use camino::Utf8Path;
-use clove_core::{list_comments, CloveId, Item, ItemFrontmatter, OutputFormat};
+use clove_core::{list_comments, CloveId, Item, OutputFormat};
 use serde_json::{json, Map, Value};
 
 use crate::output::print_json_success;
 
-/// The base JSON object for an item: exactly its serialized frontmatter
-/// (`id`, `title`, `status`, `type`, `priority`, timestamps, `labels`, `deps`, …).
-pub fn item_object(item: &Item) -> Map<String, Value> {
-    frontmatter_object(&item.frontmatter)
-}
-
-/// The JSON object for an item's frontmatter alone (the list fast path, which
-/// never reads bodies).
-pub fn frontmatter_object(fm: &ItemFrontmatter) -> Map<String, Value> {
-    match serde_json::to_value(fm) {
-        Ok(Value::Object(map)) => map,
-        _ => Map::new(),
-    }
-}
+// The pure item→JSON shaping lives in `clove_core::view` so the CLI, the MCP
+// server, and (later) the web UI all serialize items identically; re-exported
+// here so existing call sites keep their `crate::item_json::…` paths.
+pub use clove_core::view::{frontmatter_object, item_object, project};
 
 /// Build the full §7.4 item JSON object for export: the serialized frontmatter
 /// plus the computed/augmented fields `body`, `comment_count`, `ready`,
@@ -64,18 +54,6 @@ pub fn export_object(
     obj.insert("dangling_deps".to_owned(), json!(dangling));
 
     obj
-}
-
-/// Restrict `obj` to the keys named in `fields` (order follows `fields`).
-/// Unknown field names are ignored.
-pub fn project(obj: Map<String, Value>, fields: &[String]) -> Map<String, Value> {
-    let mut out = Map::new();
-    for field in fields {
-        if let Some(value) = obj.get(field) {
-            out.insert(field.clone(), value.clone());
-        }
-    }
-    out
 }
 
 /// Print a single item after a mutation: the full JSON object, or a one-line

@@ -17,6 +17,7 @@ pub mod repo;
 pub mod stats;
 pub mod store;
 pub mod validate;
+pub mod view;
 pub mod write;
 
 pub use comments::{add_comment, list_comments, Comment};
@@ -39,3 +40,4 @@ pub use stats::{
 };
 pub use store::{ItemStore, NewItem, ScanError};
 pub use validate::{validate_item, ValidationError};
+pub use view::{frontmatter_object, item_object, project, rank_of, sort_by_rank, Filters};

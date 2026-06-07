@@ -14,32 +14,14 @@ pub fn parse_id(raw: &str) -> Result<CloveId, CloveError> {
     CloveId::new(raw)
 }
 
-/// Parse a status word into [`ItemStatus`].
+/// Parse a status word into [`ItemStatus`] (delegates to the shared core parser).
 pub fn parse_status(raw: &str) -> Result<ItemStatus, CloveError> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "open" => Ok(ItemStatus::Open),
-        "in_progress" | "in-progress" | "started" => Ok(ItemStatus::InProgress),
-        "closed" | "done" => Ok(ItemStatus::Closed),
-        other => Err(CloveError::InvalidField {
-            field: "status".to_owned(),
-            reason: format!("expected open|in_progress|closed, got `{other}`"),
-        }),
-    }
+    ItemStatus::parse(raw)
 }
 
-/// Parse a type word into [`ItemType`].
+/// Parse a type word into [`ItemType`] (delegates to the shared core parser).
 pub fn parse_type(raw: &str) -> Result<ItemType, CloveError> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "bug" => Ok(ItemType::Bug),
-        "feature" => Ok(ItemType::Feature),
-        "chore" => Ok(ItemType::Chore),
-        "docs" => Ok(ItemType::Docs),
-        "epic" => Ok(ItemType::Epic),
-        other => Err(CloveError::InvalidField {
-            field: "type".to_owned(),
-            reason: format!("expected bug|feature|chore|docs|epic, got `{other}`"),
-        }),
-    }
+    ItemType::parse(raw)
 }
 
 /// Parse and validate a priority 0–4.
