@@ -23,6 +23,7 @@ pub mod query;
 pub mod ready;
 pub mod reindex;
 pub mod search;
+pub mod serve;
 pub mod set;
 pub mod show;
 pub mod stats;

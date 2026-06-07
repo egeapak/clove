@@ -61,6 +61,7 @@ impl CloveRpc for Dispatcher {
                 watcher_state: "error".to_owned(),
                 last_event_ms: None,
                 batches_applied: 0,
+                web_addr: None,
             },
         }
     }

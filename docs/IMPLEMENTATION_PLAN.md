@@ -706,8 +706,17 @@ condition for M4 planning.
   differs. True sub-linear O(region) delta mutation (Pearce–Kelly) was implemented
   and benchmarked but rejected: its order is history-dependent, which breaks
   clove's canonical-order parity contract (and it can't represent cycles).
-- TUI and/or web UI; bidirectional vendor bridges (GitHub/GitLab/Jira); richer
-  history/changelog.
+- **Web UI** — **DONE (M4)**. New `clove-web` crate (axum + embedded SvelteKit SPA)
+  and a `clove serve` subcommand; the daemon serves it by default and `clove serve`
+  hands off to a running daemon. Kanban board / filterable list / detail / timeline,
+  read + light-write, live updates over WebSocket via the file-watcher; `/api/v1`
+  REST mirrors the CLI's JSON envelope + exit codes. Assets are gzip-precompressed,
+  embedded, and served from memory; markdown via micromark + a custom id-autolink
+  extension. Plan, decisions, and status: `docs/M4_WEB_UI_PLAN.md`; design themes in
+  `docs/web-ui-mockups/`. Deferred follow-ups: binary-size trim (make the `github`
+  import feature opt-out — it costs ~3.5 MB), a body editor, and wiring the SQLite
+  stats-snapshot series into the web `/stats/history`.
+- Bidirectional vendor bridges (GitHub/GitLab/Jira); richer history/changelog.
 
 ---
 

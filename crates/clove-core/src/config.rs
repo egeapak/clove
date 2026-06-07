@@ -86,6 +86,28 @@ impl Default for DaemonConfig {
     }
 }
 
+/// `[web]` configuration — the web UI served by `clove serve` and (by default)
+/// the daemon.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebConfig {
+    /// Whether a running daemon serves the web UI automatically.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// The TCP port the web UI binds (loopback only).
+    #[serde(default = "default_web_port")]
+    pub port: u16,
+}
+
+impl Default for WebConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            port: default_web_port(),
+        }
+    }
+}
+
 /// The full repository configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -104,6 +126,8 @@ pub struct CloveConfig {
     pub index: IndexConfig,
     #[serde(default)]
     pub daemon: DaemonConfig,
+    #[serde(default)]
+    pub web: WebConfig,
 }
 
 impl Default for CloveConfig {
@@ -116,12 +140,16 @@ impl Default for CloveConfig {
             default_format: OutputFormat::default(),
             index: IndexConfig::default(),
             daemon: DaemonConfig::default(),
+            web: WebConfig::default(),
         }
     }
 }
 
 fn default_true() -> bool {
     true
+}
+fn default_web_port() -> u16 {
+    7373
 }
 fn default_debounce_ms() -> u64 {
     200

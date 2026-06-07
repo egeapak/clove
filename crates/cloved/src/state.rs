@@ -40,6 +40,7 @@ pub struct DaemonState {
     watcher_state: WatcherState,
     last_event_at: Option<Instant>,
     batches_applied: u64,
+    web_addr: Option<String>,
 }
 
 impl DaemonState {
@@ -51,7 +52,13 @@ impl DaemonState {
             watcher_state: WatcherState::Idle,
             last_event_at: None,
             batches_applied: 0,
+            web_addr: None,
         }
+    }
+
+    /// Record the address the daemon is serving the web UI on (M4).
+    pub fn set_web_addr(&mut self, addr: Option<String>) {
+        self.web_addr = addr;
     }
 
     /// Update the indexed-item count (after a sweep/watch batch).
@@ -89,6 +96,7 @@ impl DaemonState {
             watcher_state: self.watcher_state.as_str().to_owned(),
             last_event_ms: self.last_event_at.map(|t| t.elapsed().as_millis() as u64),
             batches_applied: self.batches_applied,
+            web_addr: self.web_addr.clone(),
         }
     }
 }

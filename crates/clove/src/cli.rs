@@ -107,8 +107,35 @@ pub enum Commands {
     Tui,
     /// Run the MCP server (stdio) so AI agents can use clove as native tools.
     Mcp,
+    /// Serve the web UI (with a live file-watcher for real-time updates).
+    Serve(ServeArgs),
     /// Print version and schema information.
     Version,
+}
+
+/// `clove serve` (DESIGN web UI / M4). Starts an HTTP server that serves the
+/// embedded web UI and a JSON/WebSocket API for this repository.
+#[derive(Debug, Args)]
+pub struct ServeArgs {
+    /// Port to listen on.
+    #[arg(long, default_value_t = 7373)]
+    pub port: u16,
+
+    /// Address to bind. Loopback only unless `--allow-non-loopback` is given.
+    #[arg(long, default_value = "127.0.0.1")]
+    pub host: String,
+
+    /// Open the served URL in the default browser.
+    #[arg(long)]
+    pub open: bool,
+
+    /// Do not start the file-watcher (no real-time push from this process).
+    #[arg(long)]
+    pub no_watch: bool,
+
+    /// Permit binding a non-loopback address (prints a security warning).
+    #[arg(long)]
+    pub allow_non_loopback: bool,
 }
 
 /// `clove daemon <start|stop|status>` (DESIGN §7.2, §8). The daemon is optional;

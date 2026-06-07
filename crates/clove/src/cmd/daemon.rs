@@ -110,12 +110,18 @@ fn status(clove_dir: &Utf8Path, format: OutputFormat) -> Result<ExitCode, CloveE
         "watcher_state": status.watcher_state,
         "last_event_ms": status.last_event_ms,
         "batches_applied": status.batches_applied,
+        "web_addr": status.web_addr,
     });
     match format {
         OutputFormat::Json | OutputFormat::Jsonl => print_json_success(data, json!({})),
         OutputFormat::Human => {
+            let web = status
+                .web_addr
+                .as_deref()
+                .map(|a| format!("  web http://{a}"))
+                .unwrap_or_default();
             println!(
-                "running  uptime {}s  items {}  watcher {}  batches {}",
+                "running  uptime {}s  items {}  watcher {}  batches {}{web}",
                 status.uptime_s, status.items_indexed, status.watcher_state, status.batches_applied
             );
         }

@@ -22,6 +22,7 @@ git-sync = ["dep:git2"]
 clove-core.workspace = true
 clove-index.workspace = true
 clove-ipc.workspace = true
+clove-web.workspace = true       # M4: daemon serves the web UI by default
 clap.workspace = true
 anyhow.workspace = true
 camino.workspace = true

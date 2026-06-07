@@ -1,0 +1,252 @@
+/*
+ * tokens.css — semantic CSS-variable token sets for all four clove themes.
+ * Components reference ONLY these semantic names. Switching
+ * document.documentElement.dataset.theme re-skins everything live.
+ *
+ * Semantic token contract (every theme MUST define all of these):
+ *   --surface-app, --surface, --surface-2, --surface-3, --surface-hover, --surface-inset
+ *   --text, --text-muted, --text-dim
+ *   --border, --border-strong
+ *   --accent, --accent-fg, --accent-soft
+ *   --status-open, --status-in-progress, --status-closed
+ *   --prio-0 .. --prio-4
+ *   --type-bug, --type-feature, --type-chore, --type-docs, --type-epic
+ *   --green (success/ready/live), --red (danger/blocked)
+ *   --radius-sm, --radius-md, --radius-lg, --radius-pill
+ *   --s1..--s7 (spacing)
+ *   --font-sans, --font-mono
+ *   --shadow-card, --shadow-pop
+ *   --glass-blur (0 for non-glass themes)
+ *   --app-bg-image (none for flat themes)
+ */
+
+:root {
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 20px;
+  --s6: 24px;
+  --s7: 32px;
+  --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, 'Roboto Mono', monospace;
+}
+
+/* ============================ MIDNIGHT IDE (default) ============================ */
+[data-theme='midnight-ide'] {
+  --surface-app: #0d1117;
+  --surface: #11161f;
+  --surface-2: #161c28;
+  --surface-3: #1c2433;
+  --surface-hover: #1c2433;
+  --surface-inset: #0a0e14;
+  --text: #e6edf3;
+  --text-muted: #9aa7b8;
+  --text-dim: #5f6b7c;
+  --border: #222b3a;
+  --border-strong: #30394b;
+  --accent: #58a6ff;
+  --accent-fg: #06131f;
+  --accent-soft: #16243a;
+
+  --status-open: #5f6b7c;
+  --status-in-progress: #d29922;
+  --status-closed: #3fb950;
+
+  --prio-0: #f85149;
+  --prio-1: #e3833c;
+  --prio-2: #d29922;
+  --prio-3: #79c0ff;
+  --prio-4: #7d8896;
+
+  --type-bug: #f85149;
+  --type-feature: #3fb950;
+  --type-chore: #7d8896;
+  --type-docs: #bc8cff;
+  --type-epic: #e3b341;
+
+  --green: #3fb950;
+  --red: #f85149;
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+  --radius-pill: 999px;
+
+  --shadow-card: none;
+  --shadow-pop: 0 8px 24px rgba(0, 0, 0, 0.5);
+  --glass-blur: 0px;
+  --app-bg-image: none;
+  color-scheme: dark;
+}
+
+/* ============================ LINEAR LIGHT ============================ */
+[data-theme='linear-light'] {
+  --surface-app: #fbfcfd;
+  --surface: #ffffff;
+  --surface-2: #f4f5f8;
+  --surface-3: #eef0f4;
+  --surface-hover: #f5f6f9;
+  --surface-inset: #f4f5f8;
+  --text: #1c1e26;
+  --text-muted: #5b606e;
+  --text-dim: #8b90a0;
+  --border: #e7e9ee;
+  --border-strong: #d8dbe2;
+  --accent: #5b5bd6;
+  --accent-fg: #ffffff;
+  --accent-soft: #eeeefb;
+
+  --status-open: #8b90a0;
+  --status-in-progress: #e8731b;
+  --status-closed: #2f9e44;
+
+  --prio-0: #e5484d;
+  --prio-1: #e8731b;
+  --prio-2: #d9a40b;
+  --prio-3: #5f9fd6;
+  --prio-4: #9aa0ad;
+
+  --type-bug: #e5484d;
+  --type-feature: #2f9e44;
+  --type-chore: #9aa0ad;
+  --type-docs: #8b5cf6;
+  --type-epic: #c99700;
+
+  --green: #2f9e44;
+  --red: #e5484d;
+
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-pill: 999px;
+
+  --shadow-card: 0 1px 2px rgba(20, 24, 40, 0.04);
+  --shadow-pop: 0 12px 32px rgba(20, 24, 40, 0.1);
+  --glass-blur: 0px;
+  --app-bg-image: radial-gradient(60% 50% at 0% 0%, rgba(91, 91, 214, 0.05), transparent),
+    radial-gradient(50% 50% at 100% 0%, rgba(139, 92, 246, 0.05), transparent);
+  color-scheme: light;
+}
+
+/* ============================ SOLARIZED DUO (light) ============================ */
+[data-theme='solarized-duo'] {
+  --surface-app: #fdf6e3;
+  --surface: #fbf3df;
+  --surface-2: #f6eecf;
+  --surface-3: #eee8d5;
+  --surface-hover: #f0e9d2;
+  --surface-inset: #eee8d5;
+  --text: #586e75;
+  --text-muted: #657b83;
+  --text-dim: #93a1a1;
+  --border: #e7dfc4;
+  --border-strong: #dcd3b4;
+  --accent: #268bd2;
+  --accent-fg: #fdf6e3;
+  --accent-soft: #e2ecf2;
+
+  --status-open: #268bd2;
+  --status-in-progress: #b58900;
+  --status-closed: #859900;
+
+  --prio-0: #dc322f;
+  --prio-1: #cb4b16;
+  --prio-2: #b58900;
+  --prio-3: #268bd2;
+  --prio-4: #93a1a1;
+
+  --type-bug: #dc322f;
+  --type-feature: #268bd2;
+  --type-chore: #2aa198;
+  --type-docs: #6c71c4;
+  --type-epic: #d33682;
+
+  --green: #859900;
+  --red: #dc322f;
+
+  --radius-sm: 7px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-pill: 999px;
+
+  --shadow-card: 0 1px 2px rgba(101, 123, 131, 0.08);
+  --shadow-pop: 0 10px 28px rgba(101, 123, 131, 0.18);
+  --glass-blur: 0px;
+  --app-bg-image: none;
+  color-scheme: light;
+}
+
+/* Solarized dark counterpart (data-theme + data-mode=dark) */
+[data-theme='solarized-duo'][data-mode='dark'] {
+  --surface-app: #002b36;
+  --surface: #073642;
+  --surface-2: #0a3f4d;
+  --surface-3: #0d4a59;
+  --surface-hover: #0a3f4d;
+  --surface-inset: #002028;
+  --text: #93a1a1;
+  --text-muted: #839496;
+  --text-dim: #657b83;
+  --border: #0d4a59;
+  --border-strong: #155463;
+  --accent: #268bd2;
+  --accent-fg: #002b36;
+  --accent-soft: #0a3f4d;
+  --status-open: #268bd2;
+  --status-in-progress: #b58900;
+  --status-closed: #859900;
+  color-scheme: dark;
+}
+
+/* ============================ VIBRANT GLASS ============================ */
+[data-theme='vibrant-glass'] {
+  --surface-app: #0b0720;
+  --surface: rgba(255, 255, 255, 0.06);
+  --surface-2: rgba(255, 255, 255, 0.085);
+  --surface-3: rgba(255, 255, 255, 0.12);
+  --surface-hover: rgba(255, 255, 255, 0.12);
+  --surface-inset: rgba(0, 0, 0, 0.22);
+  --text: #f4f1ff;
+  --text-muted: #c9c2e8;
+  --text-dim: #968dbe;
+  --border: rgba(255, 255, 255, 0.16);
+  --border-strong: rgba(255, 255, 255, 0.28);
+  --accent: #b06bff;
+  --accent-fg: #1a0b2e;
+  --accent-soft: rgba(176, 107, 255, 0.18);
+
+  --status-open: #968dbe;
+  --status-in-progress: #ffd24a;
+  --status-closed: #46e0a8;
+
+  --prio-0: #ff4d8d;
+  --prio-1: #ff9a3c;
+  --prio-2: #ffd24a;
+  --prio-3: #34d6ee;
+  --prio-4: #8c9bc0;
+
+  --type-bug: #ff4d8d;
+  --type-feature: #8b5cf6;
+  --type-chore: #ffd24a;
+  --type-docs: #34d6ee;
+  --type-epic: #e445c7;
+
+  --green: #46e0a8;
+  --red: #ff4d8d;
+
+  --radius-sm: 9px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
+  --radius-pill: 999px;
+
+  --shadow-card: 0 6px 22px rgba(0, 0, 0, 0.32);
+  --shadow-pop: 0 10px 40px rgba(0, 0, 0, 0.4);
+  --glass-blur: 22px;
+  --app-bg-image: radial-gradient(40% 40% at 12% 8%, rgba(124, 58, 237, 0.4), transparent 70%),
+    radial-gradient(40% 40% at 88% 4%, rgba(219, 43, 179, 0.32), transparent 70%),
+    radial-gradient(45% 45% at 75% 85%, rgba(24, 153, 179, 0.3), transparent 70%),
+    radial-gradient(40% 40% at 8% 90%, rgba(255, 77, 141, 0.26), transparent 70%),
+    linear-gradient(160deg, #0b0720, #160d33 55%, #1d1140);
+  color-scheme: dark;
+}
