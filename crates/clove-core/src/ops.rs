@@ -11,10 +11,11 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::edit::EditRequest;
 use crate::view::item_object;
 use crate::{
-    add_comment, list_comments, normalize_label, CloveError, CloveId, GraphStore, Item,
-    ItemFrontmatter, ItemStatus, ItemStore, ItemType, NewItem, Priority,
+    add_comment, fields, list_comments, CloveError, CloveId, GraphStore, Item, ItemFrontmatter,
+    ItemStatus, ItemStore, ItemType, NewItem,
 };
 
 /// A raw "new item" spec. Strings are parsed/validated by [`create`]; the struct
@@ -52,90 +53,16 @@ pub fn set_status(fm: &mut ItemFrontmatter, status: ItemStatus, now: DateTime<Ut
 
 /// Apply a list of `KEY=VALUE` (and `labels+=`/`labels-=`) edits to frontmatter.
 /// All edits are applied to the in-memory copy before a single write.
+///
+/// This is a thin shim over the unified [`EditRequest`] path: the loose tokens
+/// are parsed into an [`EditRequest`] and applied, so the CLI token surface and
+/// the structured web/MCP/TUI surfaces share one validation implementation.
 pub fn apply_assignments(
     fm: &mut ItemFrontmatter,
     assignments: &[String],
     now: DateTime<Utc>,
 ) -> Result<(), CloveError> {
-    for token in assignments {
-        apply_one(fm, token, now)?;
-    }
-    Ok(())
-}
-
-fn apply_one(fm: &mut ItemFrontmatter, token: &str, now: DateTime<Utc>) -> Result<(), CloveError> {
-    let (raw_key, value) = token
-        .split_once('=')
-        .ok_or_else(|| CloveError::InvalidField {
-            field: "edit".to_owned(),
-            reason: format!("expected KEY=VALUE, got `{token}`"),
-        })?;
-
-    // labels+=val / labels-=val
-    if let Some(key) = raw_key.strip_suffix('+') {
-        require_labels(key)?;
-        let canonical = normalize_label(value)?;
-        if !fm.labels.contains(&canonical) {
-            fm.labels.push(canonical);
-            fm.labels.sort();
-            fm.labels.dedup();
-        }
-        return Ok(());
-    }
-    if let Some(key) = raw_key.strip_suffix('-') {
-        require_labels(key)?;
-        let canonical = normalize_label(value)?;
-        fm.labels.retain(|l| l != &canonical);
-        return Ok(());
-    }
-
-    match raw_key {
-        "status" => set_status(fm, ItemStatus::parse(value)?, now),
-        "priority" => {
-            let n: u8 = value.parse().map_err(|_| CloveError::InvalidField {
-                field: "priority".to_owned(),
-                reason: format!("expected 0–4, got `{value}`"),
-            })?;
-            fm.priority = Priority::new(n)?;
-        }
-        "type" => fm.item_type = ItemType::parse(value)?,
-        "assignee" => {
-            fm.assignee = if value.trim().is_empty() {
-                None
-            } else {
-                Some(value.to_owned())
-            };
-        }
-        "title" => {
-            if value.trim().is_empty() {
-                return Err(CloveError::InvalidField {
-                    field: "title".to_owned(),
-                    reason: "title cannot be empty".to_owned(),
-                });
-            }
-            fm.title = value.to_owned();
-        }
-        other => {
-            return Err(CloveError::InvalidField {
-                field: other.to_owned(),
-                reason:
-                    "unknown editable field (status|priority|type|assignee|title|labels+=|labels-=)"
-                        .to_owned(),
-            })
-        }
-    }
-    Ok(())
-}
-
-fn require_labels(key: &str) -> Result<(), CloveError> {
-    if key == "labels" {
-        Ok(())
-    } else {
-        Err(CloveError::InvalidField {
-            field: key.to_owned(),
-            reason: "only `labels` supports += / -=".to_owned(),
-        })
-    }
+    EditRequest::from_tokens(assignments)?.apply_to_frontmatter(fm, now)
 }
 
 // ---- High-level operations (store I/O → JSON) --------------------------------
@@ -150,23 +77,15 @@ pub fn create(
     now: DateTime<Utc>,
 ) -> Result<Value, CloveError> {
     let item_type = match spec.item_type.as_deref() {
-        Some(t) => ItemType::parse(t)?,
+        Some(t) => fields::parse_type(t)?,
         None => default_type,
     };
     let priority = match spec.priority {
-        Some(p) => Priority::new(p)?,
-        None => Priority::DEFAULT,
+        Some(p) => fields::parse_priority(p)?,
+        None => crate::Priority::DEFAULT,
     };
-    let mut labels = Vec::new();
-    for raw in &spec.labels {
-        labels.push(normalize_label(raw)?);
-    }
-    labels.sort();
-    labels.dedup();
-    let mut deps = Vec::new();
-    for raw in &spec.deps {
-        deps.push(CloveId::new(raw)?);
-    }
+    let labels = fields::parse_labels(&spec.labels)?;
+    let deps = fields::parse_ids(&spec.deps)?;
     let parent = match spec.parent.as_deref() {
         Some(p) => Some(CloveId::new(p)?),
         None => None,
@@ -201,17 +120,16 @@ pub fn transition(
     Ok(Value::Object(item_object(&saved)))
 }
 
-/// Apply `KEY=VALUE` edits atomically; returns the updated item object.
+/// Apply `KEY=VALUE` edits atomically; returns the updated item object. Thin
+/// shim over the unified [`crate::edit::apply_edit`] path.
 pub fn edit(
     store: &ItemStore,
     id: &CloveId,
     assignments: &[String],
     now: DateTime<Utc>,
 ) -> Result<Value, CloveError> {
-    let mut item = store.get(id)?;
-    apply_assignments(&mut item.frontmatter, assignments, now)?;
-    let saved = store.update(&item, now)?;
-    Ok(Value::Object(item_object(&saved)))
+    let req = EditRequest::from_tokens(assignments)?;
+    crate::edit::apply_edit(store, id, &req, now)
 }
 
 /// Append a comment; returns `{ id, path }` (path relative to the repo root).
@@ -271,6 +189,75 @@ pub fn dep_add(
     item.frontmatter.deps.push(dep_id.clone());
     item.frontmatter.deps.sort();
     item.frontmatter.deps.dedup();
+    let saved = store.update(&item, now)?;
+    Ok(Value::Object(item_object(&saved)))
+}
+
+/// Remove a hard dependency `id → dep_id`. Errors if `id` is unknown or does not
+/// currently depend on `dep_id`. Returns the updated item object.
+pub fn dep_remove(
+    store: &ItemStore,
+    id: &CloveId,
+    dep_id: &CloveId,
+    now: DateTime<Utc>,
+) -> Result<Value, CloveError> {
+    let mut item = store.get(id)?;
+    if !item.frontmatter.deps.contains(dep_id) {
+        return Err(CloveError::InvalidField {
+            field: "deps".to_owned(),
+            reason: format!("{id} does not depend on {dep_id}"),
+        });
+    }
+    item.frontmatter.deps.retain(|d| d != dep_id);
+    let saved = store.update(&item, now)?;
+    Ok(Value::Object(item_object(&saved)))
+}
+
+/// Set (or, with `parent = None`, clear) an item's parent. Validates that the
+/// parent exists and that the assignment does not create a parent cycle (the new
+/// parent must not be `id` itself or any descendant of `id`). Returns the updated
+/// item object.
+pub fn set_parent(
+    store: &ItemStore,
+    id: &CloveId,
+    parent: Option<&CloveId>,
+    now: DateTime<Utc>,
+) -> Result<Value, CloveError> {
+    let mut item = store.get(id)?;
+    match parent {
+        None => item.frontmatter.parent = None,
+        Some(parent) => {
+            if parent == id {
+                return Err(CloveError::InvalidField {
+                    field: "parent".to_owned(),
+                    reason: format!("{id} cannot be its own parent"),
+                });
+            }
+            if !store.exists(parent) {
+                return Err(CloveError::NotFound {
+                    id: parent.to_string(),
+                });
+            }
+            // Walk the proposed parent's ancestry; if we reach `id`, the
+            // assignment would close a parent cycle.
+            let (frontmatters, _errors) = store.scan_frontmatter()?;
+            let parent_of: std::collections::HashMap<&CloveId, Option<&CloveId>> = frontmatters
+                .iter()
+                .map(|fm| (&fm.id, fm.parent.as_ref()))
+                .collect();
+            let mut cursor = Some(parent);
+            while let Some(node) = cursor {
+                if node == id {
+                    return Err(CloveError::InvalidField {
+                        field: "parent".to_owned(),
+                        reason: format!("setting parent of {id} to {parent} would create a cycle"),
+                    });
+                }
+                cursor = parent_of.get(node).copied().flatten();
+            }
+            item.frontmatter.parent = Some(parent.clone());
+        }
+    }
     let saved = store.update(&item, now)?;
     Ok(Value::Object(item_object(&saved)))
 }

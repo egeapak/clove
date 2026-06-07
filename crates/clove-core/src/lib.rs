@@ -6,7 +6,9 @@
 pub mod comments;
 pub mod config;
 pub mod doctor;
+pub mod edit;
 pub mod error;
+pub mod fields;
 pub mod fixtures;
 pub mod graph;
 pub mod id;
@@ -24,6 +26,7 @@ pub mod write;
 pub use comments::{add_comment, list_comments, Comment};
 pub use config::{load_config, CloveConfig, DaemonConfig, IndexConfig, OutputFormat, WebConfig};
 pub use doctor::{diagnose, fix as doctor_fix, DoctorIssue, DoctorReport, Severity};
+pub use edit::{apply_edit, normalize_body, EditRequest, LabelEdit};
 pub use error::{error_code, CloveError};
 pub use graph::{
     is_hard_dep, BlockedItem, ChildrenSummary, DanglingRef, DepTreeNode, EdgeKind, GraphStore,
