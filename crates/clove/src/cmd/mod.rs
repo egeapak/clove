@@ -15,6 +15,7 @@ pub mod init;
 pub mod label;
 pub mod listing;
 pub mod ls;
+pub mod mcp;
 pub mod merge_driver;
 pub mod new;
 pub mod priority;

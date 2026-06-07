@@ -105,6 +105,8 @@ pub enum Commands {
     Daemon(DaemonArgs),
     /// Browse items in an interactive, read-only terminal UI.
     Tui,
+    /// Run the MCP server (stdio) so AI agents can use clove as native tools.
+    Mcp,
     /// Print version and schema information.
     Version,
 }

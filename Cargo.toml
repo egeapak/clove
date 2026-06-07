@@ -70,6 +70,7 @@ clove-core = { path = "crates/clove-core", version = "0.1.0" }
 clove-index = { path = "crates/clove-index", version = "0.1.0" }
 clove-import = { path = "crates/clove-import", version = "0.1.0", default-features = false }
 clove-ipc = { path = "crates/clove-ipc", version = "0.1.0" }
+clove-mcp = { path = "crates/clove-mcp", version = "0.1.0" }
 clove-tui = { path = "crates/clove-tui", version = "0.1.0" }
 
 [profile.release]

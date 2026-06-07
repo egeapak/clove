@@ -1,24 +1,48 @@
-//! clove MCP server (M4) — feasibility scaffold.
+//! clove MCP server (M4): exposes clove to AI agents over the MCP `stdio`
+//! transport (newline-delimited JSON-RPC), built on `rmcp`.
 //!
-//! This module currently only proves the `rmcp` + `tokio` dependency tree
-//! compiles on the workspace toolchain; the real stdio server, tool surface, and
-//! daemon (tarpc) routing land in the following phases.
+//! Architecture (topology B): each MCP client spawns `clove mcp`, which runs this
+//! stdio server. Tool **writes** prefer the single `cloved` daemon (serialized +
+//! coherent) and fall back to direct `clove-core` ops; **reads** compute from the
+//! file store directly. So multiple agents on one project share one write
+//! coordinator when a daemon is running, and everything still works without one.
 
-/// Placeholder entry point: returns the MCP protocol/server identity so the
-/// dependency on `rmcp` is exercised at compile time.
-pub fn server_name() -> &'static str {
-    "clove"
+mod args;
+mod engine;
+mod server;
+
+use camino::Utf8PathBuf;
+use clove_core::ItemType;
+
+pub use engine::Engine;
+pub use server::CloveServer;
+
+/// Run the stdio MCP server until the client disconnects.
+///
+/// Builds a tokio runtime (rmcp is async) and serves on stdin/stdout. `clove_dir`
+/// is used to probe the daemon; `repo_root` roots the file store; `id_prefix` and
+/// `default_type` configure `clove_new`.
+pub fn run(
+    clove_dir: Utf8PathBuf,
+    repo_root: Utf8PathBuf,
+    id_prefix: String,
+    default_type: ItemType,
+) -> anyhow::Result<()> {
+    let engine = Engine {
+        clove_dir,
+        repo_root,
+        id_prefix,
+        default_type,
+    };
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(serve(engine))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn rmcp_and_tokio_link() {
-        // Touch an rmcp type so the crate is actually linked, and confirm the
-        // tokio runtime macro works in this crate.
-        let _ = rmcp::model::ProtocolVersion::default();
-        assert_eq!(server_name(), "clove");
-    }
+async fn serve(engine: Engine) -> anyhow::Result<()> {
+    use rmcp::ServiceExt;
+    let service = CloveServer::new(engine)
+        .serve(rmcp::transport::stdio())
+        .await?;
+    service.waiting().await?;
+    Ok(())
 }

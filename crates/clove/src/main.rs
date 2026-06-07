@@ -132,6 +132,7 @@ fn run_repo(
         Commands::Doctor(a) => cmd::doctor::run(ctx, f, a, no_index),
         Commands::Daemon(a) => cmd::daemon::run(ctx, f, a.action),
         Commands::Tui => cmd::tui::run(ctx, f).map(|_| ok),
+        Commands::Mcp => cmd::mcp::run(ctx).map(|_| ok),
         Commands::Import(a) => cmd::import::run(ctx, f, a).map(|_| ok),
         Commands::Export(a) => cmd::export::run(ctx, f, a).map(|_| ok),
         // Non-repo commands are dispatched earlier.

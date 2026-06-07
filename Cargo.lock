@@ -502,6 +502,7 @@ dependencies = [
  "clove-import",
  "clove-index",
  "clove-ipc",
+ "clove-mcp",
  "clove-tui",
  "insta",
  "jsonschema",
@@ -597,6 +598,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "camino",
+ "chrono",
  "clove-core",
  "clove-ipc",
  "rmcp",
