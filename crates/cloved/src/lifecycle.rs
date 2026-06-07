@@ -94,13 +94,26 @@ pub fn run(clove_dir: &Utf8Path) -> anyhow::Result<()> {
         .build()
         .context("building tokio runtime")?;
 
+    // Id prefix + default type for daemon-side `create` (topology B writes).
+    let id_prefix = config.as_ref().map_or_else(
+        || clove_core::CloveConfig::default().id_prefix,
+        |c| c.id_prefix.clone(),
+    );
+    let default_type = config.as_ref().map_or_else(
+        || clove_core::CloveConfig::default().default_type,
+        |c| c.default_type,
+    );
+
     let dispatcher = Dispatcher {
         index: Arc::clone(&index),
         state: Arc::clone(&state),
+        repo_root: repo_root.clone(),
         issues_dir: issues_dir.clone(),
         db_path: db_path.clone(),
         auto_refresh,
         graph: Arc::clone(&graph),
+        id_prefix,
+        default_type,
     };
 
     let serve_result: anyhow::Result<()> = runtime.block_on(async {

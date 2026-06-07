@@ -12,6 +12,7 @@ pub mod graph;
 pub mod id;
 pub mod limits;
 pub mod model;
+pub mod ops;
 pub mod parse;
 pub mod repo;
 pub mod stats;
@@ -30,6 +31,7 @@ pub use graph::{
 };
 pub use id::CloveId;
 pub use model::{normalize_label, Item, ItemFrontmatter, ItemStatus, ItemType, Priority};
+pub use ops::NewSpec;
 pub use parse::{
     contains_yaml_anchor_or_alias, parse_frontmatter_file, parse_item_bytes, parse_item_file,
     parse_item_lenient,

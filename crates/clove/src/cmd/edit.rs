@@ -1,100 +1,21 @@
 //! `clove edit` (T-CLI05) and the shared non-interactive field application used
 //! by `clove set`.
 
-use clove_core::{normalize_label, parse_item_file, CloveError, ItemFrontmatter, OutputFormat};
+use clove_core::{parse_item_file, CloveError, ItemFrontmatter, OutputFormat};
 use serde_json::Map;
 
 use crate::cli::EditArgs;
-use crate::cmd::status::set_status;
 use crate::context::Ctx;
 use crate::item_json::print_item;
-use crate::util::{now_seconds, parse_id, parse_priority, parse_status, parse_type};
+use crate::util::{now_seconds, parse_id};
 
-/// Apply a list of `KEY=VALUE` (and `labels+=`/`labels-=`) edits to frontmatter.
-/// All edits are applied to the in-memory copy before a single write.
+/// Apply a list of `KEY=VALUE` (and `labels+=`/`labels-=`) edits to frontmatter
+/// (delegates to the shared [`clove_core::ops::apply_assignments`]).
 pub fn apply_assignments(
     fm: &mut ItemFrontmatter,
     assignments: &[String],
 ) -> Result<(), CloveError> {
-    for token in assignments {
-        apply_one(fm, token)?;
-    }
-    Ok(())
-}
-
-fn apply_one(fm: &mut ItemFrontmatter, token: &str) -> Result<(), CloveError> {
-    let (raw_key, value) = token
-        .split_once('=')
-        .ok_or_else(|| CloveError::InvalidField {
-            field: "edit".to_owned(),
-            reason: format!("expected KEY=VALUE, got `{token}`"),
-        })?;
-
-    // labels+=val / labels-=val
-    if let Some(key) = raw_key.strip_suffix('+') {
-        require_labels(key)?;
-        let canonical = normalize_label(value)?;
-        if !fm.labels.contains(&canonical) {
-            fm.labels.push(canonical);
-            fm.labels.sort();
-            fm.labels.dedup();
-        }
-        return Ok(());
-    }
-    if let Some(key) = raw_key.strip_suffix('-') {
-        require_labels(key)?;
-        let canonical = normalize_label(value)?;
-        fm.labels.retain(|l| l != &canonical);
-        return Ok(());
-    }
-
-    match raw_key {
-        "status" => set_status(fm, parse_status(value)?),
-        "priority" => {
-            let n: u8 = value.parse().map_err(|_| CloveError::InvalidField {
-                field: "priority".to_owned(),
-                reason: format!("expected 0–4, got `{value}`"),
-            })?;
-            fm.priority = parse_priority(n)?;
-        }
-        "type" => fm.item_type = parse_type(value)?,
-        "assignee" => {
-            fm.assignee = if value.trim().is_empty() {
-                None
-            } else {
-                Some(value.to_owned())
-            };
-        }
-        "title" => {
-            if value.trim().is_empty() {
-                return Err(CloveError::InvalidField {
-                    field: "title".to_owned(),
-                    reason: "title cannot be empty".to_owned(),
-                });
-            }
-            fm.title = value.to_owned();
-        }
-        other => {
-            return Err(CloveError::InvalidField {
-                field: other.to_owned(),
-                reason:
-                    "unknown editable field (status|priority|type|assignee|title|labels+=|labels-=)"
-                        .to_owned(),
-            })
-        }
-    }
-    Ok(())
-}
-
-fn require_labels(key: &str) -> Result<(), CloveError> {
-    if key == "labels" {
-        Ok(())
-    } else {
-        Err(CloveError::InvalidField {
-            field: key.to_owned(),
-            reason: "only `labels` supports += / -=".to_owned(),
-        })
-    }
+    clove_core::ops::apply_assignments(fm, assignments, now_seconds())
 }
 
 pub fn run(ctx: &Ctx, format: OutputFormat, args: EditArgs) -> Result<(), CloveError> {

@@ -172,6 +172,75 @@ fn status_and_reindex_round_trip() {
 }
 
 #[test]
+fn mutations_round_trip_through_daemon() {
+    // Topology B: writes go through the single daemon, which performs them on the
+    // file store and keeps itself coherent. Verify create → edit → comment →
+    // dep_add → show all round-trip and land on disk.
+    use clove_core::ops::NewSpec;
+    use clove_core::ItemStatus;
+
+    let (_tmp, clove_dir) = init_repo_with_items(0);
+    let mut child = spawn_ready(&clove_dir);
+    let mut client = DaemonClient::probe(&clove_dir).expect("daemon alive");
+
+    // create
+    let created = client
+        .create(NewSpec {
+            title: "via daemon".to_owned(),
+            priority: Some(1),
+            ..Default::default()
+        })
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_owned();
+    assert!(created["path"].as_str().unwrap().contains(&id));
+    // The file actually exists on disk.
+    assert!(clove_dir.join("issues").join(format!("{id}.md")).exists());
+
+    // edit: set status + add a label atomically.
+    let edited = client
+        .edit(
+            id.clone(),
+            vec!["assignee=alice".to_owned(), "labels+=urgent".to_owned()],
+        )
+        .unwrap();
+    assert_eq!(edited["assignee"], "alice");
+    assert_eq!(edited["labels"], serde_json::json!(["urgent"]));
+
+    // set_status → closed.
+    let closed = client.set_status(id.clone(), ItemStatus::Closed).unwrap();
+    assert_eq!(closed["status"], "closed");
+
+    // a second item + a dependency edge (cycle-checked daemon-side).
+    let dep = client
+        .create(NewSpec {
+            title: "dependency".to_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+    let dep_id = dep["id"].as_str().unwrap().to_owned();
+    let with_dep = client.dep_add(id.clone(), dep_id.clone()).unwrap();
+    assert_eq!(with_dep["deps"], serde_json::json!([dep_id]));
+    // Negative: a self-loop is rejected by the daemon's validation pipeline.
+    assert!(client.dep_add(id.clone(), id.clone()).is_err());
+
+    // comment + show reflect the accumulated state.
+    client
+        .add_comment(id.clone(), "me@example.com".to_owned(), "done".to_owned())
+        .unwrap();
+    let shown = client.show(id.clone()).unwrap();
+    assert_eq!(shown["status"], "closed");
+    assert_eq!(shown["comment_count"], 1);
+    assert_eq!(shown["deps"], serde_json::json!([dep_id]));
+
+    // stats sees both items.
+    let stats = client.stats(10, true).unwrap();
+    assert_eq!(stats["total"], 2);
+
+    sigterm(child.id());
+    let _ = child.wait();
+}
+
+#[test]
 fn stale_socket_recovery_is_fast() {
     let (_tmp, clove_dir) = init_repo_with_items(1);
     let mut child = spawn_ready(&clove_dir);

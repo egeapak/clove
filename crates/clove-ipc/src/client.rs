@@ -13,8 +13,11 @@
 use std::time::Duration;
 
 use camino::Utf8Path;
+use clove_core::ops::NewSpec;
+use clove_core::ItemStatus;
 use interprocess::local_socket::tokio::Stream;
 use interprocess::local_socket::traits::tokio::Stream as _;
+use serde_json::Value;
 use tarpc::context;
 use thiserror::Error;
 use tokio::runtime::Runtime;
@@ -157,6 +160,52 @@ impl DaemonClient {
         self.rt
             .block_on(self.client.status(context::current()))
             .map_err(|e| ClientError::Protocol(e.to_string()))
+    }
+
+    // ---- M4 mutations + reads (topology B). Each returns the §7.4 item JSON
+    // (or `{id, path}`); the daemon serializes writes and keeps itself coherent.
+
+    /// Create an item; returns `{ id, path }`.
+    pub fn create(&mut self, spec: NewSpec) -> Result<Value, ClientError> {
+        self.app(self.client.create(context::current(), spec))
+    }
+
+    /// Transition an item's status; returns the updated item object.
+    pub fn set_status(&mut self, id: String, status: ItemStatus) -> Result<Value, ClientError> {
+        self.app(self.client.set_status(context::current(), id, status))
+    }
+
+    /// Apply `KEY=VALUE` edits atomically; returns the updated item object.
+    pub fn edit(&mut self, id: String, assignments: Vec<String>) -> Result<Value, ClientError> {
+        self.app(self.client.edit(context::current(), id, assignments))
+    }
+
+    /// Append a comment; returns `{ id, path }`.
+    pub fn add_comment(
+        &mut self,
+        id: String,
+        author: String,
+        body: String,
+    ) -> Result<Value, ClientError> {
+        self.app(
+            self.client
+                .add_comment(context::current(), id, author, body),
+        )
+    }
+
+    /// Add a hard dependency `id → dep_id`; returns the updated item object.
+    pub fn dep_add(&mut self, id: String, dep_id: String) -> Result<Value, ClientError> {
+        self.app(self.client.dep_add(context::current(), id, dep_id))
+    }
+
+    /// Full item detail (frontmatter + body + comment_count + ready/blocked_by).
+    pub fn show(&mut self, id: String) -> Result<Value, ClientError> {
+        self.app(self.client.show(context::current(), id))
+    }
+
+    /// Work-item analytics (`clove stats`) as JSON.
+    pub fn stats(&mut self, top: u32, include_epics: bool) -> Result<Value, ClientError> {
+        self.app(self.client.stats(context::current(), top, include_epics))
     }
 
     /// Drive a fallible RPC call to completion, flattening the transport-level

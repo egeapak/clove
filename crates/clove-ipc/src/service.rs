@@ -7,7 +7,10 @@
 //! and a serializable error, replacing the old hand-rolled `Request`/`Response`
 //! enums + frame codec.
 
+use clove_core::ops::NewSpec;
+use clove_core::ItemStatus;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror::Error;
 
 use crate::protocol::{
@@ -52,4 +55,23 @@ pub trait CloveRpc {
     async fn graph(req: GraphRequest) -> Result<GraphResponse, RpcError>;
     /// Force a full reindex inside the daemon; returns its report.
     async fn reindex() -> Result<ReindexDone, RpcError>;
+
+    // ---- M4 mutations + reads (topology B: writes serialized through the
+    // single daemon, which keeps its index/graph coherent). Each returns the
+    // §7.4 item JSON (or `{id, path}`) so every surface shares one shape.
+
+    /// Create an item; returns `{ id, path }`.
+    async fn create(spec: NewSpec) -> Result<Value, RpcError>;
+    /// Transition an item's status; returns the updated item object.
+    async fn set_status(id: String, status: ItemStatus) -> Result<Value, RpcError>;
+    /// Apply `KEY=VALUE` edits atomically; returns the updated item object.
+    async fn edit(id: String, assignments: Vec<String>) -> Result<Value, RpcError>;
+    /// Append a comment; returns `{ id, path }`.
+    async fn add_comment(id: String, author: String, body: String) -> Result<Value, RpcError>;
+    /// Add a hard dependency `id → dep_id`; returns the updated item object.
+    async fn dep_add(id: String, dep_id: String) -> Result<Value, RpcError>;
+    /// Full item detail (frontmatter + body + comment_count + ready/blocked_by).
+    async fn show(id: String) -> Result<Value, RpcError>;
+    /// Work-item analytics (`clove stats`) as JSON.
+    async fn stats(top: u32, include_epics: bool) -> Result<Value, RpcError>;
 }

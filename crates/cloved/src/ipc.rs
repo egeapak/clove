@@ -11,12 +11,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use camino::Utf8PathBuf;
-use clove_core::CloveId;
+use clove_core::ops::NewSpec;
+use clove_core::{CloveError, CloveId, ItemStore, ItemType};
 use clove_index::{Filter, Index, ItemListRow, QueryMode};
 use clove_ipc::{
     CloveRpc, GraphRequest, GraphResponse, LeanRow, QueryKind, QueryListResponse, QueryRequest,
     ReindexDone, RpcError, SearchRequest, StatusResponse, PROTOCOL_VERSION,
 };
+use serde_json::Value;
 use tarpc::context::Context;
 
 use crate::graph_cache::GraphCache;
@@ -33,10 +35,14 @@ const STALE_REFRESH_LIMIT: usize = 20;
 pub struct Dispatcher {
     pub index: Arc<Mutex<Index>>,
     pub state: Arc<Mutex<DaemonState>>,
+    pub repo_root: Utf8PathBuf,
     pub issues_dir: Utf8PathBuf,
     pub db_path: Utf8PathBuf,
     pub auto_refresh: bool,
     pub graph: Arc<GraphCache>,
+    /// Id prefix + default type for daemon-side `create` (from `.clove/config`).
+    pub id_prefix: String,
+    pub default_type: ItemType,
 }
 
 impl CloveRpc for Dispatcher {
@@ -78,6 +84,80 @@ impl CloveRpc for Dispatcher {
         self.touch();
         self.handle_reindex()
     }
+
+    async fn create(self, _: Context, spec: NewSpec) -> Result<Value, RpcError> {
+        self.touch();
+        let out = clove_core::ops::create(
+            &self.store(),
+            &self.id_prefix,
+            self.default_type,
+            spec,
+            now(),
+        )
+        .map_err(rpc_err);
+        self.after_write(&out);
+        out
+    }
+
+    async fn set_status(
+        self,
+        _: Context,
+        id: String,
+        status: clove_core::ItemStatus,
+    ) -> Result<Value, RpcError> {
+        self.touch();
+        let cid = CloveId::new(&id).map_err(rpc_err)?;
+        let out = clove_core::ops::transition(&self.store(), &cid, status, now()).map_err(rpc_err);
+        self.after_write(&out);
+        out
+    }
+
+    async fn edit(
+        self,
+        _: Context,
+        id: String,
+        assignments: Vec<String>,
+    ) -> Result<Value, RpcError> {
+        self.touch();
+        let cid = CloveId::new(&id).map_err(rpc_err)?;
+        let out = clove_core::ops::edit(&self.store(), &cid, &assignments, now()).map_err(rpc_err);
+        self.after_write(&out);
+        out
+    }
+
+    async fn add_comment(
+        self,
+        _: Context,
+        id: String,
+        author: String,
+        body: String,
+    ) -> Result<Value, RpcError> {
+        self.touch();
+        let cid = CloveId::new(&id).map_err(rpc_err)?;
+        let out = clove_core::ops::comment(&self.store(), &cid, &author, &body).map_err(rpc_err);
+        self.after_write(&out);
+        out
+    }
+
+    async fn dep_add(self, _: Context, id: String, dep_id: String) -> Result<Value, RpcError> {
+        self.touch();
+        let cid = CloveId::new(&id).map_err(rpc_err)?;
+        let dep = CloveId::new(&dep_id).map_err(rpc_err)?;
+        let out = clove_core::ops::dep_add(&self.store(), &cid, &dep, now()).map_err(rpc_err);
+        self.after_write(&out);
+        out
+    }
+
+    async fn show(self, _: Context, id: String) -> Result<Value, RpcError> {
+        self.touch();
+        let cid = CloveId::new(&id).map_err(rpc_err)?;
+        clove_core::ops::show(&self.store(), &cid).map_err(rpc_err)
+    }
+
+    async fn stats(self, _: Context, top: u32, include_epics: bool) -> Result<Value, RpcError> {
+        self.touch();
+        clove_core::ops::stats(&self.store(), top as usize, include_epics, now()).map_err(rpc_err)
+    }
 }
 
 impl Dispatcher {
@@ -86,6 +166,29 @@ impl Dispatcher {
         if let Ok(mut state) = self.state.lock() {
             state.mark_event();
         }
+    }
+
+    /// The file store rooted at the repo (daemon-side writes for topology B).
+    fn store(&self) -> ItemStore {
+        ItemStore::new(self.repo_root.clone())
+    }
+
+    /// After a successful daemon-side write, freshen the index from the
+    /// just-changed files and rebuild the hot graph so the daemon's lean
+    /// query/graph reads stay coherent (file-based `show`/`stats`/`list` ops are
+    /// already correct). A no-op on a failed write.
+    fn after_write(&self, result: &Result<Value, RpcError>) {
+        if result.is_err() {
+            return;
+        }
+        if let Ok(mut index) = self.index.lock() {
+            if let Ok(report) = index.check_staleness_fast(&self.issues_dir) {
+                if !report.is_clean() {
+                    let _ = index.apply_staleness(&report, &self.issues_dir);
+                }
+            }
+        }
+        self.graph.mark_dirty();
     }
 
     /// Serve a dependency-graph query from the daemon's cached graph (Tier 2).
@@ -241,6 +344,25 @@ fn build_filter(q: &QueryRequest) -> Filter {
         parent: None,
         limit: q.limit.map(|n| q.offset.saturating_add(n)),
     }
+}
+
+/// The current time for daemon-side writes (the store truncates to seconds).
+fn now() -> chrono::DateTime<chrono::Utc> {
+    chrono::Utc::now()
+}
+
+/// Map a core error to a wire [`RpcError`] with a stable machine code so clients
+/// (the MCP server) can distinguish failure classes.
+fn rpc_err(e: CloveError) -> RpcError {
+    let code = match &e {
+        CloveError::NotFound { .. } => "not_found",
+        CloveError::SelfDependency { .. } => "self_loop",
+        CloveError::DependencyCycle { .. } => "cycle",
+        CloveError::DependencyExists { .. } => "already_exists",
+        CloveError::InvalidField { .. } => "invalid_field",
+        _ => "op_failed",
+    };
+    RpcError::new(code, e.to_string())
 }
 
 /// Project an index row onto the lean wire row.
