@@ -716,6 +716,22 @@ condition for M4 planning.
   `docs/web-ui-mockups/`. Deferred follow-ups: binary-size trim (make the `github`
   import feature opt-out — it costs ~3.5 MB), a body editor, and wiring the SQLite
   stats-snapshot series into the web `/stats/history`.
+- **MCP server** — **DONE (M4)**. New `clove-mcp` crate (rmcp 1.7) and a `clove mcp`
+  subcommand expose clove to AI agents over the MCP **stdio** transport as 12 native
+  tools (`clove_ready`/`blocked`/`list`/`show`/`search`/`dep_tree`/`stats` reads;
+  `clove_new`/`status`/`edit`/`comment`/`dep_add` writes), behind a default-on `mcp`
+  feature. **Topology B:** each client spawns `clove mcp`; writes prefer the single
+  `cloved` daemon (concurrent agents share one serialized writer that keeps the
+  index/graph coherent) and fall back to direct ops; reads compute from files. The
+  shared logic was lifted into `clove_core::view` (filters/ordering/JSON shaping) and
+  `clove_core::ops` (the high-level operations), reused by the CLI, daemon, and MCP
+  engine. The CLI↔daemon IPC was **rebuilt on `tarpc`** (typed service over the
+  interprocess socket), replacing the hand-rolled frame/protocol; `DaemonClient`
+  keeps its blocking API and gained the mutation/show/stats methods. Decisions and
+  the comparison that chose rmcp + tarpc + topology B are in this session's notes.
+  Deferred follow-ups: auto-start the daemon from `clove mcp`, and server-push
+  notifications (MCP `tools/list_changed` / a ready-queue subscription) when the
+  graph changes.
 - Bidirectional vendor bridges (GitHub/GitLab/Jira); richer history/changelog.
 
 ---

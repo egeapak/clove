@@ -90,9 +90,30 @@ id-autolink extension. List/board virtualized; 4 runtime themes (default
 11.35 MB binary), a body editor, and wiring the stats-snapshot series into web
 `/stats/history`.
 
+**M4 — MCP server (DONE).** New `clove-mcp` crate (rmcp 1.7) and a `clove mcp`
+subcommand expose clove to AI agents over the MCP **stdio** transport as 12 native
+tools — `clove_ready`/`blocked`/`list`/`show`/`search`/`dep_tree`/`stats` (reads)
+and `clove_new`/`status`/`edit`/`comment`/`dep_add` (writes) — whose results are the
+same item JSON as the CLI. Behind a default-on `mcp` feature (mirrors `github`).
+**Topology B:** each client spawns `clove mcp`; **writes** prefer the single
+`cloved` daemon (so concurrent agents share one serialized writer that keeps its
+index/graph coherent) and fall back to direct `clove-core` ops, while **reads**
+compute from files. The shared read/write logic was lifted into `clove_core::view`
+(filters/ordering/JSON shaping) and `clove_core::ops` (create/transition/edit/
+comment/dep_add/show/stats/list/ready/blocked/search/dep_tree), now used by the CLI,
+the daemon, and the MCP engine alike. **The CLI↔daemon IPC was rebuilt on `tarpc`**
+(typed service over the interprocess local socket), replacing the hand-rolled
+frame/protocol; `DaemonClient` keeps its blocking API (CLI unchanged) and gained
+the mutation/show/stats methods, and `cloved` implements them via `clove_core::ops`
+(daemon-side writes for topology B). Wire `PROTOCOL_VERSION` → 2. Tests: 11
+`clove_core::ops` + 9 `view` unit tests, a daemon `mutations_round_trip_through_
+daemon` IPC test, and 3 `clove mcp` stdio e2e tests; full `cargo test --workspace`,
+clippy, fmt green.
+
 **Next step (rest of M4):** TUI write actions (status/priority/label edits, …),
-bidirectional vendor bridges, and richer history/changelog — see
-`IMPLEMENTATION_PLAN.md` M4 backlog.
+bidirectional vendor bridges, richer history/changelog, and (MCP follow-ups)
+auto-starting the daemon from `clove mcp` + server-push notifications when the
+ready set changes — see `IMPLEMENTATION_PLAN.md` M4 backlog.
 
 ### Small backlog (optional M0/M1 nice-to-haves, non-blocking)
 - Broaden JSON-schema validation to more commands (version/reindex/doctor/new)
