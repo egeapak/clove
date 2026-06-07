@@ -596,6 +596,7 @@ version = "0.1.0"
 dependencies = [
  "camino",
  "chrono",
+ "clove-types",
  "criterion",
  "fd-lock",
  "getrandom 0.2.17",
@@ -700,6 +701,21 @@ dependencies = [
  "pulldown-cmark",
  "ratatui",
  "tempfile",
+]
+
+[[package]]
+name = "clove-types"
+version = "0.1.0"
+dependencies = [
+ "camino",
+ "chrono",
+ "getrandom 0.2.17",
+ "proptest",
+ "serde",
+ "serde_json",
+ "smol_str",
+ "tempfile",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

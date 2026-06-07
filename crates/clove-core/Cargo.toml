@@ -11,6 +11,7 @@ repository.workspace = true
 autobenches = false
 
 [dependencies]
+clove-types.workspace = true
 serde.workspace = true
 serde_json.workspace = true       # item→JSON shaping in `view` (shared read surface)
 serde_yaml_neo.workspace = true

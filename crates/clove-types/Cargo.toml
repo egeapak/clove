@@ -1,0 +1,25 @@
+[package]
+name = "clove-types"
+description = "clove shared data types: item model, id, errors, validation, and write-request types (no I/O, graph, or store)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+# The pure, dependency-light type layer shared across the workspace (model, id,
+# error, validation, and the create/edit request types that ride the daemon
+# wire). Deliberately free of the store/graph/SQLite/async deps so crates that
+# only marshal types (e.g. clove-ipc) need not pull them in.
+[dependencies]
+serde.workspace = true
+chrono.workspace = true
+smol_str = { workspace = true, features = ["serde"] }
+camino.workspace = true
+thiserror.workspace = true
+getrandom.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile.workspace = true
+proptest.workspace = true

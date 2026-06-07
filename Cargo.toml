@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/clove-types",
     "crates/clove-core",
     "crates/clove-index",
     "crates/clove-import",
@@ -76,6 +77,7 @@ futures-util = "0.3"            # WS stream/sink helpers for axum::extract::ws
 
 # Internal crates (explicit version keeps them off cargo-deny's wildcard list
 # and is required for publishing clove-core to crates.io — PRD §13).
+clove-types = { path = "crates/clove-types", version = "0.1.0" }
 clove-core = { path = "crates/clove-core", version = "0.1.0" }
 clove-index = { path = "crates/clove-index", version = "0.1.0" }
 clove-import = { path = "crates/clove-import", version = "0.1.0", default-features = false }

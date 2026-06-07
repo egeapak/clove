@@ -8,62 +8,18 @@
 //! reused by the CLI's interactive edit path.
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::edit::EditRequest;
 use crate::view::item_object;
 use crate::{
-    add_comment, fields, list_comments, CloveError, CloveId, GraphStore, Item, ItemFrontmatter,
-    ItemStatus, ItemStore, ItemType, NewItem,
+    add_comment, fields, list_comments, CloveError, CloveId, EditRequest, GraphStore, Item,
+    ItemFrontmatter, ItemStatus, ItemStore, ItemType, NewItem,
 };
 
-/// A raw "new item" spec. Strings are parsed/validated by [`create`]; the struct
-/// is serializable so it can also ride the daemon RPC wire unchanged.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct NewSpec {
-    /// The item title (required, non-empty).
-    pub title: String,
-    /// `bug|feature|chore|docs|epic`; `None` → the caller's default type.
-    pub item_type: Option<String>,
-    /// Priority 0–4; `None` → [`Priority::DEFAULT`].
-    pub priority: Option<u8>,
-    #[serde(default)]
-    pub labels: Vec<String>,
-    #[serde(default)]
-    pub deps: Vec<String>,
-    pub parent: Option<String>,
-    pub assignee: Option<String>,
-    pub body: Option<String>,
-}
-
-/// Apply a status transition to frontmatter, maintaining the closed-timestamp
-/// invariant: set `closed` when moving to closed, clear it otherwise.
-pub fn set_status(fm: &mut ItemFrontmatter, status: ItemStatus, now: DateTime<Utc>) {
-    fm.status = status;
-    match status {
-        ItemStatus::Closed => {
-            if fm.closed.is_none() {
-                fm.closed = Some(now);
-            }
-        }
-        ItemStatus::Open | ItemStatus::InProgress => fm.closed = None,
-    }
-}
-
-/// Apply a list of `KEY=VALUE` (and `labels+=`/`labels-=`) edits to frontmatter.
-/// All edits are applied to the in-memory copy before a single write.
-///
-/// This is a thin shim over the unified [`EditRequest`] path: the loose tokens
-/// are parsed into an [`EditRequest`] and applied, so the CLI token surface and
-/// the structured web/MCP/TUI surfaces share one validation implementation.
-pub fn apply_assignments(
-    fm: &mut ItemFrontmatter,
-    assignments: &[String],
-    now: DateTime<Utc>,
-) -> Result<(), CloveError> {
-    EditRequest::from_tokens(assignments)?.apply_to_frontmatter(fm, now)
-}
+// The request types and the pure frontmatter mutators live in `clove-types`;
+// re-export them here so the `clove_core::ops::*` paths used by the daemon, CLI,
+// and MCP keep resolving.
+pub use clove_types::{apply_assignments, set_status, NewSpec};
 
 // ---- High-level operations (store I/O → JSON) --------------------------------
 
