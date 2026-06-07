@@ -150,3 +150,43 @@ fn comments_match_schema() {
     assert_eq!(code, 0);
     assert_valid(&comments, &v);
 }
+
+#[test]
+fn doctor_output_matches_schema() {
+    let dir = init_with_items();
+    let doctor = schema("doctor.json");
+
+    // A clean store still produces a valid (empty-issues) envelope.
+    let (clean, code) = run_json(clove(dir.path()).arg("doctor"));
+    assert_eq!(code, 0);
+    assert_valid(&doctor, &clean);
+
+    // Seed a spread of findings across severities, fixability, and the store /
+    // index check families so the `code` enum and issue shape are exercised:
+    //   GITIGNORE_DRIFT (warning, fixable), ORPHAN_COMMENTS (warning, fixable),
+    //   DANGLING_REF (error), INDEX_DIVERGENCE/INDEX_CORRUPT (index family).
+    let id = new_item(dir.path(), "Has a dangling dep");
+    let item = dir.path().join(format!(".clove/issues/{id}.md"));
+    let body = std::fs::read_to_string(&item)
+        .unwrap()
+        .replace("deps: []", "deps: [proj-MISSING0]");
+    std::fs::write(&item, body).unwrap();
+    std::fs::create_dir_all(dir.path().join(".clove/issues/proj-GHOST000/comments")).unwrap();
+    std::fs::write(dir.path().join(".clove/.gitignore"), "index.db\n").unwrap();
+    clove(dir.path()).arg("reindex").assert().success();
+    std::fs::write(dir.path().join(".clove/index.db"), b"not a database").unwrap();
+
+    let (dirty, _) = run_json(clove(dir.path()).arg("doctor"));
+    assert_valid(&doctor, &dirty);
+    // Sanity: the seeded findings actually showed up (the schema is validating a
+    // populated envelope, not an empty one).
+    let codes: Vec<&str> = dirty["data"]["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["code"].as_str().unwrap())
+        .collect();
+    for expected in ["DANGLING_REF", "GITIGNORE_DRIFT", "ORPHAN_COMMENTS"] {
+        assert!(codes.contains(&expected), "missing {expected} in {codes:?}");
+    }
+}

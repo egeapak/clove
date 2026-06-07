@@ -897,7 +897,10 @@ files (the source of truth) and re-checks. Skipped under `--no-index`.
 
 **Output:** one issue per finding: `{ severity, code, item: <id|path|null>,
 message, fixable }`, plus a summary `{ errors, warnings, fixed, checked }`. JSON
-mode uses the standard envelope (§7.3) with the issue list in `data`.
+mode uses the standard envelope (§7.3) with the issue list in `data`, validated
+against `docs/json-schema/v1/doctor.json` (whose `code` enum is the canonical
+check taxonomy — adding a check extends it, guarded by the schema round-trip
+test).
 
 **Exit codes:** `0` when no error-severity issues remain (warnings alone still
 exit 0 — issues are data, mirroring `dep cycle`). With **`--strict`**, any
