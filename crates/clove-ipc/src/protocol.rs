@@ -7,7 +7,7 @@
 //! type) lives in [`crate::service`].
 
 use clove_core::graph::DepTreeNode;
-use clove_core::{ItemStatus, ItemType, Priority};
+use clove_types::{ItemStatus, ItemType, Priority};
 use serde::{Deserialize, Serialize};
 
 /// Wire-protocol version, returned by `ping` so a client can detect a daemon

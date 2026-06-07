@@ -9,7 +9,7 @@
 //! topological rank that a lone [`Item`] does not carry.
 
 use clove_core::graph::EdgeKind;
-use clove_core::Item;
+use clove_types::Item;
 use rusqlite::{params, Connection, Transaction, TransactionBehavior};
 
 use crate::db::{Index, IndexError};
@@ -187,7 +187,7 @@ mod tests {
     use super::*;
     use crate::db::Index;
     use camino::Utf8PathBuf;
-    use clove_core::{CloveId, ItemFrontmatter, ItemStatus, ItemType, Priority};
+    use clove_types::{CloveId, ItemFrontmatter, ItemStatus, ItemType, Priority};
 
     fn index() -> (tempfile::TempDir, Index) {
         let dir = tempfile::tempdir().unwrap();

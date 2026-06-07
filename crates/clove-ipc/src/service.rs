@@ -7,8 +7,7 @@
 //! and a serializable error, replacing the old hand-rolled `Request`/`Response`
 //! enums + frame codec.
 
-use clove_core::ops::NewSpec;
-use clove_core::ItemStatus;
+use clove_types::{ItemStatus, NewSpec};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;

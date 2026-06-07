@@ -2,6 +2,7 @@
 
 use camino::Utf8PathBuf;
 use clove_core::{ItemStore, NewItem};
+use clove_types::{ItemType, Priority};
 use clove_web::{build_router, AppState};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -19,8 +20,8 @@ fn fixture() -> (tempfile::TempDir, AppState, String) {
             "proj",
             NewItem {
                 title: "Dependency".to_owned(),
-                item_type: clove_core::ItemType::Bug,
-                priority: clove_core::Priority(0),
+                item_type: ItemType::Bug,
+                priority: Priority(0),
                 labels: vec!["area:core".to_owned()],
                 deps: vec![],
                 parent: None,
@@ -35,8 +36,8 @@ fn fixture() -> (tempfile::TempDir, AppState, String) {
             "proj",
             NewItem {
                 title: "Add webhook handler".to_owned(),
-                item_type: clove_core::ItemType::Feature,
-                priority: clove_core::Priority(1),
+                item_type: ItemType::Feature,
+                priority: Priority(1),
                 labels: vec!["area:payments".to_owned()],
                 deps: vec![dep.frontmatter.id.clone()],
                 parent: None,

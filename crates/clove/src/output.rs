@@ -4,7 +4,8 @@
 //! warnings go to stderr. A JSON consumer therefore always gets valid JSON on
 //! stdout regardless of warnings.
 
-use clove_core::{CloveError, OutputFormat};
+use clove_core::OutputFormat;
+use clove_types::CloveError;
 use serde_json::{json, Value};
 
 use crate::exit::{classify, ExitCode};

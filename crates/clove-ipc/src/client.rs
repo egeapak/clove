@@ -13,8 +13,7 @@
 use std::time::Duration;
 
 use camino::Utf8Path;
-use clove_core::ops::NewSpec;
-use clove_core::ItemStatus;
+use clove_types::{ItemStatus, NewSpec};
 use interprocess::local_socket::tokio::Stream;
 use interprocess::local_socket::traits::tokio::Stream as _;
 use serde_json::Value;

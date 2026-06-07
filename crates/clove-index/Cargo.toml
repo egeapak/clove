@@ -9,6 +9,7 @@ repository.workspace = true
 
 # M0 is file-only; the SQLite stack (rusqlite/blake3) is added in M1 (T-S01).
 [dependencies]
+clove-types.workspace = true
 clove-core.workspace = true
 rusqlite.workspace = true
 blake3.workspace = true

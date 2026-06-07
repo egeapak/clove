@@ -8,8 +8,9 @@
 use std::time::{Duration, Instant};
 
 use camino::Utf8Path;
-use clove_core::{CloveError, OutputFormat};
+use clove_core::OutputFormat;
 use clove_ipc::{pid_path, DaemonClient};
+use clove_types::CloveError;
 use serde_json::json;
 
 use crate::cli::DaemonAction;

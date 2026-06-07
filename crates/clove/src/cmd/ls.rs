@@ -1,7 +1,8 @@
 //! `clove ls` (T-CLI11): list items with optional filters.
 
-use clove_core::{CloveError, OutputFormat};
+use clove_core::OutputFormat;
 use clove_index::QueryMode;
+use clove_types::CloveError;
 
 use crate::cli::FilterArgs;
 use crate::cmd::index_read::{list_via_daemon, list_via_index};

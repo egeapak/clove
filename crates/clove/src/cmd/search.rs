@@ -2,7 +2,8 @@
 //! file-content scan. Both paths return the same JSON shape; `_meta.source`
 //! distinguishes them. Title matches are ranked ahead of body-only matches.
 
-use clove_core::{CloveError, CloveId, ItemFrontmatter, OutputFormat};
+use clove_core::OutputFormat;
+use clove_types::{CloveError, CloveId, ItemFrontmatter};
 
 use clove_ipc::{DaemonClient, SearchRequest};
 

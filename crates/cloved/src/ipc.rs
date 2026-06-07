@@ -11,13 +11,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use camino::Utf8PathBuf;
-use clove_core::ops::NewSpec;
-use clove_core::{CloveError, CloveId, ItemStore, ItemType};
+use clove_core::ItemStore;
 use clove_index::{Filter, Index, ItemListRow, QueryMode};
 use clove_ipc::{
     CloveRpc, GraphRequest, GraphResponse, LeanRow, QueryKind, QueryListResponse, QueryRequest,
     ReindexDone, RpcError, SearchRequest, StatusResponse, PROTOCOL_VERSION,
 };
+use clove_types::{CloveError, CloveId, ItemType, NewSpec};
 use serde_json::Value;
 use tarpc::context::Context;
 
@@ -109,7 +109,7 @@ impl CloveRpc for Dispatcher {
         self,
         _: Context,
         id: String,
-        status: clove_core::ItemStatus,
+        status: clove_types::ItemStatus,
     ) -> Result<Value, RpcError> {
         self.touch();
         let cid = CloveId::new(&id).map_err(rpc_err)?;

@@ -2,8 +2,9 @@
 
 use std::io::{IsTerminal, Read};
 
-use clove_core::{CloveError, OutputFormat};
+use clove_core::OutputFormat;
 use clove_index::QueryMode;
+use clove_types::CloveError;
 use serde::Deserialize;
 
 use crate::cli::QueryArgs;

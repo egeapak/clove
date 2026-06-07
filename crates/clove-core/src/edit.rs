@@ -32,8 +32,8 @@ pub fn apply_edit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CloveError, ItemType, LabelEdit, NewSpec};
-    use clove_types::ItemStatus;
+    use crate::{CloveError, ItemType};
+    use clove_types::{ItemStatus, LabelEdit, NewSpec};
     use serde_json::json;
     use tempfile::TempDir;
 

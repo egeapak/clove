@@ -3,8 +3,9 @@
 
 use std::collections::HashMap;
 
-use clove_core::{CloveId, GraphStore, ItemFrontmatter, OutputFormat};
+use clove_core::{GraphStore, OutputFormat};
 use clove_index::ItemListRow;
+use clove_types::{CloveId, ItemFrontmatter};
 use serde_json::{json, Map, Value};
 
 use crate::item_json::{frontmatter_object, project};

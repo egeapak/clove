@@ -1,6 +1,7 @@
 //! `clove label <id> <add|rm> <label>` (T-CLI07).
 
-use clove_core::{normalize_label, CloveError, OutputFormat};
+use clove_core::OutputFormat;
+use clove_types::{normalize_label, CloveError};
 use serde_json::Map;
 
 use crate::context::Ctx;

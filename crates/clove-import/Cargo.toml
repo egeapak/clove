@@ -15,6 +15,7 @@ default = ["github"]
 github = ["dep:octocrab", "dep:tokio", "dep:rustls"]
 
 [dependencies]
+clove-types.workspace = true
 clove-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true

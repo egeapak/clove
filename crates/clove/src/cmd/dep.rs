@@ -1,8 +1,9 @@
 //! `clove dep add|rm|tree|cycle` (T-CLI08, T-CLI09).
 
 use clove_core::graph::{render_dep_tree_human, DepTreeNode};
-use clove_core::{CloveError, CloveId, GraphStore, OutputFormat};
+use clove_core::{GraphStore, OutputFormat};
 use clove_ipc::{DaemonClient, GraphRequest, GraphResponse};
+use clove_types::{CloveError, CloveId};
 use serde_json::{json, Map, Value};
 
 use crate::cli::{DepAction, DepCycleArgs, DepTreeArgs};

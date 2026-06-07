@@ -19,7 +19,8 @@ mod listing;
 pub use listing::{Listing, SortDir, SortField, Tab, ViewFilter};
 
 use chrono::Utc;
-use clove_core::{CloveId, ItemFrontmatter, ItemStatus, ItemStore, ItemType};
+use clove_core::ItemStore;
+use clove_types::{CloveId, ItemFrontmatter, ItemStatus, ItemType};
 
 /// Input mode: browsing, typing a search query, or the facet filter menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -620,7 +621,8 @@ pub fn fmt_day(ts: chrono::DateTime<Utc>) -> String {
 mod tests {
     use super::*;
     use camino::Utf8PathBuf;
-    use clove_core::{ItemType, NewItem, Priority};
+    use clove_core::NewItem;
+    use clove_types::{ItemType, Priority};
 
     /// Build a store in a temp dir with a small dependency graph:
     /// `b` (open) ← `a` depends on `b`, plus an independent `c`.

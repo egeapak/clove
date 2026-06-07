@@ -6,7 +6,8 @@
 
 use camino::Utf8PathBuf;
 use clove_core::fixtures::write_fixtures;
-use clove_core::{GraphStore, ItemFrontmatter, ItemStore};
+use clove_core::{GraphStore, ItemStore};
+use clove_types::ItemFrontmatter;
 use criterion::{criterion_group, criterion_main, Criterion};
 
 /// Generate a 1,000-item corpus and return its parsed frontmatters.

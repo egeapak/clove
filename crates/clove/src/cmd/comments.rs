@@ -1,6 +1,7 @@
 //! `clove comment` / `clove comments` (T-CLI12).
 
-use clove_core::{add_comment, list_comments, CloveError, OutputFormat};
+use clove_core::{add_comment, list_comments, OutputFormat};
+use clove_types::CloveError;
 use serde_json::{json, Value};
 
 use crate::context::{rel_to_root, Ctx};

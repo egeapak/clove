@@ -1,7 +1,8 @@
 //! `clove new` (T-CLI03): create an item.
 
 use chrono::Utc;
-use clove_core::{normalize_label, CloveError, NewItem, OutputFormat, Priority};
+use clove_core::{NewItem, OutputFormat};
+use clove_types::{normalize_label, CloveError, Priority};
 use serde_json::json;
 
 use crate::cli::NewArgs;

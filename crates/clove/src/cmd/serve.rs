@@ -7,8 +7,8 @@
 
 use std::net::{IpAddr, SocketAddr};
 
-use clove_core::CloveError;
 use clove_ipc::DaemonClient;
+use clove_types::CloveError;
 use clove_web::AppState;
 
 use crate::cli::ServeArgs;

@@ -1,7 +1,7 @@
 //! The filtered/sorted projection over [`super::Data`]: which items are shown,
 //! in what order, and the list cursor. Cohesive state for a future lock.
 
-use clove_core::{ItemFrontmatter, ItemStatus, ItemType};
+use clove_types::{ItemFrontmatter, ItemStatus, ItemType};
 use ratatui::widgets::ListState;
 
 /// The top-level view filter.

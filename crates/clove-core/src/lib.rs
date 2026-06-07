@@ -20,9 +20,11 @@ pub mod view;
 pub mod write;
 
 // The pure type layer now lives in `clove-types`. Re-export its modules at the
-// same paths so this crate's internals keep using `crate::error`, `crate::model`,
-// `crate::id`, `crate::validate`, `crate::fields`, and `crate::limits` unchanged.
-pub use clove_types::{error, fields, id, limits, model, request, validate};
+// same paths, crate-internal only, so this crate's modules keep using
+// `crate::error`, `crate::model`, `crate::id`, `crate::validate`, `crate::fields`,
+// and `crate::limits` unchanged. These are NOT public: downstream crates depend
+// on `clove-types` and import the types from there directly.
+pub(crate) use clove_types::{error, fields, id, limits, model, validate};
 
 pub use comments::{add_comment, list_comments, Comment};
 pub use config::{load_config, CloveConfig, DaemonConfig, IndexConfig, OutputFormat, WebConfig};
@@ -43,9 +45,10 @@ pub use stats::{
 pub use store::{ItemStore, NewItem, ScanError};
 pub use view::{frontmatter_object, item_object, project, rank_of, sort_by_rank, Filters};
 
-// Re-export the `clove-types` data types at this crate's root, mirroring the
-// pre-split public surface so existing `clove_core::…` references keep resolving.
-pub use clove_types::{
-    error_code, normalize_body, normalize_label, validate_item, CloveError, CloveId, EditRequest,
-    Item, ItemFrontmatter, ItemStatus, ItemType, LabelEdit, NewSpec, Priority, ValidationError,
+// Bring the `clove-types` data types the lib uses into this crate's namespace
+// for internal use (`crate::CloveError`, `crate::Item`, …). Crate-internal only —
+// downstream crates import these from `clove-types`, not from `clove-core`.
+pub(crate) use clove_types::{
+    normalize_label, CloveError, CloveId, EditRequest, Item, ItemFrontmatter, ItemStatus, ItemType,
+    Priority,
 };

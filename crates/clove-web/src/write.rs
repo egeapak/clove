@@ -6,10 +6,8 @@ use std::collections::HashMap;
 
 use axum::extract::{Path, Query, State};
 use chrono::Utc;
-use clove_core::{
-    add_comment as core_add_comment, normalize_label, CloveError, CloveId, GraphStore, Item,
-    ItemStatus, ItemType, NewItem, Priority,
-};
+use clove_core::{add_comment as core_add_comment, GraphStore, NewItem};
+use clove_types::{normalize_label, CloveError, CloveId, Item, ItemStatus, ItemType, Priority};
 use serde::Deserialize;
 use serde_json::{json, Value};
 

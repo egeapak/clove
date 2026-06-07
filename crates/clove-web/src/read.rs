@@ -4,9 +4,8 @@
 use std::collections::{BTreeSet, HashMap};
 
 use axum::extract::{Path, Query, State};
-use clove_core::{
-    compute_stats, list_comments, CloveId, GraphStore, ItemFrontmatter, StatsOptions,
-};
+use clove_core::{compute_stats, list_comments, GraphStore, StatsOptions};
+use clove_types::{CloveId, ItemFrontmatter};
 use serde_json::{json, Value};
 
 use crate::dto::{frontmatter_value, item_value, GraphContext};
@@ -181,7 +180,7 @@ pub async fn get_comments(
 ) -> ApiResult {
     let id = parse_id(&id)?;
     if !state.store.exists(&id) {
-        return Err(ApiError::from(clove_core::CloveError::NotFound {
+        return Err(ApiError::from(clove_types::CloveError::NotFound {
             id: id.to_string(),
         }));
     }
@@ -211,7 +210,7 @@ pub async fn get_deptree(
     let tree = ctx
         .graph()
         .dep_tree(&id, depth)
-        .ok_or_else(|| ApiError::from(clove_core::CloveError::NotFound { id: id.to_string() }))?;
+        .ok_or_else(|| ApiError::from(clove_types::CloveError::NotFound { id: id.to_string() }))?;
     let value = serde_json::to_value(tree).unwrap_or(Value::Null);
     Ok(ok_data(value))
 }

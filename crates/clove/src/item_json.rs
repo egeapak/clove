@@ -7,7 +7,8 @@
 use std::collections::HashMap;
 
 use camino::Utf8Path;
-use clove_core::{list_comments, CloveId, Item, OutputFormat};
+use clove_core::{list_comments, OutputFormat};
+use clove_types::{CloveId, Item};
 use serde_json::{json, Map, Value};
 
 use crate::output::print_json_success;

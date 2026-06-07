@@ -11,7 +11,8 @@ use camino::Utf8PathBuf;
 use chrono::{DateTime, Utc};
 use clove_core::comments::add_comment_at;
 use clove_core::write::write_item_file;
-use clove_core::{CloveId, Item, ItemFrontmatter, ItemStatus, ItemStore, ItemType, Priority};
+use clove_core::ItemStore;
+use clove_types::{CloveId, Item, ItemFrontmatter, ItemStatus, ItemType, Priority};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 

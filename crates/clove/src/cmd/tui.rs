@@ -4,7 +4,8 @@
 //! terminal until the user quits. This command produces no JSON/structured
 //! output — it is interactive-only — so it ignores the output format.
 
-use clove_core::{CloveError, ItemStore, OutputFormat};
+use clove_core::{ItemStore, OutputFormat};
+use clove_types::CloveError;
 
 use crate::context::Ctx;
 

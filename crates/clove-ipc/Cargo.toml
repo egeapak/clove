@@ -12,7 +12,8 @@ repository.workspace = true
 # replacing the hand-rolled frame/protocol; tokio comes along with it (the
 # lean-CLI "no tokio" constraint was lifted deliberately — see HANDOFF).
 [dependencies]
-clove-core.workspace = true   # model types (ItemStatus/ItemType/Priority) on the wire
+clove-types.workspace = true
+clove-core.workspace = true   # graph::DepTreeNode on the wire (model types moved to clove-types)
 serde.workspace = true
 serde_json.workspace = true
 camino.workspace = true

@@ -1,7 +1,7 @@
 //! The facet filter menu: the selectable rows (built from values present in the
 //! repo) and the cursor into them. The *active* filter lives on `Listing`.
 
-use clove_core::{ItemStatus, ItemType};
+use clove_types::{ItemStatus, ItemType};
 
 /// One facet shown in the filter menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

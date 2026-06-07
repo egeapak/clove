@@ -19,7 +19,8 @@ pub mod tk;
 use std::collections::{HashMap, HashSet};
 
 use camino::Utf8Path;
-use clove_core::{CloveId, ItemStatus, ItemStore, Priority};
+use clove_core::ItemStore;
+use clove_types::{CloveId, ItemStatus, Priority};
 
 pub use beads::BeadsImporter;
 pub use error::ImportError;
