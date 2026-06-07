@@ -5,6 +5,7 @@ members = [
     "crates/clove-index",
     "crates/clove-import",
     "crates/clove-ipc",
+    "crates/clove-mcp",
     "crates/clove-tui",
     "crates/clove-web",
     "crates/clove",
@@ -56,6 +57,13 @@ toml = "0.8"                    # config.toml parsing
 jsonschema = "0.46"             # JSON Schema validation in tests (T-CLI14)
 ratatui = "0.29"                # terminal UI (M4 `clove tui`); re-exports crossterm
 pulldown-cmark = { version = "0.13", default-features = false }  # Markdown body rendering in `clove tui`
+# M4 MCP server: rmcp for the MCP (JSON-RPC stdio) surface; tarpc for the typed
+# CLI<->daemon RPC seam (replaces the hand-rolled clove-ipc frame/protocol).
+rmcp = { version = "1.7", default-features = false, features = ["server", "macros", "transport-io", "schemars"] }
+tarpc = { version = "0.37", features = ["serde1", "serde-transport", "serde-transport-json", "tokio1", "unix"] }
+futures = "0.3"                  # stream/sink combinators for the tarpc transport
+tokio-util = { version = "0.7", features = ["codec"] }   # LengthDelimited framing under tarpc serde-transport
+tokio-serde = { version = "0.9", features = ["json"] }   # JSON codec for the tarpc transport
 # M4 web UI (clove-web): HTTP/WS server + embedded SPA assets. All MIT, same
 # tokio/hyper ecosystem already in the tree — no new cargo-deny license class.
 axum = { version = "0.7", features = ["ws"] }   # router + extractors + native WebSocket
@@ -72,6 +80,7 @@ clove-core = { path = "crates/clove-core", version = "0.1.0" }
 clove-index = { path = "crates/clove-index", version = "0.1.0" }
 clove-import = { path = "crates/clove-import", version = "0.1.0", default-features = false }
 clove-ipc = { path = "crates/clove-ipc", version = "0.1.0" }
+clove-mcp = { path = "crates/clove-mcp", version = "0.1.0" }
 clove-tui = { path = "crates/clove-tui", version = "0.1.0" }
 clove-web = { path = "crates/clove-web", version = "0.1.0" }
 

@@ -17,12 +17,14 @@ use std::time::Duration;
 use anyhow::Context;
 use camino::Utf8Path;
 use clove_index::Index;
-use clove_ipc::{lock_path, pid_path, sock_path, socket_name};
+use clove_ipc::{build_transport, lock_path, pid_path, sock_path, socket_name, CloveRpc};
+use futures::StreamExt;
 use interprocess::local_socket::tokio::prelude::*;
 use interprocess::local_socket::tokio::Listener as TokioListener;
 use interprocess::local_socket::ListenerOptions;
+use tarpc::server::{BaseChannel, Channel};
 
-use crate::ipc::{handle_connection, Dispatcher};
+use crate::ipc::Dispatcher;
 use crate::state::{DaemonState, WatcherState};
 
 /// Run the daemon for `clove_dir` until a shutdown signal arrives. Blocks the
@@ -128,13 +130,26 @@ pub fn run(clove_dir: &Utf8Path) -> anyhow::Result<()> {
         .build()
         .context("building tokio runtime")?;
 
+    // Id prefix + default type for daemon-side `create` (topology B writes).
+    let id_prefix = config.as_ref().map_or_else(
+        || clove_core::CloveConfig::default().id_prefix,
+        |c| c.id_prefix.clone(),
+    );
+    let default_type = config.as_ref().map_or_else(
+        || clove_core::CloveConfig::default().default_type,
+        |c| c.default_type,
+    );
+
     let dispatcher = Dispatcher {
         index: Arc::clone(&index),
         state: Arc::clone(&state),
+        repo_root: repo_root.clone(),
         issues_dir: issues_dir.clone(),
         db_path: db_path.clone(),
         auto_refresh,
         graph: Arc::clone(&graph),
+        id_prefix,
+        default_type,
     };
 
     let serve_result: anyhow::Result<()> = runtime.block_on(async {
@@ -239,15 +254,22 @@ async fn serve_web(state: Option<clove_web::AppState>, addr: std::net::SocketAdd
     std::future::pending::<()>().await
 }
 
-/// Accept connections forever, serving each on its own task.
+/// Accept connections forever, serving each as a tarpc channel on its own task.
 async fn accept_loop(listener: TokioListener, dispatcher: Dispatcher) {
     loop {
         match listener.accept().await {
             Ok(stream) => {
                 let dispatcher = dispatcher.clone();
                 tokio::spawn(async move {
-                    // EOF / connection reset are normal client teardown.
-                    let _ = handle_connection(stream, dispatcher).await;
+                    // One tarpc channel per connection; each request is served on
+                    // its own task. EOF / reset are normal client teardown.
+                    let transport = build_transport(stream);
+                    BaseChannel::with_defaults(transport)
+                        .execute(dispatcher.serve())
+                        .for_each(|response| async move {
+                            tokio::spawn(response);
+                        })
+                        .await;
                 });
             }
             Err(e) => {

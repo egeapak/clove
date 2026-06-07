@@ -40,6 +40,8 @@ pub struct DaemonState {
     watcher_state: WatcherState,
     last_event_at: Option<Instant>,
     batches_applied: u64,
+    ping_count: u64,
+    last_ping_at: Option<Instant>,
     web_addr: Option<String>,
 }
 
@@ -52,6 +54,8 @@ impl DaemonState {
             watcher_state: WatcherState::Idle,
             last_event_at: None,
             batches_applied: 0,
+            ping_count: 0,
+            last_ping_at: None,
             web_addr: None,
         }
     }
@@ -88,6 +92,15 @@ impl DaemonState {
         self.last_event_at = Some(Instant::now());
     }
 
+    /// Record a served `ping`: bump the counter, stamp the time, and count it as
+    /// activity (so a client/MCP heartbeat resets the idle-shutdown window).
+    pub fn record_ping(&mut self) {
+        self.ping_count += 1;
+        let now = Instant::now();
+        self.last_ping_at = Some(now);
+        self.last_event_at = Some(now);
+    }
+
     /// Build the `STATUS` IPC payload from the current state.
     pub fn snapshot(&self) -> StatusResponse {
         StatusResponse {
@@ -96,6 +109,8 @@ impl DaemonState {
             watcher_state: self.watcher_state.as_str().to_owned(),
             last_event_ms: self.last_event_at.map(|t| t.elapsed().as_millis() as u64),
             batches_applied: self.batches_applied,
+            ping_count: self.ping_count,
+            last_ping_ms: self.last_ping_at.map(|t| t.elapsed().as_millis() as u64),
             web_addr: self.web_addr.clone(),
         }
     }
@@ -119,5 +134,19 @@ mod tests {
         assert_eq!(snap.items_indexed, 9);
         assert_eq!(snap.watcher_state, "watching");
         assert!(snap.last_event_ms.is_some());
+    }
+
+    #[test]
+    fn record_ping_counts_and_marks_activity() {
+        let mut s = DaemonState::new(0);
+        assert_eq!(s.snapshot().ping_count, 0);
+        assert_eq!(s.snapshot().last_ping_ms, None);
+        // A ping bumps the counter, stamps last-ping, and counts as activity.
+        s.record_ping();
+        s.record_ping();
+        let snap = s.snapshot();
+        assert_eq!(snap.ping_count, 2);
+        assert!(snap.last_ping_ms.is_some(), "last ping stamped");
+        assert!(snap.last_event_ms.is_some(), "ping resets idle window");
     }
 }

@@ -12,6 +12,8 @@ allow = [
     "MIT",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
+    "0BSD",          # BSD Zero Clause (public-domain-equivalent); via interprocess→recvmsg (tokio local-socket support the tarpc IPC transport uses)
+    "CC0-1.0",       # public-domain dedication; via the `notify` file-watcher (daemon + web UI)
     "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
@@ -27,8 +29,17 @@ wildcards = "deny"
 
 [advisories]
 yanked = "deny"
-# `ignore` is intentionally empty; add RUSTSEC IDs here only with justification.
-ignore = []
+# Add RUSTSEC IDs here only with justification.
+ignore = [
+    # Marvin Attack: potential RSA key-recovery via timing sidechannel. Pulled
+    # only by the optional `github` feature (octocrab → jsonwebtoken → rsa) for
+    # GitHub App JWT auth, which clove does not exercise in a setting where an
+    # attacker can observe decryption timing. No fixed `rsa` release exists.
+    "RUSTSEC-2023-0071",
+    # `paste` is unmaintained (not a vulnerability). Pulled transitively by
+    # `ratatui` (the `clove tui` browser); revisit on a ratatui bump.
+    "RUSTSEC-2024-0436",
+]
 
 [sources]
 unknown-registry = "deny"

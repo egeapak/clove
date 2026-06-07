@@ -5,7 +5,6 @@
 //! spawns the sibling `cloved` binary detached and waits for its pid (readiness);
 //! `stop` signals it and waits for teardown; `status` queries it over IPC.
 
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use camino::Utf8Path;
@@ -45,8 +44,7 @@ fn start(clove_dir: &Utf8Path, format: OutputFormat) -> Result<ExitCode, CloveEr
         );
     }
 
-    let bin = cloved_path()?;
-    spawn_detached(&bin, clove_dir)?;
+    clove_ipc::spawn_daemon(clove_dir).map_err(|e| daemon_err(&format!("spawning cloved: {e}")))?;
 
     // Wait for readiness (the pid file, written only after bind + startup sweep).
     let pid_file = pid_path(clove_dir);
@@ -110,6 +108,8 @@ fn status(clove_dir: &Utf8Path, format: OutputFormat) -> Result<ExitCode, CloveE
         "watcher_state": status.watcher_state,
         "last_event_ms": status.last_event_ms,
         "batches_applied": status.batches_applied,
+        "ping_count": status.ping_count,
+        "last_ping_ms": status.last_ping_ms,
         "web_addr": status.web_addr,
     });
     match format {
@@ -121,8 +121,12 @@ fn status(clove_dir: &Utf8Path, format: OutputFormat) -> Result<ExitCode, CloveE
                 .map(|a| format!("  web http://{a}"))
                 .unwrap_or_default();
             println!(
-                "running  uptime {}s  items {}  watcher {}  batches {}{web}",
-                status.uptime_s, status.items_indexed, status.watcher_state, status.batches_applied
+                "running  uptime {}s  items {}  watcher {}  batches {}  pings {}{web}",
+                status.uptime_s,
+                status.items_indexed,
+                status.watcher_state,
+                status.batches_applied,
+                status.ping_count,
             );
         }
     }
@@ -147,84 +151,6 @@ fn daemon_err(msg: &str) -> CloveError {
         path: camino::Utf8PathBuf::from("daemon"),
         source: std::io::Error::other(msg.to_owned()),
     }
-}
-
-/// Locate the `cloved` binary next to the running `clove` executable (the install
-/// layout, and the cargo target dir in tests).
-fn cloved_path() -> Result<PathBuf, CloveError> {
-    let exe =
-        std::env::current_exe().map_err(|e| daemon_err(&format!("locating clove exe: {e}")))?;
-    let dir = exe
-        .parent()
-        .ok_or_else(|| daemon_err("clove exe has no parent dir"))?;
-    let name = if cfg!(windows) {
-        "cloved.exe"
-    } else {
-        "cloved"
-    };
-    let path = dir.join(name);
-    if path.exists() {
-        Ok(path)
-    } else {
-        Err(daemon_err(&format!(
-            "cloved binary not found at {}",
-            path.display()
-        )))
-    }
-}
-
-/// Spawn `cloved run --clove-dir <dir>` detached from this process and terminal.
-#[cfg(unix)]
-fn spawn_detached(bin: &std::path::Path, clove_dir: &Utf8Path) -> Result<(), CloveError> {
-    use std::os::unix::process::CommandExt;
-    use std::process::{Command, Stdio};
-
-    let mut cmd = Command::new(bin);
-    cmd.arg("run")
-        .arg("--clove-dir")
-        .arg(clove_dir.as_str())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    // New session leader → detached from the controlling terminal. The parent
-    // (`clove`) exits right after readiness, so the daemon reparents to init.
-    unsafe {
-        cmd.pre_exec(|| {
-            // SAFETY: setsid in the forked child before exec; no allocation.
-            if libc_setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    cmd.spawn()
-        .map(|_child| ())
-        .map_err(|e| daemon_err(&format!("spawning cloved: {e}")))
-}
-
-#[cfg(unix)]
-extern "C" {
-    #[link_name = "setsid"]
-    fn libc_setsid() -> i32;
-}
-
-#[cfg(windows)]
-fn spawn_detached(bin: &std::path::Path, clove_dir: &Utf8Path) -> Result<(), CloveError> {
-    use std::os::windows::process::CommandExt;
-    use std::process::{Command, Stdio};
-    const DETACHED_PROCESS: u32 = 0x0000_0008;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    Command::new(bin)
-        .arg("run")
-        .arg("--clove-dir")
-        .arg(clove_dir.as_str())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
-        .spawn()
-        .map(|_child| ())
-        .map_err(|e| daemon_err(&format!("spawning cloved: {e}")))
 }
 
 /// Signal the daemon to shut down: SIGTERM (Unix) / named event (Windows).

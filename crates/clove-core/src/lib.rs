@@ -12,11 +12,13 @@ pub mod graph;
 pub mod id;
 pub mod limits;
 pub mod model;
+pub mod ops;
 pub mod parse;
 pub mod repo;
 pub mod stats;
 pub mod store;
 pub mod validate;
+pub mod view;
 pub mod write;
 
 pub use comments::{add_comment, list_comments, Comment};
@@ -29,6 +31,7 @@ pub use graph::{
 };
 pub use id::CloveId;
 pub use model::{normalize_label, Item, ItemFrontmatter, ItemStatus, ItemType, Priority};
+pub use ops::NewSpec;
 pub use parse::{
     contains_yaml_anchor_or_alias, parse_frontmatter_file, parse_item_bytes, parse_item_file,
     parse_item_lenient,
@@ -39,3 +42,4 @@ pub use stats::{
 };
 pub use store::{ItemStore, NewItem, ScanError};
 pub use validate::{validate_item, ValidationError};
+pub use view::{frontmatter_object, item_object, project, rank_of, sort_by_rank, Filters};

@@ -8,17 +8,9 @@ use crate::item_json::print_item;
 use crate::util::{now_seconds, parse_id};
 
 /// Apply a status transition to frontmatter, maintaining the closed-timestamp
-/// invariant: set `closed` when moving to closed, clear it otherwise.
+/// invariant (delegates to the shared [`clove_core::ops::set_status`]).
 pub fn set_status(fm: &mut ItemFrontmatter, status: ItemStatus) {
-    fm.status = status;
-    match status {
-        ItemStatus::Closed => {
-            if fm.closed.is_none() {
-                fm.closed = Some(now_seconds());
-            }
-        }
-        ItemStatus::Open | ItemStatus::InProgress => fm.closed = None,
-    }
+    clove_core::ops::set_status(fm, status, now_seconds());
 }
 
 pub fn run(

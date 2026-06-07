@@ -16,14 +16,19 @@ path = "src/main.rs"
 # clove-import's GitHub (octocrab/tokio) layer. Default-on; a lean build can opt
 # out with `--no-default-features`, in which case those arms return a clean error.
 [features]
-default = ["github"]
+default = ["github", "mcp"]
 github = ["clove-import/github"]
+# `mcp` wires the `clove mcp` subcommand to the clove-mcp (rmcp) server. Default-on,
+# mirroring `github`; `--no-default-features` drops it (the subcommand then errors
+# cleanly) for lean/cross builds.
+mcp = ["dep:clove-mcp"]
 
 [dependencies]
 clove-core.workspace = true
 clove-index.workspace = true
 clove-import = { workspace = true, default-features = false }   # M2 import/export/merge-driver; `github` via this crate's `github` feature
-clove-ipc.workspace = true       # M3: daemon liveness probe + QUERY routing (no tokio — lean client)
+clove-ipc.workspace = true       # M3: daemon liveness probe + QUERY routing
+clove-mcp = { workspace = true, optional = true }   # M4: `clove mcp` server (rmcp), behind the `mcp` feature
 clove-tui.workspace = true       # M4: `clove tui` read-only terminal browser
 clove-web.workspace = true       # M4: `clove serve` web UI server
 tokio.workspace = true           # M4: async runtime for `clove serve`

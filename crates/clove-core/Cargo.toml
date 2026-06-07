@@ -12,6 +12,7 @@ autobenches = false
 
 [dependencies]
 serde.workspace = true
+serde_json.workspace = true       # item→JSON shaping in `view` (shared read surface)
 serde_yaml_neo.workspace = true
 toml.workspace = true
 thiserror.workspace = true

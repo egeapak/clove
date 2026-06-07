@@ -3,90 +3,17 @@
 
 use std::collections::HashMap;
 
-use clove_core::{
-    normalize_label, CloveError, CloveId, GraphStore, ItemFrontmatter, ItemStatus, ItemType,
-    OutputFormat, Priority,
-};
+use clove_core::{CloveId, GraphStore, ItemFrontmatter, OutputFormat};
 use clove_index::ItemListRow;
 use serde_json::{json, Map, Value};
 
 use crate::item_json::{frontmatter_object, project};
 use crate::output::{print_json_list, print_jsonl_items};
-use crate::util::{parse_status, parse_type};
 
-/// Parsed list filters. A `None` field does not constrain.
-#[derive(Debug, Default, Clone)]
-pub struct Filters {
-    pub status: Option<ItemStatus>,
-    pub item_type: Option<ItemType>,
-    pub label: Option<String>,
-    pub assignee: Option<String>,
-    pub priority: Option<Priority>,
-}
-
-impl Filters {
-    /// Build filters from raw CLI strings, validating each.
-    pub fn parse(
-        status: Option<&str>,
-        item_type: Option<&str>,
-        label: Option<&str>,
-        assignee: Option<&str>,
-        priority: Option<u8>,
-    ) -> Result<Filters, CloveError> {
-        Ok(Filters {
-            status: status.map(parse_status).transpose()?,
-            item_type: item_type.map(parse_type).transpose()?,
-            label: label.map(normalize_label).transpose()?,
-            assignee: assignee.map(str::to_owned),
-            priority: priority.map(Priority::new).transpose()?,
-        })
-    }
-
-    /// Whether `fm` satisfies every set constraint.
-    pub fn matches(&self, fm: &ItemFrontmatter) -> bool {
-        if let Some(s) = self.status {
-            if fm.status != s {
-                return false;
-            }
-        }
-        if let Some(t) = self.item_type {
-            if fm.item_type != t {
-                return false;
-            }
-        }
-        if let Some(p) = self.priority {
-            if fm.priority != p {
-                return false;
-            }
-        }
-        if let Some(a) = &self.assignee {
-            if fm.assignee.as_deref() != Some(a.as_str()) {
-                return false;
-            }
-        }
-        if let Some(l) = &self.label {
-            if !fm.labels.iter().any(|x| x == l) {
-                return false;
-            }
-        }
-        true
-    }
-}
-
-/// Sort frontmatter in place by `(priority, topological_rank, id)` — the canonical
-/// list order shared with the index path.
-pub fn sort_by_priority_topo(items: &mut [ItemFrontmatter], ranks: &HashMap<CloveId, usize>) {
-    items.sort_by(|a, b| {
-        a.priority
-            .cmp(&b.priority)
-            .then_with(|| {
-                let ra = ranks.get(&a.id).copied().unwrap_or(usize::MAX);
-                let rb = ranks.get(&b.id).copied().unwrap_or(usize::MAX);
-                ra.cmp(&rb)
-            })
-            .then_with(|| a.id.cmp(&b.id))
-    });
-}
+// `Filters` and the canonical `(priority, topo, id)` ordering live in
+// `clove_core::view`, shared by the CLI, MCP server, and web UI.
+pub use clove_core::view::sort_by_rank as sort_by_priority_topo;
+pub use clove_core::view::Filters;
 
 /// Default cap on list output, so `ls` on a large repo stays snappy (the index
 /// steps only this many rows). `_meta.total` still reports the full match count.

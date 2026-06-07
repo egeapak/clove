@@ -1,0 +1,806 @@
+//! High-level item operations shared by the CLI mutation commands, the daemon
+//! (which serializes writes through one process for topology B), and the MCP
+//! server's direct fallback.
+//!
+//! Each high-level op performs the store I/O and returns the §7.4 item JSON (or
+//! a small result object), so every surface produces byte-identical shapes. The
+//! pure frontmatter mutators ([`set_status`], [`apply_assignments`]) are also
+//! reused by the CLI's interactive edit path.
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+
+use crate::view::item_object;
+use crate::{
+    add_comment, list_comments, normalize_label, CloveError, CloveId, GraphStore, Item,
+    ItemFrontmatter, ItemStatus, ItemStore, ItemType, NewItem, Priority,
+};
+
+/// A raw "new item" spec. Strings are parsed/validated by [`create`]; the struct
+/// is serializable so it can also ride the daemon RPC wire unchanged.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NewSpec {
+    /// The item title (required, non-empty).
+    pub title: String,
+    /// `bug|feature|chore|docs|epic`; `None` → the caller's default type.
+    pub item_type: Option<String>,
+    /// Priority 0–4; `None` → [`Priority::DEFAULT`].
+    pub priority: Option<u8>,
+    #[serde(default)]
+    pub labels: Vec<String>,
+    #[serde(default)]
+    pub deps: Vec<String>,
+    pub parent: Option<String>,
+    pub assignee: Option<String>,
+    pub body: Option<String>,
+}
+
+/// Apply a status transition to frontmatter, maintaining the closed-timestamp
+/// invariant: set `closed` when moving to closed, clear it otherwise.
+pub fn set_status(fm: &mut ItemFrontmatter, status: ItemStatus, now: DateTime<Utc>) {
+    fm.status = status;
+    match status {
+        ItemStatus::Closed => {
+            if fm.closed.is_none() {
+                fm.closed = Some(now);
+            }
+        }
+        ItemStatus::Open | ItemStatus::InProgress => fm.closed = None,
+    }
+}
+
+/// Apply a list of `KEY=VALUE` (and `labels+=`/`labels-=`) edits to frontmatter.
+/// All edits are applied to the in-memory copy before a single write.
+pub fn apply_assignments(
+    fm: &mut ItemFrontmatter,
+    assignments: &[String],
+    now: DateTime<Utc>,
+) -> Result<(), CloveError> {
+    for token in assignments {
+        apply_one(fm, token, now)?;
+    }
+    Ok(())
+}
+
+fn apply_one(fm: &mut ItemFrontmatter, token: &str, now: DateTime<Utc>) -> Result<(), CloveError> {
+    let (raw_key, value) = token
+        .split_once('=')
+        .ok_or_else(|| CloveError::InvalidField {
+            field: "edit".to_owned(),
+            reason: format!("expected KEY=VALUE, got `{token}`"),
+        })?;
+
+    // labels+=val / labels-=val
+    if let Some(key) = raw_key.strip_suffix('+') {
+        require_labels(key)?;
+        let canonical = normalize_label(value)?;
+        if !fm.labels.contains(&canonical) {
+            fm.labels.push(canonical);
+            fm.labels.sort();
+            fm.labels.dedup();
+        }
+        return Ok(());
+    }
+    if let Some(key) = raw_key.strip_suffix('-') {
+        require_labels(key)?;
+        let canonical = normalize_label(value)?;
+        fm.labels.retain(|l| l != &canonical);
+        return Ok(());
+    }
+
+    match raw_key {
+        "status" => set_status(fm, ItemStatus::parse(value)?, now),
+        "priority" => {
+            let n: u8 = value.parse().map_err(|_| CloveError::InvalidField {
+                field: "priority".to_owned(),
+                reason: format!("expected 0–4, got `{value}`"),
+            })?;
+            fm.priority = Priority::new(n)?;
+        }
+        "type" => fm.item_type = ItemType::parse(value)?,
+        "assignee" => {
+            fm.assignee = if value.trim().is_empty() {
+                None
+            } else {
+                Some(value.to_owned())
+            };
+        }
+        "title" => {
+            if value.trim().is_empty() {
+                return Err(CloveError::InvalidField {
+                    field: "title".to_owned(),
+                    reason: "title cannot be empty".to_owned(),
+                });
+            }
+            fm.title = value.to_owned();
+        }
+        other => {
+            return Err(CloveError::InvalidField {
+                field: other.to_owned(),
+                reason:
+                    "unknown editable field (status|priority|type|assignee|title|labels+=|labels-=)"
+                        .to_owned(),
+            })
+        }
+    }
+    Ok(())
+}
+
+fn require_labels(key: &str) -> Result<(), CloveError> {
+    if key == "labels" {
+        Ok(())
+    } else {
+        Err(CloveError::InvalidField {
+            field: key.to_owned(),
+            reason: "only `labels` supports += / -=".to_owned(),
+        })
+    }
+}
+
+// ---- High-level operations (store I/O → JSON) --------------------------------
+
+/// Create an item from a raw [`NewSpec`]. Returns `{ id, path }` (path relative
+/// to the repo root), matching `clove new`.
+pub fn create(
+    store: &ItemStore,
+    prefix: &str,
+    default_type: ItemType,
+    spec: NewSpec,
+    now: DateTime<Utc>,
+) -> Result<Value, CloveError> {
+    let item_type = match spec.item_type.as_deref() {
+        Some(t) => ItemType::parse(t)?,
+        None => default_type,
+    };
+    let priority = match spec.priority {
+        Some(p) => Priority::new(p)?,
+        None => Priority::DEFAULT,
+    };
+    let mut labels = Vec::new();
+    for raw in &spec.labels {
+        labels.push(normalize_label(raw)?);
+    }
+    labels.sort();
+    labels.dedup();
+    let mut deps = Vec::new();
+    for raw in &spec.deps {
+        deps.push(CloveId::new(raw)?);
+    }
+    let parent = match spec.parent.as_deref() {
+        Some(p) => Some(CloveId::new(p)?),
+        None => None,
+    };
+
+    let new_item = NewItem {
+        title: spec.title,
+        item_type,
+        priority,
+        labels,
+        deps,
+        parent,
+        assignee: spec.assignee,
+        body: spec.body.unwrap_or_default(),
+    };
+    let item = store.create(prefix, new_item, now)?;
+    let id = item.frontmatter.id.clone();
+    let rel = rel_path(store, &id);
+    Ok(json!({ "id": id.as_str(), "path": rel }))
+}
+
+/// Transition an item's status; returns the updated item object.
+pub fn transition(
+    store: &ItemStore,
+    id: &CloveId,
+    status: ItemStatus,
+    now: DateTime<Utc>,
+) -> Result<Value, CloveError> {
+    let mut item = store.get(id)?;
+    set_status(&mut item.frontmatter, status, now);
+    let saved = store.update(&item, now)?;
+    Ok(Value::Object(item_object(&saved)))
+}
+
+/// Apply `KEY=VALUE` edits atomically; returns the updated item object.
+pub fn edit(
+    store: &ItemStore,
+    id: &CloveId,
+    assignments: &[String],
+    now: DateTime<Utc>,
+) -> Result<Value, CloveError> {
+    let mut item = store.get(id)?;
+    apply_assignments(&mut item.frontmatter, assignments, now)?;
+    let saved = store.update(&item, now)?;
+    Ok(Value::Object(item_object(&saved)))
+}
+
+/// Append a comment; returns `{ id, path }` (path relative to the repo root).
+pub fn comment(
+    store: &ItemStore,
+    id: &CloveId,
+    author: &str,
+    body: &str,
+) -> Result<Value, CloveError> {
+    if !store.exists(id) {
+        return Err(CloveError::NotFound { id: id.to_string() });
+    }
+    let path = add_comment(store.issues_dir(), id, author, body)?;
+    let rel = path
+        .strip_prefix(store.repo_root())
+        .map(|p| p.to_string())
+        .unwrap_or_else(|_| path.to_string());
+    Ok(json!({ "id": id.as_str(), "path": rel }))
+}
+
+/// Add a hard dependency `id → dep_id` with the full validation pipeline
+/// (DESIGN §5.4): existence, self-loop, cycle, duplicate. Returns the updated
+/// item object.
+pub fn dep_add(
+    store: &ItemStore,
+    id: &CloveId,
+    dep_id: &CloveId,
+    now: DateTime<Utc>,
+) -> Result<Value, CloveError> {
+    if !store.exists(id) {
+        return Err(CloveError::NotFound { id: id.to_string() });
+    }
+    if !store.exists(dep_id) {
+        return Err(CloveError::NotFound {
+            id: dep_id.to_string(),
+        });
+    }
+    if id == dep_id {
+        return Err(CloveError::SelfDependency { id: id.to_string() });
+    }
+    let (frontmatters, _errors) = store.scan_frontmatter()?;
+    let (graph, _dangling) = GraphStore::build(&frontmatters);
+    if graph.check_would_cycle(id, dep_id) {
+        return Err(CloveError::DependencyCycle {
+            from: id.to_string(),
+            to: dep_id.to_string(),
+            cycle: vec![id.to_string(), dep_id.to_string()],
+        });
+    }
+    let mut item = store.get(id)?;
+    if item.frontmatter.deps.contains(dep_id) {
+        return Err(CloveError::DependencyExists {
+            from: id.to_string(),
+            to: dep_id.to_string(),
+        });
+    }
+    item.frontmatter.deps.push(dep_id.clone());
+    item.frontmatter.deps.sort();
+    item.frontmatter.deps.dedup();
+    let saved = store.update(&item, now)?;
+    Ok(Value::Object(item_object(&saved)))
+}
+
+/// The full §7.4 item object for `id`: frontmatter + body + comment_count +
+/// computed `ready`/`blocked_by` (a whole-store graph build, like `clove show
+/// --format json`).
+pub fn show(store: &ItemStore, id: &CloveId) -> Result<Value, CloveError> {
+    let item = store.get(id)?;
+    let comment_count = list_comments(store.issues_dir(), id)
+        .map(|c| c.len())
+        .unwrap_or(0);
+
+    let mut obj = item_object(&item);
+    obj.insert("body".to_owned(), json!(item.body));
+    obj.insert("comment_count".to_owned(), json!(comment_count));
+
+    let (frontmatters, _errors) = store.scan_frontmatter()?;
+    let (graph, _dangling) = GraphStore::build(&frontmatters);
+    let ready = graph.ready_items().contains(id);
+    let blocked_by: Vec<String> = graph
+        .blocked_items()
+        .into_iter()
+        .find(|b| &b.id == id)
+        .map(|b| {
+            b.blocking_deps
+                .iter()
+                .chain(b.dangling_deps.iter())
+                .map(CloveId::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    obj.insert("ready".to_owned(), json!(ready));
+    obj.insert("blocked_by".to_owned(), json!(blocked_by));
+    Ok(Value::Object(obj))
+}
+
+/// Compute the work-item analytics report (`clove stats`) from the file store
+/// and return it as JSON. `top` caps the assignee/label breakdowns (0 = no cap).
+pub fn stats(
+    store: &ItemStore,
+    top: usize,
+    include_epics: bool,
+    now: DateTime<Utc>,
+) -> Result<Value, CloveError> {
+    let (frontmatters, _errors) = store.scan_frontmatter()?;
+    let (graph, _dangling) = GraphStore::build(&frontmatters);
+    let report = crate::stats::compute(
+        &frontmatters,
+        &graph,
+        now,
+        crate::StatsOptions { top, include_epics },
+    );
+    Ok(serde_json::to_value(&report).unwrap_or(Value::Null))
+}
+
+// ---- Read-list operations (file-based; always correct) -----------------------
+
+/// List items matching `filters`, ordered by `(priority, topo, id)`, paginated.
+/// Returns `{ total, returned, offset, items: [full objects] }`.
+pub fn list(
+    store: &ItemStore,
+    filters: &crate::Filters,
+    offset: usize,
+    limit: Option<usize>,
+) -> Result<Value, CloveError> {
+    let (frontmatters, _errors) = store.scan_frontmatter()?;
+    let (graph, _dangling) = GraphStore::build(&frontmatters);
+    let ranks = graph.topological_ranks();
+    let mut matched: Vec<ItemFrontmatter> = frontmatters
+        .into_iter()
+        .filter(|fm| filters.matches(fm))
+        .collect();
+    crate::view::sort_by_rank(&mut matched, &ranks);
+    let objects: Vec<Value> = matched
+        .iter()
+        .map(|fm| Value::Object(crate::view::frontmatter_object(fm)))
+        .collect();
+    Ok(page(objects, offset, limit))
+}
+
+/// Items ready to work on now (open/in_progress, all hard deps closed, no
+/// dangling), ordered `(priority, topo, id)`, filtered + paginated.
+pub fn ready(
+    store: &ItemStore,
+    filters: &crate::Filters,
+    limit: Option<usize>,
+) -> Result<Value, CloveError> {
+    let (frontmatters, _errors) = store.scan_frontmatter()?;
+    let by_id: std::collections::HashMap<CloveId, ItemFrontmatter> = frontmatters
+        .iter()
+        .cloned()
+        .map(|fm| (fm.id.clone(), fm))
+        .collect();
+    let (graph, _dangling) = GraphStore::build(&frontmatters);
+    let objects: Vec<Value> = graph
+        .ready_items()
+        .iter()
+        .filter_map(|id| by_id.get(id))
+        .filter(|fm| filters.matches(fm))
+        .map(|fm| Value::Object(crate::view::frontmatter_object(fm)))
+        .collect();
+    Ok(page(objects, 0, limit))
+}
+
+/// Items blocked by open or (with `include_warnings`) missing deps, each with a
+/// `blocked_by` list, ordered `(priority, topo, id)`, filtered + paginated.
+pub fn blocked(
+    store: &ItemStore,
+    filters: &crate::Filters,
+    include_warnings: bool,
+    limit: Option<usize>,
+) -> Result<Value, CloveError> {
+    let (frontmatters, _errors) = store.scan_frontmatter()?;
+    let by_id: std::collections::HashMap<CloveId, ItemFrontmatter> = frontmatters
+        .iter()
+        .cloned()
+        .map(|fm| (fm.id.clone(), fm))
+        .collect();
+    let (graph, _dangling) = GraphStore::build(&frontmatters);
+    let ranks = graph.topological_ranks();
+
+    let mut rows: Vec<(ItemFrontmatter, Vec<String>)> = graph
+        .blocked_items()
+        .into_iter()
+        .filter(|b| include_warnings || !b.blocking_deps.is_empty())
+        .filter_map(|b| {
+            by_id.get(&b.id).cloned().map(|fm| {
+                let blocked_by: Vec<String> = b
+                    .blocking_deps
+                    .iter()
+                    .chain(b.dangling_deps.iter())
+                    .map(CloveId::to_string)
+                    .collect();
+                (fm, blocked_by)
+            })
+        })
+        .collect();
+    rows.retain(|(fm, _)| filters.matches(fm));
+    rows.sort_by(|a, b| {
+        a.0.priority
+            .cmp(&b.0.priority)
+            .then_with(|| {
+                crate::view::rank_of(&ranks, &a.0.id).cmp(&crate::view::rank_of(&ranks, &b.0.id))
+            })
+            .then_with(|| a.0.id.cmp(&b.0.id))
+    });
+    let objects: Vec<Value> = rows
+        .into_iter()
+        .map(|(fm, blocked_by)| {
+            let mut obj = crate::view::frontmatter_object(&fm);
+            obj.insert("blocked_by".to_owned(), json!(blocked_by));
+            Value::Object(obj)
+        })
+        .collect();
+    Ok(page(objects, 0, limit))
+}
+
+/// Case-insensitive substring search over title/labels/body; title matches rank
+/// first, then labels, then body. Returns full item objects, paginated.
+pub fn search(store: &ItemStore, text: &str, limit: Option<usize>) -> Result<Value, CloveError> {
+    let needle = text.to_lowercase();
+    let items = store.list()?;
+    let mut hits: Vec<(u8, Value)> = Vec::new();
+    for item in &items {
+        let fm = &item.frontmatter;
+        let in_title = fm.title.to_lowercase().contains(&needle);
+        let in_label = fm.labels.iter().any(|l| l.to_lowercase().contains(&needle));
+        let in_body = item.body.to_lowercase().contains(&needle);
+        if in_title || in_label || in_body {
+            let rank = if in_title {
+                0
+            } else if in_label {
+                1
+            } else {
+                2
+            };
+            hits.push((rank, Value::Object(item_object(item))));
+        }
+    }
+    hits.sort_by(|a, b| a.0.cmp(&b.0));
+    let objects: Vec<Value> = hits.into_iter().map(|(_, o)| o).collect();
+    Ok(page(objects, 0, limit))
+}
+
+/// The dependency tree rooted at `id` to `depth`, as a nested JSON object.
+pub fn dep_tree(store: &ItemStore, id: &CloveId, depth: usize) -> Result<Value, CloveError> {
+    if !store.exists(id) {
+        return Err(CloveError::NotFound { id: id.to_string() });
+    }
+    let (frontmatters, _errors) = store.scan_frontmatter()?;
+    let (graph, _dangling) = GraphStore::build(&frontmatters);
+    let root = graph
+        .dep_tree(id, depth)
+        .ok_or_else(|| CloveError::NotFound { id: id.to_string() })?;
+    Ok(tree_to_json(&root))
+}
+
+fn tree_to_json(node: &crate::DepTreeNode) -> Value {
+    json!({
+        "id": node.id.as_str(),
+        "title": node.title,
+        "status": node.status.as_str(),
+        "ready": node.ready,
+        "cycle_ref": node.cycle_ref,
+        "children": node.children.iter().map(tree_to_json).collect::<Vec<_>>(),
+    })
+}
+
+/// Apply offset/limit and wrap a list of item values into the standard payload.
+fn page(objects: Vec<Value>, offset: usize, limit: Option<usize>) -> Value {
+    let total = objects.len();
+    let items: Vec<Value> = objects
+        .into_iter()
+        .skip(offset)
+        .take(limit.unwrap_or(usize::MAX))
+        .collect();
+    json!({ "total": total, "returned": items.len(), "offset": offset, "items": items })
+}
+
+/// The item's relative path under the repo root (best effort).
+fn rel_path(store: &ItemStore, id: &CloveId) -> String {
+    let path = store.path_for(id);
+    path.strip_prefix(store.repo_root())
+        .map(|p| p.to_string())
+        .unwrap_or_else(|_| path.to_string())
+}
+
+/// Re-read `id` and return it (used by callers that want the [`Item`] rather
+/// than its JSON, e.g. to render a human summary after a mutation).
+pub fn reload(store: &ItemStore, id: &CloveId) -> Result<Item, CloveError> {
+    store.get(id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn store() -> (TempDir, ItemStore) {
+        let dir = TempDir::new().unwrap();
+        let root = camino::Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
+        std::fs::create_dir_all(root.join(".clove/issues")).unwrap();
+        let store = ItemStore::new(root);
+        (dir, store)
+    }
+
+    fn new_id(store: &ItemStore, title: &str) -> CloveId {
+        let v = create(
+            store,
+            "proj",
+            ItemType::Feature,
+            NewSpec {
+                title: title.to_owned(),
+                ..Default::default()
+            },
+            Utc::now(),
+        )
+        .unwrap();
+        CloveId::new(v["id"].as_str().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn create_then_show_round_trips() {
+        let (_d, store) = store();
+        let v = create(
+            &store,
+            "proj",
+            ItemType::Bug,
+            NewSpec {
+                title: "fix it".to_owned(),
+                priority: Some(1),
+                labels: vec!["Area:Core".to_owned()],
+                body: Some("# Title\n\nbody".to_owned()),
+                ..Default::default()
+            },
+            Utc::now(),
+        )
+        .unwrap();
+        let id = CloveId::new(v["id"].as_str().unwrap()).unwrap();
+
+        let shown = show(&store, &id).unwrap();
+        assert_eq!(shown["title"], "fix it");
+        assert_eq!(shown["type"], "bug");
+        assert_eq!(shown["priority"], 1);
+        // Label was canonicalized on the way in.
+        assert_eq!(shown["labels"], json!(["area:core"]));
+        assert_eq!(shown["body"], "# Title\n\nbody");
+        assert_eq!(shown["comment_count"], 0);
+        assert_eq!(shown["ready"], true);
+        assert_eq!(shown["blocked_by"], json!([]));
+    }
+
+    #[test]
+    fn create_rejects_bad_fields() {
+        let (_d, store) = store();
+        // Negative: invalid type, out-of-range priority, malformed dep id.
+        assert!(create(
+            &store,
+            "proj",
+            ItemType::Feature,
+            NewSpec {
+                title: "x".to_owned(),
+                item_type: Some("saga".to_owned()),
+                ..Default::default()
+            },
+            Utc::now()
+        )
+        .is_err());
+        assert!(create(
+            &store,
+            "proj",
+            ItemType::Feature,
+            NewSpec {
+                title: "x".to_owned(),
+                priority: Some(9),
+                ..Default::default()
+            },
+            Utc::now()
+        )
+        .is_err());
+        assert!(create(
+            &store,
+            "proj",
+            ItemType::Feature,
+            NewSpec {
+                title: "x".to_owned(),
+                deps: vec!["not a real id".to_owned()],
+                ..Default::default()
+            },
+            Utc::now()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn transition_sets_and_clears_closed() {
+        let (_d, store) = store();
+        let id = new_id(&store, "task");
+        let closed = transition(&store, &id, ItemStatus::Closed, Utc::now()).unwrap();
+        assert_eq!(closed["status"], "closed");
+        assert!(closed["closed"].is_string(), "closed timestamp set");
+        let reopened = transition(&store, &id, ItemStatus::Open, Utc::now()).unwrap();
+        assert_eq!(reopened["status"], "open");
+        assert!(reopened["closed"].is_null(), "closed cleared on reopen");
+    }
+
+    #[test]
+    fn edit_applies_multiple_fields_and_labels() {
+        let (_d, store) = store();
+        let id = new_id(&store, "task");
+        let v = edit(
+            &store,
+            &id,
+            &[
+                "priority=0".to_owned(),
+                "assignee=alice".to_owned(),
+                "labels+=urgent".to_owned(),
+            ],
+            Utc::now(),
+        )
+        .unwrap();
+        assert_eq!(v["priority"], 0);
+        assert_eq!(v["assignee"], "alice");
+        assert_eq!(v["labels"], json!(["urgent"]));
+        // Negative: an unknown field is rejected.
+        assert!(edit(&store, &id, &["bogus=1".to_owned()], Utc::now()).is_err());
+    }
+
+    #[test]
+    fn dep_add_validation_pipeline() {
+        let (_d, store) = store();
+        let a = new_id(&store, "a");
+        let b = new_id(&store, "b");
+
+        // Positive: a depends on b.
+        let v = dep_add(&store, &a, &b, Utc::now()).unwrap();
+        assert_eq!(v["deps"], json!([b.as_str()]));
+
+        // Negative: duplicate.
+        assert!(matches!(
+            dep_add(&store, &a, &b, Utc::now()),
+            Err(CloveError::DependencyExists { .. })
+        ));
+        // Negative: self-loop.
+        assert!(matches!(
+            dep_add(&store, &a, &a, Utc::now()),
+            Err(CloveError::SelfDependency { .. })
+        ));
+        // Negative: cycle (b → a, when a → b already).
+        assert!(matches!(
+            dep_add(&store, &b, &a, Utc::now()),
+            Err(CloveError::DependencyCycle { .. })
+        ));
+        // Negative: missing dependency target.
+        let missing = CloveId::new("proj-ZZZZZZZZ").unwrap();
+        assert!(matches!(
+            dep_add(&store, &a, &missing, Utc::now()),
+            Err(CloveError::NotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn list_ready_blocked_partition() {
+        let (_d, store) = store();
+        let a = new_id(&store, "a");
+        let b = new_id(&store, "b");
+        dep_add(&store, &a, &b, Utc::now()).unwrap(); // a blocked by open b
+
+        let all = list(&store, &crate::Filters::default(), 0, None).unwrap();
+        assert_eq!(all["total"], 2);
+        assert_eq!(all["items"].as_array().unwrap().len(), 2);
+
+        let ready_v = ready(&store, &crate::Filters::default(), None).unwrap();
+        let ready_ids: Vec<&str> = ready_v["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ready_ids, vec![b.as_str()], "only b is ready");
+
+        let blocked_v = blocked(&store, &crate::Filters::default(), false, None).unwrap();
+        let items = blocked_v["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["id"], a.as_str());
+        assert_eq!(items[0]["blocked_by"], json!([b.as_str()]));
+    }
+
+    #[test]
+    fn list_filters_and_paginates() {
+        let (_d, store) = store();
+        for i in 0..5 {
+            new_id(&store, &format!("t{i}"));
+        }
+        // Edge: limit caps the page but total reflects the full match count.
+        let v = list(&store, &crate::Filters::default(), 0, Some(2)).unwrap();
+        assert_eq!(v["total"], 5);
+        assert_eq!(v["returned"], 2);
+        // Filter that matches nothing → empty page, total 0.
+        let none = list(
+            &store,
+            &crate::Filters::parse(Some("closed"), None, None, None, None).unwrap(),
+            0,
+            None,
+        )
+        .unwrap();
+        assert_eq!(none["total"], 0);
+        assert!(none["items"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn search_ranks_title_before_body() {
+        let (_d, store) = store();
+        create(
+            &store,
+            "proj",
+            ItemType::Feature,
+            NewSpec {
+                title: "widget".to_owned(),
+                ..Default::default()
+            },
+            Utc::now(),
+        )
+        .unwrap();
+        create(
+            &store,
+            "proj",
+            ItemType::Feature,
+            NewSpec {
+                title: "other".to_owned(),
+                body: Some("mentions widget in body".to_owned()),
+                ..Default::default()
+            },
+            Utc::now(),
+        )
+        .unwrap();
+        let v = search(&store, "WIDGET", None).unwrap();
+        let titles: Vec<&str> = v["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["title"].as_str().unwrap())
+            .collect();
+        assert_eq!(titles, vec!["widget", "other"], "title hit ranks first");
+        // Negative: a needle present nowhere returns nothing.
+        assert_eq!(search(&store, "zzzzz", None).unwrap()["total"], 0);
+    }
+
+    #[test]
+    fn dep_tree_renders_and_rejects_missing() {
+        let (_d, store) = store();
+        let a = new_id(&store, "a");
+        let b = new_id(&store, "b");
+        dep_add(&store, &a, &b, Utc::now()).unwrap();
+        let tree = dep_tree(&store, &a, 5).unwrap();
+        assert_eq!(tree["id"], a.as_str());
+        assert_eq!(tree["children"][0]["id"], b.as_str());
+        // Negative: unknown root.
+        assert!(dep_tree(&store, &CloveId::new("proj-ZZZZZZZZ").unwrap(), 5).is_err());
+    }
+
+    #[test]
+    fn stats_reports_totals() {
+        let (_d, store) = store();
+        new_id(&store, "a");
+        let b = new_id(&store, "b");
+        transition(&store, &b, ItemStatus::Closed, Utc::now()).unwrap();
+        let v = stats(&store, 10, true, Utc::now()).unwrap();
+        assert_eq!(v["total"], 2);
+        assert_eq!(v["by_status"]["closed"], 1);
+        assert_eq!(v["by_status"]["open"], 1);
+    }
+
+    #[test]
+    fn comment_round_trips_and_blocks_when_ready() {
+        let (_d, store) = store();
+        let a = new_id(&store, "a");
+        let b = new_id(&store, "b");
+        // a depends on open b → a is blocked, not ready.
+        dep_add(&store, &a, &b, Utc::now()).unwrap();
+        let shown = show(&store, &a).unwrap();
+        assert_eq!(shown["ready"], false);
+        assert_eq!(shown["blocked_by"], json!([b.as_str()]));
+
+        // Comment on a missing item errors; on a real item it returns a path.
+        assert!(comment(&store, &CloveId::new("proj-ZZZZZZZZ").unwrap(), "me", "hi").is_err());
+        let c = comment(&store, &a, "me@example.com", "working on it").unwrap();
+        assert_eq!(c["id"], a.as_str());
+        assert!(c["path"].as_str().unwrap().contains(a.as_str()));
+        assert_eq!(show(&store, &a).unwrap()["comment_count"], 1);
+    }
+}

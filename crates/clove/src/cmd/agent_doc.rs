@@ -127,6 +127,18 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
   `clove stats --history`.\n\
 - `clove doctor --fix` cleans up a stale daemon socket/pid left by a crash.\n\
 \n\
+## MCP server (for agents)\n\
+\n\
+- `clove mcp` runs a Model Context Protocol server over stdio (newline-delimited\n\
+  JSON-RPC), exposing clove as native tools so an agent need not shell out:\n\
+  `clove_ready`, `clove_blocked`, `clove_list`, `clove_show`, `clove_search`,\n\
+  `clove_dep_tree`, `clove_stats` (reads) and `clove_new`, `clove_status`,\n\
+  `clove_edit`, `clove_comment`, `clove_dep_add` (writes). Tool results carry the\n\
+  same item JSON as the CLI. Configure it as an MCP server with command `clove`\n\
+  and arg `mcp`, launched in the repository.\n\
+- Writes are coordinated through a running daemon when present (so concurrent\n\
+  agents share one writer) and fall back to direct file writes otherwise.\n\
+\n\
 ## Conventions\n\
 \n\
 - Labels are case-insensitive and canonicalized (`Area:iOS` → `area:ios`).\n\

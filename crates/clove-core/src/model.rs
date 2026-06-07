@@ -62,6 +62,20 @@ impl ItemStatus {
             ItemStatus::Closed => "closed",
         }
     }
+
+    /// Parse a status word, accepting the common aliases used by the CLI/MCP
+    /// surfaces (`in-progress`/`started` → in_progress; `done` → closed).
+    pub fn parse(raw: &str) -> Result<ItemStatus, CloveError> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "open" => Ok(ItemStatus::Open),
+            "in_progress" | "in-progress" | "started" => Ok(ItemStatus::InProgress),
+            "closed" | "done" => Ok(ItemStatus::Closed),
+            other => Err(CloveError::InvalidField {
+                field: "status".to_owned(),
+                reason: format!("expected open|in_progress|closed, got `{other}`"),
+            }),
+        }
+    }
 }
 
 /// The kind of work an item represents. Serialized as the `type` field.
@@ -85,6 +99,21 @@ impl ItemType {
             ItemType::Chore => "chore",
             ItemType::Docs => "docs",
             ItemType::Epic => "epic",
+        }
+    }
+
+    /// Parse a type word into [`ItemType`].
+    pub fn parse(raw: &str) -> Result<ItemType, CloveError> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "bug" => Ok(ItemType::Bug),
+            "feature" => Ok(ItemType::Feature),
+            "chore" => Ok(ItemType::Chore),
+            "docs" => Ok(ItemType::Docs),
+            "epic" => Ok(ItemType::Epic),
+            other => Err(CloveError::InvalidField {
+                field: "type".to_owned(),
+                reason: format!("expected bug|feature|chore|docs|epic, got `{other}`"),
+            }),
         }
     }
 }
