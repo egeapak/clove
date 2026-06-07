@@ -47,7 +47,10 @@ pub struct Dispatcher {
 
 impl CloveRpc for Dispatcher {
     async fn ping(self, _: Context) -> u32 {
-        self.touch();
+        // A ping is a heartbeat: count it and reset the idle-shutdown window.
+        if let Ok(mut state) = self.state.lock() {
+            state.record_ping();
+        }
         PROTOCOL_VERSION
     }
 
@@ -61,6 +64,8 @@ impl CloveRpc for Dispatcher {
                 watcher_state: "error".to_owned(),
                 last_event_ms: None,
                 batches_applied: 0,
+                ping_count: 0,
+                last_ping_ms: None,
                 web_addr: None,
             },
         }

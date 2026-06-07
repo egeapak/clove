@@ -110,10 +110,17 @@ the mutation/show/stats methods, and `cloved` implements them via `clove_core::o
 daemon` IPC test, and 3 `clove mcp` stdio e2e tests; full `cargo test --workspace`,
 clippy, fmt green.
 
+`clove mcp` **auto-starts** the `cloved` daemon (best-effort; `CLOVE_MCP_NO_DAEMON`
+opts out) and runs a background **heartbeat** that pings it on an interval
+(`CLOVE_MCP_HEARTBEAT_MS`, default 30 s) to keep it alive for the session; the
+daemon tracks **ping stats** (`ping_count` + `last_ping_ms`, surfaced in `STATUS`
+/ `clove daemon status`). Spawn logic is shared via `clove_ipc::{spawn_daemon,
+ensure_daemon}` (also used by `clove daemon start`).
+
 **Next step (rest of M4):** TUI write actions (status/priority/label edits, …),
-bidirectional vendor bridges, richer history/changelog, and (MCP follow-ups)
-auto-starting the daemon from `clove mcp` + server-push notifications when the
-ready set changes — see `IMPLEMENTATION_PLAN.md` M4 backlog.
+bidirectional vendor bridges, richer history/changelog, and the remaining MCP
+follow-up — server-push notifications (MCP `tools/list_changed` / a ready-queue
+subscription) when the graph changes — see `IMPLEMENTATION_PLAN.md` M4 backlog.
 
 ### Small backlog (optional M0/M1 nice-to-haves, non-blocking)
 - Broaden JSON-schema validation to more commands (version/reindex/doctor/new)

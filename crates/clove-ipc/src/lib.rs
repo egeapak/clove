@@ -14,6 +14,7 @@
 pub mod client;
 pub mod protocol;
 pub mod service;
+pub mod spawn;
 pub mod transport;
 
 use std::hash::{Hash, Hasher};
@@ -26,6 +27,7 @@ pub use protocol::{
     SearchRequest, StatusResponse, PROTOCOL_VERSION,
 };
 pub use service::{CloveRpc, CloveRpcClient, RpcError};
+pub use spawn::{cloved_path, ensure_daemon, spawn_daemon};
 pub use transport::build_transport;
 
 /// The Unix socket filename inside `.clove/` (DESIGN §8.2).

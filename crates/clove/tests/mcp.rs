@@ -39,10 +39,24 @@ struct Session {
     stdout: BufReader<ChildStdout>,
 }
 
+/// A `clove mcp` command with the daemon auto-start opted out (the default for
+/// tests that exercise the direct-core fallback path — hermetic, no spawned daemon).
+fn fallback_cmd(dir: &Path) -> Command {
+    let mut cmd = clove(dir);
+    cmd.env("CLOVE_MCP_NO_DAEMON", "1");
+    cmd
+}
+
 impl Session {
-    /// Spawn the server and complete the `initialize` / `initialized` handshake.
+    /// Spawn the server (fallback / no-daemon) and complete the handshake.
     fn start(dir: &Path) -> Session {
-        let mut child = clove(dir)
+        Session::start_cmd(fallback_cmd(dir))
+    }
+
+    /// Spawn the server from a pre-configured command and complete the
+    /// `initialize` / `initialized` handshake.
+    fn start_cmd(mut cmd: Command) -> Session {
+        let mut child = cmd
             .arg("mcp")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -187,4 +201,73 @@ fn tool_error_is_reported_as_is_error() {
     let result = s.call(2, "clove_show", json!({ "id": "not-a-valid-id" }));
     assert_eq!(result["isError"], true, "bad id surfaces as a tool error");
     s.shutdown();
+}
+
+/// `clove mcp` auto-starts the daemon (topology B) and the heartbeat keeps it
+/// alive + accrues ping stats. Unix-only (kills the spawned daemon at the end).
+#[cfg(unix)]
+#[test]
+fn auto_starts_daemon_and_heartbeats() {
+    use clove_ipc::DaemonClient;
+    use std::time::{Duration, Instant};
+
+    extern "C" {
+        #[link_name = "kill"]
+        fn libc_kill(pid: i32, sig: i32) -> i32;
+    }
+
+    let dir = init_repo();
+    let clove_dir = camino::Utf8PathBuf::from_path_buf(dir.path().join(".clove")).unwrap();
+
+    // Daemon auto-start enabled; web disabled (avoid port contention) and a fast
+    // heartbeat so the test observes pings accruing without a long wait.
+    let mut cmd = clove(dir.path());
+    cmd.env("CLOVED_DISABLE_WEB", "1")
+        .env("CLOVE_MCP_HEARTBEAT_MS", "150");
+    let mut s = Session::start_cmd(cmd);
+
+    // The MCP server should have brought a daemon up. Wait briefly for readiness.
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(6) && !clove_dir.join("daemon.pid").exists() {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        clove_dir.join("daemon.pid").exists(),
+        "clove mcp should have auto-started the daemon"
+    );
+
+    // A write tool routes through the daemon and lands on disk.
+    let created = s.call(2, "clove_new", json!({ "title": "via daemon" }));
+    let id = created["structuredContent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(dir
+        .path()
+        .join(".clove/issues")
+        .join(format!("{id}.md"))
+        .exists());
+
+    // Ping stats accrue: query the daemon directly and confirm the count climbs
+    // as the heartbeat fires.
+    let mut client = DaemonClient::probe(&clove_dir).expect("daemon alive");
+    let first = client.status().unwrap().ping_count;
+    assert!(first >= 1, "startup ensure + probe should have pinged");
+    std::thread::sleep(Duration::from_millis(450)); // ~3 heartbeat ticks
+    let later = client.status().unwrap().ping_count;
+    assert!(
+        later > first,
+        "heartbeat must keep pinging (first={first}, later={later})"
+    );
+
+    s.shutdown();
+
+    // Tear down the spawned daemon so the test leaves nothing running.
+    if let Ok(pid) = std::fs::read_to_string(clove_dir.join("daemon.pid")) {
+        if let Ok(pid) = pid.trim().parse::<i32>() {
+            unsafe {
+                libc_kill(pid, 15);
+            }
+        }
+    }
 }
