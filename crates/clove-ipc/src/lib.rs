@@ -14,6 +14,7 @@
 pub mod client;
 pub mod frame;
 pub mod protocol;
+pub mod service;
 
 use std::hash::{Hash, Hasher};
 

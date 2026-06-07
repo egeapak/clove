@@ -1,23 +1,25 @@
 [package]
 name = "clove-ipc"
-description = "clove daemon IPC wire protocol, frame codec, and blocking client (M3)"
+description = "clove daemon IPC: typed tarpc service for the CLI<->daemon seam (M3/M4)"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
-# Deliberately lean: serde + a synchronous interprocess client only. No tokio,
-# notify, or git2 — this is the crate the lean `clove` CLI links to talk to the
-# daemon, so it must not pull the daemon's async/file-watch/git stack into the CLI
-# (DESIGN §1, M3_PLAN §1.1 lean-CLI gate).
+# The CLI<->daemon seam. As of M4 this uses `tarpc` (typed RPC over a local
+# socket) instead of the hand-rolled frame/protocol; tokio comes along with it
+# (the lean-CLI "no tokio" constraint was lifted deliberately — see HANDOFF).
 [dependencies]
-clove-core.workspace = true   # model types (ItemStatus/ItemType/Priority) on the wire; pure, lean
+clove-core.workspace = true   # model types (ItemStatus/ItemType/Priority) on the wire
 serde.workspace = true
 serde_json.workspace = true
 interprocess.workspace = true
 camino.workspace = true
 thiserror.workspace = true
+tarpc.workspace = true
+tokio.workspace = true
+futures.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

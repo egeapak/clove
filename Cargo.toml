@@ -5,6 +5,7 @@ members = [
     "crates/clove-index",
     "crates/clove-import",
     "crates/clove-ipc",
+    "crates/clove-mcp",
     "crates/clove-tui",
     "crates/clove",
     "crates/cloved",
@@ -55,6 +56,11 @@ toml = "0.8"                    # config.toml parsing
 jsonschema = "0.46"             # JSON Schema validation in tests (T-CLI14)
 ratatui = "0.29"                # terminal UI (M4 `clove tui`); re-exports crossterm
 pulldown-cmark = { version = "0.13", default-features = false }  # Markdown body rendering in `clove tui`
+# M4 MCP server: rmcp for the MCP (JSON-RPC stdio) surface; tarpc for the typed
+# CLI<->daemon RPC seam (replaces the hand-rolled clove-ipc frame/protocol).
+rmcp = { version = "1.7", default-features = false, features = ["server", "macros", "transport-io", "schemars"] }
+tarpc = { version = "0.37", features = ["serde1", "serde-transport", "serde-transport-json", "tokio1", "unix"] }
+futures = "0.3"                  # stream/sink combinators for the tarpc transport
 
 # Internal crates (explicit version keeps them off cargo-deny's wildcard list
 # and is required for publishing clove-core to crates.io — PRD §13).

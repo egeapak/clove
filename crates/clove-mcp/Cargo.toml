@@ -1,0 +1,24 @@
+[package]
+name = "clove-mcp"
+description = "clove MCP (Model Context Protocol) server: exposes clove to AI agents over stdio (M4)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+# The MCP server is async (rmcp is built on tokio) and routes to the cloved
+# daemon over the tarpc seam (clove-ipc), falling back to direct clove-core
+# access when no daemon is reachable.
+[dependencies]
+clove-core.workspace = true
+clove-ipc.workspace = true
+rmcp.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+camino.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
