@@ -114,6 +114,8 @@ async fn heartbeat_layer(
 
 /// Build the axum router (API + WebSocket + embedded-SPA fallback).
 pub fn build_router(state: AppState) -> Router {
+    // Decompress the embedded gzip assets into memory once, up front.
+    assets::warm();
     Router::new()
         .route(
             "/api/v1/items",
@@ -145,12 +147,10 @@ pub fn build_router(state: AppState) -> Router {
             heartbeat_layer,
         ))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
-        // Negotiated response compression (brotli > zstd > gzip by the client's
-        // Accept-Encoding). Outermost so it compresses both the embedded SPA
-        // assets and large API JSON (e.g. /items at 10k items). `Best` quality so
-        // brotli reaches its full ~11% win over gzip; the assets are immutable
-        // (hashed + long-cached), so a browser compresses each at most once per
-        // version, and API payloads are small enough that best-level is cheap.
+        // gzip-only compression for the *dynamic* API responses (e.g. /items at
+        // 10k items). Static SPA assets are already served pre-gzipped from
+        // memory with their own Content-Encoding, so this layer skips them. No
+        // brotli/zstd library is linked (gzip via pure-Rust flate2).
         .layer(CompressionLayer::new().quality(CompressionLevel::Best))
         .with_state(state)
 }

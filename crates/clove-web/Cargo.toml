@@ -21,7 +21,11 @@ chrono.workspace = true
 notify.workspace = true
 rust-embed.workspace = true
 mime_guess.workspace = true
+flate2.workspace = true
 futures-util.workspace = true
+
+[build-dependencies]
+flate2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -60,9 +60,10 @@ pulldown-cmark = { version = "0.13", default-features = false }  # Markdown body
 # tokio/hyper ecosystem already in the tree — no new cargo-deny license class.
 axum = { version = "0.7", features = ["ws"] }   # router + extractors + native WebSocket
 tower = "0.5"                   # middleware plumbing for the web server
-tower-http = { version = "0.6", features = ["compression-br", "compression-gzip", "compression-zstd"] }  # negotiated br/zstd/gzip response compression
-rust-embed = "8"                # embed the built SvelteKit `dist/` into the binary (disk-load in debug)
+tower-http = { version = "0.6", features = ["compression-gzip"] }  # gzip-only response compression for the dynamic API (no brotli/zstd C deps in the binary)
+rust-embed = "8"                # embed the gzip-precompressed SPA assets into the binary
 mime_guess = "2"                # content-type for embedded static assets
+flate2 = "1"                    # gzip the embedded assets (build script) + decompress them once at startup (pure-Rust miniz_oxide; no C deps)
 futures-util = "0.3"            # WS stream/sink helpers for axum::extract::ws
 
 # Internal crates (explicit version keeps them off cargo-deny's wildcard list
