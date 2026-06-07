@@ -23,7 +23,7 @@
   });
 </script>
 
-<!-- eslint-disable-next-line svelte/no-at-html-tags -- sanitized in markdown.ts -->
+<!-- eslint-disable-next-line svelte/no-at-html-tags -- micromark escapes raw HTML by default (see markdown.ts) -->
 <div class="md">{@html html}</div>
 
 <style>
@@ -51,15 +51,23 @@
   .md :global(li) {
     margin: 3px 0;
   }
-  .md :global(li.task) {
+  /* Native GFM task lists render as `<li><input type=checkbox disabled> text`.
+     GFM marks the parent list with `class="contains-task-list"`; style the
+     items that hold a checkbox so they sit flush and lose the bullet. */
+  .md :global(li:has(> input[type='checkbox'])) {
     list-style: none;
     margin-left: -20px;
     display: flex;
-    align-items: center;
+    align-items: baseline;
     gap: 8px;
   }
-  .md :global(li.task.done) {
-    text-decoration: line-through;
+  .md :global(li > input[type='checkbox']) {
+    margin: 0;
+    flex: none;
+    accent-color: var(--accent);
+  }
+  /* GFM strikethrough renders as `<del>`. */
+  .md :global(del) {
     color: var(--text-dim);
   }
   .md :global(pre) {
