@@ -123,7 +123,7 @@ fn handshake_and_tools_list() {
 
     let resp = s.request(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
     let tools = resp["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 12, "all 12 tools advertised");
+    assert_eq!(tools.len(), 14, "all 14 tools advertised");
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     for expected in [
         "clove_ready",
@@ -138,6 +138,8 @@ fn handshake_and_tools_list() {
         "clove_edit",
         "clove_comment",
         "clove_dep_add",
+        "clove_dep_remove",
+        "clove_set_parent",
     ] {
         assert!(names.contains(&expected), "missing tool {expected}");
     }

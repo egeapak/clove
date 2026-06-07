@@ -12,7 +12,10 @@ use serde::{Deserialize, Serialize};
 
 /// Wire-protocol version, returned by `ping` so a client can detect a daemon
 /// built against an incompatible protocol. Bumped on any incompatible change.
-pub const PROTOCOL_VERSION: u32 = 2;
+///
+/// v3 (M4 add/edit): added the `apply_edit(EditRequest)`, `dep_remove`, and
+/// `set_parent` mutation methods to the service.
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// A dependency-graph query (DESIGN §8.4 extension for `blocked`/`dep`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -13,7 +13,7 @@
 use std::time::Duration;
 
 use camino::Utf8Path;
-use clove_types::{ItemStatus, NewSpec};
+use clove_types::{EditRequest, ItemStatus, NewSpec};
 use interprocess::local_socket::tokio::Stream;
 use interprocess::local_socket::traits::tokio::Stream as _;
 use serde_json::Value;
@@ -179,6 +179,11 @@ impl DaemonClient {
         self.app(self.client.edit(context::current(), id, assignments))
     }
 
+    /// Apply a structured [`EditRequest`] atomically; returns the updated item object.
+    pub fn apply_edit(&mut self, id: String, req: EditRequest) -> Result<Value, ClientError> {
+        self.app(self.client.apply_edit(context::current(), id, req))
+    }
+
     /// Append a comment; returns `{ id, path }`.
     pub fn add_comment(
         &mut self,
@@ -195,6 +200,16 @@ impl DaemonClient {
     /// Add a hard dependency `id → dep_id`; returns the updated item object.
     pub fn dep_add(&mut self, id: String, dep_id: String) -> Result<Value, ClientError> {
         self.app(self.client.dep_add(context::current(), id, dep_id))
+    }
+
+    /// Remove a hard dependency `id → dep_id`; returns the updated item object.
+    pub fn dep_remove(&mut self, id: String, dep_id: String) -> Result<Value, ClientError> {
+        self.app(self.client.dep_remove(context::current(), id, dep_id))
+    }
+
+    /// Set (or clear) an item's parent; returns the updated item object.
+    pub fn set_parent(&mut self, id: String, parent: Option<String>) -> Result<Value, ClientError> {
+        self.app(self.client.set_parent(context::current(), id, parent))
     }
 
     /// Full item detail (frontmatter + body + comment_count + ready/blocked_by).

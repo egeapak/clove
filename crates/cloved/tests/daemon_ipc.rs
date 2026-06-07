@@ -224,6 +224,31 @@ fn mutations_round_trip_through_daemon() {
     // Negative: a self-loop is rejected by the daemon's validation pipeline.
     assert!(client.dep_add(id.clone(), id.clone()).is_err());
 
+    // apply_edit: a structured edit including a body (the new v3 capability),
+    // proving the EditRequest rides the wire and the body lands on disk.
+    let renamed = client
+        .apply_edit(
+            id.clone(),
+            clove_types::EditRequest {
+                title: Some("renamed via daemon".to_owned()),
+                body: Some("a fresh body".to_owned()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(renamed["title"], "renamed via daemon");
+    assert_eq!(client.show(id.clone()).unwrap()["body"], "a fresh body\n");
+
+    // dep_remove then re-add (keeps later assertions stable).
+    let undone = client.dep_remove(id.clone(), dep_id.clone()).unwrap();
+    assert_eq!(undone["deps"], serde_json::json!([]));
+    client.dep_add(id.clone(), dep_id.clone()).unwrap();
+
+    // set_parent: make `id` a child of `dep`, then clear it.
+    let parented = client.set_parent(id.clone(), Some(dep_id.clone())).unwrap();
+    assert_eq!(parented["parent"], dep_id);
+    assert!(client.set_parent(id.clone(), None).unwrap()["parent"].is_null());
+
     // comment + show reflect the accumulated state.
     client
         .add_comment(id.clone(), "me@example.com".to_owned(), "done".to_owned())

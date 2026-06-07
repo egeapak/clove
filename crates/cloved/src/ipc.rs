@@ -131,6 +131,19 @@ impl CloveRpc for Dispatcher {
         out
     }
 
+    async fn apply_edit(
+        self,
+        _: Context,
+        id: String,
+        req: clove_types::EditRequest,
+    ) -> Result<Value, RpcError> {
+        self.touch();
+        let cid = CloveId::new(&id).map_err(rpc_err)?;
+        let out = clove_core::apply_edit(&self.store(), &cid, &req, now()).map_err(rpc_err);
+        self.after_write(&out);
+        out
+    }
+
     async fn add_comment(
         self,
         _: Context,
@@ -150,6 +163,33 @@ impl CloveRpc for Dispatcher {
         let cid = CloveId::new(&id).map_err(rpc_err)?;
         let dep = CloveId::new(&dep_id).map_err(rpc_err)?;
         let out = clove_core::ops::dep_add(&self.store(), &cid, &dep, now()).map_err(rpc_err);
+        self.after_write(&out);
+        out
+    }
+
+    async fn dep_remove(self, _: Context, id: String, dep_id: String) -> Result<Value, RpcError> {
+        self.touch();
+        let cid = CloveId::new(&id).map_err(rpc_err)?;
+        let dep = CloveId::new(&dep_id).map_err(rpc_err)?;
+        let out = clove_core::ops::dep_remove(&self.store(), &cid, &dep, now()).map_err(rpc_err);
+        self.after_write(&out);
+        out
+    }
+
+    async fn set_parent(
+        self,
+        _: Context,
+        id: String,
+        parent: Option<String>,
+    ) -> Result<Value, RpcError> {
+        self.touch();
+        let cid = CloveId::new(&id).map_err(rpc_err)?;
+        let parent = match parent {
+            Some(p) => Some(CloveId::new(&p).map_err(rpc_err)?),
+            None => None,
+        };
+        let out = clove_core::ops::set_parent(&self.store(), &cid, parent.as_ref(), now())
+            .map_err(rpc_err);
         self.after_write(&out);
         out
     }

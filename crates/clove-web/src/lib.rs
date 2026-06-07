@@ -133,6 +133,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/v1/items/:id/deptree", get(read::get_deptree))
         .route("/api/v1/items/:id/labels", put(write::put_labels))
+        .route("/api/v1/items/:id/parent", put(write::put_parent))
         .route("/api/v1/items/:id/deps", post(write::add_dep))
         .route("/api/v1/items/:id/deps/:dep", delete(write::remove_dep))
         .route("/api/v1/board", get(read::get_board))
