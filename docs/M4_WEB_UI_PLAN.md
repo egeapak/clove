@@ -61,6 +61,31 @@ Tests: 6 `clove-web` API integration tests + the full workspace suite green;
 `fmt`/`clippy -D warnings` clean workspace-wide. The daemon intentionally keeps a
 distinct clove-web watcher (no IPC `SUBSCRIBE` needed).
 
+### Post-review refinements (after two expert reviews)
+
+- **Review fixes (UX + code quality):** timeline "blocked" gating, detail body
+  backfill, optimistic-write reconciliation on refetch, `g`-chord listener leak,
+  reachable **Delete item**, comment author/rollback, an initial-load error+retry
+  state, shared `filter.ts`/`query.ts` (no duplicated filter/sort/URL logic),
+  modal focus-trap + Esc, WS reconnect on online/visibility, toast cap, plus a11y
+  and empty-state polish.
+- **Virtualized** list + board with `@tanstack/virtual-core` (only visible rows
+  render at 10k); +~7.5K gz, all in lazy route chunks (initial load unchanged).
+- **Markdown:** replaced `markdown-it` with **micromark + GFM + a custom
+  id-autolink micromark extension** (`lib/micromark-clove-id.ts`) — no hand-written
+  regex/sanitizer; safe by default. Detail markdown chunk 45.3K→14.3K gz.
+- **Minify:** esbuild only (terser/swc evaluated and dropped — esbuild is the best
+  speed/size trade).
+- **Compression/embedding:** the build script gzips `dist/`→`dist-gz/`; the binary
+  embeds **gzip only**, decompresses once at startup, and serves both gzip and
+  identity **from memory** (no per-request compression for static). Dropped brotli
+  + zstd entirely (gzip-only `tower-http` for the dynamic API) → **release `clove`
+  binary 13.10 MB → 11.35 MB**. The build script's gzip output is verified
+  byte-correct (every `*.gz` gunzips back to its original).
+- **Known size note (deferred):** the default-on `github` import feature accounts
+  for ~3.5 MB of the binary (octocrab + rustls/ring + JWT); making it opt-out would
+  cut the binary to ~7.8 MB — deferred to a later session.
+
 ## 2. Invariants inherited from clove (non-negotiable)
 
 - **Files are truth.** Every write goes through `clove_core::ItemStore` (atomic

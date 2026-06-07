@@ -87,8 +87,14 @@ pub fn run(clove_dir: &Utf8Path) -> anyhow::Result<()> {
 
     // Web UI (M4): served by the daemon by default ([web] enabled, port 7373), so
     // `clove serve` hands off to the daemon instead of binding its own server.
-    let web_enabled = config.as_ref().is_none_or(|c| c.web.enabled);
-    let web_port = config.as_ref().map_or(7373, |c| c.web.port);
+    // `CLOVED_DISABLE_WEB` turns it off (used by the daemon tests to avoid all
+    // instances contending for the fixed port); `CLOVED_WEB_PORT` overrides the port.
+    let web_enabled = config.as_ref().is_none_or(|c| c.web.enabled)
+        && std::env::var_os("CLOVED_DISABLE_WEB").is_none();
+    let web_port = std::env::var("CLOVED_WEB_PORT")
+        .ok()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or_else(|| config.as_ref().map_or(7373, |c| c.web.port));
     let id_prefix = config
         .as_ref()
         .map_or_else(|| "proj".to_owned(), |c| c.id_prefix.clone());
@@ -218,7 +224,16 @@ fn write_pid(clove_dir: &Utf8Path) -> std::io::Result<()> {
 async fn serve_web(state: Option<clove_web::AppState>, addr: std::net::SocketAddr) {
     if let Some(state) = state {
         if let Err(e) = clove_web::serve_with_watch(state, addr).await {
-            eprintln!("cloved: web server error ({addr}): {e}");
+            if e.kind() == std::io::ErrorKind::AddrInUse {
+                // Expected when another daemon or `clove serve` already holds the
+                // port (per-project daemons share one web port). The daemon keeps
+                // running without the web UI.
+                eprintln!(
+                    "cloved: web UI port {addr} in use; this daemon will not serve the web UI"
+                );
+            } else {
+                eprintln!("cloved: web server error ({addr}): {e}");
+            }
         }
     }
     std::future::pending::<()>().await

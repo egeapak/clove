@@ -76,9 +76,23 @@ clippy `-D warnings`, and fmt are green. The `ratatui`/`crossterm`/
 exposure).
 **TUI internals (refactor):** `clove-tui` is now modular — `app/{mod,data,listing,detail,filter_menu}.rs` with state regrouped into `Data`/`Listing`/`DetailPane`/`FilterMenu` sub-structs (command methods stay on `App` as the coordinator), and `ui/{mod,util,style,tabs,list,status,help,filter_menu}.rs` + `ui/detail/{mod,overview,tree,comments}.rs` (per-component/per-page). The event loop is tick-driven (1fps idle / redraw-after-event / 10fps when `App::is_busy()`). The split is structural (no locks yet); the **next M4 step** is the concurrent TUI model — move the wholesale re-scan onto a background worker behind per-sub-struct locks and drive the 10fps `is_busy()` cadence with a spinner.
 
+**M4 — Web UI (DONE).** New `clove-web` crate (axum + embedded SvelteKit SPA) and a
+`clove serve` subcommand serve a Kanban board / filterable list / detail / timeline,
+read + light-write, with live updates over WebSocket via the file-watcher; the
+daemon serves the UI by default (port 7373) and `clove serve` hands off to a running
+daemon. `/api/v1` REST mirrors the CLI's JSON envelope + exit codes (shared
+`clove_core::error_code`). The SPA is built by `clove-web/build.rs` (Node-free
+`cargo build` still works via a placeholder), gzip-precompressed, embedded
+(`dist-gz/`, git-ignored), and served from memory; markdown is micromark + a custom
+id-autolink extension. List/board virtualized; 4 runtime themes (default
+`midnight-ide`). Plan/decisions/status: `docs/M4_WEB_UI_PLAN.md`; themes in
+`docs/web-ui-mockups/`. Deferred: make the `github` feature opt-out (~3.5 MB of the
+11.35 MB binary), a body editor, and wiring the stats-snapshot series into web
+`/stats/history`.
+
 **Next step (rest of M4):** TUI write actions (status/priority/label edits, …),
-web UI, bidirectional vendor bridges, and richer history/changelog — see
-`IMPLEMENTATION_PLAN.md` M4 backlog. Still undesigned beyond the TUI and stats.
+bidirectional vendor bridges, and richer history/changelog — see
+`IMPLEMENTATION_PLAN.md` M4 backlog.
 
 ### Small backlog (optional M0/M1 nice-to-haves, non-blocking)
 - Broaden JSON-schema validation to more commands (version/reindex/doctor/new)

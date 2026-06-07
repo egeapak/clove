@@ -2,9 +2,23 @@
 
 Guidance for working in this repo. `clove` is a Cargo workspace (`crates/*`):
 `clove-core` (model/graph/store), `clove-tui` (the read-only terminal browser),
-plus `clove-cli`, `cloved`, `clove-index`, `clove-ipc`, `clove-import`.
+`clove-web` (the web UI server + embedded SvelteKit SPA, `clove serve`),
+plus `clove` (CLI), `cloved`, `clove-index`, `clove-ipc`, `clove-import`.
 
-See `HANDOFF.md` and `docs/IMPLEMENTATION_PLAN.md` for the full design/state.
+See `HANDOFF.md` and `docs/IMPLEMENTATION_PLAN.md` for the full design/state, and
+`docs/M4_WEB_UI_PLAN.md` for the web UI.
+
+## Web UI (`clove-web`)
+
+The SvelteKit SPA lives in `crates/clove-web/web/` and is built by
+`crates/clove-web/build.rs` (`npm run build` when `npm` is present and sources
+changed; otherwise a placeholder), gzipped into `dist-gz/`, and embedded via
+`rust-embed` (both `dist/` and `dist-gz/` are git-ignored — never commit them). A
+Node-free `cargo build` still works (the placeholder is embedded);
+`CLOVE_SKIP_WEB_BUILD=1` skips the npm build. Frontend checks:
+`cd crates/clove-web/web && npm run check && npm run test` (svelte-check + vitest).
+Markdown rendering is micromark + a custom id-autolink extension
+(`lib/micromark-clove-id.ts`) — no hand-written markdown regex/sanitizer.
 
 ## Quality gate
 

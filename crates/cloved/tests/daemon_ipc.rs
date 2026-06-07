@@ -54,6 +54,7 @@ fn init_repo_with_items(n: usize) -> (tempfile::TempDir, Utf8PathBuf) {
 
 fn spawn_ready(clove_dir: &Utf8Path) -> Child {
     let child = Command::new(cloved_bin())
+        .env("CLOVED_DISABLE_WEB", "1") // avoid all test daemons contending for port 7373
         .arg("run")
         .arg("--clove-dir")
         .arg(clove_dir.as_str())

@@ -36,6 +36,7 @@ fn init_clove_dir() -> (tempfile::TempDir, Utf8PathBuf) {
 /// (its readiness signal), up to `timeout`.
 fn spawn_ready(clove_dir: &Utf8Path, timeout: Duration) -> Child {
     let child = Command::new(cloved_bin())
+        .env("CLOVED_DISABLE_WEB", "1") // avoid all test daemons contending for port 7373
         .arg("run")
         .arg("--clove-dir")
         .arg(clove_dir.as_str())
@@ -102,6 +103,7 @@ fn second_daemon_refuses_to_start() {
 
     // A second daemon on the same .clove must fail fast (lock held).
     let second = Command::new(cloved_bin())
+        .env("CLOVED_DISABLE_WEB", "1") // avoid all test daemons contending for port 7373
         .arg("run")
         .arg("--clove-dir")
         .arg(clove_dir.as_str())
@@ -142,6 +144,7 @@ fn idle_shutdown_self_terminates() {
     // CLOVED_IDLE_SHUTDOWN_MS is the test seam for the minute-granularity
     // `[daemon] idle_shutdown_min` (T-D05): self-terminate after 500ms idle.
     let mut child = Command::new(cloved_bin())
+        .env("CLOVED_DISABLE_WEB", "1") // avoid all test daemons contending for port 7373
         .arg("run")
         .arg("--clove-dir")
         .arg(clove_dir.as_str())
