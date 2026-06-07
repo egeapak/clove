@@ -1,26 +1,23 @@
-//! IPC server: the async side of the clove-ipc wire protocol (DESIGN §8.4).
+//! IPC server: the daemon's implementation of the `clove-ipc` tarpc service
+//! (DESIGN §8.4).
 //!
-//! The framing matches [`clove_ipc::frame`] (4-byte LE length prefix + JSON), but
-//! is driven over Tokio's `AsyncRead`/`AsyncWrite` here so the accept loop stays
-//! on the runtime. The blocking client in `clove-ipc` interoperates byte-for-byte.
-//!
-//! Commands (DESIGN §8.4): `PING`/`STATUS` answer from daemon state; `QUERY` runs
-//! the lean `clove_index` list (freshening first, like the CLI's index path) and
-//! returns rows the CLI shapes itself; `REINDEX` rebuilds and reopens the index.
+//! `PING`/`STATUS` answer from daemon state; `QUERY` runs the lean `clove_index`
+//! list (freshening first, like the CLI's index path) and returns rows the client
+//! shapes itself; `SEARCH` runs FTS; `GRAPH` serves the cached graph; `REINDEX`
+//! rebuilds and reopens the index. The transport (tarpc over a local socket) is
+//! wired in `lifecycle::accept_loop`.
 
-use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use camino::Utf8PathBuf;
 use clove_core::CloveId;
 use clove_index::{Filter, Index, ItemListRow, QueryMode};
-use clove_ipc::frame::MAX_FRAME;
-use clove_ipc::protocol::{
-    ErrorResponse, GraphRequest, GraphResponse, LeanRow, QueryKind, QueryListResponse,
-    QueryRequest, ReindexDone, Request, Response,
+use clove_ipc::{
+    CloveRpc, GraphRequest, GraphResponse, LeanRow, QueryKind, QueryListResponse, QueryRequest,
+    ReindexDone, RpcError, SearchRequest, StatusResponse, PROTOCOL_VERSION,
 };
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tarpc::context::Context;
 
 use crate::graph_cache::GraphCache;
 use crate::state::DaemonState;
@@ -30,7 +27,8 @@ use crate::state::DaemonState;
 /// CLI's `STALE_REFRESH_LIMIT` (DESIGN §6.4).
 const STALE_REFRESH_LIMIT: usize = 20;
 
-/// Shared context every connection handler needs.
+/// Shared context every connection handler needs. Cloned per request by tarpc,
+/// so all fields are cheap (`Arc`) handles.
 #[derive(Clone)]
 pub struct Dispatcher {
     pub index: Arc<Mutex<Index>>,
@@ -41,27 +39,57 @@ pub struct Dispatcher {
     pub graph: Arc<GraphCache>,
 }
 
+impl CloveRpc for Dispatcher {
+    async fn ping(self, _: Context) -> u32 {
+        self.touch();
+        PROTOCOL_VERSION
+    }
+
+    async fn status(self, _: Context) -> StatusResponse {
+        self.touch();
+        match self.state.lock() {
+            Ok(state) => state.snapshot(),
+            Err(_) => StatusResponse {
+                uptime_s: 0,
+                items_indexed: 0,
+                watcher_state: "error".to_owned(),
+                last_event_ms: None,
+                batches_applied: 0,
+            },
+        }
+    }
+
+    async fn query(self, _: Context, req: QueryRequest) -> Result<QueryListResponse, RpcError> {
+        self.touch();
+        self.handle_query(req)
+    }
+
+    async fn search(self, _: Context, req: SearchRequest) -> Result<Vec<String>, RpcError> {
+        self.touch();
+        self.handle_search(req)
+    }
+
+    async fn graph(self, _: Context, req: GraphRequest) -> Result<GraphResponse, RpcError> {
+        self.touch();
+        self.handle_graph(req)
+    }
+
+    async fn reindex(self, _: Context) -> Result<ReindexDone, RpcError> {
+        self.touch();
+        self.handle_reindex()
+    }
+}
+
 impl Dispatcher {
-    /// Map a request to a response.
-    pub fn dispatch(&self, req: Request) -> Response {
+    /// Record that an IPC event happened (resets the idle-shutdown window).
+    fn touch(&self) {
         if let Ok(mut state) = self.state.lock() {
             state.mark_event();
-        }
-        match req {
-            Request::Ping => Response::Pong,
-            Request::Status => match self.state.lock() {
-                Ok(state) => Response::Status(state.snapshot()),
-                Err(_) => Response::Error(ErrorResponse::new("internal", "state lock poisoned")),
-            },
-            Request::Query(q) => self.handle_query(q),
-            Request::Search(s) => self.handle_search(s),
-            Request::Graph(g) => self.handle_graph(g),
-            Request::Reindex => self.handle_reindex(),
         }
     }
 
     /// Serve a dependency-graph query from the daemon's cached graph (Tier 2).
-    fn handle_graph(&self, req: GraphRequest) -> Response {
+    fn handle_graph(&self, req: GraphRequest) -> Result<GraphResponse, RpcError> {
         let resp = self.graph.with_graph(|graph, ranks| match req {
             GraphRequest::Cycles => GraphResponse::Cycles {
                 cycles: graph
@@ -103,77 +131,64 @@ impl Dispatcher {
                 }
             }
         });
-        match resp {
-            Some(r) => Response::Graph(r),
-            None => Response::Error(ErrorResponse::new("graph_failed", "could not read index")),
-        }
+        resp.ok_or_else(|| RpcError::new("graph_failed", "could not read index"))
     }
 
     /// Run an FTS search over the hot index (freshening first) and return matched
-    /// ids in rank order; the CLI reads those files for full detail.
-    fn handle_search(&self, req: clove_ipc::SearchRequest) -> Response {
-        let mut index = match self.index.lock() {
-            Ok(g) => g,
-            Err(_) => {
-                return Response::Error(ErrorResponse::new("internal", "index lock poisoned"))
-            }
-        };
-        if self.auto_refresh {
-            if let Ok(report) = index.check_staleness_fast(&self.issues_dir) {
-                if !report.is_clean() && report.change_count() <= STALE_REFRESH_LIMIT {
-                    let _ = index.apply_staleness(&report, &self.issues_dir);
-                    // The DB advanced; the hot graph (sourced from it) must rebuild.
-                    self.graph.mark_dirty();
-                }
-            }
-        }
-        match index.search(&req.text, req.limit) {
-            Ok(rows) => Response::SearchIds {
-                ids: rows.into_iter().map(|r| r.id).collect(),
-            },
-            Err(e) => Response::Error(ErrorResponse::new("search_failed", e.to_string())),
-        }
+    /// ids in rank order; the client reads those files for full detail.
+    fn handle_search(&self, req: SearchRequest) -> Result<Vec<String>, RpcError> {
+        let mut index = self
+            .index
+            .lock()
+            .map_err(|_| RpcError::new("internal", "index lock poisoned"))?;
+        self.refresh(&mut index);
+        index
+            .search(&req.text, req.limit)
+            .map(|rows| rows.into_iter().map(|r| r.id).collect())
+            .map_err(|e| RpcError::new("search_failed", e.to_string()))
     }
 
     /// Serve a lean list query, freshening the index inline first (the daemon owns
     /// freshness; the watcher in P3 makes this a no-op in the steady state).
-    fn handle_query(&self, q: QueryRequest) -> Response {
-        let mut index = match self.index.lock() {
-            Ok(g) => g,
-            Err(_) => {
-                return Response::Error(ErrorResponse::new("internal", "index lock poisoned"))
-            }
-        };
-
-        if self.auto_refresh {
-            if let Ok(report) = index.check_staleness_fast(&self.issues_dir) {
-                if !report.is_clean() && report.change_count() <= STALE_REFRESH_LIMIT {
-                    let _ = index.apply_staleness(&report, &self.issues_dir);
-                    // The DB advanced; the hot graph (sourced from it) must rebuild.
-                    self.graph.mark_dirty();
-                }
-            }
-        }
+    fn handle_query(&self, q: QueryRequest) -> Result<QueryListResponse, RpcError> {
+        let mut index = self
+            .index
+            .lock()
+            .map_err(|_| RpcError::new("internal", "index lock poisoned"))?;
+        self.refresh(&mut index);
 
         let filter = build_filter(&q);
-        let total = match index.count_items(&filter) {
-            Ok(n) => n as u64,
-            Err(e) => return Response::Error(ErrorResponse::new("query_failed", e.to_string())),
-        };
-        let rows = match index.query_list(&filter) {
-            Ok(rows) => rows,
-            Err(e) => return Response::Error(ErrorResponse::new("query_failed", e.to_string())),
-        };
+        let total = index
+            .count_items(&filter)
+            .map_err(|e| RpcError::new("query_failed", e.to_string()))? as u64;
+        let rows = index
+            .query_list(&filter)
+            .map_err(|e| RpcError::new("query_failed", e.to_string()))?;
 
         if let Ok(mut state) = self.state.lock() {
             state.set_items_indexed(index.item_count().unwrap_or(0) as u64);
         }
 
-        Response::QueryList(QueryListResponse {
+        Ok(QueryListResponse {
             rows: rows.iter().map(to_lean).collect(),
             total,
             warnings: Vec::new(),
         })
+    }
+
+    /// Freshen the hot index from disk if it is lightly stale (shared by the
+    /// query and search paths). A heavier drift is left to the watcher.
+    fn refresh(&self, index: &mut Index) {
+        if !self.auto_refresh {
+            return;
+        }
+        if let Ok(report) = index.check_staleness_fast(&self.issues_dir) {
+            if !report.is_clean() && report.change_count() <= STALE_REFRESH_LIMIT {
+                let _ = index.apply_staleness(&report, &self.issues_dir);
+                // The DB advanced; the hot graph (sourced from it) must rebuild.
+                self.graph.mark_dirty();
+            }
+        }
     }
 
     /// Rebuild the index from files, then reopen so the daemon serves the rebuilt
@@ -185,18 +200,14 @@ impl Dispatcher {
     /// which would write to the about-to-be-replaced inode and lose that history
     /// point. Reindex is an explicit, infrequent operation, so briefly serializing
     /// queries behind it is an acceptable trade for not dropping snapshots.
-    fn handle_reindex(&self) -> Response {
+    fn handle_reindex(&self) -> Result<ReindexDone, RpcError> {
         let start = Instant::now();
-        let mut index = match self.index.lock() {
-            Ok(g) => g,
-            Err(_) => {
-                return Response::Error(ErrorResponse::new("internal", "index lock poisoned"))
-            }
-        };
-        let report = match clove_index::reindex(&self.issues_dir, &self.db_path) {
-            Ok(report) => report,
-            Err(e) => return Response::Error(ErrorResponse::new("reindex_failed", e.to_string())),
-        };
+        let mut index = self
+            .index
+            .lock()
+            .map_err(|_| RpcError::new("internal", "index lock poisoned"))?;
+        let report = clove_index::reindex(&self.issues_dir, &self.db_path)
+            .map_err(|e| RpcError::new("reindex_failed", e.to_string()))?;
         if let Ok(fresh) = Index::open_or_create(&self.db_path) {
             *index = fresh;
             if let Ok(mut state) = self.state.lock() {
@@ -206,7 +217,7 @@ impl Dispatcher {
         drop(index);
         // The index was rebuilt and reopened; rebuild the hot graph from it.
         self.graph.mark_dirty();
-        Response::ReindexDone(ReindexDone {
+        Ok(ReindexDone {
             items_indexed: report.items_indexed as u64,
             duration_ms: start.elapsed().as_millis() as u64,
             warnings: report.warnings,
@@ -241,56 +252,4 @@ fn to_lean(row: &ItemListRow) -> LeanRow {
         priority: row.priority,
         title: row.title.clone(),
     }
-}
-
-/// Read one length-prefixed frame asynchronously. `Ok(None)` means the peer
-/// closed the connection cleanly at a frame boundary (clean EOF on the prefix).
-pub async fn read_frame_async<R: AsyncRead + Unpin>(r: &mut R) -> io::Result<Option<Vec<u8>>> {
-    let mut len_buf = [0u8; 4];
-    match r.read_exact(&mut len_buf).await {
-        Ok(_) => {}
-        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(e) => return Err(e),
-    }
-    let len = u32::from_le_bytes(len_buf);
-    if len > MAX_FRAME {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "frame exceeds MAX_FRAME",
-        ));
-    }
-    let mut payload = vec![0u8; len as usize];
-    r.read_exact(&mut payload).await?;
-    Ok(Some(payload))
-}
-
-/// Write one length-prefixed frame asynchronously.
-pub async fn write_frame_async<W: AsyncWrite + Unpin>(w: &mut W, payload: &[u8]) -> io::Result<()> {
-    let len: u32 = payload
-        .len()
-        .try_into()
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "frame too large"))?;
-    w.write_all(&len.to_le_bytes()).await?;
-    w.write_all(payload).await?;
-    w.flush().await?;
-    Ok(())
-}
-
-/// Serve one connection: read requests, dispatch, write responses, until the peer
-/// closes or a transport error occurs. A malformed frame is answered with an error
-/// response and the connection is dropped; the daemon stays up.
-pub async fn handle_connection<S>(mut stream: S, dispatcher: Dispatcher) -> io::Result<()>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    while let Some(payload) = read_frame_async(&mut stream).await? {
-        let response = match serde_json::from_slice::<Request>(&payload) {
-            Ok(req) => dispatcher.dispatch(req),
-            Err(e) => Response::Error(ErrorResponse::new("bad_request", e.to_string())),
-        };
-        let out = serde_json::to_vec(&response)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        write_frame_async(&mut stream, &out).await?;
-    }
-    Ok(())
 }

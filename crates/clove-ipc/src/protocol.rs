@@ -1,48 +1,18 @@
-//! The clove daemon IPC wire protocol (DESIGN §8.4).
+//! The clove daemon IPC payload types (DESIGN §8.4).
 //!
-//! One request frame, one response frame, both JSON (see [`crate::frame`] for the
-//! length-prefix framing). The types here are the single source of truth shared by
-//! the daemon (`cloved`, server) and the CLI ([`crate::client`], client), so the
-//! wire format can never drift between the two.
-//!
-//! v1 command set (DESIGN §8.4):
-//! ```text
-//! PING    → PONG
-//! QUERY   { kind, filter, format, fields, limit, offset } → { envelope }
-//! REINDEX → REINDEX_DONE { items_indexed, duration_ms, warnings }
-//! STATUS  → { uptime_s, items_indexed, watcher_state, last_event_ms }
-//! ```
+//! These are the request/response *payloads* of the [`crate::service::CloveRpc`]
+//! tarpc service — the single source of truth shared by the daemon (`cloved`,
+//! server) and the clients ([`crate::client`], the MCP shim), so the wire format
+//! can never drift. The service contract itself (method set + the `RpcError`
+//! type) lives in [`crate::service`].
 
 use clove_core::graph::DepTreeNode;
 use clove_core::{ItemStatus, ItemType, Priority};
 use serde::{Deserialize, Serialize};
 
-/// Wire-protocol version. Bumped on any incompatible change to the types below.
-/// The CLI and daemon exchange it implicitly: a deserialization failure on either
-/// side is treated as a version/garbage mismatch and the connection is dropped.
-pub const PROTOCOL_VERSION: u32 = 1;
-
-/// A request from the CLI to the daemon.
-///
-/// `#[serde(tag = "cmd")]` keeps the JSON self-describing and forward-compatible:
-/// `{"cmd":"PING"}`, `{"cmd":"QUERY", ...}`. Unknown tags fail to deserialize,
-/// which the server handles by returning [`Response::Error`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "cmd", rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum Request {
-    /// Liveness probe. The CLI sends this first on every connection (§8.3).
-    Ping,
-    /// A read query the daemon answers from its hot index.
-    Query(QueryRequest),
-    /// Full-text search; returns matched ids in FTS-rank order.
-    Search(SearchRequest),
-    /// A dependency-graph query served from the daemon's cached graph.
-    Graph(GraphRequest),
-    /// Force a full reindex inside the daemon.
-    Reindex,
-    /// Operational daemon telemetry.
-    Status,
-}
+/// Wire-protocol version, returned by `ping` so a client can detect a daemon
+/// built against an incompatible protocol. Bumped on any incompatible change.
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// A dependency-graph query (DESIGN §8.4 extension for `blocked`/`dep`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,7 +29,7 @@ pub enum GraphRequest {
     WouldCycle { from: String, to: String },
 }
 
-/// The reply to a [`Request::Graph`].
+/// The reply to a [`GraphRequest`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "graph", rename_all = "snake_case")]
 pub enum GraphResponse {
@@ -73,7 +43,7 @@ pub enum GraphResponse {
     WouldCycle { would: bool },
 }
 
-/// The payload of a [`Request::Search`] (the FTS query the daemon runs).
+/// The payload of a `search` call (the FTS query the daemon runs).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchRequest {
     /// The free-text query.
@@ -83,10 +53,9 @@ pub struct SearchRequest {
     pub limit: Option<usize>,
 }
 
-/// Which lean list a [`Request::Query`] runs — mirrors `clove_index::QueryMode`.
-/// Both `clove ls` and `clove query` are [`QueryKind::List`]; `clove ready` is
-/// [`QueryKind::Ready`]. (`search`/`blocked` are not daemon-routed in M3 — they
-/// fall back to the local path.)
+/// Which lean list a `query` call runs — mirrors `clove_index::QueryMode`. Both
+/// `clove ls` and `clove query` are [`QueryKind::List`]; `clove ready` is
+/// [`QueryKind::Ready`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QueryKind {
@@ -96,8 +65,8 @@ pub enum QueryKind {
     Ready,
 }
 
-/// The payload of a [`Request::Query`]: the filter the daemon turns into a
-/// `clove_index::Filter`. Carries the typed model values so the daemon and CLI
+/// The payload of a `query` call: the filter the daemon turns into a
+/// `clove_index::Filter`. Carries typed model values so the daemon and clients
 /// agree without string round-tripping (DESIGN §8.4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueryRequest {
@@ -132,10 +101,8 @@ pub struct LeanRow {
     pub title: String,
 }
 
-/// `QUERY` reply: the (page-limited) lean rows, the full unpaginated match count,
-/// and any warnings. The CLI shapes these with its own list renderer, so
-/// daemon-routed output is byte-identical to the local index path bar
-/// `_meta.source = "daemon"`.
+/// `query` reply: the (page-limited) lean rows, the full unpaginated match count,
+/// and any warnings. Clients shape these with their own list renderer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueryListResponse {
     pub rows: Vec<LeanRow>,
@@ -144,29 +111,7 @@ pub struct QueryListResponse {
     pub warnings: Vec<String>,
 }
 
-/// A response from the daemon to the CLI.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "resp", rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum Response {
-    /// Reply to [`Request::Ping`].
-    Pong,
-    /// Reply to [`Request::Query`]: the lean rows + total the CLI shapes itself.
-    QueryList(QueryListResponse),
-    /// Reply to [`Request::Search`]: matched item ids in FTS-rank order. The CLI
-    /// reads those files for full detail, preserving `clove search`'s shape.
-    SearchIds { ids: Vec<String> },
-    /// Reply to [`Request::Graph`].
-    Graph(GraphResponse),
-    /// Reply to [`Request::Reindex`].
-    ReindexDone(ReindexDone),
-    /// Reply to [`Request::Status`].
-    Status(StatusResponse),
-    /// Any server-side failure (bad request, query error). The connection is then
-    /// closed; the daemon stays up.
-    Error(ErrorResponse),
-}
-
-/// `REINDEX_DONE` payload (DESIGN §8.4).
+/// `reindex` reply (DESIGN §8.4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReindexDone {
     pub items_indexed: u64,
@@ -175,9 +120,8 @@ pub struct ReindexDone {
     pub warnings: Vec<String>,
 }
 
-/// `STATUS` payload: the daemon's operational telemetry (DESIGN §8.4). This is the
-/// daemon's *own* runtime state, not work-item analytics (that is the deferred M4
-/// `clove stats`, see M3_PLAN §1.1).
+/// `status` reply: the daemon's operational telemetry (DESIGN §8.4). This is the
+/// daemon's *own* runtime state, not work-item analytics (that is `clove stats`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusResponse {
     /// Seconds since the daemon became ready.
@@ -195,53 +139,53 @@ pub struct StatusResponse {
     pub batches_applied: u64,
 }
 
-/// A structured error reply.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ErrorResponse {
-    /// Stable machine code, e.g. `"bad_request"`, `"query_failed"`.
-    pub code: String,
-    /// Human-readable detail.
-    pub message: String,
-}
-
-impl ErrorResponse {
-    /// Build an error response from a code and message.
-    pub fn new(code: impl Into<String>, message: impl Into<String>) -> ErrorResponse {
-        ErrorResponse {
-            code: code.into(),
-            message: message.into(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Every request variant round-trips through JSON unchanged.
+    /// Every graph request/response payload round-trips through JSON unchanged.
     #[test]
-    fn request_round_trips() {
-        let cases = vec![
-            Request::Ping,
-            Request::Reindex,
-            Request::Status,
-            Request::Search(SearchRequest {
-                text: "hello world".to_owned(),
-                limit: Some(20),
-            }),
-            Request::Graph(GraphRequest::Blocked {
+    fn graph_payloads_round_trip() {
+        let reqs = vec![
+            GraphRequest::Blocked {
                 include_warnings: true,
-            }),
-            Request::Graph(GraphRequest::Cycles),
-            Request::Graph(GraphRequest::Tree {
+            },
+            GraphRequest::Cycles,
+            GraphRequest::Tree {
                 root: "proj-7af".to_owned(),
                 depth: 5,
-            }),
-            Request::Graph(GraphRequest::WouldCycle {
+            },
+            GraphRequest::WouldCycle {
                 from: "proj-7af".to_owned(),
                 to: "proj-3k2".to_owned(),
-            }),
-            Request::Query(QueryRequest {
+            },
+        ];
+        for case in reqs {
+            let json = serde_json::to_string(&case).unwrap();
+            assert_eq!(case, serde_json::from_str(&json).unwrap(), "{json}");
+        }
+
+        let resps = vec![
+            GraphResponse::Blocked {
+                ids: vec!["proj-7af".to_owned()],
+            },
+            GraphResponse::Cycles {
+                cycles: vec![vec!["proj-a".to_owned(), "proj-b".to_owned()]],
+            },
+            GraphResponse::WouldCycle { would: true },
+            GraphResponse::Tree { node: None },
+        ];
+        for case in resps {
+            let json = serde_json::to_string(&case).unwrap();
+            assert_eq!(case, serde_json::from_str(&json).unwrap(), "{json}");
+        }
+    }
+
+    /// Query/list/status payloads round-trip, including the `None`/empty edges.
+    #[test]
+    fn list_payloads_round_trip() {
+        let cases = vec![
+            QueryRequest {
                 kind: QueryKind::List,
                 status: Some(ItemStatus::Open),
                 item_type: Some(ItemType::Bug),
@@ -250,8 +194,8 @@ mod tests {
                 label: Some("area:core".to_owned()),
                 offset: 0,
                 limit: Some(100),
-            }),
-            Request::Query(QueryRequest {
+            },
+            QueryRequest {
                 kind: QueryKind::Ready,
                 status: None,
                 item_type: None,
@@ -260,68 +204,54 @@ mod tests {
                 label: None,
                 offset: 20,
                 limit: None,
-            }),
-        ];
-        for case in cases {
-            let json = serde_json::to_string(&case).unwrap();
-            let back: Request = serde_json::from_str(&json).unwrap();
-            assert_eq!(case, back, "round-trip mismatch for {json}");
-        }
-    }
-
-    /// Every response variant round-trips through JSON unchanged.
-    #[test]
-    fn response_round_trips() {
-        let cases = vec![
-            Response::Pong,
-            Response::QueryList(QueryListResponse {
-                rows: vec![LeanRow {
-                    id: "proj-7af".to_owned(),
-                    status: "open".to_owned(),
-                    item_type: "feature".to_owned(),
-                    priority: 1,
-                    title: "do the thing".to_owned(),
-                }],
-                total: 1,
-                warnings: vec![],
-            }),
-            Response::SearchIds {
-                ids: vec!["proj-7af".to_owned(), "proj-3k2".to_owned()],
             },
-            Response::Graph(GraphResponse::Blocked {
-                ids: vec!["proj-7af".to_owned()],
-            }),
-            Response::Graph(GraphResponse::Cycles {
-                cycles: vec![vec!["proj-a".to_owned(), "proj-b".to_owned()]],
-            }),
-            Response::Graph(GraphResponse::WouldCycle { would: true }),
-            Response::ReindexDone(ReindexDone {
-                items_indexed: 42,
-                duration_ms: 735,
-                warnings: vec!["dangling dep".to_owned()],
-            }),
-            Response::Status(StatusResponse {
-                uptime_s: 10,
-                items_indexed: 7,
-                watcher_state: "watching".to_owned(),
-                last_event_ms: Some(1200),
-                batches_applied: 3,
-            }),
-            Response::Error(ErrorResponse::new("bad_request", "unknown cmd")),
         ];
         for case in cases {
             let json = serde_json::to_string(&case).unwrap();
-            let back: Response = serde_json::from_str(&json).unwrap();
-            assert_eq!(case, back, "round-trip mismatch for {json}");
+            assert_eq!(case, serde_json::from_str(&json).unwrap(), "{json}");
         }
+
+        let resp = QueryListResponse {
+            rows: vec![LeanRow {
+                id: "proj-7af".to_owned(),
+                status: "open".to_owned(),
+                item_type: "feature".to_owned(),
+                priority: 1,
+                title: "do the thing".to_owned(),
+            }],
+            total: 1,
+            warnings: vec![],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert_eq!(resp, serde_json::from_str(&json).unwrap());
+
+        let status = StatusResponse {
+            uptime_s: 10,
+            items_indexed: 7,
+            watcher_state: "watching".to_owned(),
+            last_event_ms: Some(1200),
+            batches_applied: 3,
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        assert_eq!(status, serde_json::from_str(&json).unwrap());
     }
 
-    /// The tag wire form is the documented uppercase command name.
+    /// Edge: an empty search query and an absent limit still round-trip.
     #[test]
-    fn ping_tag_is_uppercase() {
-        let json = serde_json::to_string(&Request::Ping).unwrap();
-        assert_eq!(json, r#"{"cmd":"PING"}"#);
-        let json = serde_json::to_string(&Response::Pong).unwrap();
-        assert_eq!(json, r#"{"resp":"PONG"}"#);
+    fn search_request_edges() {
+        let cases = vec![
+            SearchRequest {
+                text: String::new(),
+                limit: None,
+            },
+            SearchRequest {
+                text: "hello world".to_owned(),
+                limit: Some(0),
+            },
+        ];
+        for case in cases {
+            let json = serde_json::to_string(&case).unwrap();
+            assert_eq!(case, serde_json::from_str(&json).unwrap(), "{json}");
+        }
     }
 }

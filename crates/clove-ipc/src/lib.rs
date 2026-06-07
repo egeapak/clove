@@ -12,20 +12,21 @@
 //! - path/name helpers for the socket, pid, and lock files (DESIGN §8.2).
 
 pub mod client;
-pub mod frame;
 pub mod protocol;
 pub mod service;
+pub mod transport;
 
 use std::hash::{Hash, Hasher};
 
 use camino::{Utf8Path, Utf8PathBuf};
 
-pub use client::{ClientError, DaemonClient};
-pub use frame::{read_frame, read_message, write_frame, write_message, FrameError, MAX_FRAME};
+pub use client::{cleanup_stale, ClientError, DaemonClient};
 pub use protocol::{
-    ErrorResponse, GraphRequest, GraphResponse, LeanRow, QueryKind, QueryListResponse,
-    QueryRequest, ReindexDone, Request, Response, SearchRequest, StatusResponse, PROTOCOL_VERSION,
+    GraphRequest, GraphResponse, LeanRow, QueryKind, QueryListResponse, QueryRequest, ReindexDone,
+    SearchRequest, StatusResponse, PROTOCOL_VERSION,
 };
+pub use service::{CloveRpc, CloveRpcClient, RpcError};
+pub use transport::build_transport;
 
 /// The Unix socket filename inside `.clove/` (DESIGN §8.2).
 pub const SOCK_FILE: &str = "daemon.sock";

@@ -61,6 +61,8 @@ pulldown-cmark = { version = "0.13", default-features = false }  # Markdown body
 rmcp = { version = "1.7", default-features = false, features = ["server", "macros", "transport-io", "schemars"] }
 tarpc = { version = "0.37", features = ["serde1", "serde-transport", "serde-transport-json", "tokio1", "unix"] }
 futures = "0.3"                  # stream/sink combinators for the tarpc transport
+tokio-util = { version = "0.7", features = ["codec"] }   # LengthDelimited framing under tarpc serde-transport
+tokio-serde = { version = "0.9", features = ["json"] }   # JSON codec for the tarpc transport
 
 # Internal crates (explicit version keeps them off cargo-deny's wildcard list
 # and is required for publishing clove-core to crates.io — PRD §13).

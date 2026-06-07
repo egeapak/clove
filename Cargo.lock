@@ -579,7 +579,6 @@ version = "0.1.0"
 dependencies = [
  "camino",
  "clove-core",
- "criterion",
  "futures",
  "interprocess",
  "serde",
@@ -588,6 +587,8 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-serde",
+ "tokio-util",
 ]
 
 [[package]]
@@ -633,10 +634,12 @@ dependencies = [
  "clove-index",
  "clove-ipc",
  "fd-lock",
+ "futures",
  "git2",
  "interprocess",
  "notify",
  "serde_json",
+ "tarpc",
  "tempfile",
  "tokio",
  "windows-sys 0.59.0",

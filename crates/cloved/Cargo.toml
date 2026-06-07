@@ -28,6 +28,8 @@ camino.workspace = true
 chrono.workspace = true       # snapshot timestamps for the auto-snapshot loop (M4)
 serde_json.workspace = true
 tokio.workspace = true
+tarpc.workspace = true        # typed CLI<->daemon RPC service (clove-ipc)
+futures.workspace = true      # tarpc channel executor (StreamExt)
 interprocess = { workspace = true, features = ["tokio"] }
 notify.workspace = true
 fd-lock.workspace = true
