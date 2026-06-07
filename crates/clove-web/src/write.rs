@@ -21,6 +21,17 @@ fn parse_id(raw: &str) -> Result<CloveId, ApiError> {
     CloveId::new(raw).map_err(ApiError::from)
 }
 
+/// Deserialize a present field (including explicit `null`) into the inner option,
+/// wrapped in `Some`, so a PATCH can distinguish "clear" (`null`) from "leave"
+/// (absent). Mirrors `clove_types::EditRequest`'s tri-state assignee handling.
+fn double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::deserialize(deserializer)?))
+}
+
 /// Build the updated-item response (full detail, with fresh graph context).
 fn respond_item(state: &AppState, item: &Item) -> ApiResult {
     let (frontmatters, _errors) = state.store.scan_frontmatter()?;
@@ -82,7 +93,9 @@ pub struct PatchBody {
     pub status: Option<String>,
     #[serde(default)]
     pub priority: Option<u8>,
-    #[serde(default)]
+    // `double_option` makes an explicit `null` mean clear and an absent key mean
+    // leave — a plain `Option<Option<_>>` would collapse `null` to "leave".
+    #[serde(default, deserialize_with = "double_option")]
     pub assignee: Option<Option<String>>,
     #[serde(default)]
     pub r#type: Option<String>,
