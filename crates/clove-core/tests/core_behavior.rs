@@ -34,6 +34,13 @@ fn repo() -> (tempfile::TempDir, ItemStore) {
     let tmp = tempfile::tempdir().unwrap();
     let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
     std::fs::create_dir_all(root.join(".clove").join("issues")).unwrap();
+    // A properly-initialized repo carries `.clove/.gitignore` (as `clove init`
+    // writes it); without it the doctor `GITIGNORE_DRIFT` check would fire.
+    std::fs::write(
+        root.join(".clove").join(".gitignore"),
+        format!("{}\n", clove_core::GITIGNORE_ENTRIES.join("\n")),
+    )
+    .unwrap();
     (tmp, ItemStore::new(root))
 }
 

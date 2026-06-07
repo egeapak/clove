@@ -23,20 +23,19 @@ pub fn run(
     }
     let mut report = diagnose(&ctx.store);
 
-    // T-S08: index divergence check (skipped with --no-index or no index file).
+    // T-S08 + integrity (M4): index health — schema version, internal
+    // corruption, and files-vs-index divergence. Skipped with --no-index or when
+    // no index file exists. Every index finding is repaired by a full rebuild.
     if !no_index && ctx.db_path.exists() {
-        if let Some(issue) = index_divergence(ctx)? {
-            if args.fix {
-                clove_index::reindex(&ctx.issues_dir, &ctx.db_path)
-                    .map_err(|e| index_error(e, &ctx.db_path))?;
-                fixed += 1;
-                // Re-check; report only if it is still diverged.
-                if let Some(again) = index_divergence(ctx)? {
-                    report.issues.push(again);
-                }
-            } else {
-                report.issues.push(issue);
-            }
+        let issues = index_checks(ctx)?;
+        if args.fix && !issues.is_empty() {
+            clove_index::reindex(&ctx.issues_dir, &ctx.db_path)
+                .map_err(|e| index_error(e, &ctx.db_path))?;
+            fixed += issues.len();
+            // Re-check; surface anything the rebuild did not resolve.
+            report.issues.extend(index_checks(ctx)?);
+        } else {
+            report.issues.extend(issues);
         }
     }
 
@@ -63,21 +62,67 @@ pub fn run(
     }
 }
 
-/// Compare the index against the files (reusing the staleness machinery).
-/// Returns a fixable warning when they diverge.
-fn index_divergence(ctx: &Ctx) -> Result<Option<DoctorIssue>, CloveError> {
-    let index = match clove_index::Index::open_or_create(&ctx.db_path) {
-        Ok(index) => index,
-        Err(_) => {
-            return Ok(Some(DoctorIssue {
-                severity: Severity::Warning,
-                code: "INDEX_UNREADABLE",
-                item: None,
-                message: "index is unreadable; run `clove reindex`".to_owned(),
-                fixable: true,
-            }))
+/// Inspect the on-disk index **without healing it** — uses [`clove_index::Index::open`]
+/// (not `open_or_create`), so a schema-version mismatch or corruption is reported
+/// as a finding rather than silently rebuilt out from under the user. Returns
+/// every index finding (zero or one); all are `fixable` via a `reindex`.
+fn index_checks(ctx: &Ctx) -> Result<Vec<DoctorIssue>, CloveError> {
+    use clove_index::{Index, IndexError};
+
+    match Index::open(&ctx.db_path) {
+        Ok(index) => {
+            // Internal integrity first: a structurally-corrupt cache silently
+            // serves wrong query results, so it is an error, not a warning.
+            if let Some(reason) = index
+                .integrity_check()
+                .map_err(|e| index_error(e, &ctx.db_path))?
+            {
+                return Ok(vec![corrupt_issue(&reason)]);
+            }
+            // Healthy and current: the only remaining question is freshness.
+            Ok(index_divergence(&index, ctx)?.into_iter().collect())
         }
-    };
+        Err(IndexError::SchemaMismatch { found, expected }) => Ok(vec![DoctorIssue {
+            severity: Severity::Warning,
+            code: "INDEX_SCHEMA_MISMATCH",
+            item: None,
+            message: format!(
+                "index schema is v{found} but this clove expects v{expected}; \
+                 run `clove reindex`"
+            ),
+            fixable: true,
+        }]),
+        Err(IndexError::CorruptIndex(msg)) => Ok(vec![corrupt_issue(&msg)]),
+        Err(IndexError::SqliteError(e)) if clove_index::db::is_corrupt(&e) => {
+            Ok(vec![corrupt_issue(&e.to_string())])
+        }
+        Err(_) => Ok(vec![DoctorIssue {
+            severity: Severity::Warning,
+            code: "INDEX_UNREADABLE",
+            item: None,
+            message: "index is unreadable; run `clove reindex`".to_owned(),
+            fixable: true,
+        }]),
+    }
+}
+
+/// An `INDEX_CORRUPT` error finding (fixable by a rebuild from the files).
+fn corrupt_issue(detail: &str) -> DoctorIssue {
+    DoctorIssue {
+        severity: Severity::Error,
+        code: "INDEX_CORRUPT",
+        item: None,
+        message: format!("index is corrupt ({detail}); run `clove reindex`"),
+        fixable: true,
+    }
+}
+
+/// Compare an already-opened, healthy index against the files (reusing the
+/// staleness machinery). Returns a fixable warning when they diverge.
+fn index_divergence(
+    index: &clove_index::Index,
+    ctx: &Ctx,
+) -> Result<Option<DoctorIssue>, CloveError> {
     let staleness = index
         .check_staleness(&ctx.issues_dir)
         .map_err(|e| index_error(e, &ctx.db_path))?;

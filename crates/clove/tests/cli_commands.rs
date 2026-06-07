@@ -473,6 +473,148 @@ fn doctor_no_index_skips_divergence_check() {
     assert!(!codes.contains(&"INDEX_DIVERGENCE"));
 }
 
+/// Collect the `code` of every issue in a doctor JSON report.
+fn doctor_codes(report: &Value) -> Vec<String> {
+    report["data"]["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["code"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn doctor_detects_and_fixes_gitignore_drift() {
+    let dir = init_repo();
+    new_item(dir.path(), "X", &[]);
+    let gitignore = dir.path().join(".clove/.gitignore");
+
+    // A missing required entry (the file exists but is incomplete).
+    std::fs::write(&gitignore, "index.db\n").unwrap();
+    let report = json_ok(clove(dir.path()).arg("doctor"));
+    assert!(
+        doctor_codes(&report).contains(&"GITIGNORE_DRIFT".to_owned()),
+        "codes: {:?}",
+        doctor_codes(&report)
+    );
+
+    // --fix appends the missing canonical entries (keeping the existing line).
+    clove(dir.path())
+        .args(["doctor", "--fix"])
+        .assert()
+        .success();
+    let fixed = std::fs::read_to_string(&gitignore).unwrap();
+    for entry in ["index.db", "daemon.sock", "index.db.tmp"] {
+        assert!(fixed.contains(entry), "missing {entry} after fix");
+    }
+    let after = json_ok(clove(dir.path()).arg("doctor"));
+    assert!(!doctor_codes(&after).contains(&"GITIGNORE_DRIFT".to_owned()));
+
+    // A wholly absent file is also detected and recreated.
+    std::fs::remove_file(&gitignore).unwrap();
+    let report = json_ok(clove(dir.path()).arg("doctor"));
+    assert!(doctor_codes(&report).contains(&"GITIGNORE_DRIFT".to_owned()));
+    clove(dir.path())
+        .args(["doctor", "--fix"])
+        .assert()
+        .success();
+    assert!(gitignore.exists());
+}
+
+#[test]
+fn doctor_detects_timestamp_incoherence() {
+    let dir = init_repo();
+    let id = new_item(dir.path(), "Backwards", &[]);
+
+    // Hand-edit the file so `updated` precedes `created`.
+    let item_path = dir.path().join(format!(".clove/issues/{id}.md"));
+    let rewritten = std::fs::read_to_string(&item_path)
+        .unwrap()
+        .lines()
+        .map(|l| {
+            if l.starts_with("created:") {
+                "created: 2026-06-05T10:00:00Z".to_owned()
+            } else if l.starts_with("updated:") {
+                "updated: 2026-06-01T10:00:00Z".to_owned()
+            } else {
+                l.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&item_path, format!("{rewritten}\n")).unwrap();
+
+    let report = json_ok(clove(dir.path()).arg("doctor"));
+    assert!(
+        doctor_codes(&report).contains(&"TIMESTAMP_INCOHERENT".to_owned()),
+        "codes: {:?}",
+        doctor_codes(&report)
+    );
+    // It is a warning, not an error: a plain run still exits 0.
+    clove(dir.path()).arg("doctor").assert().success();
+}
+
+#[test]
+fn doctor_detects_and_fixes_index_corruption() {
+    let dir = init_repo();
+    new_item(dir.path(), "Indexed", &[]);
+    clove(dir.path()).arg("reindex").assert().success();
+
+    // Overwrite the index with bytes that are not a SQLite database.
+    let db = dir.path().join(".clove/index.db");
+    std::fs::write(&db, b"this is definitely not sqlite").unwrap();
+
+    let report = json_ok(clove(dir.path()).arg("doctor"));
+    assert!(
+        doctor_codes(&report).contains(&"INDEX_CORRUPT".to_owned()),
+        "codes: {:?}",
+        doctor_codes(&report)
+    );
+    // It is an error: --strict exits 4.
+    clove(dir.path())
+        .args(["doctor", "--strict"])
+        .assert()
+        .failure()
+        .code(4);
+
+    // --fix rebuilds the index from the files; a subsequent run is clean.
+    clove(dir.path())
+        .args(["doctor", "--fix"])
+        .assert()
+        .success();
+    let after = json_ok(clove(dir.path()).arg("doctor"));
+    assert!(!doctor_codes(&after).contains(&"INDEX_CORRUPT".to_owned()));
+}
+
+#[test]
+fn doctor_detects_and_fixes_index_schema_mismatch() {
+    let dir = init_repo();
+    new_item(dir.path(), "Indexed", &[]);
+    clove(dir.path()).arg("reindex").assert().success();
+
+    // Stamp an older schema version onto the (otherwise valid) index.
+    let db = dir.path().join(".clove/index.db");
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.pragma_update(None, "user_version", 1_i64).unwrap();
+    }
+
+    let report = json_ok(clove(dir.path()).arg("doctor"));
+    assert!(
+        doctor_codes(&report).contains(&"INDEX_SCHEMA_MISMATCH".to_owned()),
+        "codes: {:?}",
+        doctor_codes(&report)
+    );
+
+    // --fix rebuilds at the current schema version; clean afterwards.
+    clove(dir.path())
+        .args(["doctor", "--fix"])
+        .assert()
+        .success();
+    let after = json_ok(clove(dir.path()).arg("doctor"));
+    assert!(!doctor_codes(&after).contains(&"INDEX_SCHEMA_MISMATCH".to_owned()));
+}
+
 #[test]
 fn env_clove_format_json_without_flag() {
     let dir = init_repo();

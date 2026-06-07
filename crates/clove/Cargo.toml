@@ -52,3 +52,4 @@ assert_cmd.workspace = true
 insta = { workspace = true, features = ["json"] }       # golden CLI snapshot tests (T-X01 acceptance gate)
 tempfile.workspace = true
 jsonschema.workspace = true       # T-CLI14: validate JSON output against v1 schema
+rusqlite.workspace = true         # doctor: stamp an old index user_version to exercise INDEX_SCHEMA_MISMATCH

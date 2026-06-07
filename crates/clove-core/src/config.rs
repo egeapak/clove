@@ -13,6 +13,23 @@ use crate::model::ItemType;
 /// Current `config.toml` schema version (distinct from item schema).
 pub const CURRENT_CONFIG_SCHEMA: u32 = 1;
 
+/// The exact `.clove/.gitignore` entries (DESIGN §2.1 / §8.2). These keep the
+/// rebuildable SQLite cache and the daemon's socket/pid/lock files out of git —
+/// committing them would put derived state into the source of truth. `clove init`
+/// writes this set (LF endings on every platform) and `clove doctor` verifies it
+/// is present (`GITIGNORE_DRIFT`), so the canonical list lives here, shared by
+/// both rather than duplicated.
+pub const GITIGNORE_ENTRIES: [&str; 8] = [
+    "index.db",
+    "*.db-shm",
+    "*.db-wal",
+    "daemon.sock",
+    "daemon.pid",
+    "reindex.lock",
+    "daemon.lock",
+    "index.db.tmp",
+];
+
 /// Minimum / maximum number of random characters in a generated id.
 pub const MIN_ID_LENGTH: u8 = 4;
 pub const MAX_ID_LENGTH: u8 = 12;

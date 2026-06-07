@@ -181,7 +181,7 @@ impl IndexError {
 
 /// True for SQLite errors that mean the file is unusable and should be rebuilt
 /// rather than surfaced (`SQLITE_CORRUPT` and "file is not a database").
-pub(crate) fn is_corrupt(err: &rusqlite::Error) -> bool {
+pub fn is_corrupt(err: &rusqlite::Error) -> bool {
     matches!(
         err,
         rusqlite::Error::SqliteFailure(e, _)
@@ -378,6 +378,44 @@ impl Index {
         Ok(n as usize)
     }
 
+    /// Verify the index's internal integrity, returning `Ok(None)` when healthy
+    /// or `Ok(Some(reason))` when corrupt. Two complementary checks:
+    ///
+    /// 1. `PRAGMA quick_check` — SQLite's own structural verification (the fast
+    ///    variant of `integrity_check`; it skips the exhaustive index/content
+    ///    cross-validation but catches the page-level corruption that the shallow
+    ///    open-time [`is_corrupt`] probe misses).
+    /// 2. The contentless-FTS mirror: `fts_map` must have exactly one row per
+    ///    `items` row. Because `items_fts` is contentless and joined back through
+    ///    `fts_map` (see the schema notes above), a torn `fts_map` is a
+    ///    clove-specific corruption that `quick_check` cannot see but that would
+    ///    silently drop or misattribute search hits.
+    pub fn integrity_check(&self) -> Result<Option<String>, IndexError> {
+        let mut stmt = self.conn.prepare("PRAGMA quick_check")?;
+        let problems: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|line| line != "ok")
+            .collect();
+        if !problems.is_empty() {
+            return Ok(Some(format!("quick_check: {}", problems.join("; "))));
+        }
+
+        let items: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))?;
+        let fts: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM fts_map", [], |r| r.get(0))?;
+        if items != fts {
+            return Ok(Some(format!(
+                "full-text index out of sync ({fts} fts row(s) vs {items} item(s))"
+            )));
+        }
+        Ok(None)
+    }
+
     /// Flush the WAL back into the main database file and truncate it. Run on
     /// daemon shutdown (DESIGN §8.9) so no `-wal` work is left dangling for the
     /// next opener.
@@ -502,6 +540,25 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 5);
+    }
+
+    #[test]
+    fn integrity_check_passes_clean_and_catches_fts_drift() {
+        let (_dir, path) = tmp_db();
+        let index = Index::open(&path).unwrap();
+        // A fresh index is internally consistent.
+        assert_eq!(index.integrity_check().unwrap(), None);
+        // Tear the FTS mirror: a stray fts_map row with no matching item makes
+        // the contentless-FTS cross-check fail even though quick_check is happy.
+        index
+            .conn()
+            .execute(
+                "INSERT INTO fts_map(fts_rowid, item_id) VALUES (1, 'ghost')",
+                [],
+            )
+            .unwrap();
+        let reason = index.integrity_check().unwrap().unwrap();
+        assert!(reason.contains("full-text index"), "{reason}");
     }
 
     /// T-D01 / schema v3: `file_mtimes` carries the nullable `synced_at` column

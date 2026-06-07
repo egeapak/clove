@@ -117,6 +117,25 @@ daemon tracks **ping stats** (`ping_count` + `last_ping_ms`, surfaced in `STATUS
 / `clove daemon status`). Spawn logic is shared via `clove_ipc::{spawn_daemon,
 ensure_daemon}` (also used by `clove daemon start`).
 
+**M4 — `clove doctor` integrity checks (this session).** Five new health checks,
+chosen by a 3-lens agent forum (store-integrity / operational / DX) and the
+"integrity" scope. **Store-level** (in `clove_core::doctor`, file-only): (3)
+`DUPLICATE_ID` — closes the one §7.7 check that was specced but never built
+(error); (12) `TIMESTAMP_INCOHERENT` — `updated<created`, `closed<created`, or a
+timestamp >24 h in the future (warning, report-only); (13) `GITIGNORE_DRIFT` —
+`.clove/.gitignore` absent or missing a required cache/socket entry (warning,
+**fixable** — appends the missing canonical lines, preserving user-added ones).
+The canonical entry list was lifted to `clove_core::GITIGNORE_ENTRIES`, shared by
+`clove init` and `doctor` so they can't drift. **Index-level** (in
+`clove/src/cmd/doctor.rs`, now via the **non-healing** `Index::open` so problems
+are reported instead of silently rebuilt): `INDEX_SCHEMA_MISMATCH` (warning) and
+`INDEX_CORRUPT` (error — `PRAGMA quick_check` + a contentless-FTS
+`fts_map`↔`items` row-count cross-check, the first integrity verification in the
+tree). All index findings are fixed by one `reindex`. DESIGN §7.7 updated; tests:
+5 `clove-core` doctor unit tests + 1 `clove-index` `integrity_check` test + 4 new
+`clove` e2e tests (gitignore drift+fix, timestamp, index corruption+fix, schema
+mismatch+fix); `fmt`/`clippy -D warnings`/`cargo test --workspace` all green.
+
 **Next step (rest of M4):** TUI write actions (status/priority/label edits, …),
 bidirectional vendor bridges, richer history/changelog, and the remaining MCP
 follow-up — server-push notifications (MCP `tools/list_changed` / a ready-queue
