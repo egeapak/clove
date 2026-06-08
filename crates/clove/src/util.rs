@@ -1,7 +1,7 @@
 //! Small parsing helpers shared across commands.
 
 use chrono::{DateTime, Timelike, Utc};
-use clove_core::{CloveError, CloveId, ItemStatus, ItemType, Priority};
+use clove_types::{CloveError, CloveId, ItemStatus, ItemType, Priority};
 
 /// The current time truncated to whole seconds (the canonical on-disk timestamp
 /// precision; matches `ItemStore`'s internal truncation).

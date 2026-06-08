@@ -6,7 +6,7 @@
 //! crate behind the default-on `mcp` feature; a build without that feature still
 //! exposes the subcommand but errors cleanly.
 
-use clove_core::CloveError;
+use clove_types::CloveError;
 
 use crate::context::Ctx;
 

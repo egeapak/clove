@@ -1,7 +1,8 @@
 //! `clove edit` (T-CLI05) and the shared non-interactive field application used
 //! by `clove set`.
 
-use clove_core::{parse_item_file, CloveError, ItemFrontmatter, OutputFormat};
+use clove_core::{parse_item_file, OutputFormat};
+use clove_types::{CloveError, ItemFrontmatter};
 use serde_json::Map;
 
 use crate::cli::EditArgs;
@@ -10,12 +11,12 @@ use crate::item_json::print_item;
 use crate::util::{now_seconds, parse_id};
 
 /// Apply a list of `KEY=VALUE` (and `labels+=`/`labels-=`) edits to frontmatter
-/// (delegates to the shared [`clove_core::ops::apply_assignments`]).
+/// (delegates to the shared [`clove_types::apply_assignments`]).
 pub fn apply_assignments(
     fm: &mut ItemFrontmatter,
     assignments: &[String],
 ) -> Result<(), CloveError> {
-    clove_core::ops::apply_assignments(fm, assignments, now_seconds())
+    clove_types::apply_assignments(fm, assignments, now_seconds())
 }
 
 pub fn run(ctx: &Ctx, format: OutputFormat, args: EditArgs) -> Result<(), CloveError> {
@@ -33,7 +34,7 @@ pub fn run(ctx: &Ctx, format: OutputFormat, args: EditArgs) -> Result<(), CloveE
 }
 
 /// Open the item file in `$EDITOR`/`$VISUAL`, then re-parse to validate it.
-fn open_in_editor(ctx: &Ctx, id: &clove_core::CloveId) -> Result<(), CloveError> {
+fn open_in_editor(ctx: &Ctx, id: &clove_types::CloveId) -> Result<(), CloveError> {
     let path = ctx.store.path_for(id);
     if !path.exists() {
         return Err(CloveError::NotFound { id: id.to_string() });

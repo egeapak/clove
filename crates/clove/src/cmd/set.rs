@@ -1,6 +1,7 @@
 //! `clove set <id> KEY=VALUE...` (T-CLI05): alias for `edit --field`.
 
-use clove_core::{CloveError, OutputFormat};
+use clove_core::OutputFormat;
+use clove_types::CloveError;
 use serde_json::Map;
 
 use crate::cli::SetArgs;

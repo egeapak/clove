@@ -1,12 +1,31 @@
 # CLAUDE.md
 
 Guidance for working in this repo. `clove` is a Cargo workspace (`crates/*`):
-`clove-core` (model/graph/store), `clove-tui` (the read-only terminal browser),
+`clove-types` (pure shared data types: model/id/error/validation + the
+create/edit request types), `clove-core` (file store/graph/high-level ops on top
+of `clove-types`), `clove-tui` (the terminal browser + add/edit form),
 `clove-web` (the web UI server + embedded SvelteKit SPA, `clove serve`),
-plus `clove` (CLI), `cloved`, `clove-index`, `clove-ipc`, `clove-import`.
+plus `clove` (CLI), `cloved`, `clove-index`, `clove-ipc`, `clove-import`,
+`clove-mcp`.
 
 See `HANDOFF.md` and `docs/IMPLEMENTATION_PLAN.md` for the full design/state, and
 `docs/M4_WEB_UI_PLAN.md` for the web UI.
+
+## Unified write path (all surfaces share it)
+
+Every mutation — CLI, web, MCP, daemon, and the TUI form — flows through one
+implementation, so field validation and the status↔`closed` invariant live in a
+single place. The request types are `clove_types::{NewSpec, EditRequest,
+LabelEdit}` (serializable; they also ride the daemon `tarpc` wire). The pure
+mutators (`EditRequest::apply_to_frontmatter`, `set_status`, `from_tokens`,
+`normalize_body`) are in `clove-types`; the store-touching orchestration
+(`clove_core::apply_edit`, `clove_core::ops::{create, transition, dep_add,
+dep_remove, set_parent, comment}`) is in `clove-core`. `EditRequest` covers the
+scalar + label + body surface; graph edges (`deps`/`parent`) stay as dedicated
+cycle-validated ops. `ops::edit` / `apply_assignments` are thin shims over
+`EditRequest::from_tokens`, so the CLI `KEY=VALUE` token surface and the
+structured web/MCP/TUI surfaces never diverge. When adding an editable field,
+add it to `EditRequest` once — don't re-implement it per surface.
 
 ## Web UI (`clove-web`)
 

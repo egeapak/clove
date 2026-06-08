@@ -10,7 +10,8 @@
 use std::collections::HashMap;
 
 use camino::{Utf8Path, Utf8PathBuf};
-use clove_core::{parse_item_bytes, CloveId};
+use clove_core::parse_item_bytes;
+use clove_types::CloveId;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 use crate::db::{Index, IndexError};
@@ -343,7 +344,7 @@ fn read_snapshot(conn: &Connection, id: &str) -> Result<(Signature, DerivedCols)
 }
 
 /// The structure signature of a freshly parsed item.
-fn signature_of(fm: &clove_core::ItemFrontmatter) -> Signature {
+fn signature_of(fm: &clove_types::ItemFrontmatter) -> Signature {
     use clove_core::graph::EdgeKind;
     let mut edges = std::collections::BTreeSet::new();
     let mut add = |kind: EdgeKind, ids: &[CloveId]| {

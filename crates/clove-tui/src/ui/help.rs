@@ -21,6 +21,7 @@ pub(crate) fn render_help(f: &mut Frame, area: Rect) {
         ("f", "filter menu (facets)"),
         ("x", "clear all filters"),
         ("/", "search id, title, labels"),
+        ("n / e", "new / edit item"),
         ("Esc", "clear search / back / close"),
         ("r", "refresh from disk"),
         ("?", "toggle this help"),
@@ -29,7 +30,7 @@ pub(crate) fn render_help(f: &mut Frame, area: Rect) {
 
     let mut lines = vec![
         Line::from(Span::styled(
-            "clove tui — read-only browser",
+            "clove tui — browser + editor",
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         )),
         Line::raw(""),

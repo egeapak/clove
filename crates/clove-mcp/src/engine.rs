@@ -9,9 +9,10 @@
 
 use camino::Utf8PathBuf;
 use chrono::Utc;
-use clove_core::ops::{self, NewSpec};
-use clove_core::{CloveId, Filters, ItemStatus, ItemStore, ItemType};
+use clove_core::ops;
+use clove_core::{Filters, ItemStore};
 use clove_ipc::DaemonClient;
+use clove_types::{CloveId, ItemStatus, ItemType, NewSpec};
 use serde_json::Value;
 
 use crate::args::*;
@@ -129,15 +130,15 @@ impl Engine {
     }
 
     pub fn edit(&self, a: EditArgs) -> Result<Value, String> {
-        let tokens = a.to_tokens();
-        if tokens.is_empty() {
+        let req = a.to_request().map_err(stringify)?;
+        if req.is_empty() {
             return Err("no fields to edit".to_owned());
         }
         match self.daemon() {
-            Some(mut d) => d.edit(a.id, tokens).map_err(stringify),
+            Some(mut d) => d.apply_edit(a.id, req).map_err(stringify),
             None => {
                 let id = parse_id(&a.id)?;
-                ops::edit(&self.store(), &id, &tokens, Utc::now()).map_err(stringify)
+                clove_core::apply_edit(&self.store(), &id, &req, Utc::now()).map_err(stringify)
             }
         }
     }
@@ -160,6 +161,31 @@ impl Engine {
                 let id = parse_id(&a.id)?;
                 let dep = parse_id(&a.dep_id)?;
                 ops::dep_add(&self.store(), &id, &dep, Utc::now()).map_err(stringify)
+            }
+        }
+    }
+
+    pub fn dep_remove(&self, a: DepAddArgs) -> Result<Value, String> {
+        match self.daemon() {
+            Some(mut d) => d.dep_remove(a.id, a.dep_id).map_err(stringify),
+            None => {
+                let id = parse_id(&a.id)?;
+                let dep = parse_id(&a.dep_id)?;
+                ops::dep_remove(&self.store(), &id, &dep, Utc::now()).map_err(stringify)
+            }
+        }
+    }
+
+    pub fn set_parent(&self, a: SetParentArgs) -> Result<Value, String> {
+        match self.daemon() {
+            Some(mut d) => d.set_parent(a.id, a.parent).map_err(stringify),
+            None => {
+                let id = parse_id(&a.id)?;
+                let parent = match a.parent {
+                    Some(p) => Some(parse_id(&p)?),
+                    None => None,
+                };
+                ops::set_parent(&self.store(), &id, parent.as_ref(), Utc::now()).map_err(stringify)
             }
         }
     }

@@ -1,0 +1,52 @@
+---
+source: crates/clove-tui/src/snapshot.rs
+expression: rendered
+---
+┌ Edit proj-9QX4D1B7 ──────────────────┐
+│ ▌   Title: Build REST API▏           │
+│    Status: in_progress               │
+│      Type: feature                   │
+│  Priority: p0                        │
+│  Assignee: grace                     │
+│    Labels: area:api, backend         │
+│    Parent:                           │
+│      Deps: proj-7AF3K2MN             │
+│      Body:                           │
+│   ## Goals                           │
+│                                      │
+│   Build a **REST API** with `axum`;  │
+│                                      │
+│   - CRUD endpoints                   │
+│   - Auth middleware                  │
+│                                      │
+│   ### Steps                          │
+│                                      │
+│   1. Define routes                   │
+│   2. Wire handlers                   │
+│                                      │
+│   > Blocked on the schema work until │
+│                                      │
+│   ---                                │
+│                                      │
+│   Done when the integration tests pa │
+│                                      │
+│ Ctrl-S save · Esc cancel · Tab/↑↓ fi │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+└──────────────────────────────────────┘

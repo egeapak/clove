@@ -9,8 +9,9 @@ use std::time::{Duration, Instant};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use chrono::Utc;
-use clove_core::{ItemStore, ItemType, NewItem, Priority};
+use clove_core::{ItemStore, NewItem};
 use clove_ipc::{DaemonClient, QueryKind, QueryRequest};
+use clove_types::{ItemType, Priority};
 
 fn cloved_bin() -> Utf8PathBuf {
     Utf8PathBuf::from(env!("CARGO_BIN_EXE_cloved"))

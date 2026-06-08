@@ -12,8 +12,9 @@ use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 
 use camino::Utf8Path;
-use clove_core::{CloveError, CloveId, GraphStore, OutputFormat};
+use clove_core::{GraphStore, OutputFormat};
 use clove_import::export::{export_json, export_jsonl};
+use clove_types::{CloveError, CloveId};
 use serde_json::{json, Value};
 use tempfile::NamedTempFile;
 
@@ -64,7 +65,7 @@ pub fn run(ctx: &Ctx, format: OutputFormat, args: ExportArgs) -> Result<(), Clov
     // then shape the full items in that order.
     let mut order = frontmatters.clone();
     sort_by_priority_topo(&mut order, &ranks);
-    let by_id: HashMap<&CloveId, &clove_core::Item> =
+    let by_id: HashMap<&CloveId, &clove_types::Item> =
         items.iter().map(|i| (&i.frontmatter.id, i)).collect();
 
     let shaped: Vec<Value> = order

@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 
 use camino::Utf8Path;
 use clove_core::fixtures::{deps_fuzz_document, FUZZ_ID};
-use clove_core::{parse_item_bytes, CloveId};
+use clove_core::parse_item_bytes;
+use clove_types::CloveId;
 
 /// Path to `fuzz/corpus/<target>/`, resolved from this crate's manifest dir.
 fn corpus_dir(target: &str) -> PathBuf {

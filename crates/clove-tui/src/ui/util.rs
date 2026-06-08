@@ -88,7 +88,7 @@ pub(crate) fn centered_fixed(area: Rect, w: u16, h: u16) -> Rect {
 /// The short form of an id for display: drop the (per-repo, redundant) prefix
 /// and trim leading zeros — e.g. `proj-00000042` → `42`, `proj-7af3q2k9` →
 /// `7af3q2k9`.
-pub(crate) fn short_id(id: &clove_core::CloveId) -> String {
+pub(crate) fn short_id(id: &clove_types::CloveId) -> String {
     let s = id.as_str();
     let suffix = s.rsplit_once('-').map(|(_, b)| b).unwrap_or(s);
     let trimmed = suffix.trim_start_matches('0');
@@ -100,11 +100,11 @@ pub(crate) fn short_id(id: &clove_core::CloveId) -> String {
 }
 
 /// `short_id` with a leading `#` so it reads as a reference.
-pub(crate) fn short_ref(id: &clove_core::CloveId) -> String {
+pub(crate) fn short_ref(id: &clove_types::CloveId) -> String {
     format!("#{}", short_id(id))
 }
 
-pub(crate) fn join_ids<'a>(ids: impl IntoIterator<Item = &'a clove_core::CloveId>) -> String {
+pub(crate) fn join_ids<'a>(ids: impl IntoIterator<Item = &'a clove_types::CloveId>) -> String {
     ids.into_iter()
         .map(short_ref)
         .collect::<Vec<_>>()
@@ -114,7 +114,7 @@ pub(crate) fn join_ids<'a>(ids: impl IntoIterator<Item = &'a clove_core::CloveId
 pub(crate) fn push_id_field<'a>(
     lines: &mut Vec<Line<'static>>,
     key: &str,
-    ids: impl IntoIterator<Item = &'a clove_core::CloveId>,
+    ids: impl IntoIterator<Item = &'a clove_types::CloveId>,
 ) {
     let joined = join_ids(ids);
     if !joined.is_empty() {

@@ -9,9 +9,10 @@ use std::time::{Duration, Instant};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use chrono::Utc;
-use clove_core::{ItemStore, ItemType, NewItem, Priority};
+use clove_core::{ItemStore, NewItem};
 use clove_index::{Filter, Index, QueryMode};
 use clove_ipc::{DaemonClient, QueryKind, QueryRequest};
+use clove_types::{ItemType, Priority};
 
 fn cloved_bin() -> Utf8PathBuf {
     Utf8PathBuf::from(env!("CARGO_BIN_EXE_cloved"))
@@ -177,8 +178,7 @@ fn mutations_round_trip_through_daemon() {
     // Topology B: writes go through the single daemon, which performs them on the
     // file store and keeps itself coherent. Verify create → edit → comment →
     // dep_add → show all round-trip and land on disk.
-    use clove_core::ops::NewSpec;
-    use clove_core::ItemStatus;
+    use clove_types::{ItemStatus, NewSpec};
 
     let (_tmp, clove_dir) = init_repo_with_items(0);
     let mut child = spawn_ready(&clove_dir);
@@ -223,6 +223,31 @@ fn mutations_round_trip_through_daemon() {
     assert_eq!(with_dep["deps"], serde_json::json!([dep_id]));
     // Negative: a self-loop is rejected by the daemon's validation pipeline.
     assert!(client.dep_add(id.clone(), id.clone()).is_err());
+
+    // apply_edit: a structured edit including a body (the new v3 capability),
+    // proving the EditRequest rides the wire and the body lands on disk.
+    let renamed = client
+        .apply_edit(
+            id.clone(),
+            clove_types::EditRequest {
+                title: Some("renamed via daemon".to_owned()),
+                body: Some("a fresh body".to_owned()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(renamed["title"], "renamed via daemon");
+    assert_eq!(client.show(id.clone()).unwrap()["body"], "a fresh body\n");
+
+    // dep_remove then re-add (keeps later assertions stable).
+    let undone = client.dep_remove(id.clone(), dep_id.clone()).unwrap();
+    assert_eq!(undone["deps"], serde_json::json!([]));
+    client.dep_add(id.clone(), dep_id.clone()).unwrap();
+
+    // set_parent: make `id` a child of `dep`, then clear it.
+    let parented = client.set_parent(id.clone(), Some(dep_id.clone())).unwrap();
+    assert_eq!(parented["parent"], dep_id);
+    assert!(client.set_parent(id.clone(), None).unwrap()["parent"].is_null());
 
     // comment + show reflect the accumulated state.
     client

@@ -7,7 +7,7 @@
 //! ordering but never surfaced in the public JSON schema.
 
 use clove_core::graph::EdgeKind;
-use clove_core::{CloveId, ItemStatus, ItemType, Priority};
+use clove_types::{CloveId, ItemStatus, ItemType, Priority};
 use rusqlite::{Connection, ToSql};
 
 use crate::db::{IndexError, ItemListRow, ItemRow, ITEM_COLUMNS, LIST_COLUMNS};

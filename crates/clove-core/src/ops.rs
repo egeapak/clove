@@ -8,135 +8,18 @@
 //! reused by the CLI's interactive edit path.
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::view::item_object;
 use crate::{
-    add_comment, list_comments, normalize_label, CloveError, CloveId, GraphStore, Item,
-    ItemFrontmatter, ItemStatus, ItemStore, ItemType, NewItem, Priority,
+    add_comment, fields, list_comments, CloveError, CloveId, EditRequest, GraphStore, Item,
+    ItemFrontmatter, ItemStatus, ItemStore, ItemType, NewItem,
 };
 
-/// A raw "new item" spec. Strings are parsed/validated by [`create`]; the struct
-/// is serializable so it can also ride the daemon RPC wire unchanged.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct NewSpec {
-    /// The item title (required, non-empty).
-    pub title: String,
-    /// `bug|feature|chore|docs|epic`; `None` → the caller's default type.
-    pub item_type: Option<String>,
-    /// Priority 0–4; `None` → [`Priority::DEFAULT`].
-    pub priority: Option<u8>,
-    #[serde(default)]
-    pub labels: Vec<String>,
-    #[serde(default)]
-    pub deps: Vec<String>,
-    pub parent: Option<String>,
-    pub assignee: Option<String>,
-    pub body: Option<String>,
-}
-
-/// Apply a status transition to frontmatter, maintaining the closed-timestamp
-/// invariant: set `closed` when moving to closed, clear it otherwise.
-pub fn set_status(fm: &mut ItemFrontmatter, status: ItemStatus, now: DateTime<Utc>) {
-    fm.status = status;
-    match status {
-        ItemStatus::Closed => {
-            if fm.closed.is_none() {
-                fm.closed = Some(now);
-            }
-        }
-        ItemStatus::Open | ItemStatus::InProgress => fm.closed = None,
-    }
-}
-
-/// Apply a list of `KEY=VALUE` (and `labels+=`/`labels-=`) edits to frontmatter.
-/// All edits are applied to the in-memory copy before a single write.
-pub fn apply_assignments(
-    fm: &mut ItemFrontmatter,
-    assignments: &[String],
-    now: DateTime<Utc>,
-) -> Result<(), CloveError> {
-    for token in assignments {
-        apply_one(fm, token, now)?;
-    }
-    Ok(())
-}
-
-fn apply_one(fm: &mut ItemFrontmatter, token: &str, now: DateTime<Utc>) -> Result<(), CloveError> {
-    let (raw_key, value) = token
-        .split_once('=')
-        .ok_or_else(|| CloveError::InvalidField {
-            field: "edit".to_owned(),
-            reason: format!("expected KEY=VALUE, got `{token}`"),
-        })?;
-
-    // labels+=val / labels-=val
-    if let Some(key) = raw_key.strip_suffix('+') {
-        require_labels(key)?;
-        let canonical = normalize_label(value)?;
-        if !fm.labels.contains(&canonical) {
-            fm.labels.push(canonical);
-            fm.labels.sort();
-            fm.labels.dedup();
-        }
-        return Ok(());
-    }
-    if let Some(key) = raw_key.strip_suffix('-') {
-        require_labels(key)?;
-        let canonical = normalize_label(value)?;
-        fm.labels.retain(|l| l != &canonical);
-        return Ok(());
-    }
-
-    match raw_key {
-        "status" => set_status(fm, ItemStatus::parse(value)?, now),
-        "priority" => {
-            let n: u8 = value.parse().map_err(|_| CloveError::InvalidField {
-                field: "priority".to_owned(),
-                reason: format!("expected 0–4, got `{value}`"),
-            })?;
-            fm.priority = Priority::new(n)?;
-        }
-        "type" => fm.item_type = ItemType::parse(value)?,
-        "assignee" => {
-            fm.assignee = if value.trim().is_empty() {
-                None
-            } else {
-                Some(value.to_owned())
-            };
-        }
-        "title" => {
-            if value.trim().is_empty() {
-                return Err(CloveError::InvalidField {
-                    field: "title".to_owned(),
-                    reason: "title cannot be empty".to_owned(),
-                });
-            }
-            fm.title = value.to_owned();
-        }
-        other => {
-            return Err(CloveError::InvalidField {
-                field: other.to_owned(),
-                reason:
-                    "unknown editable field (status|priority|type|assignee|title|labels+=|labels-=)"
-                        .to_owned(),
-            })
-        }
-    }
-    Ok(())
-}
-
-fn require_labels(key: &str) -> Result<(), CloveError> {
-    if key == "labels" {
-        Ok(())
-    } else {
-        Err(CloveError::InvalidField {
-            field: key.to_owned(),
-            reason: "only `labels` supports += / -=".to_owned(),
-        })
-    }
-}
+// The request types and the pure frontmatter mutators live in `clove-types`;
+// re-export them here so the `clove_core::ops::*` paths used by the daemon, CLI,
+// and MCP keep resolving.
+pub use clove_types::{apply_assignments, set_status, NewSpec};
 
 // ---- High-level operations (store I/O → JSON) --------------------------------
 
@@ -150,23 +33,15 @@ pub fn create(
     now: DateTime<Utc>,
 ) -> Result<Value, CloveError> {
     let item_type = match spec.item_type.as_deref() {
-        Some(t) => ItemType::parse(t)?,
+        Some(t) => fields::parse_type(t)?,
         None => default_type,
     };
     let priority = match spec.priority {
-        Some(p) => Priority::new(p)?,
-        None => Priority::DEFAULT,
+        Some(p) => fields::parse_priority(p)?,
+        None => crate::Priority::DEFAULT,
     };
-    let mut labels = Vec::new();
-    for raw in &spec.labels {
-        labels.push(normalize_label(raw)?);
-    }
-    labels.sort();
-    labels.dedup();
-    let mut deps = Vec::new();
-    for raw in &spec.deps {
-        deps.push(CloveId::new(raw)?);
-    }
+    let labels = fields::parse_labels(&spec.labels)?;
+    let deps = fields::parse_ids(&spec.deps)?;
     let parent = match spec.parent.as_deref() {
         Some(p) => Some(CloveId::new(p)?),
         None => None,
@@ -201,17 +76,16 @@ pub fn transition(
     Ok(Value::Object(item_object(&saved)))
 }
 
-/// Apply `KEY=VALUE` edits atomically; returns the updated item object.
+/// Apply `KEY=VALUE` edits atomically; returns the updated item object. Thin
+/// shim over the unified [`crate::edit::apply_edit`] path.
 pub fn edit(
     store: &ItemStore,
     id: &CloveId,
     assignments: &[String],
     now: DateTime<Utc>,
 ) -> Result<Value, CloveError> {
-    let mut item = store.get(id)?;
-    apply_assignments(&mut item.frontmatter, assignments, now)?;
-    let saved = store.update(&item, now)?;
-    Ok(Value::Object(item_object(&saved)))
+    let req = EditRequest::from_tokens(assignments)?;
+    crate::edit::apply_edit(store, id, &req, now)
 }
 
 /// Append a comment; returns `{ id, path }` (path relative to the repo root).
@@ -271,6 +145,81 @@ pub fn dep_add(
     item.frontmatter.deps.push(dep_id.clone());
     item.frontmatter.deps.sort();
     item.frontmatter.deps.dedup();
+    let saved = store.update(&item, now)?;
+    Ok(Value::Object(item_object(&saved)))
+}
+
+/// Remove a hard dependency `id → dep_id`. Errors if `id` is unknown or does not
+/// currently depend on `dep_id`. Returns the updated item object.
+pub fn dep_remove(
+    store: &ItemStore,
+    id: &CloveId,
+    dep_id: &CloveId,
+    now: DateTime<Utc>,
+) -> Result<Value, CloveError> {
+    let mut item = store.get(id)?;
+    if !item.frontmatter.deps.contains(dep_id) {
+        return Err(CloveError::InvalidField {
+            field: "deps".to_owned(),
+            reason: format!("{id} does not depend on {dep_id}"),
+        });
+    }
+    item.frontmatter.deps.retain(|d| d != dep_id);
+    let saved = store.update(&item, now)?;
+    Ok(Value::Object(item_object(&saved)))
+}
+
+/// Set (or, with `parent = None`, clear) an item's parent. Validates that the
+/// parent exists and that the assignment does not create a parent cycle (the new
+/// parent must not be `id` itself or any descendant of `id`). Returns the updated
+/// item object.
+pub fn set_parent(
+    store: &ItemStore,
+    id: &CloveId,
+    parent: Option<&CloveId>,
+    now: DateTime<Utc>,
+) -> Result<Value, CloveError> {
+    let mut item = store.get(id)?;
+    match parent {
+        None => item.frontmatter.parent = None,
+        Some(parent) => {
+            if parent == id {
+                return Err(CloveError::InvalidField {
+                    field: "parent".to_owned(),
+                    reason: format!("{id} cannot be its own parent"),
+                });
+            }
+            if !store.exists(parent) {
+                return Err(CloveError::NotFound {
+                    id: parent.to_string(),
+                });
+            }
+            // Walk the proposed parent's ancestry; if we reach `id`, the
+            // assignment would close a parent cycle. The `visited` set bounds the
+            // walk so a *pre-existing* parent cycle in the store (a representable
+            // but invalid state, e.g. from a bad hand-edit or merge) can't hang us.
+            let (frontmatters, _errors) = store.scan_frontmatter()?;
+            let parent_of: std::collections::HashMap<&CloveId, Option<&CloveId>> = frontmatters
+                .iter()
+                .map(|fm| (&fm.id, fm.parent.as_ref()))
+                .collect();
+            let mut visited = std::collections::HashSet::new();
+            let mut cursor = Some(parent);
+            while let Some(node) = cursor {
+                if node == id {
+                    return Err(CloveError::InvalidField {
+                        field: "parent".to_owned(),
+                        reason: format!("setting parent of {id} to {parent} would create a cycle"),
+                    });
+                }
+                if !visited.insert(node) {
+                    break; // a pre-existing cycle that doesn't involve `id`
+                }
+                cursor = parent_of.get(node).copied().flatten();
+            }
+            item.frontmatter.parent = Some(parent.clone());
+        }
+    }
     let saved = store.update(&item, now)?;
     Ok(Value::Object(item_object(&saved)))
 }
@@ -671,6 +620,90 @@ mod tests {
             dep_add(&store, &a, &missing, Utc::now()),
             Err(CloveError::NotFound { .. })
         ));
+    }
+
+    #[test]
+    fn dep_remove_removes_and_errors_when_absent() {
+        let (_d, store) = store();
+        let a = new_id(&store, "a");
+        let b = new_id(&store, "b");
+        dep_add(&store, &a, &b, Utc::now()).unwrap();
+        let v = dep_remove(&store, &a, &b, Utc::now()).unwrap();
+        assert_eq!(v["deps"], json!([]));
+        // Strict: removing a dependency that isn't present errors.
+        assert!(matches!(
+            dep_remove(&store, &a, &b, Utc::now()),
+            Err(CloveError::InvalidField { .. })
+        ));
+    }
+
+    #[test]
+    fn set_parent_sets_clears_and_validates() {
+        let (_d, store) = store();
+        let a = new_id(&store, "a");
+        let b = new_id(&store, "b");
+
+        // Set, then clear.
+        let v = set_parent(&store, &a, Some(&b), Utc::now()).unwrap();
+        assert_eq!(v["parent"], b.as_str());
+        let v = set_parent(&store, &a, None, Utc::now()).unwrap();
+        assert!(v["parent"].is_null());
+
+        // Self-parent is rejected.
+        assert!(matches!(
+            set_parent(&store, &a, Some(&a), Utc::now()),
+            Err(CloveError::InvalidField { .. })
+        ));
+        // A missing parent is NotFound.
+        let missing = CloveId::new("proj-ZZZZZZZZ").unwrap();
+        assert!(matches!(
+            set_parent(&store, &a, Some(&missing), Utc::now()),
+            Err(CloveError::NotFound { .. })
+        ));
+        // A cycle (a's parent is b, so b's parent can't become a) is rejected.
+        set_parent(&store, &a, Some(&b), Utc::now()).unwrap();
+        assert!(matches!(
+            set_parent(&store, &b, Some(&a), Utc::now()),
+            Err(CloveError::InvalidField { .. })
+        ));
+    }
+
+    #[test]
+    fn set_parent_terminates_on_preexisting_cycle() {
+        // A parent cycle is "representable but invalid"; set_parent must not hang
+        // walking the ancestry of a parent whose chain already cycles.
+        let (_d, store) = store();
+        let b = new_id(&store, "b");
+        let c = new_id(&store, "c");
+        // Force b ↔ c directly (bypassing set_parent's own cycle guard).
+        let mut ib = store.get(&b).unwrap();
+        ib.frontmatter.parent = Some(c.clone());
+        store.update(&ib, Utc::now()).unwrap();
+        let mut ic = store.get(&c).unwrap();
+        ic.frontmatter.parent = Some(b.clone());
+        store.update(&ic, Utc::now()).unwrap();
+
+        // Parenting a fresh item under b must terminate (the cycle excludes d).
+        let d = new_id(&store, "d");
+        let v = set_parent(&store, &d, Some(&b), Utc::now()).unwrap();
+        assert_eq!(v["parent"], b.as_str());
+    }
+
+    #[test]
+    fn apply_edit_empty_request_is_a_no_op() {
+        let (_d, store) = store();
+        let id = new_id(&store, "task");
+        let before = store.get(&id).unwrap().frontmatter.updated;
+        // An all-absent EditRequest must not rewrite the file / bump `updated`.
+        let v = crate::apply_edit(
+            &store,
+            &id,
+            &crate::EditRequest::default(),
+            Utc::now() + chrono::Duration::seconds(5),
+        )
+        .unwrap();
+        assert_eq!(v["id"], id.as_str());
+        assert_eq!(store.get(&id).unwrap().frontmatter.updated, before);
     }
 
     #[test]

@@ -3,7 +3,7 @@ source: crates/clove-tui/src/snapshot.rs
 expression: rendered
 ---
 ┌ Help ────────────────────────────────┐
-│ clove tui — read-only browser        │
+│ clove tui — browser + editor         │
 │                                      │
 │ ↑/k ↓/j      move selection          │
 │ g / G        jump to top / bottom    │
@@ -19,6 +19,7 @@ expression: rendered
 │ x            clear all filters       │
 │ /            search id, title,       │
 │ labels                               │
+│ n / e        new / edit item         │
 │ Esc          clear search / back /   │
 │ close                                │
 │ r            refresh from disk       │
@@ -27,7 +28,6 @@ expression: rendered
 │                                      │
 │ priority     ! ↑ • ↓  =  p0 p1 p2/p3 │
 │ p4 (by color)                        │
-│                                      │
 │                                      │
 │                                      │
 │                                      │

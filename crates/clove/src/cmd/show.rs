@@ -4,7 +4,8 @@
 //! dir. Full path (JSON, `--verbose`, or `--fields` requesting `ready`/
 //! `blocked_by`): scan all frontmatter and build the graph to compute them.
 
-use clove_core::{list_comments, CloveError, GraphStore, OutputFormat};
+use clove_core::{list_comments, GraphStore, OutputFormat};
+use clove_types::CloveError;
 use serde_json::{json, Value};
 
 use crate::cli::ShowArgs;
@@ -72,7 +73,7 @@ pub fn run(ctx: &Ctx, format: OutputFormat, args: ShowArgs) -> Result<(), CloveE
 }
 
 fn print_human(
-    item: &clove_core::Item,
+    item: &clove_types::Item,
     comment_count: usize,
     obj: &serde_json::Map<String, Value>,
 ) {

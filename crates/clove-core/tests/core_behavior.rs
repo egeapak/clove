@@ -17,10 +17,12 @@ use std::collections::HashSet;
 use clove_core::comments::add_comment_at;
 use clove_core::graph::EdgeKind;
 use clove_core::{
-    diagnose, doctor_fix, list_comments, load_config, normalize_label, parse_frontmatter_file,
-    parse_item_bytes, parse_item_file, validate_item, CloveConfig, CloveError, CloveId, GraphStore,
-    Item, ItemFrontmatter, ItemStatus, ItemStore, ItemType, NewItem, OutputFormat, Priority,
-    Severity, ValidationError,
+    diagnose, doctor_fix, list_comments, load_config, parse_frontmatter_file, parse_item_bytes,
+    parse_item_file, CloveConfig, GraphStore, ItemStore, NewItem, OutputFormat, Severity,
+};
+use clove_types::{
+    normalize_label, validate_item, CloveError, CloveId, Item, ItemFrontmatter, ItemStatus,
+    ItemType, Priority, ValidationError,
 };
 
 // ---------------------------------------------------------------------------

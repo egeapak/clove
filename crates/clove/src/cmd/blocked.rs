@@ -2,8 +2,9 @@
 
 use std::collections::HashMap;
 
-use clove_core::{CloveError, CloveId, ItemFrontmatter, OutputFormat};
+use clove_core::OutputFormat;
 use clove_ipc::{DaemonClient, GraphRequest, GraphResponse};
+use clove_types::{CloveError, CloveId, ItemFrontmatter};
 
 use crate::cli::FilterArgs;
 use crate::cmd::listing::{

@@ -1,0 +1,64 @@
+---
+source: crates/clove-tui/src/snapshot.rs
+expression: rendered
+---
+┌ clove ───────────────────────────────────────────────────┐
+│  All 7  │  Ready 4  │  Blocked 1                         │
+└──────────────────────────────────────────────────────────┘
+┌ Items (7) ───────────────────────────────────────────────┐
+│▌◐ F #9QX4D1B7 ! Build REST API ●                         │
+│ ○ B #2HZ6C3PW ↑ Investigate flaky CI ●                   │
+│ ● C #7AF3K2MN ↑ Set up database schema                   │
+│ ○ E #3HT6WYG5 • Ship v1 release ●                        │
+│ ○ F #K2M8ZP5R • Write integration tests ✗                │
+│ ○ F #5RB9NC2V • Frontend dashboard ●                     │
+│ ● D #8XQ4F7DM ↓ Docs site                                │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│┌ New item ──────────────────────────────────────────────┐│
+││ ▌   Title: New work item▏                              ││
+││      Type: feature                                     ││
+││  Priority: p2                                          ││
+└│  Assignee:                                             │┘
+┌│    Labels:                                             │┐
+││    Parent:                                             ││
+││      Deps:                                             ││
+││      Body:                                             ││
+││                                                        ││
+││                                                        ││
+││ Ctrl-S save · Esc cancel · Tab/↑↓ field · ←→ move/chan ││
+│└────────────────────────────────────────────────────────┘│
+│ • CRUD endpoints                                         │
+│ • Auth middleware                                        │
+│                                                          │
+│ Steps                                                    │
+│                                                          │
+│ 1. Define routes                                         │
+│ 2. Wire handlers                                         │
+│                                                          │
+│ │ Blocked on the schema work until it lands.             │
+│                                                          │
+│ ──────────────────────────────────────────────────────── │
+│                                                          │
+│ Done when the integration tests pass.                    │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│──────────────────────────────────────────────────────────│
+│ labels area:api, backend  created Jan 1 · updated Jan 20 │
+└──────────────────────────────────────────────────────────┘
+new item  Ctrl-S save · Esc cancel

@@ -1,6 +1,6 @@
 //! List pane rendering.
 
-use clove_core::ItemFrontmatter;
+use clove_types::ItemFrontmatter;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};

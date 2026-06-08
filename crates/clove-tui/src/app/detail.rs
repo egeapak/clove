@@ -2,7 +2,8 @@
 //! the scroll offset. `DetailPane.detail` is the loaded [`Detail`] (so the field
 //! path is `app.detail.detail`).
 
-use clove_core::{ChildrenSummary, CloveId, Comment, DepTreeNode, Item};
+use clove_core::{ChildrenSummary, Comment, DepTreeNode};
+use clove_types::{CloveId, Item};
 
 /// Which sub-view of the detail pane is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

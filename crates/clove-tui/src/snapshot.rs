@@ -11,7 +11,8 @@ use camino::Utf8PathBuf;
 use chrono::{DateTime, Utc};
 use clove_core::comments::add_comment_at;
 use clove_core::write::write_item_file;
-use clove_core::{CloveId, Item, ItemFrontmatter, ItemStatus, ItemStore, ItemType, Priority};
+use clove_core::ItemStore;
+use clove_types::{CloveId, Item, ItemFrontmatter, ItemStatus, ItemType, Priority};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 
@@ -230,7 +231,11 @@ fn app() -> App {
     // Keep the temp dir alive for the lifetime of the app by leaking it; the
     // process is a short-lived test binary.
     std::mem::forget(dir);
-    App::new(store)
+    let mut app = App::new(store);
+    // The TestBackend / PNG buffer doesn't capture the hardware cursor, so draw
+    // the in-buffer caret glyph for these cursor-less backends.
+    app.caret_glyph = true;
+    app
 }
 
 /// Flatten the rendered terminal buffer to a trimmed text grid.
@@ -322,6 +327,37 @@ fn empty_repo() {
     std::fs::create_dir_all(root.join(".clove").join("issues")).unwrap();
     let mut app = App::new(ItemStore::new(root));
     snap("empty_repo", &mut app);
+}
+
+#[test]
+fn new_form() {
+    let mut app = app();
+    app.start_new();
+    for c in "New work item".chars() {
+        app.form.insert_char(c);
+    }
+    snap("new_form", &mut app);
+}
+
+#[test]
+fn edit_form() {
+    let mut app = app();
+    app.select_first();
+    app.start_edit();
+    snap("edit_form", &mut app);
+}
+
+#[test]
+fn new_form_caret_mid_text() {
+    // The caret renders mid-text after moving left, not just at the end.
+    let mut app = app();
+    app.start_new();
+    for c in "Title".chars() {
+        app.form.insert_char(c);
+    }
+    app.form.move_left();
+    app.form.move_left(); // caret now between "Tit" and "le"
+    snap("new_form_caret_mid_text", &mut app);
 }
 
 #[test]
@@ -714,6 +750,28 @@ fn generate_screenshots() {
     {
         let mut a = app();
         save("11-portrait-list", pw, ph, &mut a);
+    }
+    {
+        let mut a = app();
+        a.start_new();
+        for c in "Add OAuth login".chars() {
+            a.form.insert_char(c);
+        }
+        a.form.focus = 4; // Labels
+        for c in "area:auth, security".chars() {
+            a.form.insert_char(c);
+        }
+        a.form.focus = 7; // Body
+        for c in "Support Google + GitHub SSO.".chars() {
+            a.form.insert_char(c);
+        }
+        save("12-new-form", ww, wh, &mut a);
+    }
+    {
+        let mut a = app();
+        a.select_first();
+        a.start_edit();
+        save("13-edit-form", ww, wh, &mut a);
     }
 }
 

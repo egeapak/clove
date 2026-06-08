@@ -12,9 +12,10 @@
 //! schema bump or `clove reindex` (only true file corruption loses it).
 
 use chrono::Utc;
-use clove_core::{compute_stats, CloveError, GraphStore, OutputFormat, StatsOptions, StatsReport};
+use clove_core::{compute_stats, GraphStore, OutputFormat, StatsOptions, StatsReport};
 use clove_index::{Index, SCHEMA_VERSION};
 use clove_ipc::DaemonClient;
+use clove_types::CloveError;
 use serde_json::{json, Map, Value};
 
 use crate::cli::StatsArgs;

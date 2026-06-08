@@ -49,7 +49,7 @@
 //! without one is CREATED and reports the new number.
 
 use chrono::{DateTime, Utc};
-use clove_core::{CloveId, ItemStatus, Priority};
+use clove_types::{CloveId, ItemStatus, Priority};
 use serde::{Deserialize, Serialize};
 
 use crate::map::{coerce_priority, map_labels};
@@ -190,7 +190,7 @@ pub struct GitHubIssue {
     pub pull_request: Option<serde_json::Value>,
 }
 
-/// A fully mapped GitHub issue, ready to be turned into an [`clove_core::Item`].
+/// A fully mapped GitHub issue, ready to be turned into an [`clove_types::Item`].
 ///
 /// Mirrors the staging structs in `tk.rs` / `beads.rs`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -455,10 +455,11 @@ mod net {
     use crate::error::ImportError;
     use crate::plan::ImportReport;
     use chrono::Utc;
-    use clove_core::id::new_id;
-    use clove_core::model::CURRENT_SCHEMA_VERSION;
     use clove_core::write::write_item_file;
-    use clove_core::{Item, ItemFrontmatter, ItemStore, ItemType};
+    use clove_core::ItemStore;
+    use clove_types::id::new_id;
+    use clove_types::model::CURRENT_SCHEMA_VERSION;
+    use clove_types::{Item, ItemFrontmatter, ItemType};
     use octocrab::Octocrab;
 
     /// Split an `owner/repo` spec into its parts, erroring cleanly on a bad shape.

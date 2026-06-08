@@ -636,8 +636,9 @@ condition for M4 planning.
   (single), landscape 120×18 (wide + compact tabs), square 60×60 (stacked) — plus
   Overview edge cases (**long/wrapping title, long label list with `+N` footer
   truncation, and a scrolled detail** that keeps the pinned footer in place) —
-  validating the adaptive layout. Mutations (status/priority/label edits, create,
-  dep add/rm, comment) are a deferred follow-up — this first cut is read-only.
+  validating the adaptive layout. (The first cut was read-only; an `n`/`e`
+  add/edit modal form — full field set incl. dep/parent — has since landed,
+  writing through the unified `clove_core` path. See HANDOFF "Unified add/edit".)
 - Tooling: an `#[ignore]`d `generate_screenshots` test rasterizes each screen's
   cell buffer (colours + bold) to PNG via a system monospace font (DejaVu Sans
   Mono preferred for glyph coverage), behind test-only `image`/`ab_glyph`
@@ -655,10 +656,10 @@ condition for M4 planning.
   drive the 10fps `is_busy()` cadence with a spinner.
 
 **M4 backlog (recorded so it is not lost; not yet task-specified):**
-- **TUI write actions** — extend `clove tui` with the common mutations (status
-  transitions, priority/assignee/label edits) and beyond, on top of the read-only
-  browser landed in T-U01.
-- **TUI read-only follow-ups** (from the T-U01 design/UX reviews; all backed by
+- **TUI write actions (DONE)** — `clove tui` gained an `n`/`e` add/edit modal
+  form (full field set incl. dep/parent, a movable text caret), writing through
+  the unified `clove_core` path. See HANDOFF "Unified add/edit".
+- **TUI follow-ups** (from the T-U01 design/UX reviews; all backed by
   existing `clove-core` APIs, no engine work): (1) inbound/"blocks" + referenced-by
   + epic-children lists in Overview (the graph has the reverse edges); (2) a
   navigation stack — follow a related id to its item and pop back, decoupled from
@@ -714,8 +715,9 @@ condition for M4 planning.
   embedded, and served from memory; markdown via micromark + a custom id-autolink
   extension. Plan, decisions, and status: `docs/M4_WEB_UI_PLAN.md`; design themes in
   `docs/web-ui-mockups/`. Deferred follow-ups: binary-size trim (make the `github`
-  import feature opt-out — it costs ~3.5 MB), a body editor, and wiring the SQLite
-  stats-snapshot series into the web `/stats/history`.
+  import feature opt-out — it costs ~3.5 MB) and wiring the SQLite stats-snapshot
+  series into the web `/stats/history`. (A body editor + full add/edit page have
+  since landed — see HANDOFF "Unified add/edit".)
 - **MCP server** — **DONE (M4)**. New `clove-mcp` crate (rmcp 1.7) and a `clove mcp`
   subcommand expose clove to AI agents over the MCP **stdio** transport as 12 native
   tools (`clove_ready`/`blocked`/`list`/`show`/`search`/`dep_tree`/`stats` reads;

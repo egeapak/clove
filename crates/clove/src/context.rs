@@ -3,7 +3,8 @@
 
 use camino::{Utf8Path, Utf8PathBuf};
 use clove_core::repo::find_repo_root;
-use clove_core::{load_config, CloveConfig, CloveError, ItemStore};
+use clove_core::{load_config, CloveConfig, ItemStore};
+use clove_types::CloveError;
 
 /// Everything a command needs to act on a repository.
 pub struct Ctx {

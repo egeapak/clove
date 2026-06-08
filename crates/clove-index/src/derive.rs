@@ -19,7 +19,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use clove_core::{CloveId, GraphStore, ItemFrontmatter, ItemStatus, ItemType, Priority};
+use clove_core::GraphStore;
+use clove_types::{CloveId, ItemFrontmatter, ItemStatus, ItemType, Priority};
 use rusqlite::Connection;
 
 use crate::db::IndexError;

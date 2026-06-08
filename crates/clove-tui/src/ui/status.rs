@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use crate::app::{App, Mode, SortField};
+use crate::app::{App, FormMode, Mode, SortField};
 
 use super::style::{ACCENT, DIM, LABEL};
 
@@ -38,6 +38,23 @@ pub(crate) fn render_status(f: &mut Frame, app: &App, area: Rect) {
             if !narrow {
                 spans.push(Span::styled(
                     "  ↑↓ move · space toggle · x clear · Esc close",
+                    Style::default().fg(DIM),
+                ));
+            }
+            Line::from(spans)
+        }
+        Mode::Form => {
+            let label = match app.form.mode {
+                FormMode::New => "new item",
+                FormMode::Edit => "edit item",
+            };
+            let mut spans = vec![Span::styled(
+                label,
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            )];
+            if !narrow {
+                spans.push(Span::styled(
+                    "  Ctrl-S save · Esc cancel",
                     Style::default().fg(DIM),
                 ));
             }

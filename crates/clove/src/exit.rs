@@ -1,7 +1,7 @@
 //! Exit codes (DESIGN.md §7.6) and the mapping from [`CloveError`] to a code +
 //! stable string error code for the JSON envelope.
 
-use clove_core::CloveError;
+use clove_types::CloveError;
 
 /// The clove exit-code table. Values are stable and documented.
 ///
@@ -42,11 +42,11 @@ impl ExitCode {
 
 /// Classify a [`CloveError`] into its exit code and stable string error code.
 ///
-/// The `(code, exit)` pair comes from [`clove_core::error_code`] — the single
+/// The `(code, exit)` pair comes from [`clove_types::error_code`] — the single
 /// classification shared with the web API (§7.3 envelope / §7.6 exit table) — and
 /// this maps the numeric exit to the [`ExitCode`] enum.
 pub fn classify(error: &CloveError) -> (ExitCode, &'static str) {
-    let (code, exit) = clove_core::error_code(error);
+    let (code, exit) = clove_types::error_code(error);
     let exit_code = match exit {
         0 => ExitCode::Success,
         1 => ExitCode::Usage,

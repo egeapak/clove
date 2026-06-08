@@ -2,11 +2,13 @@
 
 use camino::Utf8PathBuf;
 use clove_core::{ItemStore, NewItem};
+use clove_types::{ItemType, Priority};
 use clove_web::{build_router, AppState};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// A temp repo with two items (one depends on the other) and the server state.
-fn fixture() -> (tempfile::TempDir, AppState, String) {
+/// Returns the temp dir, state, the main (dependent) id, and the dependency id.
+fn fixture() -> (tempfile::TempDir, AppState, String, String) {
     let tmp = tempfile::tempdir().unwrap();
     let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
     let issues = root.join(".clove").join("issues");
@@ -19,8 +21,8 @@ fn fixture() -> (tempfile::TempDir, AppState, String) {
             "proj",
             NewItem {
                 title: "Dependency".to_owned(),
-                item_type: clove_core::ItemType::Bug,
-                priority: clove_core::Priority(0),
+                item_type: ItemType::Bug,
+                priority: Priority(0),
                 labels: vec!["area:core".to_owned()],
                 deps: vec![],
                 parent: None,
@@ -35,8 +37,8 @@ fn fixture() -> (tempfile::TempDir, AppState, String) {
             "proj",
             NewItem {
                 title: "Add webhook handler".to_owned(),
-                item_type: clove_core::ItemType::Feature,
-                priority: clove_core::Priority(1),
+                item_type: ItemType::Feature,
+                priority: Priority(1),
                 labels: vec!["area:payments".to_owned()],
                 deps: vec![dep.frontmatter.id.clone()],
                 parent: None,
@@ -48,7 +50,12 @@ fn fixture() -> (tempfile::TempDir, AppState, String) {
         .unwrap();
 
     let state = AppState::new(store, issues, "proj".to_owned(), "test", false);
-    (tmp, state, main.frontmatter.id.to_string())
+    (
+        tmp,
+        state,
+        main.frontmatter.id.to_string(),
+        dep.frontmatter.id.to_string(),
+    )
 }
 
 /// Send a raw HTTP/1.1 GET and return `(status_line, body)`.
@@ -64,15 +71,50 @@ async fn get(addr: std::net::SocketAddr, path: &str) -> (String, String) {
     (status, body.to_owned())
 }
 
+/// Send a raw HTTP/1.1 request with an optional JSON body; returns `(status_line, body)`.
+async fn send(
+    addr: std::net::SocketAddr,
+    method: &str,
+    path: &str,
+    json: Option<&str>,
+) -> (String, String) {
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let body = json.unwrap_or("");
+    let headers = if json.is_some() {
+        format!(
+            "Content-Type: application/json\r\nContent-Length: {}\r\n",
+            body.len()
+        )
+    } else {
+        String::new()
+    };
+    let req = format!(
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\n{headers}Connection: close\r\n\r\n{body}"
+    );
+    stream.write_all(req.as_bytes()).await.unwrap();
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await.unwrap();
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
+    let status = head.lines().next().unwrap_or("").to_owned();
+    (status, body.to_owned())
+}
+
 async fn spawn() -> (tempfile::TempDir, std::net::SocketAddr, String) {
-    let (tmp, state, main_id) = fixture();
+    let (tmp, addr, main_id, _dep) = spawn_ids().await;
+    (tmp, addr, main_id)
+}
+
+/// Like [`spawn`] but also returns the dependency id (for write-endpoint tests).
+async fn spawn_ids() -> (tempfile::TempDir, std::net::SocketAddr, String, String) {
+    let (tmp, state, main_id, dep_id) = fixture();
     let app = build_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    (tmp, addr, main_id)
+    (tmp, addr, main_id, dep_id)
 }
 
 #[tokio::test]
@@ -141,4 +183,149 @@ async fn invalid_id_returns_envelope_error() {
     assert!(body.contains("\"ok\":false"));
     assert!(body.contains("INVALID_ID"));
     assert!(body.contains("\"exit\":4"));
+}
+
+#[tokio::test]
+async fn patch_updates_title_body_assignee_and_labels() {
+    let (_tmp, addr, id) = spawn().await;
+    let payload = r#"{"title":"Renamed","body":"new body","assignee":"alice","labels":["urgent","area:payments"]}"#;
+    let (status, body) = send(addr, "PATCH", &format!("/api/v1/items/{id}"), Some(payload)).await;
+    assert!(status.contains("200"), "status: {status} body: {body}");
+    assert!(body.contains("\"title\":\"Renamed\""), "{body}");
+    assert!(body.contains("\"assignee\":\"alice\""), "{body}");
+    // The full set replaced + canonical-sorted.
+    assert!(
+        body.contains("\"labels\":[\"area:payments\",\"urgent\"]"),
+        "{body}"
+    );
+    // The body change landed (re-read the detail, which includes `body`).
+    let (_s, detail) = get(addr, &format!("/api/v1/items/{id}")).await;
+    assert!(detail.contains("new body"), "{detail}");
+}
+
+#[tokio::test]
+async fn patch_clears_assignee_with_null() {
+    let (_tmp, addr, id) = spawn().await;
+    send(
+        addr,
+        "PATCH",
+        &format!("/api/v1/items/{id}"),
+        Some(r#"{"assignee":"bob"}"#),
+    )
+    .await;
+    let (status, body) = send(
+        addr,
+        "PATCH",
+        &format!("/api/v1/items/{id}"),
+        Some(r#"{"assignee":null}"#),
+    )
+    .await;
+    assert!(status.contains("200"), "status: {status}");
+    assert!(body.contains("\"assignee\":null"), "{body}");
+}
+
+#[tokio::test]
+async fn patch_clears_assignee_with_empty_string() {
+    // The handler maps an empty/whitespace assignee to a clear, so a form
+    // submitting "" doesn't trip apply_edit's empty-assignee guard.
+    let (_tmp, addr, id) = spawn().await;
+    send(
+        addr,
+        "PATCH",
+        &format!("/api/v1/items/{id}"),
+        Some(r#"{"assignee":"bob"}"#),
+    )
+    .await;
+    let (status, body) = send(
+        addr,
+        "PATCH",
+        &format!("/api/v1/items/{id}"),
+        Some(r#"{"assignee":"  "}"#),
+    )
+    .await;
+    assert!(status.contains("200"), "status: {status} body: {body}");
+    assert!(body.contains("\"assignee\":null"), "{body}");
+}
+
+#[tokio::test]
+async fn patch_invalid_priority_is_validation_error() {
+    let (_tmp, addr, id) = spawn().await;
+    let (status, body) = send(
+        addr,
+        "PATCH",
+        &format!("/api/v1/items/{id}"),
+        Some(r#"{"priority":9}"#),
+    )
+    .await;
+    assert!(status.contains("422"), "status: {status}");
+    assert!(body.contains("VALIDATION_ERROR"), "{body}");
+}
+
+#[tokio::test]
+async fn put_parent_sets_and_clears() {
+    let (_tmp, addr, main_id, dep_id) = spawn_ids().await;
+    // Parent the dependency under the main item.
+    let (status, body) = send(
+        addr,
+        "PUT",
+        &format!("/api/v1/items/{dep_id}/parent"),
+        Some(&format!("{{\"parent\":\"{main_id}\"}}")),
+    )
+    .await;
+    assert!(status.contains("200"), "status: {status} body: {body}");
+    assert!(
+        body.contains(&format!("\"parent\":\"{main_id}\"")),
+        "{body}"
+    );
+    // Clear it again.
+    let (status, body) = send(
+        addr,
+        "PUT",
+        &format!("/api/v1/items/{dep_id}/parent"),
+        Some(r#"{"parent":null}"#),
+    )
+    .await;
+    assert!(status.contains("200"), "status: {status}");
+    assert!(body.contains("\"parent\":null"), "{body}");
+}
+
+#[tokio::test]
+async fn add_dep_cycle_is_rejected() {
+    let (_tmp, addr, main_id, dep_id) = spawn_ids().await;
+    // `main` already depends on `dep`; making `dep` depend on `main` would cycle.
+    let (status, body) = send(
+        addr,
+        "POST",
+        &format!("/api/v1/items/{dep_id}/deps"),
+        Some(&format!("{{\"dep\":\"{main_id}\"}}")),
+    )
+    .await;
+    assert!(status.contains("409"), "status: {status} body: {body}");
+    assert!(body.contains("CYCLE_DETECTED"), "{body}");
+}
+
+#[tokio::test]
+async fn remove_dep_is_idempotent() {
+    let (_tmp, addr, main_id, dep_id) = spawn_ids().await;
+    // Remove the real edge, then remove again — both succeed (HTTP DELETE).
+    let (status, body) = send(
+        addr,
+        "DELETE",
+        &format!("/api/v1/items/{main_id}/deps/{dep_id}"),
+        None,
+    )
+    .await;
+    assert!(status.contains("200"), "status: {status}");
+    assert!(body.contains("\"deps\":[]"), "{body}");
+    let (status2, _b2) = send(
+        addr,
+        "DELETE",
+        &format!("/api/v1/items/{main_id}/deps/{dep_id}"),
+        None,
+    )
+    .await;
+    assert!(
+        status2.contains("200"),
+        "second remove should be a no-op 200: {status2}"
+    );
 }

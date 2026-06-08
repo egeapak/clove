@@ -51,10 +51,11 @@ use std::collections::HashSet;
 use camino::Utf8Path;
 use chrono::{DateTime, Utc};
 use clove_core::contains_yaml_anchor_or_alias;
-use clove_core::id::new_id;
-use clove_core::model::CURRENT_SCHEMA_VERSION;
 use clove_core::write::write_item_file;
-use clove_core::{CloveId, Item, ItemFrontmatter, ItemStatus, ItemStore, ItemType, Priority};
+use clove_core::ItemStore;
+use clove_types::id::new_id;
+use clove_types::model::CURRENT_SCHEMA_VERSION;
+use clove_types::{CloveId, Item, ItemFrontmatter, ItemStatus, ItemType, Priority};
 use serde::Deserialize;
 
 use crate::error::ImportError;

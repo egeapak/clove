@@ -3,6 +3,7 @@
 //! `tools/list`). Schemars/serde are taken from rmcp's re-exports so the derive
 //! versions match the macro-generated code exactly.
 
+use clove_types::{CloveError, EditRequest};
 use rmcp::schemars::{self, JsonSchema};
 use rmcp::serde::Deserialize;
 
@@ -124,6 +125,8 @@ pub struct EditArgs {
     pub title: Option<String>,
     /// New assignee (empty string clears it).
     pub assignee: Option<String>,
+    /// New Markdown body (replaces the body; empty string clears it).
+    pub body: Option<String>,
     /// Labels to add.
     pub add_labels: Option<Vec<String>>,
     /// Labels to remove.
@@ -131,9 +134,19 @@ pub struct EditArgs {
 }
 
 impl EditArgs {
-    /// Translate the structured edit into `KEY=VALUE` assignment tokens for
-    /// `clove_core::ops::edit` / the daemon `edit` RPC.
-    pub fn to_tokens(&self) -> Vec<String> {
+    /// Translate the structured edit into the unified [`EditRequest`]. The
+    /// scalar/label fields ride through `from_tokens` (so the empty-assignee →
+    /// clear and label add/remove semantics match the CLI exactly), and the body
+    /// is attached directly (the one field tokens don't carry).
+    pub fn to_request(&self) -> Result<EditRequest, CloveError> {
+        let mut req = EditRequest::from_tokens(&self.to_tokens())?;
+        req.body = self.body.clone();
+        Ok(req)
+    }
+
+    /// The scalar/label fields as `KEY=VALUE` assignment tokens (body excluded —
+    /// it is multi-line and carried on the [`EditRequest`] directly).
+    fn to_tokens(&self) -> Vec<String> {
         let mut t = Vec::new();
         if let Some(s) = &self.status {
             t.push(format!("status={s}"));
@@ -176,4 +189,13 @@ pub struct DepAddArgs {
     pub id: String,
     /// The dependency target id.
     pub dep_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(crate = "rmcp::serde")]
+pub struct SetParentArgs {
+    /// The item whose parent to set.
+    pub id: String,
+    /// The new parent id, or null/omitted to clear the parent.
+    pub parent: Option<String>,
 }

@@ -14,7 +14,7 @@ mod server;
 use std::time::Duration;
 
 use camino::Utf8PathBuf;
-use clove_core::ItemType;
+use clove_types::ItemType;
 
 pub use engine::Engine;
 pub use server::CloveServer;

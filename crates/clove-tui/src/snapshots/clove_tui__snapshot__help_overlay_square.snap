@@ -22,20 +22,20 @@ expression: rendered
 │                                                          │
 │                                                          │
 │                                                          │
-│                                                          │
 │    ┌ Help ──────────────────────────────────────────┐    │
-│    │ clove tui — read-only browser                  │    │
+│    │ clove tui — browser + editor                   │    │
 │    │                                                │    │
 │    │ ↑/k ↓/j      move selection                    │    │
 │    │ g / G        jump to top / bottom              │    │
 │    │ Tab / 1 2 3  All / Ready / Blocked             │    │
-└────│ o / t / c    overview / dep tree / comments    │────┘
-┌ Ove│ →/l  ←/h     focus detail / list (narrow)      │────┐
-│ #9Q│ PgUp / PgDn  scroll detail                     │ady │
-│ Bui│ s / S        cycle sort field / direction      │s 1 │
-│────│ f            filter menu (facets)              │────│
-│ Goa│ x            clear all filters                 │    │
-│    │ /            search id, title, labels          │    │
+│    │ o / t / c    overview / dep tree / comments    │    │
+└────│ →/l  ←/h     focus detail / list (narrow)      │────┘
+┌ Ove│ PgUp / PgDn  scroll detail                     │────┐
+│ #9Q│ s / S        cycle sort field / direction      │ady │
+│ Bui│ f            filter menu (facets)              │s 1 │
+│────│ x            clear all filters                 │────│
+│ Goa│ /            search id, title, labels          │    │
+│    │ n / e        new / edit item                   │    │
 │ Bui│ Esc          clear search / back / close       │    │
 │    │ r            refresh from disk                 │    │
 │ • C│ ?            toggle this help                  │    │

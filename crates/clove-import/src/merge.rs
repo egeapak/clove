@@ -22,7 +22,7 @@
 
 use std::collections::BTreeSet;
 
-use clove_core::{ItemFrontmatter, ItemStatus};
+use clove_types::{ItemFrontmatter, ItemStatus};
 
 /// A scalar three-way conflict: both sides diverged from the base to different
 /// values.
@@ -491,7 +491,7 @@ fn merge_id_set_field<X: Ord + Clone + ToString>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clove_core::CloveId;
+    use clove_types::CloveId;
 
     fn id(s: &str) -> CloveId {
         CloveId::new(s).unwrap()

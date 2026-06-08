@@ -9,6 +9,7 @@ import type {
   Envelope,
   ListQuery
 } from './types';
+import type { PatchPayload } from './itemForm';
 import { MOCK_ITEMS, MOCK_COMMENTS, mockHistory } from './mock';
 import { applyFilters } from './filter';
 import { queryString } from './query';
@@ -135,14 +136,38 @@ export const api = {
   },
 
   // ---- writes ----
-  async patch(id: string, fields: Partial<Pick<Item, 'status' | 'priority' | 'assignee' | 'type'>>) {
+  async patch(id: string, fields: PatchPayload) {
     return withMock(
       () => req<Item>('/items/' + encodeURIComponent(id), { method: 'PATCH', body: JSON.stringify(fields) }),
       () => {
-        const it = { ...MOCK_ITEMS.find((i) => i.id === id)!, ...fields, updated: new Date().toISOString() };
         const idx = MOCK_ITEMS.findIndex((i) => i.id === id);
+        const prev = MOCK_ITEMS[idx];
+        const it: Item = { ...prev, updated: new Date().toISOString() };
+        if (fields.title !== undefined) it.title = fields.title;
+        if (fields.status !== undefined) it.status = fields.status;
+        if (fields.priority !== undefined) it.priority = fields.priority;
+        if (fields.type !== undefined) it.type = fields.type as Item['type'];
+        if (fields.assignee !== undefined) it.assignee = fields.assignee;
+        if (fields.body !== undefined) it.body = fields.body;
+        if (fields.labels !== undefined) it.labels = [...fields.labels];
         MOCK_ITEMS[idx] = it;
         return it;
+      }
+    );
+  },
+
+  /** Set or clear (`null`) an item's parent. */
+  async setParent(id: string, parent: string | null) {
+    return withMock(
+      () =>
+        req<Item>(`/items/${encodeURIComponent(id)}/parent`, {
+          method: 'PUT',
+          body: JSON.stringify({ parent })
+        }),
+      () => {
+        const idx = MOCK_ITEMS.findIndex((i) => i.id === id);
+        MOCK_ITEMS[idx] = { ...MOCK_ITEMS[idx], parent, updated: new Date().toISOString() };
+        return MOCK_ITEMS[idx];
       }
     );
   },

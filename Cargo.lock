@@ -580,6 +580,7 @@ dependencies = [
  "clove-ipc",
  "clove-mcp",
  "clove-tui",
+ "clove-types",
  "clove-web",
  "insta",
  "jsonschema",
@@ -596,6 +597,7 @@ version = "0.1.0"
 dependencies = [
  "camino",
  "chrono",
+ "clove-types",
  "criterion",
  "fd-lock",
  "getrandom 0.2.17",
@@ -621,6 +623,7 @@ dependencies = [
  "camino",
  "chrono",
  "clove-core",
+ "clove-types",
  "criterion",
  "octocrab",
  "proptest",
@@ -641,6 +644,7 @@ dependencies = [
  "camino",
  "chrono",
  "clove-core",
+ "clove-types",
  "criterion",
  "fd-lock",
  "filetime",
@@ -658,6 +662,7 @@ version = "0.1.0"
 dependencies = [
  "camino",
  "clove-core",
+ "clove-types",
  "futures",
  "interprocess",
  "serde",
@@ -679,6 +684,7 @@ dependencies = [
  "chrono",
  "clove-core",
  "clove-ipc",
+ "clove-types",
  "rmcp",
  "serde",
  "serde_json",
@@ -695,11 +701,27 @@ dependencies = [
  "camino",
  "chrono",
  "clove-core",
+ "clove-types",
  "image",
  "insta",
  "pulldown-cmark",
  "ratatui",
  "tempfile",
+]
+
+[[package]]
+name = "clove-types"
+version = "0.1.0"
+dependencies = [
+ "camino",
+ "chrono",
+ "getrandom 0.2.17",
+ "proptest",
+ "serde",
+ "serde_json",
+ "smol_str",
+ "tempfile",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -711,6 +733,7 @@ dependencies = [
  "chrono",
  "clove-core",
  "clove-index",
+ "clove-types",
  "flate2",
  "futures-util",
  "mime_guess",
@@ -735,6 +758,7 @@ dependencies = [
  "clove-core",
  "clove-index",
  "clove-ipc",
+ "clove-types",
  "clove-web",
  "fd-lock",
  "futures",

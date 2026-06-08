@@ -1,9 +1,8 @@
 //! `clove doctor` (T-CLI18, T-S08): store health check with optional safe
 //! repairs, plus an index↔files divergence check when an index is present.
 
-use clove_core::{
-    diagnose, doctor_fix, CloveError, DoctorIssue, DoctorReport, OutputFormat, Severity,
-};
+use clove_core::{diagnose, doctor_fix, DoctorIssue, DoctorReport, OutputFormat, Severity};
+use clove_types::CloveError;
 use serde_json::{json, Value};
 
 use crate::cli::DoctorArgs;
