@@ -59,7 +59,10 @@ pub(crate) fn render_form(f: &mut Frame, app: &App, area: Rect) {
                 form.body.clone()
             };
             let mut shown: Vec<&str> = body.split('\n').collect();
-            if shown.last() == Some(&"") && shown.len() > 1 {
+            // Drop a trailing empty line only when unfocused — when focused the
+            // caret may sit on that line, so both glyph and live modes must render
+            // it (otherwise the hardware cursor lands a row past the body).
+            if !focused && shown.last() == Some(&"") && shown.len() > 1 {
                 shown.pop();
             }
             for raw in &shown {
@@ -67,9 +70,6 @@ pub(crate) fn render_form(f: &mut Frame, app: &App, area: Rect) {
                     format!("  {raw}"),
                     Style::default().fg(Color::Reset),
                 )));
-            }
-            if shown.is_empty() {
-                lines.push(Line::from(Span::styled("  ", Style::default().fg(DIM))));
             }
             continue;
         }
@@ -150,6 +150,10 @@ pub(crate) fn render_form(f: &mut Frame, app: &App, area: Rect) {
     // glyph) when it's within the visible, scrolled content area — so real
     // terminals show a native blinking cursor, while the glyph keeps the caret
     // visible in the (cursor-less) snapshot/PNG tooling.
+    //
+    // `col` counts chars, not display columns, so a wide/zero-width Unicode char
+    // before the caret would offset the hardware cursor from the rendered glyph.
+    // Item ids/labels/titles are effectively single-width, so this is accepted.
     if let Some((line, col)) = caret {
         let inner_x = popup.x + 2; // left border + left padding
         let inner_y = popup.y + 1; // top border (no top padding)

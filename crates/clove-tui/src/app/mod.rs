@@ -1201,6 +1201,51 @@ mod tests {
     }
 
     #[test]
+    fn form_glyph_and_live_modes_render_identically_except_the_caret() {
+        // Regression: a body ending in a newline must render the same lines with
+        // the glyph on (snapshot/PNG) and off (live), so the hardware cursor never
+        // lands a row past the body. Both modes share the cursor position; only the
+        // caret's own row may differ (the glyph cell).
+        use ratatui::backend::{Backend, TestBackend};
+        use ratatui::Terminal;
+
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        app.start_new();
+        app.form.focus = 7; // Body
+        app.form.cursor = 0;
+        app.form.insert_char('x');
+        app.form.newline(); // body "x\n", caret on the new empty line
+
+        let render = |app: &mut App, glyph: bool| {
+            app.caret_glyph = glyph;
+            let mut t = Terminal::new(TestBackend::new(80, 30)).unwrap();
+            t.draw(|f| crate::ui::render(f, app)).unwrap();
+            let pos = t.backend_mut().get_cursor_position().unwrap();
+            (t.backend().buffer().clone(), pos)
+        };
+        let (glyph_buf, glyph_pos) = render(&mut app, true);
+        let (live_buf, live_pos) = render(&mut app, false);
+
+        assert_eq!(
+            glyph_pos, live_pos,
+            "caret position identical in both modes"
+        );
+        for y in 0..glyph_buf.area.height {
+            if y == glyph_pos.y {
+                continue; // the caret row legitimately differs (the glyph cell)
+            }
+            for x in 0..glyph_buf.area.width {
+                assert_eq!(
+                    glyph_buf.cell((x, y)).map(|c| c.symbol()),
+                    live_buf.cell((x, y)).map(|c| c.symbol()),
+                    "row {y} differs between glyph and live render"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn empty_title_keeps_form_open_with_error() {
         let (_dir, store) = fixture();
         let mut app = App::new(store);
