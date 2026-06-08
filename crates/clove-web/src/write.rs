@@ -6,9 +6,9 @@ use std::collections::HashMap;
 
 use axum::extract::{Path, Query, State};
 use chrono::Utc;
-use clove_core::{
-    add_comment as core_add_comment, normalize_label, CloveError, CloveId, GraphStore, Item,
-    ItemStatus, ItemType, NewItem, Priority,
+use clove_core::{add_comment as core_add_comment, apply_edit, ops};
+use clove_types::{
+    CloveError, CloveId, EditRequest, Item, ItemStatus, ItemType, LabelEdit, NewSpec, Priority,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -21,24 +21,15 @@ fn parse_id(raw: &str) -> Result<CloveId, ApiError> {
     CloveId::new(raw).map_err(ApiError::from)
 }
 
-fn parse_status(s: &str) -> Result<ItemStatus, ApiError> {
-    match s {
-        "open" => Ok(ItemStatus::Open),
-        "in_progress" => Ok(ItemStatus::InProgress),
-        "closed" => Ok(ItemStatus::Closed),
-        other => Err(ApiError::bad_request(format!("invalid status: {other}"))),
-    }
-}
-
-fn parse_type(s: &str) -> Result<ItemType, ApiError> {
-    match s {
-        "bug" => Ok(ItemType::Bug),
-        "feature" => Ok(ItemType::Feature),
-        "chore" => Ok(ItemType::Chore),
-        "docs" => Ok(ItemType::Docs),
-        "epic" => Ok(ItemType::Epic),
-        other => Err(ApiError::bad_request(format!("invalid type: {other}"))),
-    }
+/// Deserialize a present field (including explicit `null`) into the inner option,
+/// wrapped in `Some`, so a PATCH can distinguish "clear" (`null`) from "leave"
+/// (absent). Mirrors `clove_types::EditRequest`'s tri-state assignee handling.
+fn double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::deserialize(deserializer)?))
 }
 
 /// Build the updated-item response (full detail, with fresh graph context).
@@ -71,89 +62,88 @@ pub struct CreateBody {
 /// `POST /api/v1/items`.
 pub async fn create_item(State(state): State<AppState>, body: ApiJson<CreateBody>) -> ApiResult {
     let body = body.0;
-    let item_type = match &body.r#type {
-        Some(t) => parse_type(t)?,
-        None => ItemType::default(),
-    };
-    let priority = match body.priority {
-        Some(p) => Priority::new(p)?,
-        None => Priority::DEFAULT,
-    };
-    let mut labels = Vec::new();
-    for raw in &body.labels {
-        labels.push(normalize_label(raw)?);
-    }
-    labels.sort();
-    labels.dedup();
-    let mut deps = Vec::new();
-    for raw in &body.deps {
-        deps.push(parse_id(raw)?);
-    }
-    let parent = match &body.parent {
-        Some(p) => Some(parse_id(p)?),
-        None => None,
-    };
-    let spec = NewItem {
+    // Delegate all field parsing/validation to the shared core op (one
+    // implementation across CLI/web/MCP/daemon), then render the full detail.
+    let spec = NewSpec {
         title: body.title,
-        item_type,
-        priority,
-        labels,
-        deps,
-        parent,
+        item_type: body.r#type,
+        priority: body.priority,
+        labels: body.labels,
+        deps: body.deps,
+        parent: body.parent,
         assignee: body.assignee,
-        body: body.body.unwrap_or_default(),
+        body: body.body,
     };
-    let item = state.store.create(&state.id_prefix, spec, Utc::now())?;
-    respond_item(&state, &item)
+    let created = ops::create(
+        &state.store,
+        &state.id_prefix,
+        ItemType::default(),
+        spec,
+        Utc::now(),
+    )?;
+    let id = parse_id(created["id"].as_str().unwrap_or_default())?;
+    respond_item(&state, &state.store.get(&id)?)
 }
 
 #[derive(Debug, Deserialize)]
 pub struct PatchBody {
     #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
     pub status: Option<String>,
     #[serde(default)]
     pub priority: Option<u8>,
-    #[serde(default)]
+    // `double_option` makes an explicit `null` mean clear and an absent key mean
+    // leave — a plain `Option<Option<_>>` would collapse `null` to "leave".
+    #[serde(default, deserialize_with = "double_option")]
     pub assignee: Option<Option<String>>,
     #[serde(default)]
     pub r#type: Option<String>,
+    #[serde(default)]
+    pub body: Option<String>,
+    /// When present, replaces the whole label set (form semantics). For
+    /// incremental add/remove use `PUT /labels`.
+    #[serde(default)]
+    pub labels: Option<Vec<String>>,
 }
 
-/// `PATCH /api/v1/items/:id`.
+/// `PATCH /api/v1/items/:id` — a structured partial edit through the shared
+/// [`apply_edit`] path (one validation + status-invariant implementation).
 pub async fn patch_item(
     State(state): State<AppState>,
     Path(id): Path<String>,
     body: ApiJson<PatchBody>,
 ) -> ApiResult {
     let id = parse_id(&id)?;
-    let mut item = state.store.get(&id)?;
     let body = body.0;
 
-    if let Some(s) = &body.status {
-        let status = parse_status(s)?;
-        item.frontmatter.status = status;
-        // Maintain the status ↔ closed-timestamp invariant (DESIGN §2.3).
-        match status {
-            ItemStatus::Closed => {
-                if item.frontmatter.closed.is_none() {
-                    item.frontmatter.closed = Some(Utc::now());
-                }
-            }
-            _ => item.frontmatter.closed = None,
-        }
-    }
-    if let Some(p) = body.priority {
-        item.frontmatter.priority = Priority::new(p)?;
-    }
-    if let Some(assignee) = body.assignee {
-        item.frontmatter.assignee = assignee.filter(|s| !s.is_empty());
-    }
-    if let Some(t) = &body.r#type {
-        item.frontmatter.item_type = parse_type(t)?;
-    }
+    let req = EditRequest {
+        title: body.title,
+        body: body.body,
+        status: body
+            .status
+            .map(|s| ItemStatus::parse(&s))
+            .transpose()
+            .map_err(ApiError::from)?,
+        priority: body
+            .priority
+            .map(Priority::new)
+            .transpose()
+            .map_err(ApiError::from)?,
+        item_type: body
+            .r#type
+            .map(|t| ItemType::parse(&t))
+            .transpose()
+            .map_err(ApiError::from)?,
+        // Tri-state: absent → leave; `null`/empty → clear; value → set. Map an
+        // empty string to a clear so a form submitting "" doesn't trip the
+        // empty-assignee guard.
+        assignee: body.assignee.map(|a| a.filter(|s| !s.trim().is_empty())),
+        labels: body.labels.map(LabelEdit::Set),
+    };
 
-    let updated = state.store.update(&item, Utc::now())?;
-    respond_item(&state, &updated)
+    apply_edit(&state.store, &id, &req, Utc::now())?;
+    respond_item(&state, &state.store.get(&id)?)
 }
 
 #[derive(Debug, Deserialize)]
@@ -164,31 +154,23 @@ pub struct LabelsBody {
     pub remove: Vec<String>,
 }
 
-/// `PUT /api/v1/items/:id/labels`.
+/// `PUT /api/v1/items/:id/labels` — incremental add/remove via the shared path.
 pub async fn put_labels(
     State(state): State<AppState>,
     Path(id): Path<String>,
     body: ApiJson<LabelsBody>,
 ) -> ApiResult {
     let id = parse_id(&id)?;
-    let mut item = state.store.get(&id)?;
     let body = body.0;
-
-    for raw in &body.remove {
-        let label = normalize_label(raw)?;
-        item.frontmatter.labels.retain(|l| l != &label);
-    }
-    for raw in &body.add {
-        let label = normalize_label(raw)?;
-        if !item.frontmatter.labels.contains(&label) {
-            item.frontmatter.labels.push(label);
-        }
-    }
-    item.frontmatter.labels.sort();
-    item.frontmatter.labels.dedup();
-
-    let updated = state.store.update(&item, Utc::now())?;
-    respond_item(&state, &updated)
+    let req = EditRequest {
+        labels: Some(LabelEdit::Delta {
+            add: body.add,
+            remove: body.remove,
+        }),
+        ..Default::default()
+    };
+    apply_edit(&state.store, &id, &req, Utc::now())?;
+    respond_item(&state, &state.store.get(&id)?)
 }
 
 #[derive(Debug, Deserialize)]
@@ -225,7 +207,8 @@ pub struct DepBody {
     pub dep: String,
 }
 
-/// `POST /api/v1/items/:id/deps` — add a hard dependency (with cycle pre-check).
+/// `POST /api/v1/items/:id/deps` — add a hard dependency. The full existence /
+/// self-loop / duplicate / cycle validation lives in the shared core op.
 pub async fn add_dep(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -233,56 +216,45 @@ pub async fn add_dep(
 ) -> ApiResult {
     let id = parse_id(&id)?;
     let dep = parse_id(&body.0.dep)?;
-
-    let mut item = state.store.get(&id)?;
-    // 1. dep must exist.
-    if !state.store.exists(&dep) {
-        return Err(ApiError::from(CloveError::NotFound {
-            id: dep.to_string(),
-        }));
-    }
-    // 2. no self-loop.
-    if dep == id {
-        return Err(ApiError::from(CloveError::SelfDependency {
-            id: id.to_string(),
-        }));
-    }
-    // 3. already present?
-    if item.frontmatter.deps.contains(&dep) {
-        return Err(ApiError::from(CloveError::DependencyExists {
-            from: id.to_string(),
-            to: dep.to_string(),
-        }));
-    }
-    // 4. would-cycle check over the whole graph.
-    let (frontmatters, _errors) = state.store.scan_frontmatter()?;
-    let (graph, _dangling) = GraphStore::build(&frontmatters);
-    if graph.check_would_cycle(&id, &dep) {
-        return Err(ApiError::from(CloveError::DependencyCycle {
-            from: id.to_string(),
-            to: dep.to_string(),
-            cycle: vec![id.to_string(), dep.to_string()],
-        }));
-    }
-
-    item.frontmatter.deps.push(dep);
-    item.frontmatter.deps.sort();
-    item.frontmatter.deps.dedup();
-    let updated = state.store.update(&item, Utc::now())?;
-    respond_item(&state, &updated)
+    ops::dep_add(&state.store, &id, &dep, Utc::now())?;
+    respond_item(&state, &state.store.get(&id)?)
 }
 
-/// `DELETE /api/v1/items/:id/deps/:dep`.
+/// `DELETE /api/v1/items/:id/deps/:dep`. Idempotent (HTTP DELETE semantics): a
+/// no-op if the dependency isn't present.
 pub async fn remove_dep(
     State(state): State<AppState>,
     Path((id, dep)): Path<(String, String)>,
 ) -> ApiResult {
     let id = parse_id(&id)?;
     let dep = parse_id(&dep)?;
-    let mut item = state.store.get(&id)?;
-    item.frontmatter.deps.retain(|d| d != &dep);
-    let updated = state.store.update(&item, Utc::now())?;
-    respond_item(&state, &updated)
+    if state.store.get(&id)?.frontmatter.deps.contains(&dep) {
+        ops::dep_remove(&state.store, &id, &dep, Utc::now())?;
+    }
+    respond_item(&state, &state.store.get(&id)?)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ParentBody {
+    /// The new parent id, or `null` to clear the parent.
+    #[serde(default)]
+    pub parent: Option<String>,
+}
+
+/// `PUT /api/v1/items/:id/parent` — set or clear the parent (epic membership),
+/// with existence + parent-cycle validation in the shared core op.
+pub async fn put_parent(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: ApiJson<ParentBody>,
+) -> ApiResult {
+    let id = parse_id(&id)?;
+    let parent = match &body.0.parent {
+        Some(p) => Some(parse_id(p)?),
+        None => None,
+    };
+    ops::set_parent(&state.store, &id, parent.as_ref(), Utc::now())?;
+    respond_item(&state, &state.store.get(&id)?)
 }
 
 /// `DELETE /api/v1/items/:id?force=`.

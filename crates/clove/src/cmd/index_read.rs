@@ -6,9 +6,9 @@
 //! transparently refreshed (≤ the threshold) or bypassed. Staleness uses the
 //! fast O(readdir) check by default; `--deep` forces the thorough per-file pass.
 
-use clove_core::CloveError;
 use clove_index::{Filter, Index, ItemListRow, QueryMode};
 use clove_ipc::{DaemonClient, QueryKind, QueryRequest};
+use clove_types::CloveError;
 
 use crate::cmd::listing::{objects_from_wire_rows, Filters, ListObject};
 use crate::context::{index_error, Ctx};

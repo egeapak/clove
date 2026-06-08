@@ -15,18 +15,24 @@ mod filter_menu;
 use filter_menu::toggle_vec;
 pub use filter_menu::{Facet, FilterMenu, MenuItem, MenuValue};
 
+mod form;
+pub use form::{Field, FormMode, FormState};
+
 mod listing;
 pub use listing::{Listing, SortDir, SortField, Tab, ViewFilter};
 
 use chrono::Utc;
-use clove_core::{CloveId, ItemFrontmatter, ItemStatus, ItemStore, ItemType};
+use clove_core::ItemStore;
+use clove_types::{CloveId, ItemFrontmatter, ItemStatus, ItemType};
 
-/// Input mode: browsing, typing a search query, or the facet filter menu.
+/// Input mode: browsing, typing a search query, the facet filter menu, or the
+/// add/edit form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Browse,
     Search,
     Filter,
+    Form,
 }
 
 /// Which pane holds focus. Only visible in the single-pane (narrow) layout,
@@ -56,6 +62,17 @@ pub struct App {
 
     // Filter menu state.
     pub filter_menu: FilterMenu,
+
+    // Add/edit form state + the config needed to create items.
+    pub form: FormState,
+    id_prefix: String,
+    default_type: ItemType,
+
+    /// Draw an in-buffer caret glyph in the form (for cursor-less backends —
+    /// the insta snapshots + PNG screenshots, which don't capture the terminal's
+    /// hardware cursor). Live terminals leave this `false` and rely on the
+    /// hardware cursor instead, so the two never double up.
+    pub caret_glyph: bool,
 }
 
 impl App {
@@ -72,9 +89,20 @@ impl App {
             should_quit: false,
             busy: false,
             filter_menu: FilterMenu::default(),
+            form: FormState::default(),
+            id_prefix: "proj".to_owned(),
+            default_type: ItemType::Feature,
+            caret_glyph: false,
         };
         app.refresh();
         app
+    }
+
+    /// Set the id prefix + default type used when creating items (from config).
+    pub fn with_config(mut self, id_prefix: String, default_type: ItemType) -> Self {
+        self.id_prefix = id_prefix;
+        self.default_type = default_type;
+        self
     }
 
     /// Whether a background operation is in progress (hook for the deferred
@@ -561,6 +589,161 @@ impl App {
         }
     }
 
+    // --- Add / edit form --------------------------------------------------
+
+    /// Open a blank "new item" form.
+    pub fn start_new(&mut self) {
+        self.form = FormState::new_item(self.default_type);
+        self.mode = Mode::Form;
+    }
+
+    /// Open an "edit" form prefilled from the selected item (no-op if no
+    /// selection or the item can't be loaded).
+    pub fn start_edit(&mut self) {
+        let Some(fm) = self.selected_frontmatter() else {
+            return;
+        };
+        let id = fm.id.clone();
+        match self.data.store.get(&id) {
+            Ok(item) => {
+                self.form = FormState::edit_item(&item);
+                self.mode = Mode::Form;
+            }
+            Err(e) => self.status = format!("failed to load {id}: {e}"),
+        }
+    }
+
+    /// Close the form without saving.
+    pub fn cancel_form(&mut self) {
+        self.mode = Mode::Browse;
+    }
+
+    pub fn form_next_field(&mut self) {
+        self.form.next_field();
+    }
+
+    pub fn form_prev_field(&mut self) {
+        self.form.prev_field();
+    }
+
+    /// Route a key to the focused field: cycle enum values with ←/→, otherwise
+    /// edit text (Enter inserts a newline in the body, else advances a field).
+    pub fn form_key(&mut self, code: ratatui::crossterm::event::KeyCode) {
+        use ratatui::crossterm::event::KeyCode;
+        if self.form.focused().is_enum() {
+            match code {
+                KeyCode::Left => self.form.cycle(-1),
+                KeyCode::Right | KeyCode::Char(' ') => self.form.cycle(1),
+                _ => {}
+            }
+            return;
+        }
+        // Text field: edit + caret movement (←/→/Home/End/Backspace/Delete).
+        match code {
+            KeyCode::Char(c) => self.form.insert_char(c),
+            KeyCode::Backspace => self.form.backspace(),
+            KeyCode::Delete => self.form.delete_forward(),
+            KeyCode::Left => self.form.move_left(),
+            KeyCode::Right => self.form.move_right(),
+            KeyCode::Home => self.form.move_home(),
+            KeyCode::End => self.form.move_end(),
+            KeyCode::Enter if self.form.focused() == Field::Body => self.form.newline(),
+            KeyCode::Enter => self.form.next_field(),
+            _ => {}
+        }
+    }
+
+    /// Validate + apply the form through the shared `clove_core` write path, then
+    /// refresh. On error the form stays open with the message shown.
+    pub fn form_submit(&mut self) {
+        if self.form.title.trim().is_empty() {
+            self.form.error = Some("title cannot be empty".to_owned());
+            return;
+        }
+        let now = Utc::now();
+        let result = match self.form.mode {
+            FormMode::New => self.submit_new(now),
+            FormMode::Edit => self.submit_edit(now),
+        };
+        match result {
+            Ok(status) => {
+                self.mode = Mode::Browse;
+                self.refresh();
+                self.status = status;
+            }
+            Err(e) => self.form.error = Some(e.to_string()),
+        }
+    }
+
+    fn submit_new(
+        &mut self,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<String, clove_types::CloveError> {
+        let spec = self.form.to_new_spec();
+        let out = clove_core::ops::create(
+            &self.data.store,
+            &self.id_prefix,
+            self.default_type,
+            spec,
+            now,
+        )?;
+        let id = out["id"].as_str().unwrap_or("item").to_owned();
+        Ok(format!("created {id}"))
+    }
+
+    fn submit_edit(
+        &mut self,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<String, clove_types::CloveError> {
+        let id =
+            self.form
+                .edit_id
+                .clone()
+                .ok_or_else(|| clove_types::CloveError::InvalidField {
+                    field: "id".to_owned(),
+                    reason: "no item to edit".to_owned(),
+                })?;
+        let store = &self.data.store;
+
+        // Not transactional: the scalar/label/body edit is applied first, then the
+        // graph edges. If a later parent/dep op fails (e.g. a typed id that would
+        // cycle), the earlier change is already on disk and the form stays open
+        // showing the error; resubmitting re-applies idempotently.
+        // Scalars / labels / body via the unified structured edit.
+        clove_core::apply_edit(store, &id, &self.form.to_edit_request(), now)?;
+
+        // Parent (graph-validated) — only when it changed.
+        let new_parent = self.form.parent_id()?;
+        let old_parent = self
+            .form
+            .original
+            .as_ref()
+            .and_then(|i| i.frontmatter.parent.clone());
+        if new_parent != old_parent {
+            clove_core::ops::set_parent(store, &id, new_parent.as_ref(), now)?;
+        }
+
+        // Deps (graph-validated) — diff add/remove.
+        let new_deps = self.form.dep_ids()?;
+        let old_deps = self
+            .form
+            .original
+            .as_ref()
+            .map(|i| i.frontmatter.deps.clone())
+            .unwrap_or_default();
+        for dep in &new_deps {
+            if !old_deps.contains(dep) {
+                clove_core::ops::dep_add(store, &id, dep, now)?;
+            }
+        }
+        for dep in &old_deps {
+            if !new_deps.contains(dep) {
+                clove_core::ops::dep_remove(store, &id, dep, now)?;
+            }
+        }
+        Ok(format!("saved {id}"))
+    }
+
     // --- Detail loading ---------------------------------------------------
 
     /// Load the body, comments, dep tree, and block reasons for the selection.
@@ -620,7 +803,8 @@ pub fn fmt_day(ts: chrono::DateTime<Utc>) -> String {
 mod tests {
     use super::*;
     use camino::Utf8PathBuf;
-    use clove_core::{ItemType, NewItem, Priority};
+    use clove_core::NewItem;
+    use clove_types::{ItemType, Priority};
 
     /// Build a store in a temp dir with a small dependency graph:
     /// `b` (open) ← `a` depends on `b`, plus an independent `c`.
@@ -738,6 +922,15 @@ mod tests {
         app.start_search();
         app.push_search('a');
         terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        app.cancel_search();
+
+        // The add and edit forms also render.
+        app.start_new();
+        terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        app.cancel_form();
+        app.select_first();
+        app.start_edit();
+        terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
     }
 
     #[test]
@@ -764,5 +957,302 @@ mod tests {
         // Moving past the end stays at the end.
         app.select_next();
         assert_eq!(app.list.list_state.selected(), Some(2));
+    }
+
+    // --- Add / edit form --------------------------------------------------
+
+    #[test]
+    fn new_form_creates_item_through_store() {
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+
+        app.start_new();
+        assert_eq!(app.mode, Mode::Form);
+        app.form.title = "Brand new".to_owned();
+        app.form.item_type = ItemType::Bug;
+        app.form.priority = 0;
+        app.form.assignee = "carol".to_owned();
+        app.form.labels = "area:web, Urgent".to_owned();
+        app.form.body = "hello".to_owned();
+        app.form_submit();
+
+        assert_eq!(app.mode, Mode::Browse, "form closes on success");
+        let created = app
+            .data
+            .all
+            .iter()
+            .find(|fm| fm.title == "Brand new")
+            .expect("new item scanned in");
+        assert_eq!(created.item_type, ItemType::Bug);
+        assert_eq!(created.priority.get(), 0);
+        assert_eq!(created.assignee.as_deref(), Some("carol"));
+        // Labels canonicalized + sorted by the shared path.
+        assert_eq!(
+            created.labels,
+            vec!["area:web".to_owned(), "urgent".to_owned()]
+        );
+    }
+
+    #[test]
+    fn edit_form_applies_scalars_labels_and_body() {
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        app.select_first();
+        let id = app.selected_frontmatter().unwrap().id.clone();
+
+        app.start_edit();
+        assert_eq!(app.mode, Mode::Form);
+        app.form.title = "Renamed".to_owned();
+        app.form.status = ItemStatus::Closed;
+        app.form.priority = 1;
+        app.form.assignee = "dave".to_owned();
+        app.form.labels = "x, y".to_owned();
+        app.form.body = "edited body".to_owned();
+        app.form_submit();
+
+        assert_eq!(app.mode, Mode::Browse);
+        let item = app.data.store.get(&id).unwrap();
+        assert_eq!(item.frontmatter.title, "Renamed");
+        assert_eq!(item.frontmatter.status, ItemStatus::Closed);
+        assert!(item.frontmatter.closed.is_some(), "closed timestamp set");
+        assert_eq!(item.frontmatter.priority.get(), 1);
+        assert_eq!(item.frontmatter.assignee.as_deref(), Some("dave"));
+        assert_eq!(
+            item.frontmatter.labels,
+            vec!["x".to_owned(), "y".to_owned()]
+        );
+        assert_eq!(item.body, "edited body\n", "body normalized with newline");
+    }
+
+    #[test]
+    fn edit_form_diffs_parent_and_deps() {
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+
+        let independent = app
+            .data
+            .all
+            .iter()
+            .find(|fm| fm.title == "Independent")
+            .unwrap()
+            .id
+            .clone();
+        let base = app
+            .data
+            .all
+            .iter()
+            .find(|fm| fm.title == "Base task")
+            .unwrap()
+            .id
+            .clone();
+
+        // Open the edit form directly for the independent item.
+        let item = app.data.store.get(&independent).unwrap();
+        app.form = FormState::edit_item(&item);
+        app.mode = Mode::Form;
+        app.form.parent = base.to_string();
+        app.form.deps = base.to_string();
+        app.form_submit();
+
+        assert_eq!(app.mode, Mode::Browse);
+        let updated = app.data.store.get(&independent).unwrap();
+        assert_eq!(updated.frontmatter.parent.as_ref(), Some(&base));
+        assert_eq!(updated.frontmatter.deps, vec![base.clone()]);
+    }
+
+    #[test]
+    fn form_navigation_and_enum_cycle_wrap() {
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+
+        app.start_new();
+        assert_eq!(app.form.focused(), Field::Title);
+        app.form_prev_field(); // wraps to the last field (Body)
+        assert_eq!(app.form.focused(), Field::Body);
+        app.form_next_field(); // wraps back to Title
+        assert_eq!(app.form.focused(), Field::Title);
+
+        // Priority is an enum field at index 2; cycling past 4 wraps to 0.
+        app.form.focus = 2;
+        app.form.priority = 4;
+        app.form.cycle(1);
+        assert_eq!(app.form.priority, 0);
+    }
+
+    #[test]
+    fn form_cursor_edits_mid_string() {
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        app.start_new(); // focus Title
+
+        for c in "abc".chars() {
+            app.form.insert_char(c);
+        }
+        assert_eq!(app.form.cursor, 3);
+        app.form.move_left(); // between 'b' and 'c'
+        assert_eq!(app.form.cursor, 2);
+        app.form.insert_char('X'); // "abXc"
+        assert_eq!(app.form.title, "abXc");
+        assert_eq!(app.form.cursor, 3);
+        app.form.backspace(); // remove the 'X' → "abc"
+        assert_eq!(app.form.title, "abc");
+        assert_eq!(app.form.cursor, 2);
+        app.form.delete_forward(); // remove 'c' at caret → "ab"
+        assert_eq!(app.form.title, "ab");
+        assert_eq!(app.form.cursor, 2);
+        app.form.move_home();
+        assert_eq!(app.form.cursor, 0);
+        app.form.delete_forward(); // remove 'a' → "b"
+        assert_eq!(app.form.title, "b");
+        app.form.move_end();
+        assert_eq!(app.form.cursor, 1);
+        // Caret bounds don't underflow/overflow.
+        app.form.move_home();
+        app.form.move_left();
+        assert_eq!(app.form.cursor, 0);
+        app.form.move_end();
+        app.form.move_right();
+        assert_eq!(app.form.cursor, 1);
+    }
+
+    #[test]
+    fn form_cursor_respects_utf8_boundaries() {
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        app.start_new();
+        for c in "café".chars() {
+            app.form.insert_char(c);
+        }
+        assert_eq!(app.form.cursor, 4);
+        app.form.move_left(); // before the multibyte 'é'
+        app.form.backspace(); // remove 'f' → "caé" (no panic on byte boundary)
+        assert_eq!(app.form.title, "caé");
+        assert_eq!(app.form.cursor, 2);
+    }
+
+    #[test]
+    fn form_newline_inserts_at_caret_in_body() {
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        app.start_new();
+        app.form.focus = 7; // Body (new-item field order)
+        assert_eq!(app.form.focused(), Field::Body);
+        app.form.cursor = 0;
+        app.form.insert_char('a');
+        app.form.insert_char('b'); // "ab", caret at 2
+        app.form.move_left(); // caret at 1
+        app.form.newline(); // "a\nb"
+        assert_eq!(app.form.body, "a\nb");
+        assert_eq!(app.form.cursor, 2);
+    }
+
+    #[test]
+    fn form_field_change_moves_caret_to_end() {
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        app.select_first();
+        app.start_edit(); // Title prefilled, caret at end
+        assert_eq!(app.form.cursor, app.form.title.chars().count());
+        // Advance to Labels (index 5 in edit-mode fields): caret jumps to its end.
+        for _ in 0..5 {
+            app.form_next_field();
+        }
+        assert_eq!(app.form.focused(), Field::Labels);
+        assert_eq!(app.form.cursor, app.form.labels.chars().count());
+    }
+
+    #[test]
+    fn form_hardware_cursor_sits_on_caret_glyph() {
+        use ratatui::backend::{Backend, TestBackend};
+        use ratatui::Terminal;
+
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        app.caret_glyph = true; // draw the glyph so we can locate it in the buffer
+        app.start_new();
+        for c in "hello".chars() {
+            app.form.insert_char(c);
+        }
+        app.form.move_left();
+        app.form.move_left(); // caret between "hel" and "lo"
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        // Locate the caret glyph cell in the rendered buffer.
+        let glyph = {
+            let buf = terminal.backend().buffer();
+            let mut found = None;
+            for y in 0..buf.area.height {
+                for x in 0..buf.area.width {
+                    if buf.cell((x, y)).map(|c| c.symbol() == "▏").unwrap_or(false) {
+                        found = Some((x, y));
+                    }
+                }
+            }
+            found.expect("caret glyph rendered")
+        };
+        let pos = terminal.backend_mut().get_cursor_position().unwrap();
+        assert_eq!(
+            (pos.x, pos.y),
+            glyph,
+            "the hardware cursor sits on the caret glyph cell"
+        );
+    }
+
+    #[test]
+    fn form_glyph_and_live_modes_render_identically_except_the_caret() {
+        // Regression: a body ending in a newline must render the same lines with
+        // the glyph on (snapshot/PNG) and off (live), so the hardware cursor never
+        // lands a row past the body. Both modes share the cursor position; only the
+        // caret's own row may differ (the glyph cell).
+        use ratatui::backend::{Backend, TestBackend};
+        use ratatui::Terminal;
+
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        app.start_new();
+        app.form.focus = 7; // Body
+        app.form.cursor = 0;
+        app.form.insert_char('x');
+        app.form.newline(); // body "x\n", caret on the new empty line
+
+        let render = |app: &mut App, glyph: bool| {
+            app.caret_glyph = glyph;
+            let mut t = Terminal::new(TestBackend::new(80, 30)).unwrap();
+            t.draw(|f| crate::ui::render(f, app)).unwrap();
+            let pos = t.backend_mut().get_cursor_position().unwrap();
+            (t.backend().buffer().clone(), pos)
+        };
+        let (glyph_buf, glyph_pos) = render(&mut app, true);
+        let (live_buf, live_pos) = render(&mut app, false);
+
+        assert_eq!(
+            glyph_pos, live_pos,
+            "caret position identical in both modes"
+        );
+        for y in 0..glyph_buf.area.height {
+            if y == glyph_pos.y {
+                continue; // the caret row legitimately differs (the glyph cell)
+            }
+            for x in 0..glyph_buf.area.width {
+                assert_eq!(
+                    glyph_buf.cell((x, y)).map(|c| c.symbol()),
+                    live_buf.cell((x, y)).map(|c| c.symbol()),
+                    "row {y} differs between glyph and live render"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn empty_title_keeps_form_open_with_error() {
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        app.start_new();
+        app.form.title = "   ".to_owned();
+        app.form_submit();
+        assert_eq!(app.mode, Mode::Form, "stays open on validation error");
+        assert!(app.form.error.is_some());
     }
 }

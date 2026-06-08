@@ -336,8 +336,9 @@ shared client interface. Frames are serde-tagged like the IPC protocol:
   highlight + `(cycle)` markers, plus blocks/relates/epic-children) / Comments
   (thread + add-comment, live `comment.added`); inline light-write edits
   (status/priority/assignee/labels/deps, dep-add cycle pre-check); create form;
-  deep-linkable `?view=`. Body editing is **read-only in v1** (`edit --field`
-  doesn't cover `body`; a body-write path is a follow-up).
+  deep-linkable `?view=`. Body editing **landed** as a follow-up: an
+  `items/[id]/edit` page + the create modal share an `ItemForm` with a Markdown
+  body editor + live preview, writing via `PATCH` `body`.
 - **Timeline (`/timeline`)** — (1) dependency-aware lifecycle **Gantt**: bars span
   created→(closed|now), type-colored, with hard-dep arrows and chain-highlight on
   hover; (2) **throughput** chart created vs closed over 7d/30d/all backed by
@@ -490,7 +491,8 @@ enabled via `[web]` config or `cloved run --serve`.
    (release-only asset fetch) rejected (breaks single-binary/offline goal).
 5. **Optimistic write vs `git pull` race** — resolves to whatever the file says;
    the "server upsert wins except in-flight fields" rule needs careful tests.
-6. **Body editing** — out of scope v1 (read-only body); needs a new write path.
+6. **Body editing** — DONE: a body-write path landed (`PATCH` `body`) with an
+   edit page whose `ItemForm` has a Markdown editor + live preview.
 7. **Default port 7373** — confirm a sane default; document override.
 8. **Comment JSON shape** isn't in the v1 schema (only `comment_count`) — need a
    stable `{author,timestamp,body}` shape.

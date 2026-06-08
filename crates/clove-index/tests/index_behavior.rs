@@ -12,10 +12,9 @@ use std::collections::HashSet;
 use std::io::Write as _;
 
 use camino::{Utf8Path, Utf8PathBuf};
-use clove_core::{
-    parse_item_bytes, CloveId, GraphStore, Item, ItemFrontmatter, ItemStatus, ItemType, Priority,
-};
+use clove_core::{parse_item_bytes, GraphStore};
 use clove_index::{reindex, Filter, Index, IndexError, QueryMode};
+use clove_types::{CloveId, Item, ItemFrontmatter, ItemStatus, ItemType, Priority};
 
 // ---------------------------------------------------------------------------
 // Fixtures

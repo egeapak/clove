@@ -7,8 +7,7 @@
 //! and a serializable error, replacing the old hand-rolled `Request`/`Response`
 //! enums + frame codec.
 
-use clove_core::ops::NewSpec;
-use clove_core::ItemStatus;
+use clove_types::{EditRequest, ItemStatus, NewSpec};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -65,11 +64,20 @@ pub trait CloveRpc {
     /// Transition an item's status; returns the updated item object.
     async fn set_status(id: String, status: ItemStatus) -> Result<Value, RpcError>;
     /// Apply `KEY=VALUE` edits atomically; returns the updated item object.
+    /// Retained for back-compat; new clients prefer [`CloveRpc::apply_edit`].
     async fn edit(id: String, assignments: Vec<String>) -> Result<Value, RpcError>;
+    /// Apply a structured [`EditRequest`] atomically (supports body edits, label
+    /// set/delta, assignee clear); returns the updated item object.
+    async fn apply_edit(id: String, req: EditRequest) -> Result<Value, RpcError>;
     /// Append a comment; returns `{ id, path }`.
     async fn add_comment(id: String, author: String, body: String) -> Result<Value, RpcError>;
     /// Add a hard dependency `id → dep_id`; returns the updated item object.
     async fn dep_add(id: String, dep_id: String) -> Result<Value, RpcError>;
+    /// Remove a hard dependency `id → dep_id`; returns the updated item object.
+    async fn dep_remove(id: String, dep_id: String) -> Result<Value, RpcError>;
+    /// Set (or, with `parent = None`, clear) an item's parent; returns the
+    /// updated item object.
+    async fn set_parent(id: String, parent: Option<String>) -> Result<Value, RpcError>;
     /// Full item detail (frontmatter + body + comment_count + ready/blocked_by).
     async fn show(id: String) -> Result<Value, RpcError>;
     /// Work-item analytics (`clove stats`) as JSON.

@@ -1,4 +1,4 @@
-//! The rmcp MCP server: 12 tools spanning the agent read/write loop, each
+//! The rmcp MCP server: 14 tools spanning the agent read/write loop, each
 //! delegating to the [`Engine`]. Tool bodies run on a blocking task (the engine
 //! does file I/O and, for writes, drives the blocking daemon client).
 
@@ -143,7 +143,7 @@ impl CloveServer {
 
     #[tool(
         description = "Edit an item's fields in one atomic write: status, priority, \
-                       type, title, assignee, and label add/remove."
+                       type, title, assignee, Markdown body, and label add/remove."
     )]
     async fn clove_edit(
         &self,
@@ -173,6 +173,30 @@ impl CloveServer {
         let e = self.engine.clone();
         self.run(move || e.dep_add(a)).await
     }
+
+    #[tool(
+        description = "Remove a hard dependency: `id` no longer depends on `dep_id`. \
+                       Errors if no such dependency exists."
+    )]
+    async fn clove_dep_remove(
+        &self,
+        Parameters(a): Parameters<DepAddArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let e = self.engine.clone();
+        self.run(move || e.dep_remove(a)).await
+    }
+
+    #[tool(
+        description = "Set or clear an item's parent (epic membership). Omit `parent` \
+                       to clear it. Rejects self-parenting and parent cycles."
+    )]
+    async fn clove_set_parent(
+        &self,
+        Parameters(a): Parameters<SetParentArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let e = self.engine.clone();
+        self.run(move || e.set_parent(a)).await
+    }
 }
 
 #[tool_handler(
@@ -181,7 +205,8 @@ impl CloveServer {
                     clove_ready to find unblocked work, clove_show for detail, \
                     clove_list/clove_blocked/clove_search/clove_dep_tree to \
                     explore, clove_stats for an overview, and clove_new / \
-                    clove_status / clove_edit / clove_comment / clove_dep_add to \
-                    record progress. Ids look like `proj-7af3q2k9`."
+                    clove_status / clove_edit / clove_comment / clove_dep_add / \
+                    clove_dep_remove / clove_set_parent to record progress. \
+                    Ids look like `proj-7af3q2k9`."
 )]
 impl ServerHandler for CloveServer {}

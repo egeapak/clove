@@ -1,7 +1,8 @@
 //! `clove version` (T-CLI13).
 
-use clove_core::model::CURRENT_SCHEMA_VERSION;
-use clove_core::{CloveError, OutputFormat};
+use clove_core::OutputFormat;
+use clove_types::model::CURRENT_SCHEMA_VERSION;
+use clove_types::CloveError;
 use serde_json::json;
 
 use crate::output::print_json_success;

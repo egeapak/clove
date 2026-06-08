@@ -1,6 +1,7 @@
 //! `clove status`/`start`/`close` (T-CLI06).
 
-use clove_core::{CloveError, ItemFrontmatter, ItemStatus, OutputFormat};
+use clove_core::OutputFormat;
+use clove_types::{CloveError, ItemFrontmatter, ItemStatus};
 use serde_json::Map;
 
 use crate::context::Ctx;
@@ -8,9 +9,9 @@ use crate::item_json::print_item;
 use crate::util::{now_seconds, parse_id};
 
 /// Apply a status transition to frontmatter, maintaining the closed-timestamp
-/// invariant (delegates to the shared [`clove_core::ops::set_status`]).
+/// invariant (delegates to the shared [`clove_types::set_status`]).
 pub fn set_status(fm: &mut ItemFrontmatter, status: ItemStatus) {
-    clove_core::ops::set_status(fm, status, now_seconds());
+    clove_types::set_status(fm, status, now_seconds());
 }
 
 pub fn run(
@@ -42,7 +43,7 @@ pub fn run(
 }
 
 /// IDs of items whose `deps` list references `id` (best-effort).
-fn dependents_of(ctx: &Ctx, id: &clove_core::CloveId) -> Vec<String> {
+fn dependents_of(ctx: &Ctx, id: &clove_types::CloveId) -> Vec<String> {
     let (frontmatters, _errors) = ctx.store.scan_frontmatter().unwrap_or_default();
     frontmatters
         .into_iter()

@@ -7,8 +7,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use clove_core::limits::{MAX_BODY_BYTES, MAX_DEP_ARRAY_LEN, MAX_FRONTMATTER_BYTES};
-use clove_core::{normalize_label, CloveId, ItemStatus, ItemStore, ItemType, Priority};
+use clove_core::ItemStore;
+use clove_types::limits::{MAX_BODY_BYTES, MAX_DEP_ARRAY_LEN, MAX_FRONTMATTER_BYTES};
+use clove_types::{normalize_label, CloveId, ItemStatus, ItemType, Priority};
 
 use crate::error::ImportError;
 use crate::plan::ConflictItem;

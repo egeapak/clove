@@ -9,7 +9,8 @@
 use std::collections::{HashMap, HashSet};
 
 use camino::Utf8Path;
-use clove_core::{list_comments, CloveId, GraphStore, Item, ItemFrontmatter};
+use clove_core::{list_comments, GraphStore};
+use clove_types::{CloveId, Item, ItemFrontmatter};
 use serde_json::{json, Map, Value};
 
 /// Whole-store derived state computed once and shared across items in a response.

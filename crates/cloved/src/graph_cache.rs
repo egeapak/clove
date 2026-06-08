@@ -19,8 +19,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use clove_core::{CloveId, GraphStore};
+use clove_core::GraphStore;
 use clove_index::Index;
+use clove_types::CloveId;
 
 /// A built graph plus its topological ranks (for the `blocked` ordering).
 struct Built {

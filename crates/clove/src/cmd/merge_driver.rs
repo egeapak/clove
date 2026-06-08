@@ -25,8 +25,9 @@ use std::process::Command;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use clove_core::write::FrontmatterWriter;
-use clove_core::{parse_item_lenient, CloveError, Item, ItemFrontmatter, OutputFormat};
+use clove_core::{parse_item_lenient, OutputFormat};
 use clove_import::merge::{merge_frontmatter, FieldConflict, MergeOutcome};
+use clove_types::{CloveError, Item, ItemFrontmatter};
 use serde_json::json;
 
 use crate::cli::MergeDriverArgs;
@@ -105,7 +106,7 @@ pub fn run(format: OutputFormat, args: MergeDriverArgs) -> Result<ExitCode, Clov
     // produce an invalid item, fail safe — downgrade to a conflict rather than
     // writing a possibly-invalid item.
     if outcome.is_clean() {
-        let validation = clove_core::validate_item(merged_fm);
+        let validation = clove_types::validate_item(merged_fm);
         if !validation.is_empty() {
             field_conflicts.push(FieldConflict {
                 field: "validation".to_owned(),

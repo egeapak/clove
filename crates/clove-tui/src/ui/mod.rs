@@ -8,6 +8,7 @@
 
 mod detail;
 mod filter_menu;
+mod form;
 mod help;
 mod list;
 mod status;
@@ -24,6 +25,7 @@ use crate::app::{App, Focus, Mode};
 
 use detail::render_detail;
 use filter_menu::render_filter_menu;
+use form::render_form;
 use help::render_help;
 use list::render_list;
 use status::render_status;
@@ -86,6 +88,9 @@ pub fn render(f: &mut Frame, app: &mut App) {
 
     if app.mode == Mode::Filter {
         render_filter_menu(f, app, area);
+    }
+    if app.mode == Mode::Form {
+        render_form(f, app, area);
     }
     if app.show_help {
         render_help(f, area);

@@ -9,8 +9,9 @@ use std::collections::HashMap;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use clove_core::fixtures::write_fixtures;
-use clove_core::{parse_frontmatter_file, CloveId, GraphStore, ItemFrontmatter, ItemType};
+use clove_core::{parse_frontmatter_file, GraphStore};
 use clove_index::{reindex, Filter, Index, QueryMode};
+use clove_types::{CloveId, ItemFrontmatter, ItemType};
 use tempfile::TempDir;
 
 /// Parse every `<id>.md` under `issues` into frontmatter (the oracle input).

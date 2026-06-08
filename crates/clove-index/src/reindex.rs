@@ -9,7 +9,8 @@
 use std::time::Instant;
 
 use camino::{Utf8Path, Utf8PathBuf};
-use clove_core::{parse_item_bytes, CloveId, GraphStore, Item};
+use clove_core::{parse_item_bytes, GraphStore};
+use clove_types::{CloveId, Item};
 use rayon::prelude::*;
 use rusqlite::{params, Connection, TransactionBehavior};
 

@@ -7,7 +7,7 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use clove_core::CloveError;
+use clove_types::CloveError;
 use serde_json::{json, Value};
 
 /// A web API error: the stable string code + numeric exit code from the CLI
@@ -34,11 +34,11 @@ impl ApiError {
 }
 
 /// Map a [`CloveError`] to an [`ApiError`]. The `(code, exit)` pair comes from
-/// the shared [`clove_core::error_code`] classifier (so the web API and CLI agree
+/// the shared [`clove_types::error_code`] classifier (so the web API and CLI agree
 /// on `error.code`/`error.exit`); only the HTTP status is web-specific.
 impl From<CloveError> for ApiError {
     fn from(error: CloveError) -> Self {
-        let (code, exit) = clove_core::error_code(&error);
+        let (code, exit) = clove_types::error_code(&error);
         let status = http_status(&error, exit);
         Self {
             status,

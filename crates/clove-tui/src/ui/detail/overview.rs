@@ -1,6 +1,6 @@
 //! Overview tab rendering (wide and narrow).
 
-use clove_core::ItemFrontmatter;
+use clove_types::ItemFrontmatter;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 

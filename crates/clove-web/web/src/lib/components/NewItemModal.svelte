@@ -4,20 +4,12 @@
   import { toasts } from '$lib/toast.svelte';
   import { goto } from '$app/navigation';
   import { onMount, tick } from 'svelte';
+  import ItemForm from '$lib/components/ItemForm.svelte';
+  import { buildCreate, type FormState } from '$lib/itemForm';
 
   let { onclose }: { onclose: () => void } = $props();
 
-  let title = $state('');
-  let type = $state('feature');
-  let priority = $state(2);
-  let labels = $state('');
-  let assignee = $state('');
-  let body = $state('');
   let saving = $state(false);
-
-  // ---- focus management ----
-  const TYPES = $derived(store.meta?.types?.length ? store.meta.types : ['feature', 'bug', 'chore', 'docs', 'epic']);
-  const PRIOS = $derived(store.meta?.priorities?.length ? store.meta.priorities : [0, 1, 2, 3, 4]);
 
   let dialogEl = $state<HTMLDivElement | undefined>();
   let firstField = $state<HTMLInputElement | undefined>();
@@ -61,22 +53,10 @@
     }
   }
 
-  async function submit(e: Event) {
-    e.preventDefault();
-    if (!title.trim()) return;
+  async function create(form: FormState) {
     saving = true;
     try {
-      const item = await api.create({
-        title: title.trim(),
-        type,
-        priority,
-        labels: labels
-          .split(',')
-          .map((l) => l.trim())
-          .filter(Boolean),
-        assignee: assignee.trim() || undefined,
-        body: body.trim() || undefined
-      });
+      const item = await api.create(buildCreate(form));
       store.upsert(item);
       toasts.push(`Created ${item.id}`);
       onclose();
@@ -100,46 +80,7 @@
   onkeydown={onKeydown}
 >
   <h2>New item</h2>
-  <form onsubmit={submit}>
-    <label>
-      <span>Title</span>
-      <input bind:this={firstField} bind:value={title} placeholder="Short summary…" required />
-    </label>
-    <div class="row">
-      <label>
-        <span>Type</span>
-        <select bind:value={type}>
-          {#each TYPES as t (t)}<option value={t}>{t}</option>{/each}
-        </select>
-      </label>
-      <label>
-        <span>Priority</span>
-        <select bind:value={priority}>
-          {#each PRIOS as p (p)}<option value={p}>p{p}</option>{/each}
-        </select>
-      </label>
-    </div>
-    <div class="row">
-      <label>
-        <span>Assignee</span>
-        <input bind:value={assignee} placeholder="(optional)" />
-      </label>
-      <label>
-        <span>Labels (comma sep)</span>
-        <input bind:value={labels} placeholder="area:web, …" />
-      </label>
-    </div>
-    <label>
-      <span>Body</span>
-      <textarea bind:value={body} rows="4" placeholder="Markdown…"></textarea>
-    </label>
-    <div class="actions">
-      <button type="button" class="btn" onclick={onclose}>Cancel</button>
-      <button type="submit" class="btn primary" disabled={saving || !title.trim()}>
-        {saving ? 'Creating…' : 'Create'}
-      </button>
-    </div>
-  </form>
+  <ItemForm mode="create" submitting={saving} onsubmit={create} oncancel={onclose} bind:firstField />
 </div>
 
 <style>
@@ -156,53 +97,14 @@
     top: 8%;
     left: 50%;
     transform: translateX(-50%);
-    width: min(520px, 92vw);
+    width: min(560px, 92vw);
     padding: 20px 22px;
     box-shadow: var(--shadow-pop);
+    max-height: 84vh;
+    overflow-y: auto;
   }
   h2 {
     margin: 0 0 14px;
     font-size: 16px;
-  }
-  form {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
-  label {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    flex: 1;
-  }
-  label span {
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    color: var(--text-dim);
-  }
-  .row {
-    display: flex;
-    gap: 12px;
-  }
-  input,
-  select,
-  textarea {
-    background: var(--surface-inset);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    padding: 8px 10px;
-    color: var(--text);
-    font-size: 13px;
-  }
-  textarea {
-    resize: vertical;
-    font-family: var(--font-mono);
-  }
-  .actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 8px;
-    margin-top: 4px;
   }
 </style>

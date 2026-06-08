@@ -65,7 +65,7 @@
 //! still import (M2). Two lines sharing a source id do not collapse onto one
 //! record — `apply` consumes staged issues POSITIONALLY and the later duplicate is
 //! a `would_skip` with reason `"duplicate_id"` (C1). Over-long `deps`/`relates`
-//! arrays are truncated to [`clove_core::limits::MAX_DEP_ARRAY_LEN`] with a
+//! arrays are truncated to [`clove_types::limits::MAX_DEP_ARRAY_LEN`] with a
 //! warning, and dependency targets absent from the store are reported as dangling
 //! (M4, report-only).
 
@@ -74,10 +74,11 @@ use std::collections::{BTreeMap, HashSet};
 
 use camino::Utf8Path;
 use chrono::{DateTime, Utc};
-use clove_core::id::new_id;
-use clove_core::model::CURRENT_SCHEMA_VERSION;
 use clove_core::write::write_item_file;
-use clove_core::{CloveId, Item, ItemFrontmatter, ItemStatus, ItemStore, ItemType, Priority};
+use clove_core::ItemStore;
+use clove_types::id::new_id;
+use clove_types::model::CURRENT_SCHEMA_VERSION;
+use clove_types::{CloveId, Item, ItemFrontmatter, ItemStatus, ItemType, Priority};
 use serde::Deserialize;
 use serde_json::Value;
 

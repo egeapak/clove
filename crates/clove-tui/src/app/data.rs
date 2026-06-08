@@ -5,7 +5,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use clove_core::{BlockedItem, CloveId, GraphStore, ItemFrontmatter, ItemStore};
+use clove_core::{BlockedItem, GraphStore, ItemStore};
+use clove_types::{CloveId, ItemFrontmatter};
 
 pub struct Data {
     pub store: ItemStore,

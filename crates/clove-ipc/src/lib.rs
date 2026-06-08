@@ -1,12 +1,13 @@
-//! clove daemon IPC: wire protocol, frame codec, and a synchronous client (M3).
+//! clove daemon IPC: the typed `tarpc` service, payload types, and a synchronous
+//! client (M3/M4).
 //!
-//! This crate is deliberately lean — `serde` + a blocking `interprocess`
-//! client only. It is the seam between the lean `clove` CLI (client) and the
-//! `cloved` daemon (server) so both share one definition of the wire format, while
-//! keeping `tokio`/`notify`/`git2` out of the CLI (DESIGN §1; M3_PLAN §1.1).
+//! This crate is the seam between the `clove` CLI / MCP server (clients) and the
+//! `cloved` daemon (server) so all share one definition of the wire format. As of
+//! M4 the transport is `tarpc` over a local socket (replacing the hand-rolled
+//! frame/protocol).
 //!
-//! - [`protocol`] — the [`Request`]/[`Response`] types (DESIGN §8.4).
-//! - [`frame`] — the 4-byte length-prefix JSON framing.
+//! - [`service`] — the `#[tarpc::service]` contract ([`CloveRpc`]) + [`RpcError`].
+//! - [`protocol`] — the request/response payload types (DESIGN §8.4).
 //! - [`client`] — [`DaemonClient`], a blocking connect-with-timeout client that
 //!   probes liveness and cleans up a stale socket (DESIGN §8.3).
 //! - path/name helpers for the socket, pid, and lock files (DESIGN §8.2).

@@ -1,8 +1,8 @@
 # clove — Session Handoff
 
-**Updated:** 2026-06-04
+**Updated:** 2026-06-08
 **State:** **M0–M3 are complete and gated; the first M4 items have landed**
-(`clove stats` + analytics history, the `clove tui` read-only browser, and an
+(`clove stats` + analytics history, the `clove tui` browser, and an
 exact-incremental index/daemon graph — see the "M4" sections below). Full CLI
 command surface;
 the SQLite index serves `ls`/`ready`/`query` (lean covering-index scan, default
@@ -87,14 +87,16 @@ daemon. `/api/v1` REST mirrors the CLI's JSON envelope + exit codes (shared
 id-autolink extension. List/board virtualized; 4 runtime themes (default
 `midnight-ide`). Plan/decisions/status: `docs/M4_WEB_UI_PLAN.md`; themes in
 `docs/web-ui-mockups/`. Deferred: make the `github` feature opt-out (~3.5 MB of the
-11.35 MB binary), a body editor, and wiring the stats-snapshot series into web
-`/stats/history`.
+11.35 MB binary) and wiring the stats-snapshot series into web `/stats/history`.
+(The body editor + a full add/edit page have since landed — see the "Unified
+add/edit" section below.)
 
 **M4 — MCP server (DONE).** New `clove-mcp` crate (rmcp 1.7) and a `clove mcp`
-subcommand expose clove to AI agents over the MCP **stdio** transport as 12 native
+subcommand expose clove to AI agents over the MCP **stdio** transport as 14 native
 tools — `clove_ready`/`blocked`/`list`/`show`/`search`/`dep_tree`/`stats` (reads)
-and `clove_new`/`status`/`edit`/`comment`/`dep_add` (writes) — whose results are the
-same item JSON as the CLI. Behind a default-on `mcp` feature (mirrors `github`).
+and `clove_new`/`status`/`edit`/`comment`/`dep_add`/`dep_remove`/`set_parent`
+(writes; `edit` now includes `body`) — whose results are the same item JSON as the
+CLI. Behind a default-on `mcp` feature (mirrors `github`).
 **Topology B:** each client spawns `clove mcp`; **writes** prefer the single
 `cloved` daemon (so concurrent agents share one serialized writer that keeps its
 index/graph coherent) and fall back to direct `clove-core` ops, while **reads**
@@ -117,29 +119,80 @@ daemon tracks **ping stats** (`ping_count` + `last_ping_ms`, surfaced in `STATUS
 / `clove daemon status`). Spawn logic is shared via `clove_ipc::{spawn_daemon,
 ensure_daemon}` (also used by `clove daemon start`).
 
-**M4 — `clove doctor` integrity checks (this session).** Five new health checks,
-chosen by a 3-lens agent forum (store-integrity / operational / DX) and the
-"integrity" scope. **Store-level** (in `clove_core::doctor`, file-only): (3)
-`DUPLICATE_ID` — closes the one §7.7 check that was specced but never built
-(error); (12) `TIMESTAMP_INCOHERENT` — `updated<created`, `closed<created`, or a
-timestamp >24 h in the future (warning, report-only); (13) `GITIGNORE_DRIFT` —
-`.clove/.gitignore` absent or missing a required cache/socket entry (warning,
-**fixable** — appends the missing canonical lines, preserving user-added ones).
-The canonical entry list was lifted to `clove_core::GITIGNORE_ENTRIES`, shared by
-`clove init` and `doctor` so they can't drift. **Index-level** (in
-`clove/src/cmd/doctor.rs`, now via the **non-healing** `Index::open` so problems
-are reported instead of silently rebuilt): `INDEX_SCHEMA_MISMATCH` (warning) and
-`INDEX_CORRUPT` (error — `PRAGMA quick_check` + a contentless-FTS
-`fts_map`↔`items` row-count cross-check, the first integrity verification in the
-tree). All index findings are fixed by one `reindex`. DESIGN §7.7 updated; tests:
-5 `clove-core` doctor unit tests + 1 `clove-index` `integrity_check` test + 4 new
-`clove` e2e tests (gitignore drift+fix, timestamp, index corruption+fix, schema
-mismatch+fix); `fmt`/`clippy -D warnings`/`cargo test --workspace` all green.
+**M4 — Unified add/edit across web, TUI, MCP (DONE).** All four
+write surfaces now share **one** create/edit implementation, and add/edit UIs
+landed on the web and TUI.
 
-**Next step (rest of M4):** TUI write actions (status/priority/label edits, …),
-bidirectional vendor bridges, richer history/changelog, and the remaining MCP
-follow-up — server-push notifications (MCP `tools/list_changed` / a ready-queue
-subscription) when the graph changes — see `IMPLEMENTATION_PLAN.md` M4 backlog.
+- **New `clove-types` crate** — the pure data types (item model, `CloveId`,
+  `CloveError`, field validation, the shared field parsers, and the create/edit
+  **request types** `NewSpec`/`EditRequest`/`LabelEdit` + their pure frontmatter
+  mutators `set_status`/`apply_assignments`/`apply_to_frontmatter`) moved out of
+  `clove-core` into a dependency-light crate (serde/chrono/smol_str/camino/
+  thiserror/getrandom only). `clove-core` layers the store/graph/ops on top;
+  every downstream crate imports the types from `clove-types` directly (no
+  re-export shim — `clove-core` re-exports them `pub(crate)` for its own use).
+  `clove-ipc` now gets its wire model types from `clove-types` (its original
+  reason to depend on `clove-core`); it keeps a `clove-core` dep only for
+  `graph::DepTreeNode`.
+- **Unified write path.** `clove_types::EditRequest` is the single structured
+  partial-edit (absent=leave / present=set, tri-state `assignee` via a
+  `double_option` deserializer so `null`=clear, `LabelEdit::{Delta,Set}`, and a
+  first-class **body** edit). `clove_core::apply_edit` is the store-touching
+  orchestration; `ops::edit`/`apply_assignments` are thin shims over
+  `EditRequest::from_tokens` (CLI `KEY=VALUE` token semantics preserved exactly,
+  incl. last-mention-wins label order). New graph-validated ops
+  `dep_remove` + `set_parent` (parent-cycle checked). Everything still writes
+  through `ItemStore::update`, so the canonical FrontmatterWriter bytes / merge
+  contract are untouched.
+- **Daemon.** New tarpc RPCs `apply_edit(EditRequest)`, `dep_remove`,
+  `set_parent`; `PROTOCOL_VERSION` **2 → 3** (an old v2 daemon fails the client
+  version-probe → callers fall back to direct ops; the legacy `edit(tokens)` RPC
+  is retained).
+- **Web (was "read + light-write").** `write.rs` collapsed onto the shared ops
+  (deleted the re-implemented `dep_add` cycle pipeline + the second status
+  invariant); `PatchBody` gained `title`/`body`/`labels` and a `double_option`
+  assignee (fixes `null`=clear); new `PUT /items/:id/parent`; `remove_dep` stays
+  idempotent. New `items/[id]/edit` SvelteKit route + a shared `ItemForm`
+  (create + edit) with a **body editor + live Markdown preview** and dep/parent
+  editors; `NewItemModal` reuses it. Pure form logic in `lib/itemForm.ts`.
+- **TUI (no longer read-only).** `n` = new, `e` = edit; a `Mode::Form` modal
+  (`app/form.rs` + `ui/form.rs`) with all fields incl. dep/parent diffing, all
+  applied through the shared ops. `clove tui` now threads the id prefix +
+  default type from config.
+- **MCP.** `clove_edit` gained a `body` field and routes through `apply_edit`;
+  new tools `clove_dep_remove` + `clove_set_parent` (14 total).
+- **Tests:** `clove-types` request/field tests, core `apply_edit`/`dep_remove`/
+  `set_parent` + daemon round-trip (body over the wire), 7 web Rust integration
+  tests (caught a real assignee-clear bug), web frontend logic + jsdom component
+  tests, 5 TUI form unit tests + insta snapshots × 3 shapes (new_form/edit_form).
+  Full `cargo test --workspace`, clippy `-D warnings`, fmt, and `npm run
+  check`/`test` green. TUI PNG shots `12-new-form`/`13-edit-form` regenerated.
+
+**M4 — `clove doctor` integrity checks + published schema (this session).** Five
+new health checks, chosen by a 3-lens agent forum (store-integrity / operational
+/ DX) and the "integrity" scope. **Store-level** (in `clove_core::doctor`,
+file-only): (3) `DUPLICATE_ID` — closes the one §7.7 check that was specced but
+never built (error); (12) `TIMESTAMP_INCOHERENT` — `updated<created`,
+`closed<created`, or a timestamp >24 h in the future (warning, report-only); (13)
+`GITIGNORE_DRIFT` — `.clove/.gitignore` absent or missing a required cache/socket
+entry (warning, **fixable** — appends the missing canonical lines, preserving
+user-added ones). The canonical entry list was lifted to
+`clove_core::GITIGNORE_ENTRIES`, shared by `clove init` and `doctor` so they
+can't drift. **Index-level** (in `clove/src/cmd/doctor.rs`, now via the
+**non-healing** `Index::open` so problems are reported instead of silently
+rebuilt): `INDEX_SCHEMA_MISMATCH` (warning) and `INDEX_CORRUPT` (error — `PRAGMA
+quick_check` + a contentless-FTS `fts_map`↔`items` row-count cross-check, the
+first integrity verification in the tree). All index findings are fixed by one
+`reindex`. Also published `docs/json-schema/v1/doctor.json` (the last command
+family lacking a schema) with a `code` enum = the canonical check taxonomy, and a
+round-trip validation test. DESIGN §7.7 updated; tests: 5 `clove-core` doctor
+unit tests + 1 `clove-index` `integrity_check` test + 5 `clove` e2e/schema tests;
+`fmt`/`clippy -D warnings`/`cargo test --workspace` all green.
+
+**Next step (rest of M4):** bidirectional vendor bridges, richer
+history/changelog, and the remaining MCP follow-up — server-push notifications
+(MCP `tools/list_changed` / a ready-queue subscription) when the graph changes —
+see `IMPLEMENTATION_PLAN.md` M4 backlog.
 
 ### Small backlog (optional M0/M1 nice-to-haves, non-blocking)
 - Broaden JSON-schema validation to more commands (version/reindex/doctor/new)

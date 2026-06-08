@@ -1,6 +1,6 @@
 //! The error type for `clove-import`.
 //!
-//! Wraps [`clove_core::CloveError`] for store/validation failures and adds
+//! Wraps [`clove_types::CloveError`] for store/validation failures and adds
 //! import-specific variants (source parsing, unsupported sources). The CLI maps
 //! these to exit codes at its boundary.
 
@@ -14,7 +14,7 @@ pub enum ImportError {
     /// A failure originating in `clove-core` (store I/O, validation, label
     /// normalization, …).
     #[error(transparent)]
-    Core(#[from] clove_core::CloveError),
+    Core(#[from] clove_types::CloveError),
 
     /// The import source file/directory could not be read or did not parse.
     #[error("failed to read import source `{path}`: {message}")]

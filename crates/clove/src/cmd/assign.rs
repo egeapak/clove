@@ -1,6 +1,7 @@
 //! `clove assign <id> [who] [--clear]` (T-CLI07).
 
-use clove_core::{CloveError, OutputFormat};
+use clove_core::OutputFormat;
+use clove_types::CloveError;
 use serde_json::Map;
 
 use crate::context::Ctx;

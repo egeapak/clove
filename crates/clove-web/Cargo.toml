@@ -8,6 +8,7 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+clove-types.workspace = true
 clove-core.workspace = true
 clove-index.workspace = true
 axum.workspace = true

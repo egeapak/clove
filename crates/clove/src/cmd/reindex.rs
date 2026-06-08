@@ -1,7 +1,8 @@
 //! `clove reindex` (T-S04 CLI half): rebuild the SQLite index from the files.
 
-use clove_core::{CloveError, OutputFormat};
+use clove_core::OutputFormat;
 use clove_ipc::DaemonClient;
+use clove_types::CloveError;
 use serde_json::json;
 
 use crate::context::{index_error, Ctx};

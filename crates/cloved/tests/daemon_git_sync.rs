@@ -7,8 +7,9 @@ use std::sync::{Arc, Mutex};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use chrono::Utc;
-use clove_core::{ItemStore, ItemType, NewItem, Priority};
+use clove_core::{ItemStore, NewItem};
 use clove_index::Index;
+use clove_types::{ItemType, Priority};
 use git2::{Repository, Signature};
 
 // `cloved` is a binary crate, so its modules aren't importable; include the real

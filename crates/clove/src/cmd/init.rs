@@ -2,7 +2,8 @@
 
 use camino::{Utf8Path, Utf8PathBuf};
 use clove_core::config::derive_prefix;
-use clove_core::{CloveError, OutputFormat, GITIGNORE_ENTRIES};
+use clove_core::{OutputFormat, GITIGNORE_ENTRIES};
+use clove_types::CloveError;
 use serde_json::json;
 
 use crate::cli::InitArgs;

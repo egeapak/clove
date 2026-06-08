@@ -1,13 +1,13 @@
-//! Typed errors for clove-core.
+//! Typed errors for the clove core libraries (`clove-types` / `clove-core`).
 //!
-//! `clove-core` never uses `anyhow` (that belongs to the CLI/daemon). Every
+//! These crates never use `anyhow` (that belongs to the CLI/daemon). Every
 //! fallible operation returns a `CloveError` carrying enough context to map to
 //! the exit-code table in DESIGN.md §7.6.
 
 use camino::Utf8PathBuf;
 use thiserror::Error;
 
-/// The error type for all of `clove-core`.
+/// The error type for all of `clove-types` / `clove-core`.
 ///
 /// Variants are added as tasks need them; each maps to a stable error code +
 /// exit code via [`error_code`] (DESIGN.md §7.6) — the single mapping shared by

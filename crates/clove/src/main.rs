@@ -15,7 +15,8 @@ mod util;
 
 use clap::error::ErrorKind;
 use clap::Parser;
-use clove_core::{CloveError, ItemStatus, OutputFormat};
+use clove_core::OutputFormat;
+use clove_types::{CloveError, ItemStatus};
 
 use cli::{Cli, Commands};
 use context::{discover, Ctx};

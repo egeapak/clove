@@ -1,6 +1,6 @@
 //! Semantic colour and glyph functions for status, type, and priority.
 
-use clove_core::{ItemStatus, ItemType};
+use clove_types::{ItemStatus, ItemType};
 use ratatui::style::{Color, Style};
 
 // Structural chrome uses indexed grays (consistent on 256-color terminals);

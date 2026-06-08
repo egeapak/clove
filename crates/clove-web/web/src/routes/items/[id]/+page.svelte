@@ -232,6 +232,7 @@
         <span class="tag" style="color:{`var(--type-${item.type})`};border-color:{`var(--type-${item.type})`}">{item.type}</span>
         <span class="tag status"><StatusGlyph status={item.status} /> {statusLabel(item.status)}</span>
         <PriorityGlyph priority={item.priority} label />
+        <a class="edit-link" href="{item.id}/edit">Edit</a>
       </div>
       <h1 class="dtitle">{item.title}</h1>
 
@@ -381,6 +382,18 @@
     gap: 10px;
     flex-wrap: wrap;
     margin-bottom: 6px;
+  }
+  .edit-link {
+    margin-left: auto;
+    font-size: 12px;
+    color: var(--accent);
+    text-decoration: none;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 3px 12px;
+  }
+  .edit-link:hover {
+    background: var(--surface-inset);
   }
   .id {
     font-size: 14px;

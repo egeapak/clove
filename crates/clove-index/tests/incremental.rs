@@ -3,8 +3,9 @@
 //! and the daemon's DB-sourced graph equivalence (`graph_frontmatters`).
 
 use camino::{Utf8Path, Utf8PathBuf};
-use clove_core::{CloveId, GraphStore, ItemFrontmatter, ItemStatus, ItemType, Priority};
+use clove_core::GraphStore;
 use clove_index::{reindex, Filter, Index, QueryMode};
+use clove_types::{CloveId, ItemFrontmatter, ItemStatus, ItemType, Priority};
 use tempfile::TempDir;
 
 fn ts() -> chrono::DateTime<chrono::Utc> {
