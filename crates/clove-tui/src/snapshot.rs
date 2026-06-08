@@ -231,7 +231,11 @@ fn app() -> App {
     // Keep the temp dir alive for the lifetime of the app by leaking it; the
     // process is a short-lived test binary.
     std::mem::forget(dir);
-    App::new(store)
+    let mut app = App::new(store);
+    // The TestBackend / PNG buffer doesn't capture the hardware cursor, so draw
+    // the in-buffer caret glyph for these cursor-less backends.
+    app.caret_glyph = true;
+    app
 }
 
 /// Flatten the rendered terminal buffer to a trimmed text grid.

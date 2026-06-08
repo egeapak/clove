@@ -67,6 +67,12 @@ pub struct App {
     pub form: FormState,
     id_prefix: String,
     default_type: ItemType,
+
+    /// Draw an in-buffer caret glyph in the form (for cursor-less backends —
+    /// the insta snapshots + PNG screenshots, which don't capture the terminal's
+    /// hardware cursor). Live terminals leave this `false` and rely on the
+    /// hardware cursor instead, so the two never double up.
+    pub caret_glyph: bool,
 }
 
 impl App {
@@ -86,6 +92,7 @@ impl App {
             form: FormState::default(),
             id_prefix: "proj".to_owned(),
             default_type: ItemType::Feature,
+            caret_glyph: false,
         };
         app.refresh();
         app
@@ -1152,6 +1159,45 @@ mod tests {
         }
         assert_eq!(app.form.focused(), Field::Labels);
         assert_eq!(app.form.cursor, app.form.labels.chars().count());
+    }
+
+    #[test]
+    fn form_hardware_cursor_sits_on_caret_glyph() {
+        use ratatui::backend::{Backend, TestBackend};
+        use ratatui::Terminal;
+
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        app.caret_glyph = true; // draw the glyph so we can locate it in the buffer
+        app.start_new();
+        for c in "hello".chars() {
+            app.form.insert_char(c);
+        }
+        app.form.move_left();
+        app.form.move_left(); // caret between "hel" and "lo"
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        // Locate the caret glyph cell in the rendered buffer.
+        let glyph = {
+            let buf = terminal.backend().buffer();
+            let mut found = None;
+            for y in 0..buf.area.height {
+                for x in 0..buf.area.width {
+                    if buf.cell((x, y)).map(|c| c.symbol() == "▏").unwrap_or(false) {
+                        found = Some((x, y));
+                    }
+                }
+            }
+            found.expect("caret glyph rendered")
+        };
+        let pos = terminal.backend_mut().get_cursor_position().unwrap();
+        assert_eq!(
+            (pos.x, pos.y),
+            glyph,
+            "the hardware cursor sits on the caret glyph cell"
+        );
     }
 
     #[test]
