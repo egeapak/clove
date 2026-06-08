@@ -1,0 +1,22 @@
+---
+source: crates/clove-tui/src/snapshot.rs
+expression: rendered
+---
+  All 7  │  Ready 4  │  Blocked 1
+┌ Items (7) ───────────────────────────────────┐┌ Overview · Dep tree · Comments ──────────────────────────────────────┐
+│▌◐ F #9QX4D1B7 ! Build REST┌ New item ────────────────────────────────────────────────────┐     ◐ in_progress · ready │
+│ ○ B #2HZ6C3PW ↑ Investigat│ ▌   Title: New work item▏                                    │           @grace · deps 1 │
+│ ● C #7AF3K2MN ↑ Set up dat│      Type: feature                                           │───────────────────────────│
+│ ○ E #3HT6WYG5 • Ship v1 re│  Priority: p2                                                │                           │
+│ ○ F #K2M8ZP5R • Write inte│  Assignee:                                                   │                           │
+│ ○ F #5RB9NC2V • Frontend d│    Labels:                                                   │d.                         │
+│ ● D #8XQ4F7DM ↓ Docs site │    Parent:                                                   │                           │
+│                           │      Deps:                                                   │                           │
+│                           │      Body:                                                   │                           │
+│                           │                                                              │                           │
+│                           │                                                              │                           │
+│                           │                                                              │                           │
+│                           │ Ctrl-S save · Esc cancel · Tab/↑↓ field · ←→ change          │───────────────────────────│
+│                           └──────────────────────────────────────────────────────────────┘ted Jan 1 · updated Jan 20 │
+└──────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────┘
+new item  Ctrl-S save · Esc cancel

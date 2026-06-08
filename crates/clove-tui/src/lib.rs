@@ -14,16 +14,19 @@ mod snapshot;
 
 use anyhow::Result;
 use clove_core::ItemStore;
+use clove_types::ItemType;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 
 use app::{App, DetailTab, Mode, Tab};
 
 /// Run the TUI against a file store, blocking until the user quits.
 ///
-/// Sets up the alternate screen + raw mode (and a panic hook that restores the
-/// terminal) via [`ratatui::init`], and always restores on exit.
-pub fn run(store: ItemStore) -> Result<()> {
-    let mut app = App::new(store);
+/// `id_prefix` + `default_type` (from `.clove/config`) are used when creating
+/// items from the form. Sets up the alternate screen + raw mode (and a panic
+/// hook that restores the terminal) via [`ratatui::init`], and always restores
+/// on exit.
+pub fn run(store: ItemStore, id_prefix: String, default_type: ItemType) -> Result<()> {
+    let mut app = App::new(store).with_config(id_prefix, default_type);
     let mut terminal = ratatui::init();
     let result = event_loop(&mut terminal, &mut app);
     ratatui::restore();
@@ -73,6 +76,21 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             KeyCode::Enter => app.commit_search(),
             KeyCode::Esc => app.cancel_search(),
             _ => {}
+        }
+        return;
+    }
+
+    // The add/edit form owns the keyspace while open.
+    if app.mode == Mode::Form {
+        if mods.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('s') {
+            app.form_submit();
+            return;
+        }
+        match code {
+            KeyCode::Esc => app.cancel_form(),
+            KeyCode::Tab | KeyCode::Down => app.form_next_field(),
+            KeyCode::BackTab | KeyCode::Up => app.form_prev_field(),
+            _ => app.form_key(code),
         }
         return;
     }
@@ -142,6 +160,10 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
 
         KeyCode::Char('/') => app.start_search(),
         KeyCode::Char('r') => app.refresh(),
+
+        // Add / edit.
+        KeyCode::Char('n') => app.start_new(),
+        KeyCode::Char('e') => app.start_edit(),
 
         _ => {}
     }

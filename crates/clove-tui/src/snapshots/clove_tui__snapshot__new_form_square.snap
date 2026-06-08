@@ -22,25 +22,25 @@ expression: rendered
 │                                                          │
 │                                                          │
 │                                                          │
-│    ┌ Help ──────────────────────────────────────────┐    │
-│    │ clove tui — browser + editor                   │    │
-│    │                                                │    │
-│    │ ↑/k ↓/j      move selection                    │    │
-│    │ g / G        jump to top / bottom              │    │
-│    │ Tab / 1 2 3  All / Ready / Blocked             │    │
-│    │ o / t / c    overview / dep tree / comments    │    │
-└────│ →/l  ←/h     focus detail / list (narrow)      │────┘
-┌ Ove│ PgUp / PgDn  scroll detail                     │────┐
-│ #9Q│ s / S        cycle sort field / direction      │ady │
-│ Bui│ f            filter menu (facets)              │s 1 │
-│────│ x            clear all filters                 │────│
-│ Goa│ /            search id, title, labels          │    │
-│    │ n / e        new / edit item                   │    │
-│ Bui│ Esc          clear search / back / close       │    │
-│    │ r            refresh from disk                 │    │
-│ • C│ ?            toggle this help                  │    │
-│ • A│ q            quit                              │    │
-│    └────────────────────────────────────────────────┘    │
+│                                                          │
+│                                                          │
+│                                                          │
+│┌ New item ──────────────────────────────────────────────┐│
+││ ▌   Title: New work item▏                              ││
+││      Type: feature                                     ││
+││  Priority: p2                                          ││
+└│  Assignee:                                             │┘
+┌│    Labels:                                             │┐
+││    Parent:                                             ││
+││      Deps:                                             ││
+││      Body:                                             ││
+││                                                        ││
+││                                                        ││
+││                                                        ││
+││ Ctrl-S save · Esc cancel · Tab/↑↓ field · ←→ change    ││
+│└────────────────────────────────────────────────────────┘│
+│ • Auth middleware                                        │
+│                                                          │
 │ Steps                                                    │
 │                                                          │
 │ 1. Define routes                                         │
@@ -61,4 +61,4 @@ expression: rendered
 │──────────────────────────────────────────────────────────│
 │ labels area:api, backend  created Jan 1 · updated Jan 20 │
 └──────────────────────────────────────────────────────────┘
-7 item(s) loaded   ?: help · q: quit
+new item  Ctrl-S save · Esc cancel

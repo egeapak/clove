@@ -326,6 +326,24 @@ fn empty_repo() {
 }
 
 #[test]
+fn new_form() {
+    let mut app = app();
+    app.start_new();
+    for c in "New work item".chars() {
+        app.form.insert_char(c);
+    }
+    snap("new_form", &mut app);
+}
+
+#[test]
+fn edit_form() {
+    let mut app = app();
+    app.select_first();
+    app.start_edit();
+    snap("edit_form", &mut app);
+}
+
+#[test]
 fn filter_menu() {
     // Open the menu and toggle a single-valued (status:open) and a multi-valued
     // (type:feature) facet so the radio + checkbox states both show.
@@ -715,6 +733,28 @@ fn generate_screenshots() {
     {
         let mut a = app();
         save("11-portrait-list", pw, ph, &mut a);
+    }
+    {
+        let mut a = app();
+        a.start_new();
+        for c in "Add OAuth login".chars() {
+            a.form.insert_char(c);
+        }
+        a.form.focus = 4; // Labels
+        for c in "area:auth, security".chars() {
+            a.form.insert_char(c);
+        }
+        a.form.focus = 7; // Body
+        for c in "Support Google + GitHub SSO.".chars() {
+            a.form.insert_char(c);
+        }
+        save("12-new-form", ww, wh, &mut a);
+    }
+    {
+        let mut a = app();
+        a.select_first();
+        a.start_edit();
+        save("13-edit-form", ww, wh, &mut a);
     }
 }
 
