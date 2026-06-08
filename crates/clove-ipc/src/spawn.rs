@@ -52,7 +52,7 @@ pub fn spawn_daemon(clove_dir: &Utf8Path) -> std::io::Result<()> {
 }
 
 /// Return a live daemon client for `clove_dir`, starting `cloved` if none is
-/// running and waiting (up to [`READY_TIMEOUT`]) for it to become ready. Returns
+/// running and waiting (up to `READY_TIMEOUT`) for it to become ready. Returns
 /// `None` if no daemon could be reached or started — callers then fall back to
 /// direct file access, so this never hard-fails.
 pub fn ensure_daemon(clove_dir: &Utf8Path) -> Option<DaemonClient> {

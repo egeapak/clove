@@ -25,39 +25,11 @@ pub fn run(ctx: &Ctx, format: OutputFormat, action: DepAction) -> Result<ExitCod
 fn add(ctx: &Ctx, format: OutputFormat, id_s: &str, dep_s: &str) -> Result<(), CloveError> {
     let id = parse_id(id_s)?;
     let dep = parse_id(dep_s)?;
-
-    // Validation pipeline (DESIGN §5.4), in order.
-    if !ctx.store.exists(&id) {
-        return Err(CloveError::NotFound { id: id.to_string() });
-    }
-    if !ctx.store.exists(&dep) {
-        return Err(CloveError::NotFound {
-            id: dep.to_string(),
-        });
-    }
-    if id == dep {
-        return Err(CloveError::SelfDependency { id: id.to_string() });
-    }
-
-    if would_cycle(ctx, &id, &dep)? {
-        return Err(CloveError::DependencyCycle {
-            from: id.to_string(),
-            to: dep.to_string(),
-            cycle: vec![id.to_string(), dep.to_string()],
-        });
-    }
-
-    let mut item = ctx.store.get(&id)?;
-    if item.frontmatter.deps.contains(&dep) {
-        return Err(CloveError::DependencyExists {
-            from: id.to_string(),
-            to: dep.to_string(),
-        });
-    }
-    item.frontmatter.deps.push(dep);
-    item.frontmatter.deps.sort();
-    item.frontmatter.deps.dedup();
-    let saved = ctx.store.update(&item, now_seconds())?;
+    // Shared validation pipeline (existence, self-loop, cycle, duplicate — DESIGN
+    // §5.4) + write, identical across CLI/web/MCP/daemon. Re-read to print in the
+    // CLI's item shape (the op returns the §7.4 JSON the other surfaces use).
+    clove_core::ops::dep_add(&ctx.store, &id, &dep, now_seconds())?;
+    let saved = ctx.store.get(&id)?;
     print_item(format, &saved, Map::new());
     Ok(())
 }
@@ -180,22 +152,6 @@ fn flatten(node: &DepTreeNode, depth: usize, out: &mut Vec<Value>) {
 /// `.clove/` dir, or `None` if it cannot be located.
 fn daemon_client(ctx: &Ctx) -> Option<DaemonClient> {
     DaemonClient::probe(ctx.issues_dir.parent()?)
-}
-
-/// Whether `from → to` would cycle. Uses the daemon's cached graph when alive,
-/// else builds the graph locally.
-fn would_cycle(ctx: &Ctx, from: &CloveId, to: &CloveId) -> Result<bool, CloveError> {
-    if let Some(mut client) = daemon_client(ctx) {
-        if let Ok(GraphResponse::WouldCycle { would }) = client.graph(GraphRequest::WouldCycle {
-            from: from.to_string(),
-            to: to.to_string(),
-        }) {
-            return Ok(would);
-        }
-    }
-    let (frontmatters, _errors) = ctx.store.scan_frontmatter()?;
-    let (graph, _dangling) = GraphStore::build(&frontmatters);
-    Ok(graph.check_would_cycle(from, to))
 }
 
 /// Daemon-served dependency tree. Outer `None` = no daemon (caller falls back);

@@ -72,7 +72,15 @@ impl DaemonClient {
         }
         match Self::connect_and_ping(clove_dir) {
             Ok(client) => Some(client),
+            Err(ClientError::Protocol(_)) => {
+                // The daemon answered but with an incompatible protocol version
+                // (or unexpected reply): it is alive, so leave its socket/pid in
+                // place — we just decline to use it and fall back to direct ops.
+                None
+            }
             Err(_) => {
+                // Transport failure (no daemon / refused / stale socket): clean up
+                // the crashed daemon's leftover footprint.
                 cleanup_stale(clove_dir);
                 None
             }

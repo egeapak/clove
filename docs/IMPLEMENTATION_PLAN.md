@@ -656,10 +656,10 @@ condition for M4 planning.
   drive the 10fps `is_busy()` cadence with a spinner.
 
 **M4 backlog (recorded so it is not lost; not yet task-specified):**
-- **TUI write actions** — extend `clove tui` with the common mutations (status
-  transitions, priority/assignee/label edits) and beyond, on top of the read-only
-  browser landed in T-U01.
-- **TUI read-only follow-ups** (from the T-U01 design/UX reviews; all backed by
+- **TUI write actions (DONE)** — `clove tui` gained an `n`/`e` add/edit modal
+  form (full field set incl. dep/parent, a movable text caret), writing through
+  the unified `clove_core` path. See HANDOFF "Unified add/edit".
+- **TUI follow-ups** (from the T-U01 design/UX reviews; all backed by
   existing `clove-core` APIs, no engine work): (1) inbound/"blocks" + referenced-by
   + epic-children lists in Overview (the graph has the reverse edges); (2) a
   navigation stack — follow a related id to its item and pop back, decoupled from
