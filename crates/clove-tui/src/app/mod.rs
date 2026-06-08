@@ -631,9 +631,15 @@ impl App {
             }
             return;
         }
+        // Text field: edit + caret movement (←/→/Home/End/Backspace/Delete).
         match code {
             KeyCode::Char(c) => self.form.insert_char(c),
             KeyCode::Backspace => self.form.backspace(),
+            KeyCode::Delete => self.form.delete_forward(),
+            KeyCode::Left => self.form.move_left(),
+            KeyCode::Right => self.form.move_right(),
+            KeyCode::Home => self.form.move_home(),
+            KeyCode::End => self.form.move_end(),
             KeyCode::Enter if self.form.focused() == Field::Body => self.form.newline(),
             KeyCode::Enter => self.form.next_field(),
             _ => {}
@@ -1064,6 +1070,88 @@ mod tests {
         app.form.priority = 4;
         app.form.cycle(1);
         assert_eq!(app.form.priority, 0);
+    }
+
+    #[test]
+    fn form_cursor_edits_mid_string() {
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        app.start_new(); // focus Title
+
+        for c in "abc".chars() {
+            app.form.insert_char(c);
+        }
+        assert_eq!(app.form.cursor, 3);
+        app.form.move_left(); // between 'b' and 'c'
+        assert_eq!(app.form.cursor, 2);
+        app.form.insert_char('X'); // "abXc"
+        assert_eq!(app.form.title, "abXc");
+        assert_eq!(app.form.cursor, 3);
+        app.form.backspace(); // remove the 'X' → "abc"
+        assert_eq!(app.form.title, "abc");
+        assert_eq!(app.form.cursor, 2);
+        app.form.delete_forward(); // remove 'c' at caret → "ab"
+        assert_eq!(app.form.title, "ab");
+        assert_eq!(app.form.cursor, 2);
+        app.form.move_home();
+        assert_eq!(app.form.cursor, 0);
+        app.form.delete_forward(); // remove 'a' → "b"
+        assert_eq!(app.form.title, "b");
+        app.form.move_end();
+        assert_eq!(app.form.cursor, 1);
+        // Caret bounds don't underflow/overflow.
+        app.form.move_home();
+        app.form.move_left();
+        assert_eq!(app.form.cursor, 0);
+        app.form.move_end();
+        app.form.move_right();
+        assert_eq!(app.form.cursor, 1);
+    }
+
+    #[test]
+    fn form_cursor_respects_utf8_boundaries() {
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        app.start_new();
+        for c in "café".chars() {
+            app.form.insert_char(c);
+        }
+        assert_eq!(app.form.cursor, 4);
+        app.form.move_left(); // before the multibyte 'é'
+        app.form.backspace(); // remove 'f' → "caé" (no panic on byte boundary)
+        assert_eq!(app.form.title, "caé");
+        assert_eq!(app.form.cursor, 2);
+    }
+
+    #[test]
+    fn form_newline_inserts_at_caret_in_body() {
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        app.start_new();
+        app.form.focus = 7; // Body (new-item field order)
+        assert_eq!(app.form.focused(), Field::Body);
+        app.form.cursor = 0;
+        app.form.insert_char('a');
+        app.form.insert_char('b'); // "ab", caret at 2
+        app.form.move_left(); // caret at 1
+        app.form.newline(); // "a\nb"
+        assert_eq!(app.form.body, "a\nb");
+        assert_eq!(app.form.cursor, 2);
+    }
+
+    #[test]
+    fn form_field_change_moves_caret_to_end() {
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        app.select_first();
+        app.start_edit(); // Title prefilled, caret at end
+        assert_eq!(app.form.cursor, app.form.title.chars().count());
+        // Advance to Labels (index 5 in edit-mode fields): caret jumps to its end.
+        for _ in 0..5 {
+            app.form_next_field();
+        }
+        assert_eq!(app.form.focused(), Field::Labels);
+        assert_eq!(app.form.cursor, app.form.labels.chars().count());
     }
 
     #[test]

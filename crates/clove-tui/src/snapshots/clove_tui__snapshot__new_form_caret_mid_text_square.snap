@@ -17,36 +17,36 @@ expression: rendered
 │                                                          │
 │                                                          │
 │                                                          │
-│┌ Edit proj-9QX4D1B7 ────────────────────────────────────┐│
-││ ▌   Title: Build REST API▏                             ││
-││    Status: in_progress                                 ││
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│┌ New item ──────────────────────────────────────────────┐│
+││ ▌   Title: Tit▏le                                      ││
 ││      Type: feature                                     ││
-││  Priority: p0                                          ││
-││  Assignee: grace                                       ││
-││    Labels: area:api, backend                           ││
+││  Priority: p2                                          ││
+└│  Assignee:                                             │┘
+┌│    Labels:                                             │┐
 ││    Parent:                                             ││
-││      Deps: proj-7AF3K2MN                               ││
+││      Deps:                                             ││
 ││      Body:                                             ││
-││   ## Goals                                             ││
 ││                                                        ││
-└│   Build a **REST API** with `axum`; see `docs/api.md`. │┘
-┌│                                                        │┐
-││   - CRUD endpoints                                     ││
-││   - Auth middleware                                    ││
-││                                                        ││
-││   ### Steps                                            ││
-││                                                        ││
-││   1. Define routes                                     ││
-││   2. Wire handlers                                     ││
-││                                                        ││
-││   > Blocked on the schema work until it lands.         ││
-││                                                        ││
-││   ---                                                  ││
-││                                                        ││
-││   Done when the integration tests pass.                ││
 ││                                                        ││
 ││ Ctrl-S save · Esc cancel · Tab/↑↓ field · ←→ move/chan ││
 │└────────────────────────────────────────────────────────┘│
+│ • CRUD endpoints                                         │
+│ • Auth middleware                                        │
+│                                                          │
+│ Steps                                                    │
+│                                                          │
+│ 1. Define routes                                         │
+│ 2. Wire handlers                                         │
+│                                                          │
+│ │ Blocked on the schema work until it lands.             │
 │                                                          │
 │ ──────────────────────────────────────────────────────── │
 │                                                          │
@@ -61,4 +61,4 @@ expression: rendered
 │──────────────────────────────────────────────────────────│
 │ labels area:api, backend  created Jan 1 · updated Jan 20 │
 └──────────────────────────────────────────────────────────┘
-edit item  Ctrl-S save · Esc cancel
+new item  Ctrl-S save · Esc cancel

@@ -344,6 +344,19 @@ fn edit_form() {
 }
 
 #[test]
+fn new_form_caret_mid_text() {
+    // The caret renders mid-text after moving left, not just at the end.
+    let mut app = app();
+    app.start_new();
+    for c in "Title".chars() {
+        app.form.insert_char(c);
+    }
+    app.form.move_left();
+    app.form.move_left(); // caret now between "Tit" and "le"
+    snap("new_form_caret_mid_text", &mut app);
+}
+
+#[test]
 fn filter_menu() {
     // Open the menu and toggle a single-valued (status:open) and a multi-valued
     // (type:feature) facet so the radio + checkbox states both show.

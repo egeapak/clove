@@ -36,9 +36,9 @@ expression: rendered
 ││      Body:                                             ││
 ││                                                        ││
 ││                                                        ││
-││                                                        ││
-││ Ctrl-S save · Esc cancel · Tab/↑↓ field · ←→ change    ││
+││ Ctrl-S save · Esc cancel · Tab/↑↓ field · ←→ move/chan ││
 │└────────────────────────────────────────────────────────┘│
+│ • CRUD endpoints                                         │
 │ • Auth middleware                                        │
 │                                                          │
 │ Steps                                                    │

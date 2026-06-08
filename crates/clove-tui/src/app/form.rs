@@ -74,6 +74,10 @@ pub struct FormState {
     pub deps: String,
     pub body: String,
 
+    /// Caret position (char index) within the focused text field. Enum fields
+    /// ignore it. Reset to end-of-buffer when focus moves to a new field.
+    pub cursor: usize,
+
     /// A validation/op error from the last submit attempt (keeps the form open).
     pub error: Option<String>,
 }
@@ -95,6 +99,7 @@ impl Default for FormState {
             parent: String::new(),
             deps: String::new(),
             body: String::new(),
+            cursor: 0,
             error: None,
         }
     }
@@ -157,6 +162,7 @@ impl FormState {
                 .collect::<Vec<_>>()
                 .join(", "),
             body: item.body.clone(),
+            cursor: fm.title.chars().count(),
             error: None,
         }
     }
@@ -167,41 +173,104 @@ impl FormState {
 
     pub fn next_field(&mut self) {
         self.focus = (self.focus + 1) % self.fields.len();
+        self.cursor = self.focused_char_len();
     }
 
     pub fn prev_field(&mut self) {
         self.focus = (self.focus + self.fields.len() - 1) % self.fields.len();
+        self.cursor = self.focused_char_len();
     }
 
-    /// The mutable text buffer for the focused text field (None for enum fields).
-    fn buffer_mut(&mut self) -> Option<&mut String> {
+    /// The char-length of the focused text field (0 for enum fields).
+    fn focused_char_len(&self) -> usize {
         match self.focused() {
-            Field::Title => Some(&mut self.title),
-            Field::Assignee => Some(&mut self.assignee),
-            Field::Labels => Some(&mut self.labels),
-            Field::Parent => Some(&mut self.parent),
-            Field::Deps => Some(&mut self.deps),
-            Field::Body => Some(&mut self.body),
-            Field::Status | Field::Type | Field::Priority => None,
+            Field::Title => self.title.chars().count(),
+            Field::Assignee => self.assignee.chars().count(),
+            Field::Labels => self.labels.chars().count(),
+            Field::Parent => self.parent.chars().count(),
+            Field::Deps => self.deps.chars().count(),
+            Field::Body => self.body.chars().count(),
+            Field::Status | Field::Type | Field::Priority => 0,
         }
+    }
+
+    /// The focused text field's buffer + the cursor, as disjoint mutable borrows
+    /// (None for enum fields).
+    fn focused_buf(&mut self) -> Option<(&mut String, &mut usize)> {
+        let field = self.fields[self.focus];
+        let buf = match field {
+            Field::Title => &mut self.title,
+            Field::Assignee => &mut self.assignee,
+            Field::Labels => &mut self.labels,
+            Field::Parent => &mut self.parent,
+            Field::Deps => &mut self.deps,
+            Field::Body => &mut self.body,
+            Field::Status | Field::Type | Field::Priority => return None,
+        };
+        Some((buf, &mut self.cursor))
     }
 
     pub fn insert_char(&mut self, c: char) {
-        if let Some(buf) = self.buffer_mut() {
-            buf.push(c);
+        if let Some((buf, cur)) = self.focused_buf() {
+            let byte = char_to_byte(buf, *cur);
+            buf.insert(byte, c);
+            *cur += 1;
         }
     }
 
+    /// Delete the char before the caret (Backspace).
     pub fn backspace(&mut self) {
-        if let Some(buf) = self.buffer_mut() {
-            buf.pop();
+        if let Some((buf, cur)) = self.focused_buf() {
+            if *cur > 0 {
+                let end = char_to_byte(buf, *cur);
+                let start = char_to_byte(buf, *cur - 1);
+                buf.replace_range(start..end, "");
+                *cur -= 1;
+            }
         }
     }
 
-    /// Insert a newline (Body field only).
+    /// Delete the char at the caret (Delete).
+    pub fn delete_forward(&mut self) {
+        if let Some((buf, cur)) = self.focused_buf() {
+            if *cur < buf.chars().count() {
+                let start = char_to_byte(buf, *cur);
+                let end = char_to_byte(buf, *cur + 1);
+                buf.replace_range(start..end, "");
+            }
+        }
+    }
+
+    pub fn move_left(&mut self) {
+        if let Some((_, cur)) = self.focused_buf() {
+            *cur = cur.saturating_sub(1);
+        }
+    }
+
+    pub fn move_right(&mut self) {
+        if let Some((buf, cur)) = self.focused_buf() {
+            if *cur < buf.chars().count() {
+                *cur += 1;
+            }
+        }
+    }
+
+    pub fn move_home(&mut self) {
+        if let Some((_, cur)) = self.focused_buf() {
+            *cur = 0;
+        }
+    }
+
+    pub fn move_end(&mut self) {
+        if let Some((buf, cur)) = self.focused_buf() {
+            *cur = buf.chars().count();
+        }
+    }
+
+    /// Insert a newline at the caret (Body field only).
     pub fn newline(&mut self) {
         if self.focused() == Field::Body {
-            self.body.push('\n');
+            self.insert_char('\n');
         }
     }
 
@@ -272,6 +341,15 @@ impl FormState {
             .map(|s| CloveId::new(s))
             .collect()
     }
+}
+
+/// The byte offset of char index `char_idx` in `s` (clamped to `s.len()`), so
+/// edits land on UTF-8 char boundaries.
+fn char_to_byte(s: &str, char_idx: usize) -> usize {
+    s.char_indices()
+        .nth(char_idx)
+        .map(|(b, _)| b)
+        .unwrap_or(s.len())
 }
 
 /// Cycle through a fixed array of `Copy + PartialEq` values by `delta`.

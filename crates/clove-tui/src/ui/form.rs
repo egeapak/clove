@@ -33,29 +33,25 @@ pub(crate) fn render_form(f: &mut Frame, app: &App, area: Rect) {
 
         if field == Field::Body {
             lines.push(Line::from(Span::styled(label, label_style)));
-            // Body content below the label, indented, caret on the last line.
-            let body = &form.body;
+            // Body content below the label, indented; the caret is drawn inline at
+            // the cursor position (it may land mid-text or on its own new line).
+            let body = if focused {
+                with_caret(&form.body, form.cursor)
+            } else {
+                form.body.clone()
+            };
             let mut shown: Vec<&str> = body.split('\n').collect();
             if shown.last() == Some(&"") && shown.len() > 1 {
                 shown.pop();
             }
-            for (li, raw) in shown.iter().enumerate() {
-                let last = li + 1 == shown.len();
-                let mut text = format!("  {raw}");
-                if focused && last {
-                    text.push('▏');
-                }
+            for raw in &shown {
                 lines.push(Line::from(Span::styled(
-                    text,
+                    format!("  {raw}"),
                     Style::default().fg(Color::Reset),
                 )));
             }
-            if body.is_empty() {
-                let caret = if focused { "▏" } else { "" };
-                lines.push(Line::from(Span::styled(
-                    format!("  {caret}"),
-                    Style::default().fg(DIM),
-                )));
+            if shown.is_empty() {
+                lines.push(Line::from(Span::styled("  ", Style::default().fg(DIM))));
             }
             continue;
         }
@@ -63,12 +59,10 @@ pub(crate) fn render_form(f: &mut Frame, app: &App, area: Rect) {
         let value: String = if field.is_enum() {
             let arrows = if focused { ("‹ ", " ›") } else { ("", "") };
             format!("{}{}{}", arrows.0, form.enum_value(field), arrows.1)
+        } else if focused {
+            with_caret(&text_value(form, field), form.cursor)
         } else {
-            let mut v = text_value(form, field);
-            if focused {
-                v.push('▏');
-            }
-            v
+            text_value(form, field)
         };
         let value_style = if focused {
             Style::default().add_modifier(Modifier::BOLD)
@@ -90,7 +84,7 @@ pub(crate) fn render_form(f: &mut Frame, app: &App, area: Rect) {
     }
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(
-        "Ctrl-S save · Esc cancel · Tab/↑↓ field · ←→ change",
+        "Ctrl-S save · Esc cancel · Tab/↑↓ field · ←→ move/change",
         Style::default().fg(DIM),
     )));
 
@@ -126,6 +120,21 @@ pub(crate) fn render_form(f: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(lines).block(block).scroll((scroll, 0)),
         popup,
     );
+}
+
+/// Insert the caret glyph `▏` at char index `cursor` (clamped), so a moved
+/// cursor renders mid-text. At end-of-string this appends the caret.
+fn with_caret(s: &str, cursor: usize) -> String {
+    let byte = s
+        .char_indices()
+        .nth(cursor)
+        .map(|(b, _)| b)
+        .unwrap_or(s.len());
+    let mut out = String::with_capacity(s.len() + 3);
+    out.push_str(&s[..byte]);
+    out.push('▏');
+    out.push_str(&s[byte..]);
+    out
 }
 
 /// The current text buffer for a non-enum field.

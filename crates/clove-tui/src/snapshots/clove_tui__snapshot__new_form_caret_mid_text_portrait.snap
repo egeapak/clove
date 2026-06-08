@@ -3,7 +3,7 @@ source: crates/clove-tui/src/snapshot.rs
 expression: rendered
 ---
 ┌ New item ────────────────────────────┐
-│ ▌   Title: New work item▏            │
+│ ▌   Title: Tit▏le                    │
 │      Type: feature                   │
 │  Priority: p2                        │
 │  Assignee:                           │
