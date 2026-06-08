@@ -20,7 +20,13 @@ pub fn apply_edit(
     req: &EditRequest,
     now: DateTime<Utc>,
 ) -> Result<Value, CloveError> {
-    let mut item = store.get(id)?;
+    let item = store.get(id)?;
+    // An empty request changes nothing — don't rewrite the file (which would bump
+    // `updated` and re-trigger the watcher → push loop for no reason).
+    if req.is_empty() {
+        return Ok(Value::Object(item_object(&item)));
+    }
+    let mut item = item;
     req.apply_to_frontmatter(&mut item.frontmatter, now)?;
     if let Some(body) = &req.body {
         item.body = normalize_body(body);

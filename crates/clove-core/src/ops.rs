@@ -195,12 +195,15 @@ pub fn set_parent(
                 });
             }
             // Walk the proposed parent's ancestry; if we reach `id`, the
-            // assignment would close a parent cycle.
+            // assignment would close a parent cycle. The `visited` set bounds the
+            // walk so a *pre-existing* parent cycle in the store (a representable
+            // but invalid state, e.g. from a bad hand-edit or merge) can't hang us.
             let (frontmatters, _errors) = store.scan_frontmatter()?;
             let parent_of: std::collections::HashMap<&CloveId, Option<&CloveId>> = frontmatters
                 .iter()
                 .map(|fm| (&fm.id, fm.parent.as_ref()))
                 .collect();
+            let mut visited = std::collections::HashSet::new();
             let mut cursor = Some(parent);
             while let Some(node) = cursor {
                 if node == id {
@@ -208,6 +211,9 @@ pub fn set_parent(
                         field: "parent".to_owned(),
                         reason: format!("setting parent of {id} to {parent} would create a cycle"),
                     });
+                }
+                if !visited.insert(node) {
+                    break; // a pre-existing cycle that doesn't involve `id`
                 }
                 cursor = parent_of.get(node).copied().flatten();
             }
@@ -614,6 +620,90 @@ mod tests {
             dep_add(&store, &a, &missing, Utc::now()),
             Err(CloveError::NotFound { .. })
         ));
+    }
+
+    #[test]
+    fn dep_remove_removes_and_errors_when_absent() {
+        let (_d, store) = store();
+        let a = new_id(&store, "a");
+        let b = new_id(&store, "b");
+        dep_add(&store, &a, &b, Utc::now()).unwrap();
+        let v = dep_remove(&store, &a, &b, Utc::now()).unwrap();
+        assert_eq!(v["deps"], json!([]));
+        // Strict: removing a dependency that isn't present errors.
+        assert!(matches!(
+            dep_remove(&store, &a, &b, Utc::now()),
+            Err(CloveError::InvalidField { .. })
+        ));
+    }
+
+    #[test]
+    fn set_parent_sets_clears_and_validates() {
+        let (_d, store) = store();
+        let a = new_id(&store, "a");
+        let b = new_id(&store, "b");
+
+        // Set, then clear.
+        let v = set_parent(&store, &a, Some(&b), Utc::now()).unwrap();
+        assert_eq!(v["parent"], b.as_str());
+        let v = set_parent(&store, &a, None, Utc::now()).unwrap();
+        assert!(v["parent"].is_null());
+
+        // Self-parent is rejected.
+        assert!(matches!(
+            set_parent(&store, &a, Some(&a), Utc::now()),
+            Err(CloveError::InvalidField { .. })
+        ));
+        // A missing parent is NotFound.
+        let missing = CloveId::new("proj-ZZZZZZZZ").unwrap();
+        assert!(matches!(
+            set_parent(&store, &a, Some(&missing), Utc::now()),
+            Err(CloveError::NotFound { .. })
+        ));
+        // A cycle (a's parent is b, so b's parent can't become a) is rejected.
+        set_parent(&store, &a, Some(&b), Utc::now()).unwrap();
+        assert!(matches!(
+            set_parent(&store, &b, Some(&a), Utc::now()),
+            Err(CloveError::InvalidField { .. })
+        ));
+    }
+
+    #[test]
+    fn set_parent_terminates_on_preexisting_cycle() {
+        // A parent cycle is "representable but invalid"; set_parent must not hang
+        // walking the ancestry of a parent whose chain already cycles.
+        let (_d, store) = store();
+        let b = new_id(&store, "b");
+        let c = new_id(&store, "c");
+        // Force b ↔ c directly (bypassing set_parent's own cycle guard).
+        let mut ib = store.get(&b).unwrap();
+        ib.frontmatter.parent = Some(c.clone());
+        store.update(&ib, Utc::now()).unwrap();
+        let mut ic = store.get(&c).unwrap();
+        ic.frontmatter.parent = Some(b.clone());
+        store.update(&ic, Utc::now()).unwrap();
+
+        // Parenting a fresh item under b must terminate (the cycle excludes d).
+        let d = new_id(&store, "d");
+        let v = set_parent(&store, &d, Some(&b), Utc::now()).unwrap();
+        assert_eq!(v["parent"], b.as_str());
+    }
+
+    #[test]
+    fn apply_edit_empty_request_is_a_no_op() {
+        let (_d, store) = store();
+        let id = new_id(&store, "task");
+        let before = store.get(&id).unwrap().frontmatter.updated;
+        // An all-absent EditRequest must not rewrite the file / bump `updated`.
+        let v = crate::apply_edit(
+            &store,
+            &id,
+            &crate::EditRequest::default(),
+            Utc::now() + chrono::Duration::seconds(5),
+        )
+        .unwrap();
+        assert_eq!(v["id"], id.as_str());
+        assert_eq!(store.get(&id).unwrap().frontmatter.updated, before);
     }
 
     #[test]

@@ -424,6 +424,24 @@ mod tests {
     }
 
     #[test]
+    fn label_delta_overlap_applies_remove_then_add() {
+        // A direct Delta (what `PUT /labels` can produce) with the same label in
+        // both lists: removes run first, then adds, so the label ends up present.
+        let mut fm = sample();
+        fm.labels = vec!["keep".to_owned()];
+        EditRequest {
+            labels: Some(LabelEdit::Delta {
+                add: vec!["x".to_owned()],
+                remove: vec!["x".to_owned()],
+            }),
+            ..Default::default()
+        }
+        .apply_to_frontmatter(&mut fm, Utc::now())
+        .unwrap();
+        assert_eq!(fm.labels, vec!["keep".to_owned(), "x".to_owned()]);
+    }
+
+    #[test]
     fn label_set_replaces_whole_set() {
         let mut fm = sample();
         fm.labels = vec!["a".to_owned(), "b".to_owned()];

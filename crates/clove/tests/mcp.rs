@@ -196,6 +196,55 @@ fn create_then_read_round_trip() {
 }
 
 #[test]
+fn edit_body_dep_remove_and_set_parent_round_trip() {
+    let dir = init_repo();
+    let mut s = Session::start(dir.path());
+
+    let main = s.call(2, "clove_new", json!({ "title": "main" }));
+    let main_id = main["structuredContent"]["id"].as_str().unwrap().to_owned();
+    let dep = s.call(3, "clove_new", json!({ "title": "dep" }));
+    let dep_id = dep["structuredContent"]["id"].as_str().unwrap().to_owned();
+
+    // clove_edit now carries a body (the new capability) alongside scalar fields.
+    let edited = s.call(
+        4,
+        "clove_edit",
+        json!({ "id": main_id, "title": "renamed", "body": "a fresh body" }),
+    );
+    assert_eq!(edited["isError"], false);
+    assert_eq!(edited["structuredContent"]["title"], "renamed");
+    let shown = s.call(5, "clove_show", json!({ "id": main_id }));
+    assert_eq!(shown["structuredContent"]["body"], "a fresh body\n");
+
+    // dep_add then the new clove_dep_remove.
+    let added = s.call(
+        6,
+        "clove_dep_add",
+        json!({ "id": main_id, "dep_id": dep_id }),
+    );
+    assert_eq!(added["structuredContent"]["deps"], json!([dep_id]));
+    let removed = s.call(
+        7,
+        "clove_dep_remove",
+        json!({ "id": main_id, "dep_id": dep_id }),
+    );
+    assert_eq!(removed["isError"], false);
+    assert_eq!(removed["structuredContent"]["deps"], json!([]));
+
+    // The new clove_set_parent: set, then clear (omit `parent`).
+    let parented = s.call(
+        8,
+        "clove_set_parent",
+        json!({ "id": main_id, "parent": dep_id }),
+    );
+    assert_eq!(parented["structuredContent"]["parent"], dep_id);
+    let cleared = s.call(9, "clove_set_parent", json!({ "id": main_id }));
+    assert!(cleared["structuredContent"]["parent"].is_null());
+
+    s.shutdown();
+}
+
+#[test]
 fn tool_error_is_reported_as_is_error() {
     let dir = init_repo();
     let mut s = Session::start(dir.path());

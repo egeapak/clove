@@ -692,6 +692,10 @@ impl App {
                 })?;
         let store = &self.data.store;
 
+        // Not transactional: the scalar/label/body edit is applied first, then the
+        // graph edges. If a later parent/dep op fails (e.g. a typed id that would
+        // cycle), the earlier change is already on disk and the form stays open
+        // showing the error; resubmitting re-applies idempotently.
         // Scalars / labels / body via the unified structured edit.
         clove_core::apply_edit(store, &id, &self.form.to_edit_request(), now)?;
 

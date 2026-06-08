@@ -143,7 +143,7 @@
           <div class="rel-label">Parent</div>
           {#if !editingParent}
             <div class="rel-row">
-              {#if item.parent}<a class="mono" href={`../${item.parent}`}>{shortId(item.parent)}</a>{:else}<span class="dim sm">None</span>{/if}
+              {#if item.parent}<a class="mono" href={`../${encodeURIComponent(item.parent)}`}>{shortId(item.parent)}</a>{:else}<span class="dim sm">None</span>{/if}
               <button type="button" class="btn sm" onclick={startEditParent}>Edit</button>
             </div>
           {:else}

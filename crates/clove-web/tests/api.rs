@@ -225,6 +225,29 @@ async fn patch_clears_assignee_with_null() {
 }
 
 #[tokio::test]
+async fn patch_clears_assignee_with_empty_string() {
+    // The handler maps an empty/whitespace assignee to a clear, so a form
+    // submitting "" doesn't trip apply_edit's empty-assignee guard.
+    let (_tmp, addr, id) = spawn().await;
+    send(
+        addr,
+        "PATCH",
+        &format!("/api/v1/items/{id}"),
+        Some(r#"{"assignee":"bob"}"#),
+    )
+    .await;
+    let (status, body) = send(
+        addr,
+        "PATCH",
+        &format!("/api/v1/items/{id}"),
+        Some(r#"{"assignee":"  "}"#),
+    )
+    .await;
+    assert!(status.contains("200"), "status: {status} body: {body}");
+    assert!(body.contains("\"assignee\":null"), "{body}");
+}
+
+#[tokio::test]
 async fn patch_invalid_priority_is_validation_error() {
     let (_tmp, addr, id) = spawn().await;
     let (status, body) = send(

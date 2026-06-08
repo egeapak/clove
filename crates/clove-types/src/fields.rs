@@ -1,12 +1,12 @@
 //! Shared field-parsing helpers for the write surfaces.
 //!
-//! Item creation ([`crate::ops::create`]) and item editing
-//! ([`crate::edit::EditRequest`]) both have to turn loose external inputs
-//! (priority `u8`, type/status words, raw label and id lists) into the validated
-//! model types. Centralizing those conversions here means every surface — the
-//! CLI, the web server, the MCP tools, the daemon, and the TUI — parses a field
-//! exactly once, with one error message, instead of each re-implementing the
-//! same coercions (the divergence that this module exists to prevent).
+//! Item creation (`clove_core::ops::create`) and item editing ([`crate::request`])
+//! both have to turn loose external inputs (priority `u8`, type/status words, raw
+//! label and id lists) into the validated model types. Centralizing those
+//! conversions here means every surface — the CLI, the web server, the MCP tools,
+//! the daemon, and the TUI — parses a field exactly once, with one error message,
+//! instead of each re-implementing the same coercions (the divergence that this
+//! module exists to prevent).
 
 use crate::{normalize_label, CloveError, CloveId, ItemType, Priority};
 
