@@ -63,7 +63,8 @@
             "INDEX_SCHEMA_MISMATCH",
             "INDEX_DIVERGENCE",
             "INDEX_UNREADABLE",
-            "DAEMON_STALE_SOCKET"
+            "DAEMON_STALE_SOCKET",
+            "DAEMON_VERSION_SKEW"
           ]
         },
         "item": {

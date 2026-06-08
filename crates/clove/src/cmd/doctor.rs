@@ -40,8 +40,11 @@ pub fn run(
 
     // T-D07: daemon-health check (independent of the index; runs even with
     // --no-index, since it inspects socket/pid state, not the index).
-    if let Some(issue) = daemon_health(ctx) {
-        if args.fix {
+    if let Some(issue) = daemon_issue(clove_ipc::DaemonClient::health(daemon_dir(ctx))) {
+        // Only *dead* footprints are cleaned up; a live-but-incompatible daemon
+        // (DAEMON_VERSION_SKEW, not fixable) is reported even under --fix so we
+        // never delete a running process's socket/pid.
+        if args.fix && issue.fixable {
             clove_ipc::client::cleanup_stale(daemon_dir(ctx));
             fixed += 1;
         } else {
@@ -146,16 +149,20 @@ fn daemon_dir(ctx: &Ctx) -> &camino::Utf8Path {
     ctx.issues_dir.parent().unwrap_or(&ctx.issues_dir)
 }
 
-/// T-D07: detect a dead-daemon footprint. When `daemon.sock`/`daemon.pid` are
-/// present but no daemon answers, they are corpse files from a crash; `--fix`
-/// removes them (the DESIGN §8.3 cleanup as an explicit repair). A live daemon —
-/// or a lone leftover `daemon.lock` (normal, reused on next start) — is no finding.
-fn daemon_health(ctx: &Ctx) -> Option<DoctorIssue> {
-    let dir = daemon_dir(ctx);
-    let sock = clove_ipc::sock_path(dir).exists();
-    let pid = clove_ipc::pid_path(dir).exists();
-    if (sock || pid) && !clove_ipc::DaemonClient::is_alive(dir) {
-        return Some(DoctorIssue {
+/// T-D07: map a daemon footprint's [`DaemonHealth`] to a doctor finding.
+///
+/// - `Dead` (sock/pid present, nothing answers, process gone) → a fixable
+///   `DAEMON_STALE_SOCKET`; `--fix` removes the corpse files (DESIGN §8.3).
+/// - `Incompatible` (a daemon is alive but speaks a different protocol version —
+///   e.g. an old `cloved` still running after a `clove` upgrade) → a **non**-
+///   fixable `DAEMON_VERSION_SKEW`: deleting a live process's socket/pid would be
+///   wrong, so we advise a restart instead.
+/// - `Absent`/`Healthy` → no finding (a live, healthy daemon is never touched).
+fn daemon_issue(health: clove_ipc::DaemonHealth) -> Option<DoctorIssue> {
+    use clove_ipc::DaemonHealth;
+    match health {
+        DaemonHealth::Absent | DaemonHealth::Healthy => None,
+        DaemonHealth::Dead => Some(DoctorIssue {
             severity: Severity::Warning,
             code: "DAEMON_STALE_SOCKET",
             item: None,
@@ -163,9 +170,18 @@ fn daemon_health(ctx: &Ctx) -> Option<DoctorIssue> {
                       run `clove doctor --fix` to remove them"
                 .to_owned(),
             fixable: true,
-        });
+        }),
+        DaemonHealth::Incompatible => Some(DoctorIssue {
+            severity: Severity::Warning,
+            code: "DAEMON_VERSION_SKEW",
+            item: None,
+            message: "a running daemon speaks an incompatible protocol version \
+                      (likely an old `cloved` from before a `clove` upgrade); \
+                      run `clove daemon stop` then start it again"
+                .to_owned(),
+            fixable: false,
+        }),
     }
-    None
 }
 
 fn emit_json(report: &DoctorReport, fixed: usize) {
@@ -214,4 +230,30 @@ fn emit_human(report: &DoctorReport, fixed: usize) {
         report.warnings(),
         fixed
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clove_ipc::DaemonHealth;
+
+    #[test]
+    fn daemon_issue_maps_each_health_state() {
+        // A healthy or absent daemon is never a finding.
+        assert!(daemon_issue(DaemonHealth::Absent).is_none());
+        assert!(daemon_issue(DaemonHealth::Healthy).is_none());
+
+        // Dead corpse files → fixable stale-socket warning.
+        let dead = daemon_issue(DaemonHealth::Dead).unwrap();
+        assert_eq!(dead.code, "DAEMON_STALE_SOCKET");
+        assert_eq!(dead.severity, Severity::Warning);
+        assert!(dead.fixable);
+
+        // A live-but-incompatible daemon → non-fixable version-skew warning, so
+        // `--fix` never deletes a running process's socket/pid.
+        let skew = daemon_issue(DaemonHealth::Incompatible).unwrap();
+        assert_eq!(skew.code, "DAEMON_VERSION_SKEW");
+        assert_eq!(skew.severity, Severity::Warning);
+        assert!(!skew.fixable);
+    }
 }

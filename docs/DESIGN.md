@@ -895,6 +895,15 @@ divergence** (`INDEX_DIVERGENCE`, warning, counts/hashes via the staleness
 machinery). All three are fixable: `--fix` triggers a single `reindex` from the
 files (the source of truth) and re-checks. Skipped under `--no-index`.
 
+**M3 extension (daemon footprint):** `doctor` classifies the `daemon.sock`/
+`daemon.pid` footprint without mutating it. A **dead** footprint (files present,
+nothing answers, process gone) is a fixable `DAEMON_STALE_SOCKET` (`--fix` removes
+the corpse files, §8.3). A **live but protocol-incompatible** daemon — e.g. an old
+`cloved` still running after a `clove` upgrade bumped the IPC `PROTOCOL_VERSION` —
+is a **non-fixable** `DAEMON_VERSION_SKEW` (a restart is the remedy); crucially
+`--fix` must never delete a *running* process's socket/pid. A live, healthy daemon
+yields no finding.
+
 **Output:** one issue per finding: `{ severity, code, item: <id|path|null>,
 message, fixable }`, plus a summary `{ errors, warnings, fixed, checked }`. JSON
 mode uses the standard envelope (§7.3) with the issue list in `data`, validated
