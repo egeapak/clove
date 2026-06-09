@@ -876,18 +876,40 @@ file once, builds the graph, and runs the check suite below.
 | 9 | **Unsorted/duplicate list field** (`deps`/relations not sorted/deduped per §2.2) | warning | **yes** (re-sort + de-dup) |
 | 10 | **Orphaned comments dir** (`<id>/comments/` with no `<id>.md`) | warning | **yes** (remove dir) |
 | 11 | **Config invalid** (`id_prefix`/`id_length`/`default_type` out of spec) | error | no |
+| 12 | **Incoherent timestamps** (`updated` < `created`, `closed` < `created`, or any timestamp >24 h in the future) | warning | no |
+| 13 | **`.clove/.gitignore` drift** (file absent, or missing a required entry — the cache/socket/pid/lock set of §2.1/§8.2) | warning | **yes** (append the missing canonical entries; user-added lines preserved) |
 
 ¹ Dangling/cycle/structural issues are **report-only** — auto-removing a dep
 could silently drop intent. `--fix` only performs the clearly-safe repairs
-(label normalization, list de-dup/sort, orphaned-dir removal).
+(label normalization, list de-dup/sort, orphaned-dir removal, and
+`.clove/.gitignore` top-up). Check 12 is report-only: the *intended* time can't
+be inferred. Check 13's canonical entry list lives in `clove_core` and is shared
+with `clove init`, so the two never drift.
 
-**M1 extension:** when an index is present, `doctor` also checks
-**index↔files divergence** (counts/hashes), reported as a warning; `--fix`
-triggers a `reindex`.
+**M1 extension:** when an index is present, `doctor` also runs the index-health
+checks via the non-healing `Index::open` (so problems are reported, not silently
+rebuilt away): **schema-version mismatch** (`INDEX_SCHEMA_MISMATCH`, warning),
+**internal corruption** (`INDEX_CORRUPT`, error — `PRAGMA quick_check` plus a
+contentless-FTS `fts_map`↔`items` row-count cross-check), and **index↔files
+divergence** (`INDEX_DIVERGENCE`, warning, counts/hashes via the staleness
+machinery). All three are fixable: `--fix` triggers a single `reindex` from the
+files (the source of truth) and re-checks. Skipped under `--no-index`.
+
+**M3 extension (daemon footprint):** `doctor` classifies the `daemon.sock`/
+`daemon.pid` footprint without mutating it. A **dead** footprint (files present,
+nothing answers, process gone) is a fixable `DAEMON_STALE_SOCKET` (`--fix` removes
+the corpse files, §8.3). A **live but protocol-incompatible** daemon — e.g. an old
+`cloved` still running after a `clove` upgrade bumped the IPC `PROTOCOL_VERSION` —
+is a **non-fixable** `DAEMON_VERSION_SKEW` (a restart is the remedy); crucially
+`--fix` must never delete a *running* process's socket/pid. A live, healthy daemon
+yields no finding.
 
 **Output:** one issue per finding: `{ severity, code, item: <id|path|null>,
 message, fixable }`, plus a summary `{ errors, warnings, fixed, checked }`. JSON
-mode uses the standard envelope (§7.3) with the issue list in `data`.
+mode uses the standard envelope (§7.3) with the issue list in `data`, validated
+against `docs/json-schema/v1/doctor.json` (whose `code` enum is the canonical
+check taxonomy — adding a check extends it, guarded by the schema round-trip
+test).
 
 **Exit codes:** `0` when no error-severity issues remain (warnings alone still
 exit 0 — issues are data, mirroring `dep cycle`). With **`--strict`**, any

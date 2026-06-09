@@ -54,6 +54,24 @@ pub enum ClientError {
     Protocol(String),
 }
 
+/// The diagnostic state of a daemon footprint, as classified by
+/// [`DaemonClient::health`] (non-mutating). Used by `clove doctor` to decide
+/// whether socket/pid files are safe to remove.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonHealth {
+    /// No `daemon.sock` and no `daemon.pid`: no footprint.
+    Absent,
+    /// A daemon answered `ping` with the matching protocol version.
+    Healthy,
+    /// A daemon answered but speaks a different/incompatible protocol version —
+    /// it is alive (e.g. an old daemon still running after a `clove` upgrade),
+    /// so its socket/pid must not be removed; a restart is the remedy.
+    Incompatible,
+    /// Socket/pid present but nothing answered: corpse files from a crash, safe
+    /// to clean up.
+    Dead,
+}
+
 /// A connected, handshaken daemon client backed by an owned tokio runtime.
 pub struct DaemonClient {
     rt: Runtime,
@@ -88,11 +106,37 @@ impl DaemonClient {
     }
 
     /// Liveness check that does **not** mutate the filesystem (unlike
-    /// [`DaemonClient::probe`]). Returns `true` only if a daemon answers `ping`.
-    /// Used by `clove doctor` (T-D07) to distinguish a live daemon from a
-    /// dead-daemon footprint before deciding whether to clean up.
+    /// [`DaemonClient::probe`]). Returns `true` only if a daemon answers `ping`
+    /// with a compatible protocol version.
     pub fn is_alive(clove_dir: &Utf8Path) -> bool {
-        sock_path(clove_dir).exists() && Self::connect_and_ping(clove_dir).is_ok()
+        matches!(Self::health(clove_dir), DaemonHealth::Healthy)
+    }
+
+    /// Diagnostic daemon liveness for `clove doctor` — richer than [`is_alive`].
+    /// Does **not** mutate the filesystem. Mirrors the exact classification
+    /// [`DaemonClient::probe`] uses, so a live-but-incompatible daemon (which a
+    /// protocol bump produces after a `clove` upgrade) is distinguished from
+    /// dead corpse files: the former must be left alone (and a restart advised),
+    /// the latter is safe to remove.
+    pub fn health(clove_dir: &Utf8Path) -> DaemonHealth {
+        let sock = sock_path(clove_dir).exists();
+        let pid = pid_path(clove_dir).exists();
+        if !sock && !pid {
+            return DaemonHealth::Absent;
+        }
+        // No socket to probe → a lone `daemon.pid` is a dead footprint.
+        if !sock {
+            return DaemonHealth::Dead;
+        }
+        match Self::connect_and_ping(clove_dir) {
+            Ok(_) => DaemonHealth::Healthy,
+            // Answered, but with a mismatched protocol version (or an otherwise
+            // incompatible reply): it is alive — do not touch its socket/pid.
+            Err(ClientError::Protocol(_)) => DaemonHealth::Incompatible,
+            // Could not connect at all (no listener / refused / stale socket):
+            // corpse files from a crashed daemon.
+            Err(_) => DaemonHealth::Dead,
+        }
     }
 
     /// Connect + `ping`, bounded by [`CONNECT_TIMEOUT`].
@@ -270,6 +314,31 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let clove_dir = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
         assert!(!DaemonClient::is_alive(&clove_dir));
+    }
+
+    #[test]
+    fn health_classifies_absent_and_dead() {
+        let dir = tempfile::tempdir().unwrap();
+        let clove_dir = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
+        // No footprint at all.
+        assert_eq!(DaemonClient::health(&clove_dir), DaemonHealth::Absent);
+
+        // A lone pid file with no socket is a dead footprint.
+        std::fs::write(pid_path(&clove_dir), b"4242").unwrap();
+        assert_eq!(DaemonClient::health(&clove_dir), DaemonHealth::Dead);
+
+        // Socket file present but nothing listening (a crashed daemon) is also
+        // Dead — and health() must NOT mutate the filesystem (unlike probe()).
+        std::fs::write(sock_path(&clove_dir), b"").unwrap();
+        assert_eq!(DaemonClient::health(&clove_dir), DaemonHealth::Dead);
+        assert!(
+            sock_path(&clove_dir).exists(),
+            "health() left the sock in place"
+        );
+        assert!(
+            pid_path(&clove_dir).exists(),
+            "health() left the pid in place"
+        );
     }
 
     #[test]

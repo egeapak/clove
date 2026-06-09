@@ -22,7 +22,7 @@ use std::hash::{Hash, Hasher};
 
 use camino::{Utf8Path, Utf8PathBuf};
 
-pub use client::{cleanup_stale, ClientError, DaemonClient};
+pub use client::{cleanup_stale, ClientError, DaemonClient, DaemonHealth};
 pub use protocol::{
     GraphRequest, GraphResponse, LeanRow, QueryKind, QueryListResponse, QueryRequest, ReindexDone,
     SearchRequest, StatusResponse, PROTOCOL_VERSION,

@@ -2,26 +2,13 @@
 
 use camino::{Utf8Path, Utf8PathBuf};
 use clove_core::config::derive_prefix;
-use clove_core::OutputFormat;
+use clove_core::{OutputFormat, GITIGNORE_ENTRIES};
 use clove_types::CloveError;
 use serde_json::json;
 
 use crate::cli::InitArgs;
 use crate::context::current_dir;
 use crate::output::print_json_success;
-
-/// The exact `.clove/.gitignore` entries (DESIGN/T-CLI02). LF line endings on
-/// every platform.
-const GITIGNORE_ENTRIES: [&str; 8] = [
-    "index.db",
-    "*.db-shm",
-    "*.db-wal",
-    "daemon.sock",
-    "daemon.pid",
-    "reindex.lock",
-    "daemon.lock",
-    "index.db.tmp",
-];
 
 pub fn run(
     format: OutputFormat,

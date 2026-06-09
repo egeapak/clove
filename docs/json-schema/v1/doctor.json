@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://clove.dev/schema/v1/doctor.json",
+  "title": "clove doctor envelope",
+  "description": "A `clove doctor` health-check response: a list of findings plus a summary. Each finding's `code` is drawn from the stable check taxonomy (DESIGN §7.7); adding a check means extending the `code` enum here, which keeps the vocabulary documented and guarded by the schema round-trip test.",
+  "type": "object",
+  "required": ["v", "ok", "data"],
+  "properties": {
+    "v": { "const": 1 },
+    "ok": { "const": true },
+    "data": {
+      "type": "object",
+      "required": ["issues", "summary"],
+      "properties": {
+        "issues": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/issue" }
+        },
+        "summary": {
+          "type": "object",
+          "required": ["errors", "warnings", "fixed", "checked"],
+          "properties": {
+            "errors": { "type": "integer", "minimum": 0 },
+            "warnings": { "type": "integer", "minimum": 0 },
+            "fixed": { "type": "integer", "minimum": 0 },
+            "checked": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "_meta": { "type": "object" }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "issue": {
+      "type": "object",
+      "required": ["severity", "code", "item", "message", "fixable"],
+      "properties": {
+        "severity": { "enum": ["error", "warning"] },
+        "code": {
+          "description": "Stable machine-readable check identifier (DESIGN §7.7).",
+          "enum": [
+            "IO_ERROR",
+            "PARSE_ERROR",
+            "ID_MISMATCH",
+            "DUPLICATE_ID",
+            "INVALID_PRIORITY",
+            "CLOSED_INVARIANT",
+            "UNSUPPORTED_SCHEMA",
+            "LIST_TOO_LONG",
+            "DANGLING_REF",
+            "CYCLE_DETECTED",
+            "INVALID_PARENT",
+            "TIMESTAMP_INCOHERENT",
+            "NONCANONICAL_LABELS",
+            "UNSORTED_LISTS",
+            "ORPHAN_COMMENTS",
+            "GITIGNORE_DRIFT",
+            "CONFIG_ERROR",
+            "INDEX_CORRUPT",
+            "INDEX_SCHEMA_MISMATCH",
+            "INDEX_DIVERGENCE",
+            "INDEX_UNREADABLE",
+            "DAEMON_STALE_SOCKET",
+            "DAEMON_VERSION_SKEW"
+          ]
+        },
+        "item": {
+          "description": "The id or path the finding is about, or null for repo-level findings (cycles, config, index, daemon).",
+          "type": ["string", "null"]
+        },
+        "message": { "type": "string" },
+        "fixable": {
+          "description": "Whether `clove doctor --fix` can repair this finding safely.",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

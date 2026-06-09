@@ -584,6 +584,7 @@ dependencies = [
  "clove-web",
  "insta",
  "jsonschema",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
