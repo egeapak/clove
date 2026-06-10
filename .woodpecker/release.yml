@@ -1,0 +1,56 @@
+# Tag-triggered: build shippable binaries entirely on Linux, each carrying the
+# REAL embedded SvelteKit SPA — macOS universal2 (arm64 + x86_64) and Windows
+# x86_64 (gnu ABI). All steps share the workspace:
+#   1) node builds the SPA once into crates/clove-web/dist (the path build.rs embeds)
+#   2+) zigbuild compiles each target with CLOVE_SKIP_WEB_BUILD=1, so build.rs
+#       embeds that dist instead of the placeholder (and never shells out to npm).
+# NB: the Windows build is the GNU ABI (not MSVC); it needs the windows-sys
+# Win32_Security feature (declared in clove/cloved) to compile. The .exe links
+# the mingw runtime — verify it runs on a clean Windows box before wide release.
+when:
+  - event: tag
+
+steps:
+  - name: build-spa
+    image: node:22-bookworm
+    commands:
+      - cd crates/clove-web/web
+      - npm ci
+      - npm run build   # -> crates/clove-web/dist, picked up by clove-web/build.rs
+
+  - name: macos-universal2
+    image: ghcr.io/rust-cross/cargo-zigbuild:0.22.3
+    environment:
+      CARGO_TERM_COLOR: always
+      CLOVE_SKIP_WEB_BUILD: '1'   # embed the dist from build-spa; do not run npm
+    commands:
+      - rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - cargo zigbuild --release --target universal2-apple-darwin -p clove -p cloved
+      - file target/universal2-apple-darwin/release/clove
+      # Artifacts: target/universal2-apple-darwin/release/{clove,cloved}
+      # They are unsigned; ad-hoc `codesign --sign -` or notarise on a Mac before
+      # distributing to other machines (Gatekeeper will block an unsigned download).
+
+  - name: windows-x86_64-gnu
+    image: ghcr.io/rust-cross/cargo-zigbuild:0.22.3
+    environment:
+      CARGO_TERM_COLOR: always
+      CLOVE_SKIP_WEB_BUILD: '1'   # embed the dist from build-spa; do not run npm
+    commands:
+      - rustup target add x86_64-pc-windows-gnu
+      - cargo zigbuild --release --target x86_64-pc-windows-gnu -p clove -p cloved
+      - file target/x86_64-pc-windows-gnu/release/clove.exe
+      # Artifacts: target/x86_64-pc-windows-gnu/release/{clove,cloved}.exe
+
+  # PUBLISH — uncomment and adapt to your forge once a token secret exists:
+  # - name: publish
+  #   image: woodpeckerci/plugin-release      # for Gitea/Forgejo/GitHub releases
+  #   settings:
+  #     files:
+  #       - target/universal2-apple-darwin/release/clove
+  #       - target/universal2-apple-darwin/release/cloved
+  #       - target/x86_64-pc-windows-gnu/release/clove.exe
+  #       - target/x86_64-pc-windows-gnu/release/cloved.exe
+  #     title: ${CI_COMMIT_TAG}
+  #     api_key:
+  #       from_secret: release_token

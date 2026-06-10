@@ -43,6 +43,11 @@ git2 = { workspace = true, optional = true }
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
+    # CreateEventW takes *const SECURITY_ATTRIBUTES, which lives behind
+    # Win32_Security; without it windows-sys omits CreateEventW. The msvc build
+    # gets this feature by unification, but the windows-gnu target does not, so
+    # declare it explicitly (see crates/cloved/src/lifecycle.rs).
+    "Win32_Security",
     "Win32_System_Threading",
 ] }
 
