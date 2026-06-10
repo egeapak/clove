@@ -54,3 +54,15 @@ steps:
     environment: *cargo_env
     commands:
       - cargo bench --workspace --no-run
+
+  # FEATURE TRIMS: default-on features (github, mcp, git-sync) are trimmed for
+  # binary size, and several deps opt out of their own default features. The
+  # `--no-default-features` build paths are first-class shipping configs (lean CLI
+  # with no GitHub/MCP; daemon with no vendored libgit2), so guard they keep
+  # compiling. cargo check is enough — the opt-out arms only need to resolve.
+  - name: feature-combos
+    image: *rust_image
+    environment: *cargo_env
+    commands:
+      - cargo check -p clove --no-default-features
+      - cargo check -p cloved --no-default-features

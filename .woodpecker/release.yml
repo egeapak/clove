@@ -27,6 +27,8 @@ steps:
       - rustup target add aarch64-apple-darwin x86_64-apple-darwin
       - cargo zigbuild --release --target universal2-apple-darwin -p clove -p cloved
       - file target/universal2-apple-darwin/release/clove
+      # Informational size trend (release profile: fat LTO + cgu=1 + panic=abort + strip).
+      - ls -lh target/universal2-apple-darwin/release/clove target/universal2-apple-darwin/release/cloved
       # Artifacts: target/universal2-apple-darwin/release/{clove,cloved}
       # They are unsigned; ad-hoc `codesign --sign -` or notarise on a Mac before
       # distributing to other machines (Gatekeeper will block an unsigned download).
@@ -40,6 +42,8 @@ steps:
       - rustup target add x86_64-pc-windows-gnu
       - cargo zigbuild --release --target x86_64-pc-windows-gnu -p clove -p cloved
       - file target/x86_64-pc-windows-gnu/release/clove.exe
+      # Informational size trend (release profile: fat LTO + cgu=1 + panic=abort + strip).
+      - ls -lh target/x86_64-pc-windows-gnu/release/clove.exe target/x86_64-pc-windows-gnu/release/cloved.exe
       # Artifacts: target/x86_64-pc-windows-gnu/release/{clove,cloved}.exe
 
   # PUBLISH — uncomment and adapt to your forge once a token secret exists:
