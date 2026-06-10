@@ -1,0 +1,14 @@
+# Mirrors the GitHub `web-frontend` job: svelte-check + vitest.
+when:
+  - event: pull_request
+  - event: push
+    branch: [main, master]
+
+steps:
+  - name: web-check-test
+    image: node:22-bookworm
+    commands:
+      - cd crates/clove-web/web
+      - npm ci
+      - npm run check
+      - npm run test

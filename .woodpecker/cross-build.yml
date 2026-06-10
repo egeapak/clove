@@ -1,0 +1,39 @@
+# Cross-compile build checks that stand in for the macOS/Windows native matrix
+# legs on a Linux agent. These compile and LINK the binaries for those targets;
+# they cannot run the targets' tests on Linux (macOS test execution would need a
+# darwin-labelled agent; Windows correctness is verified on a real Windows CI).
+#
+# Uses the official cargo-zigbuild image (zig + a bundled macOS SDK).
+# LICENCE NOTE: that image ships an Apple-licensed macOS SDK; relying on it on
+# non-Apple CI hardware is the widely-used grey-area route (same as osxcross). The
+# fully compliant alternative is to extract the SDK from your own Xcode and point
+# SDKROOT at it. The embedded web UI here is the build.rs placeholder (no node in
+# this image); real release artifacts with the SPA are built in release.yml.
+when:
+  - event: pull_request
+  - event: push
+    branch: [main, master]
+
+steps:
+  - name: macos-arm64
+    image: ghcr.io/rust-cross/cargo-zigbuild:0.22.3
+    environment:
+      CARGO_TERM_COLOR: always
+      CLOVE_SKIP_WEB_BUILD: '1'
+    commands:
+      - rustup target add aarch64-apple-darwin
+      - cargo zigbuild --release --target aarch64-apple-darwin -p clove -p cloved
+      - file target/aarch64-apple-darwin/release/clove
+
+  - name: windows-x86_64
+    image: ghcr.io/rust-cross/cargo-zigbuild:0.22.3
+    environment:
+      CARGO_TERM_COLOR: always
+      CLOVE_SKIP_WEB_BUILD: '1'
+    commands:
+      # Compile-coverage for the Windows daemon shutdown path (the GitHub
+      # `daemon-windows` job built cloved+clove; its unit tests run on a real
+      # Windows agent — cross-compiling only catches build/link regressions).
+      - rustup target add x86_64-pc-windows-gnu
+      - cargo zigbuild --release --target x86_64-pc-windows-gnu -p clove -p cloved
+      - file target/x86_64-pc-windows-gnu/release/clove.exe

@@ -1,0 +1,48 @@
+# Mirrors the GitHub `test` job: fmt + clippy + test + bench-compile.
+#
+# PLATFORM COVERAGE: the GitHub matrix ran this on ubuntu/macos/windows. The
+# Woodpecker docker backend runs Linux containers only, so this leg covers Linux.
+# macOS/Windows are compile-checked in cross-build.yml; running *their* tests
+# natively would need Woodpecker agents labelled with those platforms
+# (`labels: {platform: darwin/amd64}` on the agent + a matching `when` here).
+#
+# CACHING: Woodpecker has no built-in rust-cache. The four steps below share one
+# workspace, so they reuse a single ./target across the run. For cross-pipeline
+# caching wrap ~/.cargo and ./target with woodpeckerci/plugin-cache (S3/filesystem)
+# or mount a persistent agent volume.
+
+variables:
+  - &rust_image 'rust:bookworm'
+  - &cargo_env
+    CARGO_TERM_COLOR: always
+    RUST_BACKTRACE: '1'
+
+when:
+  - event: pull_request
+  - event: push
+    branch: [main, master]
+
+steps:
+  - name: fmt
+    image: *rust_image
+    environment: *cargo_env
+    commands:
+      - cargo fmt --all --check
+
+  - name: clippy
+    image: *rust_image
+    environment: *cargo_env
+    commands:
+      - cargo clippy --workspace --all-targets -- -D warnings
+
+  - name: test
+    image: *rust_image
+    environment: *cargo_env
+    commands:
+      - cargo test --workspace
+
+  - name: bench-compile
+    image: *rust_image
+    environment: *cargo_env
+    commands:
+      - cargo bench --workspace --no-run
