@@ -1,13 +1,11 @@
-# macOS cross-compile build check on a Linux agent: compiles AND links the macOS
-# binary. It cannot run macOS tests on Linux (that needs a darwin-labelled agent).
-#
-# No Windows leg here ON PURPOSE: zigbuild can only target x86_64-pc-windows-GNU,
-# but clove ships the MSVC target, and the project decision is that Windows is
-# verified on a REAL Windows runner (the old GitHub `daemon-windows` job), not via
-# a cross-check. The gnu target in fact fails to build cloved (windows-sys feature
-# unification differs from msvc: `CreateEventW` unresolved), so a cross-check would
-# be a misleading red. Add a windows/amd64-labelled agent + its own workflow to
-# restore native Windows coverage.
+# Cross-compile build checks on a Linux agent for the two targets clove ships
+# from Linux: macOS (arm64) and Windows (x86_64-gnu). Both compile AND link here;
+# neither can RUN its tests on Linux (macOS needs a darwin agent; Windows-gnu
+# binaries can be smoke-tested under Wine if desired, but unit tests still want a
+# real runner). zigbuild can only target the GNU Windows ABI, not MSVC — that is
+# the ABI we build/ship via cross-compilation (cargo-xwin would be needed for an
+# MSVC cross-build). The gnu build requires the windows-sys `Win32_Security`
+# feature (declared in clove/cloved Cargo.toml) so `CreateEventW` resolves.
 #
 # Uses the official cargo-zigbuild image (zig + a bundled macOS SDK).
 # LICENCE NOTE: that image ships an Apple-licensed macOS SDK; relying on it on
@@ -30,3 +28,13 @@ steps:
       - rustup target add aarch64-apple-darwin
       - cargo zigbuild --release --target aarch64-apple-darwin -p clove -p cloved
       - file target/aarch64-apple-darwin/release/clove
+
+  - name: windows-x86_64-gnu
+    image: ghcr.io/rust-cross/cargo-zigbuild:0.22.3
+    environment:
+      CARGO_TERM_COLOR: always
+      CLOVE_SKIP_WEB_BUILD: '1'
+    commands:
+      - rustup target add x86_64-pc-windows-gnu
+      - cargo zigbuild --release --target x86_64-pc-windows-gnu -p clove -p cloved
+      - file target/x86_64-pc-windows-gnu/release/clove.exe

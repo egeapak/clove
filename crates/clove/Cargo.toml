@@ -45,6 +45,9 @@ tempfile.workspace = true       # T-M04: atomic `export --out FILE` writes
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
+    # See cloved/Cargo.toml: OpenEventW/SetEvent reach SECURITY_ATTRIBUTES via
+    # Win32_Security; required explicitly for the windows-gnu target.
+    "Win32_Security",
     "Win32_System_Threading",
 ] }
 
