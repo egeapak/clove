@@ -105,6 +105,32 @@ jobs:
       - name: Daemon unit tests
         run: cargo test -p cloved --lib
 
+  feature-matrix:
+    name: feature combos + release size
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Default-on features (github, mcp, git-sync) are trimmed aggressively for
+      # binary size, and several deps now opt out of their own default features.
+      # The opt-out build paths are first-class shipping configs (a lean CLI with
+      # no GitHub/MCP, a daemon with no vendored libgit2), so guard that they keep
+      # compiling — the `--no-default-features` arms must still resolve cleanly.
+      - name: clove without github + mcp (lean CLI)
+        run: cargo check -p clove --no-default-features
+      - name: cloved without git-sync
+        run: cargo check -p cloved --no-default-features
+      # Informational: track the shipped binary size. The release profile is fat
+      # LTO + codegen-units=1 + panic=abort + strip (see root Cargo.toml). cargo
+      # forces the test/bench harness back to unwind, so `cargo test --release`
+      # and `cargo bench --no-run` are unaffected by panic=abort.
+      - name: Release binary size
+        run: |
+          cargo build --release -p clove -p cloved
+          ls -l target/release/clove target/release/cloved
+          du -h target/release/clove target/release/cloved
+
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest
