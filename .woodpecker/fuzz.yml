@@ -1,0 +1,30 @@
+# Mirrors the GitHub `fuzz` job: 30s/target regression against the committed
+# seed corpora. Uses a nightly image; RUSTUP_TOOLCHAIN overrides the repo's
+# stable rust-toolchain.toml so cargo-fuzz gets the nightly it requires.
+when:
+  - event: pull_request
+  - event: push
+    branch: [main, master]
+
+steps:
+  - name: fuzz
+    image: rustlang/rust:nightly-bookworm
+    environment:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: '1'
+      RUSTUP_TOOLCHAIN: nightly
+      # No debugger in CI; drop debuginfo + incremental to shrink target/ and speed
+      # up the cargo-fuzz install + dependency builds (see lint-test.yml).
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    commands:
+      # cargo-fuzz builds libFuzzer (C++) via the cc crate; g++ ships in the
+      # buildpack-deps base. Swap to cargo-binstall to skip the from-source build.
+      - cargo install cargo-fuzz --locked
+      - cargo fuzz run parse_item_file -- -max_total_time=30
+      - cargo fuzz run parse_dep_list -- -max_total_time=30
+      - cargo fuzz run merge_driver -- -max_total_time=30
+      - cargo fuzz run import_tk -- -max_total_time=30
+      - cargo fuzz run import_beads -- -max_total_time=30
+      - cargo fuzz run ipc_frame -- -max_total_time=30

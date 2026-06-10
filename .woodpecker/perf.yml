@@ -1,0 +1,20 @@
+# Mirrors the GitHub `perf-gates` job. The DESIGN §13.1 file-scan budgets only
+# assert in optimized builds (debug is several times slower), hence --release.
+variables:
+  - &cargo_env
+    CARGO_TERM_COLOR: always
+    RUST_BACKTRACE: '1'
+    # Release profile already omits debuginfo; just skip the useless incremental dir.
+    CARGO_INCREMENTAL: '0'
+
+when:
+  - event: pull_request
+  - event: push
+    branch: [main, master]
+
+steps:
+  - name: perf-gates
+    image: rust:bookworm
+    environment: *cargo_env
+    commands:
+      - cargo test --release -p clove-core --test perf_gates
