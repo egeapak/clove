@@ -87,6 +87,7 @@ clove-tui = { path = "crates/clove-tui", version = "0.1.0" }
 clove-web = { path = "crates/clove-web", version = "0.1.0" }
 
 [profile.release]
-lto = "thin"
+lto = true            # fat LTO: cross-crate inlining/dedup; meaningfully smaller than "thin"
 codegen-units = 1
+panic = "abort"       # drop unwinding tables (no catch_unwind in-tree). `cargo test`/`bench` ignore this and keep unwind.
 strip = true
