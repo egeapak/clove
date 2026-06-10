@@ -26,4 +26,5 @@ interprocess = { workspace = true, features = ["tokio"] }
 
 [dev-dependencies]
 tempfile.workspace = true
-tokio = { workspace = true }
+# Tests may exercise tokio surfaces beyond the trimmed release set; give them full.
+tokio = { workspace = true, features = ["full"] }

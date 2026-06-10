@@ -36,7 +36,20 @@ rusqlite = { version = "0.37", features = ["bundled"] }  # embedded SQLite, no r
 # `crossbeam-channel` feature (notify falls back to std mpsc internally).
 notify = { version = "6", default-features = false, features = ["macos_fsevent"] }
 interprocess = "2"              # Unix socket + Windows named pipe (M3)
-tokio = { version = "1", features = ["full"] }  # daemon async runtime only
+# daemon/web/mcp async runtime. Trimmed from "full" to the union of features the
+# release code actually uses (verified across cloved/clove-web/clove-mcp/
+# clove-ipc/clove-import/clove): no tokio::process or tokio::fs anywhere. Test
+# code that wants more gets `full` via per-crate [dev-dependencies] overrides.
+tokio = { version = "1", features = [
+    "rt-multi-thread",  # every runtime is new_multi_thread()/Runtime::new()
+    "macros",           # tokio::select! (cloved) + #[tokio::test]
+    "net",              # TcpListener/Stream (web) + interprocess sockets + hyper/octocrab
+    "io-util",          # AsyncRead/WriteExt; rmcp transport-io
+    "io-std",           # rmcp stdio transport (clove-mcp)
+    "time",             # sleep/interval/timeout (cloved, clove-ipc, hyper)
+    "sync",             # mpsc (watcher) + broadcast (web events)
+    "signal",           # SIGTERM/ctrl_c shutdown (cloved)
+] }
 clap = { version = "4", features = ["derive"] }  # CLI only
 anyhow = "1"                    # CLI + daemon only; never in clove-core
 thiserror = "1"                 # clove-core + clove-index typed errors

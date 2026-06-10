@@ -29,3 +29,6 @@ flate2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# tests/api.rs drives a real server over TCP with #[tokio::test]; use full tokio
+# for tests so the release lib can keep the trimmed feature set.
+tokio = { workspace = true, features = ["full"] }
