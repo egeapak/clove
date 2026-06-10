@@ -66,3 +66,15 @@ steps:
     commands:
       - cargo check -p clove --no-default-features
       - cargo check -p cloved --no-default-features
+
+  # Informational native (linux x86_64) size trend for the shipped binaries.
+  # Release profile is fat LTO + cgu=1 + panic=abort + strip (root Cargo.toml);
+  # this is the authoritative native number (cross-build.yml reports the
+  # darwin/windows-gnu cross-compiled sizes).
+  - name: release-size
+    image: *rust_image
+    environment: *cargo_env
+    commands:
+      - cargo build --release -p clove -p cloved
+      - ls -lh target/release/clove target/release/cloved
+      - du -h target/release/clove target/release/cloved
