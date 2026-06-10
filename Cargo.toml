@@ -29,9 +29,12 @@ repository = "https://github.com/egeapak/clove"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml_neo = "0.11"         # strict YAML (maintained serde_yaml fork); DESIGN §4/§14.2 pinned 0.9 but crates.io only has 0.10/0.11
-petgraph = "0.6"                # DAG engine
+petgraph = { version = "0.6", default-features = false, features = ["stable_graph"] }  # DAG engine (graphmap/matrix_graph unused)
 rusqlite = { version = "0.37", features = ["bundled"] }  # embedded SQLite, no runtime dep (M1). DESIGN §1 named 0.40, but its libsqlite3-sys 0.38 build script needs unstable `cfg_select!`; 0.37 (libsqlite3-sys 0.35) builds on the pinned toolchain and still bundles SQLite ≥3.43 for FTS5 contentless_delete.
-notify = "6"                    # file-watch (M3); 9.0-rc is NOT production-ready — do not bump
+# file-watch (M3); 9.0-rc is NOT production-ready — do not bump. We use the
+# closure-callback watcher API, not the channel API, so drop the default
+# `crossbeam-channel` feature (notify falls back to std mpsc internally).
+notify = { version = "6", default-features = false, features = ["macos_fsevent"] }
 interprocess = "2"              # Unix socket + Windows named pipe (M3)
 tokio = { version = "1", features = ["full"] }  # daemon async runtime only
 clap = { version = "4", features = ["derive"] }  # CLI only
@@ -50,25 +53,32 @@ blake3 = "1"                    # content hashing for staleness (M1)
 rayon = "1"                     # parallel parse above 500 items
 fd-lock = "4"                   # advisory file locking
 git2 = "0.21"                   # M3 daemon git auto-sync only (vendored libgit2 C build blocks macOS->Windows cross-check; M0 worktree detection uses a `git` CLI wrapper instead)
-chrono = { version = "0.4", features = ["serde"] }  # RFC3339 timestamps
-jiff = "0.2"                    # nanosecond timestamps for comment filenames
-octocrab = "0.51"               # GitHub REST API client (clove-import, M2)
+# RFC3339 timestamps. clock = Utc::now() (used everywhere); drop the default
+# `wasmbind` (no wasm target) and the legacy no-op `oldtime`.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+# GitHub REST API client (clove-import, M2). Keep the default TLS/JWT providers
+# (rustls-ring + jwt-rust-crypto) the working build relies on; drop only the
+# unused middleware (retry/timeout/tracing).
+octocrab = { version = "0.51", default-features = false, features = [
+    "default-client", "follow-redirect", "rustls", "rustls-ring", "jwt-rust-crypto",
+] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }  # octocrab/hyper-rustls pull BOTH ring + aws-lc-rs via feature unification, so rustls can't auto-pick a provider and panics on first TLS use; we install the ring provider explicitly (clove-import github feature)
-toml = "0.8"                    # config.toml parsing
+toml = { version = "0.8", default-features = false, features = ["parse"] }  # config.toml parsing only (no serialize/display)
 jsonschema = "0.46"             # JSON Schema validation in tests (T-CLI14)
-ratatui = "0.29"                # terminal UI (M4 `clove tui`); re-exports crossterm
+ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }  # terminal UI (M4 `clove tui`); drop unused underline-color
 pulldown-cmark = { version = "0.13", default-features = false }  # Markdown body rendering in `clove tui`
 # M4 MCP server: rmcp for the MCP (JSON-RPC stdio) surface; tarpc for the typed
 # CLI<->daemon RPC seam (replaces the hand-rolled clove-ipc frame/protocol).
 rmcp = { version = "1.7", default-features = false, features = ["server", "macros", "transport-io", "schemars"] }
 tarpc = { version = "0.37", features = ["serde1", "serde-transport", "serde-transport-json", "tokio1", "unix"] }
-futures = "0.3"                  # stream/sink combinators for the tarpc transport
+futures = { version = "0.3", default-features = false, features = ["std"] }  # StreamExt only (cloved); drop default executor/async-await-macro
 tokio-util = { version = "0.7", features = ["codec"] }   # LengthDelimited framing under tarpc serde-transport
 tokio-serde = { version = "0.9", features = ["json"] }   # JSON codec for the tarpc transport
 # M4 web UI (clove-web): HTTP/WS server + embedded SPA assets. All MIT, same
 # tokio/hyper ecosystem already in the tree — no new cargo-deny license class.
-axum = { version = "0.7", features = ["ws"] }   # router + extractors + native WebSocket
-tower = "0.5"                   # middleware plumbing for the web server
+# router + extractors + native WebSocket. API is JSON-only, so drop the default
+# form/matched-path/original-uri/tower-log features (keep json+query+http1+tokio).
+axum = { version = "0.7", default-features = false, features = ["http1", "json", "query", "tokio", "ws"] }
 tower-http = { version = "0.6", features = ["compression-gzip"] }  # gzip-only response compression for the dynamic API (no brotli/zstd C deps in the binary)
 rust-embed = "8"                # embed the gzip-precompressed SPA assets into the binary
 mime_guess = "2"                # content-type for embedded static assets
