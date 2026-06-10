@@ -4,6 +4,8 @@ variables:
   - &cargo_env
     CARGO_TERM_COLOR: always
     RUST_BACKTRACE: '1'
+    # Release profile already omits debuginfo; just skip the useless incremental dir.
+    CARGO_INCREMENTAL: '0'
 
 when:
   - event: pull_request

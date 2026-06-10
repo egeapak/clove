@@ -16,6 +16,14 @@ variables:
   - &cargo_env
     CARGO_TERM_COLOR: always
     RUST_BACKTRACE: '1'
+    # Drop debuginfo + incremental in CI: no debugger is attached and the test
+    # harness still reports the failing test + assertion without it. Big artifact
+    # shrink and ~30% faster compiles (deps build under dev, test bins under test;
+    # set both). Swap a profile to "line-tables-only" if you want file:line in
+    # panic backtraces. `incremental/` is pure waste on a clean checkout.
+    CARGO_INCREMENTAL: '0'
+    CARGO_PROFILE_DEV_DEBUG: '0'
+    CARGO_PROFILE_TEST_DEBUG: '0'
 
 when:
   - event: pull_request

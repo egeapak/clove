@@ -13,6 +13,11 @@ steps:
       CARGO_TERM_COLOR: always
       RUST_BACKTRACE: '1'
       RUSTUP_TOOLCHAIN: nightly
+      # No debugger in CI; drop debuginfo + incremental to shrink target/ and speed
+      # up the cargo-fuzz install + dependency builds (see lint-test.yml).
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
     commands:
       # cargo-fuzz builds libFuzzer (C++) via the cc crate; g++ ships in the
       # buildpack-deps base. Swap to cargo-binstall to skip the from-source build.
