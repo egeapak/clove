@@ -149,6 +149,47 @@ impl MockGitHub {
         });
     }
 
+    /// Set an issue's labels (simulating GitHub-side label edits).
+    fn set_labels(&self, number: u64, names: &[&str]) {
+        self.edit(number, |i| {
+            i["labels"] = Value::Array(
+                names
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, n)| make_label(idx as u64, n))
+                    .collect(),
+            );
+        });
+    }
+
+    /// The label names currently on an issue (sorted).
+    fn label_names(&self, number: u64) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .issue(number)
+            .and_then(|i| i["labels"].as_array().cloned())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|l| l["name"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    /// Whether an issue is currently closed on the mock.
+    fn is_closed(&self, number: u64) -> bool {
+        self.issue(number)
+            .map(|i| i["state"] == json!("closed"))
+            .unwrap_or(false)
+    }
+
+    /// Drop an issue (simulating a GitHub-side delete).
+    fn remove_issue(&self, number: u64) {
+        let mut s = self.state.lock().unwrap();
+        s.issues.retain(|i| i["number"] != json!(number));
+    }
+
     /// The assignee logins currently on an issue.
     fn assignee_logins(&self, number: u64) -> Vec<String> {
         self.issue(number)
@@ -856,5 +897,101 @@ fn push_preserves_not_planned_close_reason() {
         mock.state_reason(5).as_deref(),
         Some("not_planned"),
         "clove push must not reset a human's not_planned close reason"
+    );
+}
+
+#[test]
+fn labels_round_trip_push_and_pull() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    // Push a label up.
+    clove(dir.path(), mock.addr)
+        .args(["new", "Tagged", "--type", "bug", "--label", "area:core"])
+        .assert()
+        .success();
+    sync(dir.path(), mock.addr, &[]);
+    assert_eq!(mock.label_names(1), vec!["area:core".to_owned()]);
+
+    // A human adds a label on GitHub; a pull brings it down to the local item.
+    mock.set_labels(1, &["area:core", "bug", "regression"]);
+    let id = only_item_id(dir.path(), mock.addr);
+    sync(dir.path(), mock.addr, &[]);
+    let item = show(dir.path(), mock.addr, &id);
+    let local: Vec<&str> = item["labels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|l| l.as_str())
+        .collect();
+    assert!(
+        local.contains(&"regression"),
+        "pulled label missing: {local:?}"
+    );
+}
+
+#[test]
+fn close_state_round_trips() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    // Push a CLOSED item: created open, then closed in the same sync.
+    clove(dir.path(), mock.addr)
+        .args(["new", "Done already", "--type", "chore"])
+        .assert()
+        .success();
+    let id = only_item_id(dir.path(), mock.addr);
+    clove(dir.path(), mock.addr)
+        .args(["close", &id])
+        .assert()
+        .success();
+    sync(dir.path(), mock.addr, &[]);
+    assert!(
+        mock.is_closed(1),
+        "a pushed closed item must end up closed on GitHub"
+    );
+
+    // Reopen on GitHub; a pull reopens the local item.
+    mock.edit(1, |i| {
+        i["state"] = json!("open");
+        i["closed_at"] = Value::Null;
+        i["state_reason"] = Value::Null;
+    });
+    sync(dir.path(), mock.addr, &[]);
+    assert_eq!(
+        show(dir.path(), mock.addr, &id)["status"],
+        "open",
+        "pull must reopen locally"
+    );
+}
+
+#[test]
+fn remote_missing_is_reported_not_fatal() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    clove(dir.path(), mock.addr)
+        .args(["new", "Linked", "--type", "bug"])
+        .assert()
+        .success();
+    sync(dir.path(), mock.addr, &[]); // push-create gh-1, link established
+    let id = only_item_id(dir.path(), mock.addr);
+
+    // The issue vanishes on GitHub (deleted); the next sync reports it as missing
+    // and leaves the local item untouched (no crash, no re-create).
+    mock.remove_issue(1);
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(
+        v["data"]["remote_missing"].as_array().unwrap().len(),
+        1,
+        "{v}"
+    );
+    assert_eq!(v["data"]["remote_missing"][0], "gh-1", "{v}");
+    assert_eq!(
+        mock.issue_count(),
+        0,
+        "must not re-create the deleted issue"
+    );
+    assert_eq!(
+        show(dir.path(), mock.addr, &id)["external_ref"],
+        "gh-1",
+        "local link preserved"
     );
 }
