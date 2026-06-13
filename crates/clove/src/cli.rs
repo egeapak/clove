@@ -95,6 +95,8 @@ pub enum Commands {
     Import(ImportArgs),
     /// Export items to `json`, `jsonl`, or GitHub.
     Export(ExportArgs),
+    /// Two-way sync items with a tracker (`github`).
+    Sync(SyncArgs),
     /// Git 3-way merge driver for item files (`clove merge-driver %O %A %B %L`).
     MergeDriver(MergeDriverArgs),
     /// Generate an agent-facing usage document.
@@ -480,6 +482,31 @@ pub struct ExportArgs {
     /// For `github`: plan only, do not push anything.
     #[arg(long)]
     pub dry_run: bool,
+}
+
+/// `clove sync <github> <owner/repo>` (T-M06). One reconciled pull+push pass.
+#[derive(Debug, Args)]
+pub struct SyncArgs {
+    /// The tracker to sync with. Only `github` is supported today.
+    #[arg(value_enum, value_name = "TRACKER")]
+    pub tracker: SyncTracker,
+    /// The `owner/repo` to sync with.
+    #[arg(value_name = "OWNER/REPO")]
+    pub target: String,
+    /// Plan only: report what would happen on both sides without writing anything.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Conflict policy for issues changed on both sides since the last sync:
+    /// `newer` (default), `local`, `remote`, or `manual`.
+    #[arg(long, value_name = "POLICY")]
+    pub prefer: Option<String>,
+}
+
+/// The tracker a `clove sync` targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SyncTracker {
+    /// GitHub Issues.
+    Github,
 }
 
 /// The `clove export` output format.

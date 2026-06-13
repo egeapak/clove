@@ -19,7 +19,7 @@ pub const CURRENT_CONFIG_SCHEMA: u32 = 1;
 /// writes this set (LF endings on every platform) and `clove doctor` verifies it
 /// is present (`GITIGNORE_DRIFT`), so the canonical list lives here, shared by
 /// both rather than duplicated.
-pub const GITIGNORE_ENTRIES: [&str; 8] = [
+pub const GITIGNORE_ENTRIES: [&str; 9] = [
     "index.db",
     "*.db-shm",
     "*.db-wal",
@@ -28,6 +28,9 @@ pub const GITIGNORE_ENTRIES: [&str; 8] = [
     "reindex.lock",
     "daemon.lock",
     "index.db.tmp",
+    // Per-clone GitHub sync bookkeeping (`sync/github/<owner>__<repo>.json`):
+    // local last-sync clocks, rebuildable, must not enter the source of truth.
+    "sync/",
 ];
 
 /// Minimum / maximum number of random characters in a generated id.

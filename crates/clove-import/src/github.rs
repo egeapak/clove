@@ -185,6 +185,12 @@ pub struct GitHubIssue {
     pub assignees: Vec<GitHubUser>,
     #[serde(default)]
     pub closed_at: Option<DateTime<Utc>>,
+    /// Last-modified time reported by GitHub. The two-way sync compares this
+    /// against the timestamp recorded at the previous sync to decide whether the
+    /// remote side changed (see [`crate::sync`]). Absent in older fixtures →
+    /// treated as "unknown / always re-examine".
+    #[serde(default)]
+    pub updated_at: Option<DateTime<Utc>>,
     /// Present on real issues; used to skip PRs (which the issues API also returns).
     #[serde(default)]
     pub pull_request: Option<serde_json::Value>,
@@ -207,6 +213,9 @@ pub struct StagedIssue {
     pub labels: Vec<String>,
     pub closed: Option<DateTime<Utc>>,
     pub body: String,
+    /// The issue's GitHub `updated_at` (carried through so a sync can record it
+    /// as the last-synced remote fingerprint). `None` when the source omitted it.
+    pub updated_at: Option<DateTime<Utc>>,
 }
 
 /// The `external_ref` (== idempotency key) for a GitHub issue number.
@@ -266,6 +275,7 @@ pub fn map_issue(issue: &GitHubIssue) -> Result<StagedIssue, String> {
         labels,
         closed: issue.closed_at,
         body,
+        updated_at: issue.updated_at,
     })
 }
 
@@ -450,7 +460,7 @@ pub struct ExportReport {
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "github")]
-mod net {
+pub(crate) mod net {
     use super::*;
     use crate::error::ImportError;
     use crate::plan::ImportReport;
@@ -463,7 +473,7 @@ mod net {
     use octocrab::Octocrab;
 
     /// Split an `owner/repo` spec into its parts, erroring cleanly on a bad shape.
-    fn parse_repo_spec(spec: &str) -> Result<(String, String), ImportError> {
+    pub(crate) fn parse_repo_spec(spec: &str) -> Result<(String, String), ImportError> {
         let mut parts = spec.trim().splitn(2, '/');
         match (parts.next(), parts.next()) {
             (Some(owner), Some(repo)) if !owner.is_empty() && !repo.is_empty() => {
@@ -522,7 +532,12 @@ mod net {
     /// Build an authenticated octocrab client from a resolved token
     /// (`GITHUB_TOKEN` or the `gh` CLI), erroring cleanly when neither is
     /// available (a network call needs it).
-    fn build_client() -> Result<Octocrab, ImportError> {
+    ///
+    /// The API base URI is overridable via `CLOVE_GITHUB_API_URL` (falling back
+    /// to `GITHUB_API_URL`). This points clove at GitHub Enterprise, and — the
+    /// reason it exists — lets the integration test-suite aim every REST call at
+    /// a local deterministic mock server instead of github.com.
+    pub(crate) fn build_client() -> Result<Octocrab, ImportError> {
         install_crypto_provider();
         let token = resolve_github_token().ok_or_else(|| ImportError::Source {
             path: camino::Utf8PathBuf::from("<github>"),
@@ -530,19 +545,39 @@ mod net {
                       (`gh auth login`); a token is required to reach the GitHub API"
                 .to_owned(),
         })?;
-        Octocrab::builder()
-            .personal_token(token)
-            .build()
-            .map_err(|err| ImportError::Source {
-                path: camino::Utf8PathBuf::from("<github>"),
-                message: format!("failed to build GitHub client: {err}"),
-            })
+        let mut builder = Octocrab::builder().personal_token(token);
+        if let Some(base) = api_base_override() {
+            builder = builder
+                .base_uri(base.clone())
+                .map_err(|err| ImportError::Source {
+                    path: camino::Utf8PathBuf::from("<github>"),
+                    message: format!("invalid GitHub API base `{base}`: {err}"),
+                })?;
+        }
+        builder.build().map_err(|err| ImportError::Source {
+            path: camino::Utf8PathBuf::from("<github>"),
+            message: format!("failed to build GitHub client: {err}"),
+        })
+    }
+
+    /// The API base-URI override, if any (`CLOVE_GITHUB_API_URL`, then
+    /// `GITHUB_API_URL`). Empty values are ignored.
+    fn api_base_override() -> Option<String> {
+        for key in ["CLOVE_GITHUB_API_URL", "GITHUB_API_URL"] {
+            if let Ok(val) = std::env::var(key) {
+                let val = val.trim();
+                if !val.is_empty() {
+                    return Some(val.to_owned());
+                }
+            }
+        }
+        None
     }
 
     /// Convert an octocrab `Issue` into our pure [`GitHubIssue`] via a serde_json
     /// round-trip (the octocrab model is `#[non_exhaustive]`, so we cannot build
     /// it directly — but it is `Serialize`).
-    fn to_intermediate(
+    pub(crate) fn to_intermediate(
         issue: &octocrab::models::issues::Issue,
     ) -> Result<GitHubIssue, ImportError> {
         let value = serde_json::to_value(issue).map_err(|err| ImportError::Record {
@@ -554,7 +589,7 @@ mod net {
     }
 
     /// Fetch every issue (all states, paginated) from `owner/repo`.
-    async fn fetch_all(
+    pub(crate) async fn fetch_all(
         crab: &Octocrab,
         owner: &str,
         repo: &str,
@@ -571,7 +606,7 @@ mod net {
         all.iter().map(to_intermediate).collect()
     }
 
-    fn net_err(err: octocrab::Error) -> ImportError {
+    pub(crate) fn net_err(err: octocrab::Error) -> ImportError {
         ImportError::Source {
             path: camino::Utf8PathBuf::from("<github>"),
             message: format!("github api error: {err}"),
@@ -660,6 +695,7 @@ mod net {
     pub fn export_github(
         spec: &str,
         objs: &[serde_json::Map<String, serde_json::Value>],
+        store: &ItemStore,
         dry_run: bool,
     ) -> Result<(ExportPlan, Option<ExportReport>), ImportError> {
         // Validate the spec shape even for dry runs (cheap, offline).
@@ -677,17 +713,23 @@ mod net {
         // octocrab/tower Buffer worker is spawned at build time and needs a reactor.
         let report = rt.block_on(async {
             let crab = build_client()?;
-            push_all(&crab, &owner, &repo, objs).await
+            push_all(&crab, &owner, &repo, objs, store).await
         })?;
         Ok((plan, Some(report)))
     }
 
     /// Create/update every item on GitHub, returning the affected issue numbers.
+    ///
+    /// A freshly *created* issue's number is written back onto the local item as
+    /// `external_ref = "gh-<number>"`, so a subsequent export (or sync) UPDATES
+    /// that issue instead of creating a duplicate — the idempotency the one-way
+    /// export previously lacked.
     async fn push_all(
         crab: &Octocrab,
         owner: &str,
         repo: &str,
         objs: &[serde_json::Map<String, serde_json::Value>],
+        store: &ItemStore,
     ) -> Result<ExportReport, ImportError> {
         let handler = crab.issues(owner, repo);
         let mut report = ExportReport::default();
@@ -725,11 +767,34 @@ mod net {
                         create = create.assignees(vec![assignee.clone()]);
                     }
                     let created = create.send().await.map_err(net_err)?;
+                    // A created issue is OPEN; if the local item is closed, close it.
+                    if item.closed {
+                        handler
+                            .update(created.number)
+                            .state(octocrab::models::IssueState::Closed)
+                            .send()
+                            .await
+                            .map_err(net_err)?;
+                    }
+                    write_back_ref(store, &item.clove_id, created.number)?;
                     report.created.push(created.number);
                 }
             }
         }
         Ok(report)
+    }
+
+    /// Stamp `source_system = github` + `external_ref = gh-<number>` onto the
+    /// local item and persist it through the store's atomic write path.
+    fn write_back_ref(store: &ItemStore, clove_id: &str, number: u64) -> Result<(), ImportError> {
+        let id = clove_types::CloveId::new(clove_id).map_err(|e| ImportError::Record {
+            message: format!("invalid local id `{clove_id}`: {e}"),
+        })?;
+        let mut item = store.get(&id)?;
+        item.frontmatter.source_system = Some("github".to_owned());
+        item.frontmatter.external_ref = Some(external_ref_for(number));
+        store.update(&item, Utc::now())?;
+        Ok(())
     }
 }
 
