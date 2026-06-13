@@ -141,6 +141,32 @@ impl MockGitHub {
             .push(make_comment(id, author, body, &created));
     }
 
+    /// Set an issue's assignees to `logins` (simulating GitHub-side edits).
+    fn set_assignees(&self, number: u64, logins: &[&str]) {
+        self.edit(number, |i| {
+            i["assignees"] = Value::Array(logins.iter().map(|l| make_user(l)).collect());
+            i["assignee"] = logins.first().map(|l| make_user(l)).unwrap_or(Value::Null);
+        });
+    }
+
+    /// The assignee logins currently on an issue.
+    fn assignee_logins(&self, number: u64) -> Vec<String> {
+        self.issue(number)
+            .and_then(|i| i["assignees"].as_array().cloned())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|u| u["login"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The current `state_reason` of an issue, if any.
+    fn state_reason(&self, number: u64) -> Option<String> {
+        self.issue(number)
+            .and_then(|i| i["state_reason"].as_str().map(str::to_owned))
+    }
+
     /// The comment bodies currently on an issue.
     fn comment_bodies(&self, number: u64) -> Vec<String> {
         let s = self.state.lock().unwrap();
@@ -286,11 +312,20 @@ fn route(
             }
             if let Some(st) = body.get("state").and_then(Value::as_str) {
                 issue["state"] = json!(st);
-                issue["closed_at"] = if st == "closed" {
-                    json!(updated)
+                if st == "closed" {
+                    issue["closed_at"] = json!(updated);
+                    // GitHub stamps a reason on close: the caller's, else
+                    // `completed` (so a bare close resets a prior `not_planned`).
+                    issue["state_reason"] = match body.get("state_reason").and_then(Value::as_str) {
+                        Some(reason) => json!(reason),
+                        None => json!("completed"),
+                    };
                 } else {
-                    Value::Null
-                };
+                    issue["closed_at"] = Value::Null;
+                    issue["state_reason"] = Value::Null;
+                }
+            } else if let Some(reason) = body.get("state_reason").and_then(Value::as_str) {
+                issue["state_reason"] = json!(reason);
             }
             if let Some(labels) = body.get("labels") {
                 issue["labels"] = Value::Array(
@@ -760,4 +795,66 @@ fn no_comments_flag_skips_comment_sync() {
     assert_eq!(v["data"]["comments_pulled"], 0, "{v}");
     let id = only_item_id(dir.path(), mock.addr);
     assert!(local_comment_bodies(dir.path(), mock.addr, &id).is_empty());
+}
+
+#[test]
+fn push_preserves_human_added_assignee() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    clove(dir.path(), mock.addr)
+        .args(["new", "Task", "--type", "bug", "--assignee", "alice"])
+        .assert()
+        .success();
+    sync(dir.path(), mock.addr, &[]); // push-create gh-1 assigned [alice]
+    let id = only_item_id(dir.path(), mock.addr);
+
+    // A human adds a second assignee on GitHub; clove syncs (pull) and keeps its
+    // single primary (alice).
+    mock.set_assignees(1, &["alice", "bob"]);
+    sync(dir.path(), mock.addr, &[]);
+
+    // A local-only edit triggers a push. clove must keep bob, not reset to [alice].
+    std::thread::sleep(Duration::from_millis(1100));
+    clove(dir.path(), mock.addr)
+        .args(["set", &id, "title=Renamed"])
+        .assert()
+        .success();
+    sync(dir.path(), mock.addr, &[]);
+
+    let logins = mock.assignee_logins(1);
+    assert!(logins.contains(&"alice".to_owned()), "{logins:?}");
+    assert!(
+        logins.contains(&"bob".to_owned()),
+        "human-added assignee must survive a clove push: {logins:?}"
+    );
+}
+
+#[test]
+fn push_preserves_not_planned_close_reason() {
+    let mock = MockGitHub::start();
+    mock.seed(5, "Bug", "Body.", "open");
+    // Closed on GitHub as not-planned (a human's deliberate "won't do").
+    mock.edit(5, |i| {
+        i["state"] = json!("closed");
+        i["closed_at"] = json!("2030-01-01T00:00:00Z");
+        i["state_reason"] = json!("not_planned");
+    });
+    let dir = init_repo();
+    sync(dir.path(), mock.addr, &[]); // pull-create the closed item
+    let id = only_item_id(dir.path(), mock.addr);
+
+    // A local-only edit (still closed) triggers a push. The push must preserve the
+    // not_planned reason rather than resetting it to completed.
+    std::thread::sleep(Duration::from_millis(1100));
+    clove(dir.path(), mock.addr)
+        .args(["set", &id, "title=Won't fix, renamed"])
+        .assert()
+        .success();
+    sync(dir.path(), mock.addr, &[]);
+
+    assert_eq!(
+        mock.state_reason(5).as_deref(),
+        Some("not_planned"),
+        "clove push must not reset a human's not_planned close reason"
+    );
 }

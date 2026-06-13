@@ -97,8 +97,28 @@ pub fn sync_github(
         Ok::<SyncReport, ImportError>(report)
     })?;
 
+    // Record each linked item's post-apply assignee, so the next push can tell
+    // clove's assignee apart from human-added extras. Done in one pass (not per
+    // action) and after apply, so pushes above still see the *previous* value.
+    record_synced_assignees(store, &mut state)?;
+
     state.save(&state_path)?;
     Ok((summary, Some(report)))
+}
+
+/// Stamp every linked item's current assignee onto its sync entry.
+fn record_synced_assignees(store: &ItemStore, state: &mut SyncState) -> Result<(), ImportError> {
+    let (frontmatters, _errors) = store.scan_frontmatter()?;
+    for fm in frontmatters {
+        if let Some(external_ref) = &fm.external_ref {
+            if external_ref.starts_with("gh-") {
+                if let Some(entry) = state.entries.get_mut(external_ref) {
+                    entry.synced_assignee = fm.assignee.clone();
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Build the local side of the diff: one object per item, its serialized
@@ -288,11 +308,34 @@ async fn push_update(
     state: &mut SyncState,
 ) -> Result<(), ImportError> {
     let item = &push.item;
+    let external_ref = crate::github::external_ref_for(push.number);
     let handler = crab.issues(owner, repo);
     let want_closed = item.closed;
-    // Bind owned values in this (longer-lived) scope so the per-attempt builder
-    // can borrow them without the returned future outliving its referent.
-    let assignees: Vec<String> = item.assignee.iter().cloned().collect();
+
+    // Preserve extra GitHub assignees a human added: keep every current assignee
+    // except the one clove previously owned (recorded `synced_assignee`), and put
+    // clove's current assignee first. This replaces clove's primary on
+    // reassignment without dropping the others.
+    let prev_owned = state
+        .entries
+        .get(&external_ref)
+        .and_then(|e| e.synced_assignee.clone());
+    let mut assignees: Vec<String> = Vec::new();
+    if let Some(primary) = &item.assignee {
+        assignees.push(primary.clone());
+    }
+    for login in &push.gh_assignees {
+        if Some(login.as_str()) != prev_owned.as_deref() && !assignees.contains(login) {
+            assignees.push(login.clone());
+        }
+    }
+
+    // Preserve a human's close reason (`not_planned`) rather than resetting it to
+    // `completed` when clove pushes a close.
+    let preserved_reason = want_closed
+        .then(|| push.gh_state_reason.as_deref().and_then(parse_state_reason))
+        .flatten();
+
     let updated: Issue = with_retry(|| {
         let state_param = if want_closed {
             octocrab::models::IssueState::Closed
@@ -310,13 +353,27 @@ async fn push_update(
         if !assignees.is_empty() {
             builder = builder.assignees(&assignees);
         }
+        if let Some(reason) = &preserved_reason {
+            builder = builder.state_reason(reason.clone());
+        }
         builder.send()
     })
     .await?;
 
-    let external_ref = crate::github::external_ref_for(push.number);
     state.record(&external_ref, Some(updated.updated_at), push.local_updated);
     Ok(())
+}
+
+/// Map a GitHub `state_reason` string onto octocrab's enum (`None` for the
+/// open-issue `reopened`, which a close never sets, or an unknown value).
+fn parse_state_reason(raw: &str) -> Option<octocrab::models::issues::IssueStateReason> {
+    use octocrab::models::issues::IssueStateReason;
+    match raw.trim().to_lowercase().as_str() {
+        "completed" => Some(IssueStateReason::Completed),
+        "not_planned" | "not planned" => Some(IssueStateReason::NotPlanned),
+        "duplicate" => Some(IssueStateReason::Duplicate),
+        _ => None,
+    }
 }
 
 /// Reconcile comment threads for every issue linked to a local item, after the

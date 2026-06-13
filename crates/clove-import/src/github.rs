@@ -191,6 +191,11 @@ pub struct GitHubIssue {
     /// treated as "unknown / always re-examine".
     #[serde(default)]
     pub updated_at: Option<DateTime<Utc>>,
+    /// `completed` / `not_planned` / `reopened` / `duplicate` on a closed issue.
+    /// clove has no equivalent field, but the sync preserves it on push so a
+    /// human's `not_planned` is not reset to `completed` when clove pushes a close.
+    #[serde(default)]
+    pub state_reason: Option<String>,
     /// Present on real issues; used to skip PRs (which the issues API also returns).
     #[serde(default)]
     pub pull_request: Option<serde_json::Value>,

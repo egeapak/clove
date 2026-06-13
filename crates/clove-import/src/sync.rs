@@ -103,6 +103,11 @@ pub struct SyncEntry {
     /// hashes of pulled-in comments, so they are never pushed back).
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
     pub local_comment_hashes: HashSet<u64>,
+    /// The local item's assignee at the last sync. Lets a push distinguish the
+    /// assignee clove "owns" from extra GitHub assignees a human added, so the
+    /// push can replace the former without clobbering the latter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synced_assignee: Option<String>,
 }
 
 impl SyncEntry {
@@ -113,6 +118,7 @@ impl SyncEntry {
             local_updated,
             gh_comment_ids: HashSet::new(),
             local_comment_hashes: HashSet::new(),
+            synced_assignee: None,
         }
     }
 }
@@ -257,6 +263,11 @@ pub struct PushUpdate {
     pub item: ExportItem,
     /// The local item's `updated`, recorded as the sync fingerprint after push.
     pub local_updated: DateTime<Utc>,
+    /// The issue's current GitHub assignee logins (so the push can preserve the
+    /// extras a human added rather than reset them to clove's single assignee).
+    pub gh_assignees: Vec<String>,
+    /// The issue's current `state_reason` (preserved when clove pushes a close).
+    pub gh_state_reason: Option<String>,
 }
 
 /// An issue found already in sync — no action, but its fingerprint is (re)recorded
@@ -660,7 +671,7 @@ fn decide_linked(
             local_updated,
         }),
         (true, false) => push_pull_update(plan, clove_id, staged)?,
-        (false, true) => push_push_update(plan, ext, clove_id, item, local_updated),
+        (false, true) => push_push_update(plan, ext, clove_id, item, local_updated, issue),
         (true, true) => resolve_conflict(
             plan,
             ext,
@@ -689,13 +700,15 @@ fn push_pull_update(
     Ok(())
 }
 
-/// Queue a push-update (local → remote).
+/// Queue a push-update (local → remote), capturing the issue's current GitHub
+/// assignees and `state_reason` so the apply can preserve them.
 fn push_push_update(
     plan: &mut SyncPlan,
     ext: &str,
     clove_id: &str,
     item: ExportItem,
     local_updated: DateTime<Utc>,
+    issue: &GitHubIssue,
 ) {
     // The number is parsed from the external_ref; it is guaranteed `Some` here
     // because the ref matched a fetched issue keyed by `gh-<number>`.
@@ -705,6 +718,13 @@ fn push_push_update(
             clove_id: clove_id.to_owned(),
             item,
             local_updated,
+            gh_assignees: issue
+                .assignees
+                .iter()
+                .map(|u| u.login.clone())
+                .filter(|l| !l.trim().is_empty())
+                .collect(),
+            gh_state_reason: issue.state_reason.clone(),
         });
     }
 }
@@ -758,7 +778,7 @@ fn resolve_conflict(
     if remote_wins {
         push_pull_update(plan, clove_id, staged)?;
     } else {
-        push_push_update(plan, ext, clove_id, item, local_updated);
+        push_push_update(plan, ext, clove_id, item, local_updated, issue);
     }
     Ok(())
 }
