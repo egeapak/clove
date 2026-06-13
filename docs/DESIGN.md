@@ -1294,6 +1294,11 @@ ids (pull) and stable body hashes (push). `--dry-run` plans without touching
 either side; `--no-comments` skips comment reconciliation. A running daemon can
 run the sync on a timer (`[daemon] github_sync_interval_min` + `github_sync_repo`).
 
+Fields clove's model can't represent are still preserved on push (using the live
+issue + sync state, so no item-schema change): extra GitHub **assignees** a human
+added survive a clove push (clove replaces only the assignee it owns), and a
+human's close **`state_reason`** (`not_planned`) is not reset to `completed`.
+
 ### 11.4 Export
 
 ```
