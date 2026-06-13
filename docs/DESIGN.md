@@ -1255,6 +1255,10 @@ missing comment data.
 
 **Idempotent re-import:** skip items where `external_ref` matches an existing item.
 
+**Export write-back:** a *created* issue's number is written back onto the local
+item (`external_ref = "gh-<number>"`), so a second export/sync UPDATES it rather
+than creating a duplicate.
+
 **`--dry-run`** emits:
 ```json
 {
@@ -1267,12 +1271,36 @@ missing comment data.
 }
 ```
 
+**Two-way sync (`clove sync github <owner/repo>`):** one reconciled pass that
+pulls remote changes *and* pushes local changes, plus bidirectional issue-comment
+sync. A per-repo last-sync fingerprint store (`external_ref → {gh_updated_at,
+local_updated}`, persisted under `.clove/sync/`, git-ignored) makes "changed since
+last sync" decidable in both directions:
+
+| remote changed | local changed | action |
+|---|---|---|
+| no  | no  | in sync (skip) |
+| yes | no  | pull (update local) |
+| no  | yes | push (update remote) |
+| yes | yes | **conflict** → resolved by `--prefer` policy |
+
+The conflict policy defaults to `newer` (most recently edited side wins, compared
+via GitHub `updated_at` vs the item's `updated`); `local`/`remote` force a side,
+`manual` reports without applying. Every conflict is reported regardless. With no
+prior sync for an already-linked pair, the planner falls back to a content
+comparison so a first sync never silently clobbers a side. Pulls/updates go
+through the unified write path (`apply_edit`); comment dedup uses GitHub comment
+ids (pull) and stable body hashes (push). `--dry-run` plans without touching
+either side; `--no-comments` skips comment reconciliation. A running daemon can
+run the sync on a timer (`[daemon] github_sync_interval_min` + `github_sync_repo`).
+
 ### 11.4 Export
 
 ```
 clove export json         → single JSON envelope with all items
 clove export jsonl        → one item per line (NDJSON)
-clove export github       → push to GitHub Issues via REST API
+clove export github       → push to GitHub Issues via REST API (one-way)
+clove sync   github       → two-way reconcile (pull + push + comments, §11.3)
 ```
 
 JSONL export format is isomorphic with Beads' `.beads/issues.jsonl` format, enabling

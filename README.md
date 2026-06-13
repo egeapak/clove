@@ -70,8 +70,19 @@ same JSON envelope and exit-code semantics.
 ```sh
 clove import tk|beads|github <src>      # import from other trackers
 clove export json|jsonl|github          # export
+clove sync github <owner/repo>          # two-way GitHub sync (pull + push, one pass)
 clove init --merge-driver               # install the 3-way git merge driver for item files
 ```
+
+**Two-way GitHub sync.** `clove sync github <owner/repo>` reconciles both
+directions in a single pass: it pulls remote issue changes *and* pushes local
+ones, and when the same issue changed on both sides since the last sync it
+resolves the conflict by policy (`--prefer newer|local|remote|manual`; default
+*newest edit wins*, every conflict reported). Issue comments sync bidirectionally
+too (`--no-comments` to skip). `--dry-run` plans without touching either side. A
+per-repo last-sync clock lives under `.clove/sync/` (git-ignored), and a running
+daemon can run the sync on a timer (`[daemon] github_sync_interval_min` +
+`github_sync_repo`). Auth via `GITHUB_TOKEN` or the `gh` CLI.
 
 ## Layout
 

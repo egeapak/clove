@@ -174,6 +174,7 @@ fn github_without_feature_returns_clean_fallback_error() {
     for args in [
         ["export", "github", "owner/repo"].as_slice(),
         ["import", "github", "owner/repo"].as_slice(),
+        ["sync", "github", "owner/repo"].as_slice(),
     ] {
         let out = clove(dir.path())
             .args(args)

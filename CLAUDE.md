@@ -27,6 +27,29 @@ cycle-validated ops. `ops::edit` / `apply_assignments` are thin shims over
 structured web/MCP/TUI surfaces never diverge. When adding an editable field,
 add it to `EditRequest` once — don't re-implement it per surface.
 
+## GitHub sync (`clove-import`)
+
+Three GitHub surfaces share one mapping core: `import github` (pull-only),
+`export github` (push-only), and `sync github` (two-way). The split mirrors the
+rest of the crate — **pure, always-compiled** logic vs. the **`github`-feature**
+network layer:
+
+- `clove_import::github` — the field mapping + `clove-meta` codec (pure) and the
+  octocrab import/export network path (gated).
+- `clove_import::sync` — the **pure** reconciliation: `SyncState` (per-repo
+  last-sync fingerprints under `.clove/sync/`, git-ignored), `plan_sync` (the
+  change-detection matrix + `ConflictPolicy`), and `plan_comments` (id/body-hash
+  comment dedup). All offline-unit-tested — no network, no token.
+- `clove_import::sync_net` (`github` feature) — the apply: octocrab create/update,
+  local writes through the unified write path (`apply_edit`), `external_ref`
+  write-back, comment reconciliation, and state persistence, with bounded retry.
+
+When adding a synced field, add it to the mapping in one place (`map_issue` /
+`build_export_item`) and to `content_equal`/the `EditRequest` in `sync_net`.
+Network tests use the deterministic in-process mock server in
+`crates/clove/tests/sync_github.rs` (octocrab base URI overridden via
+`CLOVE_GITHUB_API_URL`) — extend it rather than reaching for the real API.
+
 ## Web UI (`clove-web`)
 
 The SvelteKit SPA lives in `crates/clove-web/web/` and is built by
