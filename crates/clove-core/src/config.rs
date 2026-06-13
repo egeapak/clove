@@ -93,6 +93,14 @@ pub struct DaemonConfig {
     pub idle_shutdown_min: u64,
     #[serde(default = "default_stats_snapshot_min")]
     pub stats_snapshot_min: u64,
+    /// Minutes between automatic two-way GitHub syncs (`0` = disabled, the
+    /// default). Requires `github_sync_repo` to be set.
+    #[serde(default)]
+    pub github_sync_interval_min: u64,
+    /// The `owner/repo` the daemon periodically syncs with (when
+    /// `github_sync_interval_min > 0`).
+    #[serde(default)]
+    pub github_sync_repo: Option<String>,
 }
 
 impl Default for DaemonConfig {
@@ -102,6 +110,8 @@ impl Default for DaemonConfig {
             watch_debounce_ms: default_debounce_ms(),
             idle_shutdown_min: default_idle_shutdown_min(),
             stats_snapshot_min: default_stats_snapshot_min(),
+            github_sync_interval_min: 0,
+            github_sync_repo: None,
         }
     }
 }

@@ -24,7 +24,6 @@ fn sync_github(ctx: &Ctx, format: OutputFormat, args: SyncArgs) -> Result<(), Cl
     use clove_import::ConflictPolicy;
     use serde_json::json;
 
-    use crate::cmd::export::shaped_objects;
     use crate::output::print_json_success;
 
     let policy = match &args.prefer {
@@ -35,10 +34,8 @@ fn sync_github(ctx: &Ctx, format: OutputFormat, args: SyncArgs) -> Result<(), Cl
         None => ConflictPolicy::default(),
     };
 
-    let objs = shaped_objects(ctx)?;
     let (summary, report) = clove_import::sync_net::sync_github(
         &args.target,
-        &objs,
         &ctx.store,
         &ctx.config.id_prefix,
         policy,

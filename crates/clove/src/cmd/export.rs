@@ -27,7 +27,7 @@ use crate::item_json::export_object;
 /// (frontmatter + body + computed `ready`/`blocked_by`), in the canonical
 /// `(priority, topological rank, id)` order. Shared by `export` and `sync` so the
 /// two surfaces push byte-identical item payloads to GitHub.
-pub fn shaped_objects(ctx: &Ctx) -> Result<Vec<serde_json::Map<String, Value>>, CloveError> {
+fn shaped_objects(ctx: &Ctx) -> Result<Vec<serde_json::Map<String, Value>>, CloveError> {
     // Files are the source of truth: load every item with its body.
     let (items, _errors) = ctx.store.scan()?;
 

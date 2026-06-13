@@ -753,6 +753,7 @@ dependencies = [
  "chrono",
  "clap",
  "clove-core",
+ "clove-import",
  "clove-index",
  "clove-ipc",
  "clove-types",

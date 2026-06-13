@@ -50,7 +50,6 @@ const SOURCE_GITHUB: &str = "github";
 /// persisted after a successful apply.
 pub fn sync_github(
     spec: &str,
-    local: &[Map<String, Value>],
     store: &ItemStore,
     prefix: &str,
     policy: ConflictPolicy,
@@ -58,6 +57,11 @@ pub fn sync_github(
     dry_run: bool,
 ) -> Result<(SyncSummary, Option<SyncReport>), ImportError> {
     let (owner, repo) = parse_repo_spec(spec)?;
+
+    // The local side of the diff: each item's frontmatter plus its body, which is
+    // all the planner reads. Built here (not by the caller) so the CLI and the
+    // daemon share one path.
+    let local = local_objects(store)?;
 
     let state_path = SyncState::path_for(store.repo_root(), spec);
     let mut state = SyncState::load(&state_path, spec);
@@ -73,7 +77,7 @@ pub fn sync_github(
         fetch_all(&crab, &owner, &repo).await
     })?;
 
-    let plan: SyncPlan = plan_sync(&issues, local, &state, policy)
+    let plan: SyncPlan = plan_sync(&issues, &local, &state, policy)
         .map_err(|message| ImportError::Record { message })?;
     let summary = plan.summary();
 
@@ -95,6 +99,21 @@ pub fn sync_github(
 
     state.save(&state_path)?;
     Ok((summary, Some(report)))
+}
+
+/// Build the local side of the diff: one object per item, its serialized
+/// frontmatter plus `body` (the exact fields [`plan_sync`] / `build_export_item`
+/// read). Parse failures are dropped, matching the export path.
+fn local_objects(store: &ItemStore) -> Result<Vec<Map<String, Value>>, ImportError> {
+    let (items, _errors) = store.scan()?;
+    Ok(items
+        .iter()
+        .map(|item| {
+            let mut obj = clove_core::frontmatter_object(&item.frontmatter);
+            obj.insert("body".to_owned(), Value::String(item.body.clone()));
+            obj
+        })
+        .collect())
 }
 
 /// Apply every action in `plan`, mutating both GitHub and the local store and
