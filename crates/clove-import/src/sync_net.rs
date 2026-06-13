@@ -41,13 +41,11 @@ use crate::sync::{
 /// The marker `source_system` value stamped on synced items.
 const SOURCE_GITHUB: &str = "github";
 
-/// Run a full two-way sync of local items against `spec` (`owner/repo`).
+/// Run a full two-way sync of `store` against `spec` (`owner/repo`).
 ///
-/// `local` is the shaped `export_object` item list (built by the caller exactly
-/// as `export github` does). Returns the plan summary always, and the apply
-/// report when not a dry run. The sync state under
-/// `.clove/sync/github/<owner>__<repo>.json` is loaded before planning and
-/// persisted after a successful apply.
+/// Returns the plan summary always, and the apply report when not a dry run. The
+/// sync state under `.clove/sync/github/<owner>__<repo>.json` is loaded before
+/// planning and persisted after a successful apply.
 pub fn sync_github(
     spec: &str,
     store: &ItemStore,
@@ -67,7 +65,7 @@ pub fn sync_github(
     let mut state = SyncState::load(&state_path, spec);
 
     // Fetch remote issues. Even a dry run needs the current remote state to plan
-    // a meaningful diff (mirrors `import github --dry-run`).
+    // a meaningful diff.
     let rt = tokio::runtime::Runtime::new().map_err(|err| ImportError::Source {
         path: camino::Utf8PathBuf::from("<github>"),
         message: format!("failed to start async runtime: {err}"),

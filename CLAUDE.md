@@ -29,13 +29,14 @@ add it to `EditRequest` once — don't re-implement it per surface.
 
 ## GitHub sync (`clove-import`)
 
-Three GitHub surfaces share one mapping core: `import github` (pull-only),
-`export github` (push-only), and `sync github` (two-way). The split mirrors the
-rest of the crate — **pure, always-compiled** logic vs. the **`github`-feature**
-network layer:
+`clove sync github <owner/repo>` is the **single GitHub path** (two-way; the old
+one-way `import github` / `export github` were removed). `import`/`export` remain
+for the file formats only (tk/beads, json/jsonl). The crate splits — like the
+rest — into **pure, always-compiled** logic vs. the **`github`-feature** network
+layer:
 
-- `clove_import::github` — the field mapping + `clove-meta` codec (pure) and the
-  octocrab import/export network path (gated).
+- `clove_import::github` — the `GitHubIssue ↔ clove` field mapping + `clove-meta`
+  codec (pure) and the octocrab client/fetch helpers (`net`, gated).
 - `clove_import::sync` — the **pure** reconciliation: `SyncState` (per-repo
   last-sync fingerprints under `.clove/sync/`, git-ignored), `plan_sync` (the
   change-detection matrix + `ConflictPolicy`), and `plan_comments` (id/body-hash

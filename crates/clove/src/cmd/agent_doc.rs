@@ -96,13 +96,14 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
 \n\
 - `clove import tk <.tickets-dir> [--dry-run]` — import tk tickets.\n\
 - `clove import beads <issues.jsonl> [--dry-run]` — import a Beads JSONL export.\n\
-- `clove import github <owner/repo> [--dry-run]` — import GitHub issues (needs\n\
-  the `github` build feature + a token via `GITHUB_TOKEN` or `gh auth token`).\n\
 - `clove export json` / `clove export jsonl [--out FILE]` — dump all items as a\n\
   JSON envelope (`data` array) or one item per line (NDJSON, Beads-isomorphic).\n\
-- `clove export github <owner/repo>` — push items to a GitHub repo (token +\n\
-  `github` feature).\n\
-- Imports are idempotent on `external_ref`: re-running skips already-imported\n\
+- `clove sync github <owner/repo> [--dry-run] [--prefer P] [--no-comments]` —\n\
+  two-way GitHub sync (pull + push + comments in one pass; conflict policy\n\
+  `newer|local|remote|manual`). Needs the `github` build feature + a token via\n\
+  `GITHUB_TOKEN` or `gh auth token`. The single GitHub path (replaces the old\n\
+  one-way `import github` / `export github`).\n\
+- File imports are idempotent on `external_ref`: re-running skips already-imported\n\
   items. `--dry-run` reports `{{ would_create, would_skip, conflicts }}` and\n\
   writes nothing.\n\
 - `clove init --merge-driver` installs a git merge driver for\n\

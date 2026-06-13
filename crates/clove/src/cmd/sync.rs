@@ -1,10 +1,9 @@
 //! `clove sync github <owner/repo> [--dry-run] [--prefer POLICY]` (T-M06).
 //!
-//! The two-way counterpart to `import github` (pull-only) and `export github`
-//! (push-only): one reconciled pass that pulls remote changes *and* pushes local
-//! changes, detecting issues changed on both sides since the last sync and
-//! resolving them by a [`clove_import::ConflictPolicy`] (default: newest wins,
-//! every conflict reported). `--dry-run` plans without touching either side.
+//! The single GitHub path: one reconciled pass that pulls remote changes *and*
+//! pushes local changes, detecting issues changed on both sides since the last
+//! sync and resolving them by a [`clove_import::ConflictPolicy`] (default: newest
+//! wins, every conflict reported). `--dry-run` plans without touching either side.
 //!
 //! Like the other GitHub surfaces this is built behind the `github` feature;
 //! without it the command is recognized but returns a clean fallback error.

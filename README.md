@@ -68,8 +68,8 @@ same JSON envelope and exit-code semantics.
 ### Interop
 
 ```sh
-clove import tk|beads|github <src>      # import from other trackers
-clove export json|jsonl|github          # export
+clove import tk|beads <src>             # import from a file-based tracker
+clove export json|jsonl                 # export to a file / stdout
 clove sync github <owner/repo>          # two-way GitHub sync (pull + push, one pass)
 clove init --merge-driver               # install the 3-way git merge driver for item files
 ```

@@ -1,12 +1,11 @@
-//! `clove export <json|jsonl|github> [--out FILE]` (T-M03/T-M04).
+//! `clove export <json|jsonl> [--out FILE]` (T-M04).
 //!
-//! Phase 1: the `json` and `jsonl` writers. The source of truth is the file
-//! store (export always reads files, never the index), loading every item with
-//! its full §7.4 shape (frontmatter + body + computed `ready`/`blocked_by`),
-//! sorted by `(priority, topological_rank, id)` to match list ordering. Output
-//! goes to stdout by default, or atomically to `--out FILE`. The GitHub arm
-//! (built with the `github` feature) pushes the shaped items to an `owner/repo`
-//! via octocrab; without that feature it returns a clean fallback error.
+//! The `json` and `jsonl` writers. The source of truth is the file store (export
+//! always reads files, never the index), loading every item with its full §7.4
+//! shape (frontmatter + body + computed `ready`/`blocked_by`), sorted by
+//! `(priority, topological_rank, id)` to match list ordering. Output goes to
+//! stdout by default, or atomically to `--out FILE`. (GitHub is no longer an
+//! export sink — `clove sync github` is the single GitHub path.)
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
@@ -25,8 +24,7 @@ use crate::item_json::export_object;
 
 /// Shape every item in the store into the canonical §7.4 export object
 /// (frontmatter + body + computed `ready`/`blocked_by`), in the canonical
-/// `(priority, topological rank, id)` order. Shared by `export` and `sync` so the
-/// two surfaces push byte-identical item payloads to GitHub.
+/// `(priority, topological rank, id)` order.
 fn shaped_objects(ctx: &Ctx) -> Result<Vec<serde_json::Map<String, Value>>, CloveError> {
     // Files are the source of truth: load every item with its body.
     let (items, _errors) = ctx.store.scan()?;
@@ -55,46 +53,13 @@ fn shaped_objects(ctx: &Ctx) -> Result<Vec<serde_json::Map<String, Value>>, Clov
 }
 
 pub fn run(ctx: &Ctx, format: OutputFormat, args: ExportArgs) -> Result<(), CloveError> {
-    // Cross-flag validation up front (exit 4) so a misused flag is a clean
-    // validation error rather than being silently ignored.
-    // `--out` is a file sink; `github` is a network sink and ignores it.
-    if matches!(args.export_format, ExportFormat::Github) && args.out.is_some() {
-        return Err(CloveError::InvalidField {
-            field: "out".to_owned(),
-            reason: "`--out` is not valid for `export github` (it pushes to GitHub, not a file)"
-                .to_owned(),
-        });
-    }
-    // `target` (owner/repo) is only meaningful for github; reject it on json/jsonl.
-    if matches!(args.export_format, ExportFormat::Json | ExportFormat::Jsonl)
-        && args.target.is_some()
-    {
-        return Err(CloveError::InvalidField {
-            field: "target".to_owned(),
-            reason: "an `owner/repo` target is only valid for `export github`".to_owned(),
-        });
-    }
-
     // Files are the source of truth: shape every item (body + computed fields) in
     // the canonical order. Per-file parse failures are dropped (consistent with
     // `ls`/`ready`).
-    let objs = shaped_objects(ctx)?;
-
-    // GitHub is a network sink, not a file/stdout sink: it pushes the shaped items
-    // (create/update) and emits its own plan/report envelope. `--dry-run` is fully
-    // offline (no token needed): it lists what would be pushed from local items.
-    if matches!(args.export_format, ExportFormat::Github) {
-        let target = args
-            .target
-            .clone()
-            .ok_or_else(|| CloveError::InvalidField {
-                field: "target".to_owned(),
-                reason: "export github requires an `owner/repo` target".to_owned(),
-            })?;
-        return export_github(ctx, format, &target, &objs, args.dry_run);
-    }
-
-    let shaped: Vec<Value> = objs.into_iter().map(Value::Object).collect();
+    let shaped: Vec<Value> = shaped_objects(ctx)?
+        .into_iter()
+        .map(Value::Object)
+        .collect();
 
     // Pick the sink: a file (atomic write) when `--out` is set, else stdout.
     match &args.out {
@@ -126,81 +91,6 @@ pub fn run(ctx: &Ctx, format: OutputFormat, args: ExportArgs) -> Result<(), Clov
     Ok(())
 }
 
-/// `clove export github <owner/repo> [--dry-run]`.
-///
-/// GitHub is a network sink: each shaped local item is created (no
-/// `external_ref`) or updated (`external_ref = "gh-<n>"`) via octocrab. The body
-/// gets a `<!-- clove-meta: {id,priority,deps} -->` comment appended. `--dry-run`
-/// is fully offline — it partitions local items into would-create / would-update
-/// without contacting GitHub (no token required). A real push needs `GITHUB_TOKEN`.
-#[cfg(feature = "github")]
-fn export_github(
-    ctx: &Ctx,
-    format: OutputFormat,
-    target: &str,
-    objs: &[serde_json::Map<String, Value>],
-    dry_run: bool,
-) -> Result<(), CloveError> {
-    use crate::output::print_json_success;
-
-    let (plan, report) = clove_import::github::export_github(target, objs, &ctx.store, dry_run)
-        .map_err(export_err)?;
-
-    match (format, report) {
-        (OutputFormat::Json | OutputFormat::Jsonl, Some(report)) => print_json_success(
-            json!({ "created": report.created, "updated": report.updated }),
-            json!({ "warnings": [] }),
-        ),
-        (OutputFormat::Json | OutputFormat::Jsonl, None) => print_json_success(
-            serde_json::to_value(&plan).unwrap_or_else(|_| json!({})),
-            json!({ "warnings": [] }),
-        ),
-        (OutputFormat::Human, Some(report)) => println!(
-            "exported to github: {} created, {} updated",
-            report.created.len(),
-            report.updated.len()
-        ),
-        (OutputFormat::Human, None) => println!(
-            "dry-run: would create {}, would update {}",
-            plan.would_create.len(),
-            plan.would_update.len()
-        ),
-    }
-    Ok(())
-}
-
-/// When built without the `github` feature, `export github` is recognized but
-/// fails with a clean error rather than attempting a push.
-#[cfg(not(feature = "github"))]
-fn export_github(
-    _ctx: &Ctx,
-    _format: OutputFormat,
-    _target: &str,
-    _objs: &[serde_json::Map<String, Value>],
-    _dry_run: bool,
-) -> Result<(), CloveError> {
-    Err(CloveError::NotYetImplemented {
-        feature: "export github (built without github support)".to_owned(),
-    })
-}
-
-/// Map a `clove-import` error onto a `CloveError` for exit-code classification.
-#[cfg(feature = "github")]
-fn export_err(err: clove_import::ImportError) -> CloveError {
-    use clove_import::ImportError;
-    match err {
-        ImportError::Core(core) => core,
-        ImportError::Source { path, message } => CloveError::Io {
-            path,
-            source: std::io::Error::other(message),
-        },
-        other => CloveError::Io {
-            path: Utf8Path::new("<github>").to_owned(),
-            source: std::io::Error::other(other.to_string()),
-        },
-    }
-}
-
 /// Serialize `items` to `writer` in the chosen format. JSON wraps them in the
 /// standard envelope; JSONL emits one bare item object per line.
 fn serialize<W: Write>(
@@ -211,7 +101,6 @@ fn serialize<W: Write>(
     match fmt {
         ExportFormat::Json => export_json(writer, items, json!({ "source": "files" })),
         ExportFormat::Jsonl => export_jsonl(writer, items),
-        ExportFormat::Github => unreachable!("github handled before serialize"),
     }
 }
 

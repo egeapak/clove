@@ -1243,37 +1243,28 @@ with `comment_count > 0` emit a warning to stderr listing the IDs and suggesting
 `bd show --json <id>` to extract comment bodies. The importer must NOT silently succeed with
 missing comment data.
 
-### 11.3 GitHub Import / Export
+### 11.3 GitHub Sync
 
-**Export (`clove export github`):** Uses `octocrab` crate. Maps `title`, body, `assignee`,
-`labels`. Encodes `deps`/`priority`/`id` as `<!-- clove-meta: {...} -->` HTML comment in body.
+GitHub is reached through **one** command — `clove sync github <owner/repo>`, a
+two-way reconcile (the earlier one-way `import github` / `export github` were
+removed in favour of it). It uses the `octocrab` crate behind the `github` feature.
 
-**Import (`clove import github`):** Fetches all issues. Maps `number` → `id` as `gh-<number>`,
-`state` → `status`, `labels[].name` → `labels`, `assignees[0].login` → `assignee`,
-`closed_at` → `closed`. Parses `<!-- clove-meta: ... -->` for `deps`/`priority`. Sets
-`source_system = "github"` and `external_ref = "gh-<number>"`.
+**Field mapping.** `number` ↔ `external_ref = "gh-<number>"` (the durable link;
+clove mints a fresh `CloveId` on pull-create), `title` ↔ `title`, `state`
+(`open`/`closed`) ↔ `status` (`closed` → `Closed`), `labels[].name` ↔ `labels`,
+`assignees[0].login` ↔ `assignee`, `closed_at` → `closed`, and `body` (minus the
+`clove-meta` comment) ↔ body. clove-only fields (`deps`/`priority`/`id`) ride a
+`<!-- clove-meta: {...} -->` HTML comment in the issue body. Pulled items get
+`source_system = "github"`.
 
-**Idempotent re-import:** skip items where `external_ref` matches an existing item.
+**Link write-back:** a *created* issue's number is written back onto the local
+item (`external_ref = "gh-<number>"`), so the next sync UPDATES it rather than
+creating a duplicate.
 
-**Export write-back:** a *created* issue's number is written back onto the local
-item (`external_ref = "gh-<number>"`), so a second export/sync UPDATES it rather
-than creating a duplicate.
-
-**`--dry-run`** emits:
-```json
-{
-  "v": 1, "ok": true,
-  "data": {
-    "would_create": [{ "id": "...", "title": "..." }],
-    "would_skip": [{ "id": "...", "reason": "already_imported" }],
-    "conflicts": [{ "id": "...", "field": "status", "existing": "open", "incoming": "closed" }]
-  }
-}
-```
-
-**Two-way sync (`clove sync github <owner/repo>`):** one reconciled pass that
-pulls remote changes *and* pushes local changes, plus bidirectional issue-comment
-sync. A per-repo last-sync fingerprint store (`external_ref → {gh_updated_at,
+**Two-way reconcile:** one pass that pulls remote changes *and* pushes local
+changes, plus bidirectional issue-comment sync. A per-repo last-sync fingerprint
+store (`external_ref → {gh_updated_at, local_updated}`, persisted under
+`.clove/sync/`, git-ignored) makes "changed since
 local_updated}`, persisted under `.clove/sync/`, git-ignored) makes "changed since
 last sync" decidable in both directions:
 
@@ -1304,8 +1295,7 @@ human's close **`state_reason`** (`not_planned`) is not reset to `completed`.
 ```
 clove export json         → single JSON envelope with all items
 clove export jsonl        → one item per line (NDJSON)
-clove export github       → push to GitHub Issues via REST API (one-way)
-clove sync   github       → two-way reconcile (pull + push + comments, §11.3)
+clove sync   github       → two-way GitHub reconcile (pull + push + comments, §11.3)
 ```
 
 JSONL export format is isomorphic with Beads' `.beads/issues.jsonl` format, enabling

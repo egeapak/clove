@@ -193,15 +193,17 @@ unit tests + 1 `clove-index` `integrity_check` test + 5 `clove` e2e/schema tests
 reconciles pull + push in one pass with a per-repo last-sync fingerprint store
 (`.clove/sync/`, git-ignored), conflict policies (`--prefer
 newer|local|remote|manual`, default newest-wins, all conflicts reported),
-bidirectional issue-comment sync (`--no-comments` to skip), and an opt-in daemon
-loop (`[daemon] github_sync_interval_min` + `github_sync_repo`). Also fixed the
-one-way `export github` idempotency gap (created issue numbers are now written
-back as `external_ref`). Pure reconciliation core in `clove_import::sync`
-(offline-unit-tested), network apply behind the `github` feature in
-`clove_import::sync_net`, and a deterministic in-process **mock GitHub server**
-(`crates/clove/tests/sync_github.rs`) that drives the real `clove sync` binary
-through octocrab over HTTP — 11 end-to-end scenarios (push/pull create+update,
-conflict resolution, idempotency/write-back, comments, dry-run). See DESIGN §11.3.
+bidirectional issue-comment sync (`--no-comments` to skip), multi-assignee +
+`state_reason` preservation, and an opt-in daemon loop (`[daemon]
+github_sync_interval_min` + `github_sync_repo`). **`sync github` is now the single
+GitHub path** — the earlier one-way `import github` / `export github` commands were
+removed (`import`/`export` keep tk/beads and json/jsonl). Pure reconciliation core
+in `clove_import::sync` (offline-unit-tested), network apply behind the `github`
+feature in `clove_import::sync_net`, and a deterministic in-process **mock GitHub
+server** (`crates/clove/tests/sync_github.rs`) that drives the real `clove sync`
+binary through octocrab over HTTP — 13 end-to-end scenarios (push/pull
+create+update, conflict resolution, idempotency/write-back, comments,
+assignee/state_reason preservation, dry-run). See DESIGN §11.3.
 
 **Next step (rest of M4):** the remaining vendor bridges (GitLab/Jira), richer
 history/changelog, and the remaining MCP follow-up — server-push notifications

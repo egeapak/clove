@@ -1,9 +1,8 @@
 //! Two-way GitHub sync: the pure reconciliation engine (T-M06).
 //!
-//! `clove import github` and `clove export github` are one-way mirrors. This
-//! module adds the missing piece — a single reconciled pass (`clove sync github`)
-//! that pulls remote changes *and* pushes local changes, detecting the case where
-//! the same issue changed on both sides since the last sync and resolving it by a
+//! `clove sync github` is the single GitHub path: one reconciled pass that pulls
+//! remote changes *and* pushes local changes, detecting the case where the same
+//! issue changed on both sides since the last sync and resolving it by a
 //! configurable [`ConflictPolicy`] (default: newest edit wins, every conflict
 //! reported).
 //!

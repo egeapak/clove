@@ -91,9 +91,9 @@ pub enum Commands {
     Stats(StatsArgs),
     /// Rebuild the SQLite index from the files.
     Reindex,
-    /// Import items from another tracker (`tk|beads|github`).
+    /// Import items from a file-based tracker (`tk|beads`).
     Import(ImportArgs),
-    /// Export items to `json`, `jsonl`, or GitHub.
+    /// Export items to `json` or `jsonl`.
     Export(ExportArgs),
     /// Two-way sync items with a tracker (`github`).
     Sync(SyncArgs),
@@ -436,10 +436,10 @@ pub struct ImportArgs {
     pub source: ImportSource,
 }
 
-/// The import source kind plus its source path/spec and shared flags.
+/// The import source kind plus its source path and shared flags.
 ///
-/// Each variant carries a `src` (a directory or file path, or a `owner/repo`
-/// spec for GitHub) and a `--dry-run` flag (plan only, no writes).
+/// Each variant carries a `src` (a directory or file path) and a `--dry-run`
+/// flag (plan only, no writes). GitHub is handled by `clove sync github`.
 #[derive(Debug, Subcommand)]
 pub enum ImportSource {
     /// Import a `tk` `.tickets/` directory (DESIGN §11.1).
@@ -458,14 +458,6 @@ pub enum ImportSource {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Import GitHub issues from `owner/repo` (DESIGN §11.3).
-    Github {
-        /// The `owner/repo` spec to fetch issues from.
-        src: String,
-        /// Plan only: report what would happen without writing any files.
-        #[arg(long)]
-        dry_run: bool,
-    },
 }
 
 #[derive(Debug, Args)]
@@ -473,15 +465,9 @@ pub struct ExportArgs {
     /// The export format.
     #[arg(value_enum, value_name = "FORMAT")]
     pub export_format: ExportFormat,
-    /// For `github`: the `owner/repo` to push to (required for `github`).
-    #[arg(value_name = "OWNER/REPO")]
-    pub target: Option<String>,
     /// Write to a file instead of stdout.
     #[arg(long, value_name = "FILE")]
     pub out: Option<Utf8PathBuf>,
-    /// For `github`: plan only, do not push anything.
-    #[arg(long)]
-    pub dry_run: bool,
 }
 
 /// `clove sync <github> <owner/repo>` (T-M06). One reconciled pull+push pass.
@@ -512,15 +498,13 @@ pub enum SyncTracker {
     Github,
 }
 
-/// The `clove export` output format.
+/// The `clove export` output format. GitHub is handled by `clove sync github`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ExportFormat {
     /// A single JSON envelope with a `data` array of all items.
     Json,
     /// One item per line (NDJSON), Beads-isomorphic.
     Jsonl,
-    /// Push to GitHub Issues via the REST API.
-    Github,
 }
 
 #[derive(Debug, Args)]
