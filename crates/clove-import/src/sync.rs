@@ -95,6 +95,26 @@ pub struct SyncEntry {
     pub gh_updated_at: Option<DateTime<Utc>>,
     /// The local item's `updated` at the moment of the last successful sync.
     pub local_updated: DateTime<Utc>,
+    /// GitHub comment ids already represented locally (pull-dedup; also holds the
+    /// ids of comments clove itself posted, so they are never pulled back).
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    pub gh_comment_ids: HashSet<u64>,
+    /// Body hashes of local comments already on GitHub (push-dedup; also holds the
+    /// hashes of pulled-in comments, so they are never pushed back).
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    pub local_comment_hashes: HashSet<u64>,
+}
+
+impl SyncEntry {
+    /// A fresh entry with the given fingerprint and no comment bookkeeping yet.
+    pub fn new(gh_updated_at: Option<DateTime<Utc>>, local_updated: DateTime<Utc>) -> Self {
+        Self {
+            gh_updated_at,
+            local_updated,
+            gh_comment_ids: HashSet::new(),
+            local_comment_hashes: HashSet::new(),
+        }
+    }
 }
 
 /// The current schema version of the persisted sync-state file.
@@ -182,20 +202,20 @@ impl SyncState {
         })
     }
 
-    /// Record (or overwrite) the fingerprint for `external_ref`.
+    /// Record the fingerprint for `external_ref`, preserving any existing comment
+    /// bookkeeping (only the `{gh_updated_at, local_updated}` clock is refreshed).
     pub fn record(
         &mut self,
         external_ref: &str,
         gh_updated_at: Option<DateTime<Utc>>,
         local_updated: DateTime<Utc>,
     ) {
-        self.entries.insert(
-            external_ref.to_owned(),
-            SyncEntry {
-                gh_updated_at,
-                local_updated,
-            },
-        );
+        let entry = self
+            .entries
+            .entry(external_ref.to_owned())
+            .or_insert_with(|| SyncEntry::new(gh_updated_at, local_updated));
+        entry.gh_updated_at = gh_updated_at;
+        entry.local_updated = local_updated;
     }
 }
 
@@ -379,6 +399,83 @@ pub struct SyncReport {
     pub in_sync: usize,
     /// Local refs whose remote issue was missing.
     pub remote_missing: usize,
+    /// GitHub comments pulled into local items.
+    pub comments_pulled: usize,
+    /// Local comments pushed to GitHub.
+    pub comments_pushed: usize,
+}
+
+// ---------------------------------------------------------------------------
+// Comment reconciliation (pure)
+// ---------------------------------------------------------------------------
+
+/// A GitHub issue comment, reduced to what the sync needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GhComment {
+    /// The GitHub comment id (the pull-dedup key).
+    pub id: u64,
+    /// The commenter's login.
+    pub author: String,
+    /// The comment body.
+    pub body: String,
+    /// When GitHub recorded the comment.
+    pub created_at: Option<DateTime<Utc>>,
+}
+
+/// A local sidecar comment, reduced to what the sync needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalComment {
+    /// The comment author.
+    pub author: String,
+    /// The comment body.
+    pub body: String,
+}
+
+/// Which comments to pull (GitHub → local) and push (local → GitHub).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CommentPlan {
+    /// GitHub comments to add as local sidecar comments.
+    pub pull: Vec<GhComment>,
+    /// Local comments to post on the GitHub issue.
+    pub push: Vec<LocalComment>,
+}
+
+/// A stable, dependency-free hash of a comment body (the push-dedup key). Uses
+/// the fixed-seed [`DefaultHasher`](std::collections::hash_map::DefaultHasher) so
+/// the value is reproducible across runs and machines. The body is trimmed first
+/// so a trailing-newline difference never forks the identity.
+pub fn body_hash(body: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    body.trim().hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Reconcile an issue's GitHub comments against its local sidecar comments,
+/// given the prior per-issue bookkeeping in `entry`.
+///
+/// Dedup is symmetric and stateless-per-comment: a GitHub comment is pulled
+/// unless its id was already seen; a local comment is pushed unless its body hash
+/// was already seen. Pulling a comment also marks its body hash seen (so the
+/// freshly-created local copy is never pushed back), so a clean first pass over a
+/// shared thread converges without duplication.
+pub fn plan_comments(gh: &[GhComment], local: &[LocalComment], entry: &SyncEntry) -> CommentPlan {
+    let mut seen_gh = entry.gh_comment_ids.clone();
+    let mut seen_local = entry.local_comment_hashes.clone();
+    let mut plan = CommentPlan::default();
+
+    for comment in gh {
+        if seen_gh.insert(comment.id) {
+            seen_local.insert(body_hash(&comment.body));
+            plan.pull.push(comment.clone());
+        }
+    }
+    for comment in local {
+        if seen_local.insert(body_hash(&comment.body)) {
+            plan.push.push(comment.clone());
+        }
+    }
+    plan
 }
 
 /// The Unix epoch as a UTC datetime — the "infinitely old" fallback for a
@@ -1065,5 +1162,68 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "{not json").unwrap();
         assert!(SyncState::load(&path, "o/r").entries.is_empty());
+    }
+
+    fn gh_comment(id: u64, body: &str) -> GhComment {
+        GhComment {
+            id,
+            author: "octocat".to_owned(),
+            body: body.to_owned(),
+            created_at: Some(ts("2026-06-01T00:00:00Z")),
+        }
+    }
+
+    fn local_comment(body: &str) -> LocalComment {
+        LocalComment {
+            author: "tester".to_owned(),
+            body: body.to_owned(),
+        }
+    }
+
+    #[test]
+    fn first_comment_sync_pulls_remote_and_pushes_local() {
+        let entry = SyncEntry::new(None, ts("2026-06-01T00:00:00Z"));
+        let plan = plan_comments(
+            &[gh_comment(10, "from github")],
+            &[local_comment("from clove")],
+            &entry,
+        );
+        assert_eq!(plan.pull.len(), 1);
+        assert_eq!(plan.pull[0].id, 10);
+        assert_eq!(plan.push.len(), 1);
+        assert_eq!(plan.push[0].body, "from clove");
+    }
+
+    #[test]
+    fn already_synced_comments_are_skipped() {
+        let mut entry = SyncEntry::new(None, ts("2026-06-01T00:00:00Z"));
+        entry.gh_comment_ids.insert(10);
+        entry.local_comment_hashes.insert(body_hash("from clove"));
+        let plan = plan_comments(
+            &[gh_comment(10, "from github")],
+            &[local_comment("from clove")],
+            &entry,
+        );
+        assert!(plan.pull.is_empty() && plan.push.is_empty());
+    }
+
+    #[test]
+    fn pulled_comment_is_not_pushed_back() {
+        // A GitHub comment whose body matches a not-yet-seen local comment is
+        // pulled; the identical local one must NOT then be pushed (no echo).
+        let entry = SyncEntry::new(None, ts("2026-06-01T00:00:00Z"));
+        let plan = plan_comments(
+            &[gh_comment(10, "same text")],
+            &[local_comment("same text")],
+            &entry,
+        );
+        assert_eq!(plan.pull.len(), 1);
+        assert!(plan.push.is_empty(), "identical body must not echo back");
+    }
+
+    #[test]
+    fn body_hash_ignores_trailing_whitespace() {
+        assert_eq!(body_hash("hello"), body_hash("hello\n"));
+        assert_ne!(body_hash("hello"), body_hash("world"));
     }
 }

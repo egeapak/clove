@@ -36,8 +36,12 @@ use tempfile::TempDir;
 struct State {
     /// The octocrab-shaped issue JSON objects currently "on GitHub".
     issues: Vec<Value>,
+    /// issue number → its comment JSON objects.
+    comments: std::collections::HashMap<u64, Vec<Value>>,
     /// Next issue number to mint on create.
     next_number: u64,
+    /// Next comment id to mint.
+    next_comment_id: u64,
     /// Monotonic clock (seconds past a fixed far-future base) for `updated_at`,
     /// so a created/edited issue always looks strictly newer than seeded data.
     clock: u64,
@@ -65,7 +69,9 @@ impl MockGitHub {
         let addr = listener.local_addr().unwrap();
         let state = Arc::new(Mutex::new(State {
             issues: Vec::new(),
+            comments: std::collections::HashMap::new(),
             next_number: 1,
+            next_comment_id: 1000,
             clock: 0,
         }));
         let thread_state = Arc::clone(&state);
@@ -121,6 +127,31 @@ impl MockGitHub {
 
     fn issue_count(&self) -> usize {
         self.state.lock().unwrap().issues.len()
+    }
+
+    /// Seed a comment on an existing issue (simulating a GitHub-side comment).
+    fn seed_comment(&self, number: u64, author: &str, body: &str) {
+        let mut s = self.state.lock().unwrap();
+        let id = s.next_comment_id;
+        s.next_comment_id += 1;
+        let created = s.tick();
+        s.comments
+            .entry(number)
+            .or_default()
+            .push(make_comment(id, author, body, &created));
+    }
+
+    /// The comment bodies currently on an issue.
+    fn comment_bodies(&self, number: u64) -> Vec<String> {
+        let s = self.state.lock().unwrap();
+        s.comments
+            .get(&number)
+            .map(|cs| {
+                cs.iter()
+                    .filter_map(|c| c["body"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 }
 
@@ -192,8 +223,33 @@ fn route(
         return ("404 Not Found", json!({ "message": "not found" }));
     }
     let number = segments.get(4).and_then(|n| n.parse::<u64>().ok());
+    let is_comments = segments.get(5) == Some(&"comments");
 
     let mut s = state.lock().unwrap();
+
+    // /repos/{o}/{r}/issues/{n}/comments
+    if is_comments {
+        let Some(number) = number else {
+            return ("404 Not Found", json!({ "message": "bad issue" }));
+        };
+        return match method {
+            "GET" => (
+                "200 OK",
+                Value::Array(s.comments.get(&number).cloned().unwrap_or_default()),
+            ),
+            "POST" => {
+                let id = s.next_comment_id;
+                s.next_comment_id += 1;
+                let created = s.tick();
+                let body_text = body["body"].as_str().unwrap_or("").to_owned();
+                let comment = make_comment(id, "tester", &body_text, &created);
+                s.comments.entry(number).or_default().push(comment.clone());
+                ("201 Created", comment)
+            }
+            _ => ("404 Not Found", json!({ "message": "unsupported" })),
+        };
+    }
+
     match (method, number) {
         ("GET", None) => ("200 OK", Value::Array(s.issues.clone())),
         ("POST", None) => {
@@ -306,6 +362,24 @@ fn make_label(id: u64, name: &str) -> Value {
         "description": null,
         "color": "ededed",
         "default": false
+    })
+}
+
+/// Build an octocrab-`Comment`-valid issue-comment object.
+fn make_comment(id: u64, author: &str, body: &str, created_at: &str) -> Value {
+    json!({
+        "id": id,
+        "node_id": format!("IC_{id}"),
+        "url": format!("https://example.test/comments/{id}"),
+        "html_url": format!("https://example.test/comments/{id}/html"),
+        "issue_url": null,
+        "body": body,
+        "body_text": null,
+        "body_html": null,
+        "author_association": "OWNER",
+        "user": make_user(author),
+        "created_at": created_at,
+        "updated_at": created_at
     })
 }
 
@@ -587,4 +661,103 @@ fn dry_run_touches_neither_side() {
         1,
         "dry-run pulled nothing"
     );
+}
+
+/// Local comment bodies for an item via `clove comments`.
+fn local_comment_bodies(dir: &Path, addr: SocketAddr, id: &str) -> Vec<String> {
+    let out = clove(dir, addr)
+        .args(["comments", id, "--format", "json"])
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    v["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|c| c["body"].as_str().map(str::to_owned))
+        .collect()
+}
+
+#[test]
+fn comment_pull_creates_local_comment() {
+    let mock = MockGitHub::start();
+    mock.seed(5, "Issue", "Body.", "open");
+    mock.seed_comment(5, "octocat", "A remote comment");
+    let dir = init_repo();
+
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["comments_pulled"], 1, "{v}");
+    let id = only_item_id(dir.path(), mock.addr);
+    let bodies = local_comment_bodies(dir.path(), mock.addr, &id);
+    assert!(
+        bodies.iter().any(|b| b.contains("A remote comment")),
+        "{bodies:?}"
+    );
+}
+
+#[test]
+fn comment_push_creates_gh_comment() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    clove(dir.path(), mock.addr)
+        .args(["new", "Has a comment", "--type", "bug"])
+        .assert()
+        .success();
+    let id = only_item_id(dir.path(), mock.addr);
+    clove(dir.path(), mock.addr)
+        .args(["comment", &id, "A local comment"])
+        .assert()
+        .success();
+
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["pushed_created"], 1, "{v}");
+    assert_eq!(v["data"]["comments_pushed"], 1, "{v}");
+    let bodies = mock.comment_bodies(1);
+    assert!(bodies.iter().any(|b| b == "A local comment"), "{bodies:?}");
+}
+
+#[test]
+fn comment_sync_is_idempotent_both_directions() {
+    let mock = MockGitHub::start();
+    mock.seed(5, "Issue", "Body.", "open");
+    mock.seed_comment(5, "octocat", "remote comment");
+    let dir = init_repo();
+    sync(dir.path(), mock.addr, &[]); // pull issue + comment
+    let id = only_item_id(dir.path(), mock.addr);
+    clove(dir.path(), mock.addr)
+        .args(["comment", &id, "local comment"])
+        .assert()
+        .success();
+
+    // First sync pushes the local comment.
+    let v1 = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v1["data"]["comments_pushed"], 1, "{v1}");
+
+    // Second sync: nothing new in either direction, and no duplicates anywhere.
+    let v2 = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v2["data"]["comments_pulled"], 0, "{v2}");
+    assert_eq!(v2["data"]["comments_pushed"], 0, "{v2}");
+    assert_eq!(
+        mock.comment_bodies(5).len(),
+        2,
+        "no duplicate GitHub comments"
+    );
+    assert_eq!(
+        local_comment_bodies(dir.path(), mock.addr, &id).len(),
+        2,
+        "no duplicate local comments"
+    );
+}
+
+#[test]
+fn no_comments_flag_skips_comment_sync() {
+    let mock = MockGitHub::start();
+    mock.seed(5, "Issue", "Body.", "open");
+    mock.seed_comment(5, "octocat", "remote comment");
+    let dir = init_repo();
+
+    let v = sync(dir.path(), mock.addr, &["--no-comments"]);
+    assert_eq!(v["data"]["comments_pulled"], 0, "{v}");
+    let id = only_item_id(dir.path(), mock.addr);
+    assert!(local_comment_bodies(dir.path(), mock.addr, &id).is_empty());
 }

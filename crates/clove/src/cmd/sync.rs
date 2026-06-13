@@ -42,6 +42,7 @@ fn sync_github(ctx: &Ctx, format: OutputFormat, args: SyncArgs) -> Result<(), Cl
         &ctx.store,
         &ctx.config.id_prefix,
         policy,
+        !args.no_comments,
         args.dry_run,
     )
     .map_err(sync_err)?;
@@ -54,6 +55,8 @@ fn sync_github(ctx: &Ctx, format: OutputFormat, args: SyncArgs) -> Result<(), Cl
                 "pulled_updated": report.pulled_updated,
                 "pushed_created": report.pushed_created,
                 "pushed_updated": report.pushed_updated,
+                "comments_pulled": report.comments_pulled,
+                "comments_pushed": report.comments_pushed,
                 "in_sync": report.in_sync,
                 "conflicts": summary.conflicts,
                 "remote_missing": summary.remote_missing,
@@ -67,12 +70,14 @@ fn sync_github(ctx: &Ctx, format: OutputFormat, args: SyncArgs) -> Result<(), Cl
         ),
         (OutputFormat::Human, Some(report)) => {
             println!(
-                "synced {}: pulled {} new / {} updated, pushed {} new / {} updated, {} in sync, {} conflicts",
+                "synced {}: pulled {} new / {} updated, pushed {} new / {} updated, comments +{}/-{}, {} in sync, {} conflicts",
                 args.target,
                 report.pulled_created,
                 report.pulled_updated,
                 report.pushed_created,
                 report.pushed_updated,
+                report.comments_pulled,
+                report.comments_pushed,
                 report.in_sync,
                 report.conflicts,
             );

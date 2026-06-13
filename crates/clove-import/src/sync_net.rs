@@ -27,12 +27,15 @@ use clove_types::{CloveId, EditRequest, Item, ItemFrontmatter, ItemStatus, ItemT
 use octocrab::models::issues::Issue;
 use octocrab::Octocrab;
 
+use clove_core::comments::{add_comment_at, list_comments};
+
 use crate::error::ImportError;
 use crate::github::net::{build_client, fetch_all, net_err, parse_repo_spec};
-use crate::github::StagedIssue;
+use crate::github::{parse_gh_number, StagedIssue};
+use crate::map::build_external_ref_index;
 use crate::sync::{
-    plan_sync, ConflictPolicy, PullUpdate, PushCreate, PushUpdate, SyncPlan, SyncReport, SyncState,
-    SyncSummary,
+    body_hash, plan_comments, plan_sync, ConflictPolicy, GhComment, LocalComment, PullUpdate,
+    PushCreate, PushUpdate, SyncPlan, SyncReport, SyncState, SyncSummary,
 };
 
 /// The marker `source_system` value stamped on synced items.
@@ -51,6 +54,7 @@ pub fn sync_github(
     store: &ItemStore,
     prefix: &str,
     policy: ConflictPolicy,
+    sync_comments: bool,
     dry_run: bool,
 ) -> Result<(SyncSummary, Option<SyncReport>), ImportError> {
     let (owner, repo) = parse_repo_spec(spec)?;
@@ -79,7 +83,14 @@ pub fn sync_github(
 
     let report = rt.block_on(async {
         let crab = build_client()?;
-        apply_plan(&crab, &owner, &repo, plan, store, prefix, &mut state).await
+        let mut report = apply_plan(&crab, &owner, &repo, plan, store, prefix, &mut state).await?;
+        if sync_comments {
+            let (pulled, pushed) =
+                sync_all_comments(&crab, &owner, &repo, store, &mut state).await?;
+            report.comments_pulled = pulled;
+            report.comments_pushed = pushed;
+        }
+        Ok::<SyncReport, ImportError>(report)
     })?;
 
     state.save(&state_path)?;
@@ -287,6 +298,100 @@ async fn push_update(
     let external_ref = crate::github::external_ref_for(push.number);
     state.record(&external_ref, Some(updated.updated_at), push.local_updated);
     Ok(())
+}
+
+/// Reconcile comment threads for every issue linked to a local item, after the
+/// main item apply has run. Iterates the *post-apply* `external_ref` index (a
+/// fresh store scan), so issues just created on either side — which are absent
+/// from the pre-apply fetch — are still covered. Returns `(pulled, pushed)`.
+async fn sync_all_comments(
+    crab: &Octocrab,
+    owner: &str,
+    repo: &str,
+    store: &ItemStore,
+    state: &mut SyncState,
+) -> Result<(usize, usize), ImportError> {
+    // Re-scan so freshly pull-created / push-created items are included. Sort by
+    // ref for a deterministic order of API calls.
+    let mut linked: Vec<(String, clove_types::CloveId)> = build_external_ref_index(store)?
+        .into_iter()
+        .filter_map(|(ext, existing)| ext.starts_with("gh-").then_some((ext, existing.id)))
+        .collect();
+    linked.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut pulled = 0;
+    let mut pushed = 0;
+
+    for (external_ref, id) in &linked {
+        let Some(number) = parse_gh_number(external_ref) else {
+            continue;
+        };
+
+        let gh = fetch_comments(crab, owner, repo, number).await?;
+        let local: Vec<LocalComment> = list_comments(store.issues_dir(), id)?
+            .into_iter()
+            .map(|c| LocalComment {
+                author: c.author,
+                body: c.body,
+            })
+            .collect();
+
+        let entry = state
+            .entries
+            .entry(external_ref.clone())
+            .or_insert_with(default_entry);
+        let plan = plan_comments(&gh, &local, entry);
+
+        for comment in &plan.pull {
+            let when = comment.created_at.unwrap_or_else(Utc::now);
+            let author = if comment.author.trim().is_empty() {
+                "github".to_owned()
+            } else {
+                comment.author.clone()
+            };
+            add_comment_at(store.issues_dir(), id, &author, &comment.body, when)?;
+            entry.gh_comment_ids.insert(comment.id);
+            entry.local_comment_hashes.insert(body_hash(&comment.body));
+            pulled += 1;
+        }
+        for comment in &plan.push {
+            let handler = crab.issues(owner, repo);
+            let body = comment.body.clone();
+            let created = with_retry(|| handler.create_comment(number, body.clone())).await?;
+            entry.gh_comment_ids.insert(created.id.into_inner());
+            entry.local_comment_hashes.insert(body_hash(&comment.body));
+            pushed += 1;
+        }
+    }
+    Ok((pulled, pushed))
+}
+
+/// A default [`crate::sync::SyncEntry`] for an issue that somehow lacks a
+/// fingerprint entry by comment-sync time (defensive — every linked issue gets
+/// one during the item apply).
+fn default_entry() -> crate::sync::SyncEntry {
+    crate::sync::SyncEntry::new(None, truncate(Utc::now()))
+}
+
+/// Fetch every comment on an issue (paginated), reduced to [`GhComment`].
+async fn fetch_comments(
+    crab: &Octocrab,
+    owner: &str,
+    repo: &str,
+    number: u64,
+) -> Result<Vec<GhComment>, ImportError> {
+    let handler = crab.issues(owner, repo);
+    let first = with_retry(|| handler.list_comments(number).per_page(100u8).send()).await?;
+    let all = crab.all_pages(first).await.map_err(net_err)?;
+    Ok(all
+        .into_iter()
+        .map(|c| GhComment {
+            id: c.id.into_inner(),
+            author: c.user.login,
+            body: c.body.unwrap_or_default(),
+            created_at: Some(c.created_at),
+        })
+        .collect())
 }
 
 /// Stamp `source_system = github` + `external_ref` onto a local item and persist

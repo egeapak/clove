@@ -500,6 +500,9 @@ pub struct SyncArgs {
     /// `newer` (default), `local`, `remote`, or `manual`.
     #[arg(long, value_name = "POLICY")]
     pub prefer: Option<String>,
+    /// Skip syncing issue comments (faster: avoids one API call per issue).
+    #[arg(long)]
+    pub no_comments: bool,
 }
 
 /// The tracker a `clove sync` targets.
