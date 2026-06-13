@@ -56,12 +56,29 @@ pub fn sync_github(
 ) -> Result<(SyncSummary, Option<SyncReport>), ImportError> {
     let (owner, repo) = parse_repo_spec(spec)?;
 
+    let state_path = SyncState::path_for(store.repo_root(), spec);
+
+    // Serialize concurrent syncs of the same repo (e.g. a daemon timer overlapping
+    // a manual `clove sync`): two in flight could both push-create the same
+    // unlinked item and mint duplicate GitHub issues. A dry run reads only, so it
+    // needs no lock. The guard borrows `sync_lock_rw`, so both are held (and
+    // released on drop) for the whole run.
+    let mut sync_lock_rw;
+    let _sync_lock = if dry_run {
+        None
+    } else {
+        sync_lock_rw = open_sync_lock(&state_path)?;
+        Some(sync_lock_rw.try_write().map_err(|_| ImportError::Source {
+            path: state_path.clone(),
+            message: format!("another sync for `{spec}` is already in progress"),
+        })?)
+    };
+
     // The local side of the diff: each item's frontmatter plus its body, which is
     // all the planner reads. Built here (not by the caller) so the CLI and the
     // daemon share one path.
     let local = local_objects(store)?;
 
-    let state_path = SyncState::path_for(store.repo_root(), spec);
     let mut state = SyncState::load(&state_path, spec);
 
     // Fetch remote issues. Even a dry run needs the current remote state to plan
@@ -102,6 +119,32 @@ pub fn sync_github(
 
     state.save(&state_path)?;
     Ok((summary, Some(report)))
+}
+
+/// Open (creating if needed) the per-repo sync lock file next to the state file,
+/// returning an [`fd_lock::RwLock`] the caller locks for the run. The advisory
+/// lock releases when the underlying file handle is dropped.
+fn open_sync_lock(
+    state_path: &camino::Utf8Path,
+) -> Result<fd_lock::RwLock<std::fs::File>, ImportError> {
+    let lock_path = state_path.with_extension("lock");
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| ImportError::Source {
+            path: parent.to_owned(),
+            message: format!("failed to create sync dir: {source}"),
+        })?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path.as_std_path())
+        .map_err(|source| ImportError::Source {
+            path: lock_path.clone(),
+            message: format!("failed to open sync lock: {source}"),
+        })?;
+    Ok(fd_lock::RwLock::new(file))
 }
 
 /// Stamp every linked item's current assignee onto its sync entry.
@@ -334,6 +377,12 @@ async fn push_update(
         .then(|| push.gh_state_reason.as_deref().and_then(parse_state_reason))
         .flatten();
 
+    // Send the reconciled assignee list whenever clove is involved in assignment
+    // now or was at the last sync — so an unassign locally actually clears the
+    // assignee on GitHub (possibly an empty list). When clove never owned an
+    // assignee, leave GitHub's untouched (don't disturb purely-human assignees).
+    let touch_assignees = item.assignee.is_some() || prev_owned.is_some();
+
     let updated: Issue = with_retry(|| {
         let state_param = if want_closed {
             octocrab::models::IssueState::Closed
@@ -348,7 +397,7 @@ async fn push_update(
         if !item.labels.is_empty() {
             builder = builder.labels(&item.labels);
         }
-        if !assignees.is_empty() {
+        if touch_assignees {
             builder = builder.assignees(&assignees);
         }
         if let Some(reason) = &preserved_reason {

@@ -12,7 +12,7 @@ repository.workspace = true
 # non-GitHub / lean builds (`--no-default-features`) stay free of that weight.
 [features]
 default = ["github"]
-github = ["dep:octocrab", "dep:tokio", "dep:rustls"]
+github = ["dep:octocrab", "dep:tokio", "dep:rustls", "dep:fd-lock"]
 
 [dependencies]
 clove-types.workspace = true
@@ -33,6 +33,9 @@ tokio = { workspace = true, optional = true }
 # default and panics on first TLS use. We depend on it directly (ring) to install
 # the ring provider explicitly before building the client (see github.rs).
 rustls = { workspace = true, optional = true }
+# Advisory lock so a daemon sync and a manual `clove sync` of the same repo can't
+# interleave (which could create duplicate issues). github-only.
+fd-lock = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion.workspace = true     # T-X01: export throughput bench (informational)

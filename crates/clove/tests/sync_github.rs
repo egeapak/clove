@@ -995,3 +995,67 @@ fn remote_missing_is_reported_not_fatal() {
         "local link preserved"
     );
 }
+
+#[test]
+fn unassign_locally_clears_the_github_assignee() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    clove(dir.path(), mock.addr)
+        .args(["new", "Assigned", "--type", "bug", "--assignee", "alice"])
+        .assert()
+        .success();
+    sync(dir.path(), mock.addr, &[]); // push-create gh-1 assigned [alice]
+    let id = only_item_id(dir.path(), mock.addr);
+    assert_eq!(mock.assignee_logins(1), vec!["alice".to_owned()]);
+
+    // Unassign locally; the next push must clear the assignee on GitHub.
+    std::thread::sleep(Duration::from_millis(1100));
+    clove(dir.path(), mock.addr)
+        .args(["assign", &id, "--clear"])
+        .assert()
+        .success();
+    sync(dir.path(), mock.addr, &[]);
+    assert!(
+        mock.assignee_logins(1).is_empty(),
+        "unassigning locally must clear the GitHub assignee: {:?}",
+        mock.assignee_logins(1)
+    );
+}
+
+#[test]
+fn concurrent_sync_is_rejected_while_locked() {
+    // Hold the per-repo sync lock (as a daemon sync would), then a manual `clove
+    // sync` of the same repo must fail cleanly rather than race into duplicate
+    // issue creation.
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    clove(dir.path(), mock.addr)
+        .args(["new", "Local", "--type", "bug"])
+        .assert()
+        .success();
+
+    let lock_path = dir.path().join(".clove/sync/github/owner_repo.lock");
+    std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .unwrap();
+    let mut held = fd_lock::RwLock::new(file);
+    let _guard = held.write().unwrap(); // hold the exclusive lock
+
+    let out = clove(dir.path(), mock.addr)
+        .args(["sync", "github", "owner/repo"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "a locked sync must fail: {out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_lowercase();
+    assert!(
+        stderr.contains("in progress"),
+        "error should explain the lock: {stderr}"
+    );
+    // Nothing was pushed while the lock was held.
+    assert_eq!(mock.issue_count(), 0, "locked sync must not push");
+}

@@ -1287,8 +1287,14 @@ run the sync on a timer (`[daemon] github_sync_interval_min` + `github_sync_repo
 
 Fields clove's model can't represent are still preserved on push (using the live
 issue + sync state, so no item-schema change): extra GitHub **assignees** a human
-added survive a clove push (clove replaces only the assignee it owns), and a
-human's close **`state_reason`** (`not_planned`) is not reset to `completed`.
+added survive a clove push (clove replaces only the assignee it owns — and an
+unassign locally *does* clear clove's assignee on GitHub), and a human's close
+**`state_reason`** (`not_planned`) is not reset to `completed`.
+
+A non-dry-run sync takes an **advisory lock** (`.clove/sync/github/<repo>.lock`)
+for its duration, so a daemon timer can't interleave with a manual `clove sync`
+of the same repo and mint duplicate issues; a second concurrent sync fails cleanly
+("already in progress").
 
 ### 11.4 Export
 
