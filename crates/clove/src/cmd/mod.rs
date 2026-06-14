@@ -28,5 +28,6 @@ pub mod set;
 pub mod show;
 pub mod stats;
 pub mod status;
+pub mod sync;
 pub mod tui;
 pub mod version;

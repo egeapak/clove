@@ -1,11 +1,10 @@
-//! GitHub importer / exporter (T-M03): import from and export to GitHub Issues
-//! (DESIGN.md §11.3).
+//! GitHub field mapping + `clove-meta` codec (T-M03, DESIGN.md §11.3).
 //!
-//! Unlike the file-based importers (tk, beads) the GitHub source/sink is a
-//! network endpoint addressed by an `owner/repo` spec, not a [`camino::Utf8Path`],
-//! so it does not implement the file-path [`crate::Importer`] trait. Instead it
-//! exposes two free functions, [`import_github`] and [`export_github`], that keep
-//! the same dry-run / idempotency / envelope semantics as tk and beads.
+//! This module is the shared, mostly-pure GitHub layer used by the two-way sync
+//! ([`crate::sync`] / [`crate::sync_net`], the single GitHub path). It owns the
+//! `GitHubIssue ↔ clove` field mapping, the `<!-- clove-meta: {…} -->` codec that
+//! round-trips clove-only fields through an issue body, and the small octocrab
+//! client/fetch helpers in the [`net`] submodule.
 //!
 //! ## Layering: pure mapping vs. network
 //!
@@ -20,11 +19,11 @@
 //!   `Issue` into this via a `serde_json` round-trip, and the offline tests build
 //!   it straight from committed JSON fixtures — so the mapping is exercised with
 //!   no network.
-//! - [`map_issue`] — `GitHubIssue → StagedIssue`, the pure mapping.
-//! - [`plan_issues`] — the pure idempotency filter over a slice of mapped issues.
+//! - [`map_issue`] — `GitHubIssue → StagedIssue`, the pure mapping (pull side).
+//! - [`build_export_item`] — local item object → GitHub payload (push side).
 //!
 //! Only the octocrab client construction, the tokio runtime, and the paginated
-//! fetch / create / update calls are behind `#[cfg(feature = "github")]`.
+//! fetch calls are behind `#[cfg(feature = "github")]` (in [`net`]).
 //!
 //! ## Field mapping (DESIGN §11.3)
 //!
@@ -40,21 +39,19 @@
 //! | `clove-meta.deps` / `.priority` | `deps` / `priority` |
 //! | — | `source_system = "github"` |
 //!
-//! ## external_ref / idempotency rule
+//! ## external_ref / link rule
 //!
-//! The clove `external_ref` is always `"gh-<number>"`. This is the idempotency key
-//! (DESIGN §11.3): on re-import an incoming issue whose `"gh-<number>"` already
-//! exists in the store is skipped. On export, a local item that already carries
-//! `external_ref = "gh-<number>"` is UPDATED (PATCH that issue number); an item
-//! without one is CREATED and reports the new number.
+//! The clove `external_ref` is always `"gh-<number>"` — the durable link between a
+//! local item and its GitHub issue. A local item carrying `external_ref =
+//! "gh-<number>"` maps to that issue (pulled/pushed as an UPDATE); one without is a
+//! new item on whichever side it is missing. The sync writes the new number back
+//! onto the local item after a create, so the link is established exactly once.
 
 use chrono::{DateTime, Utc};
 use clove_types::{CloveId, ItemStatus, Priority};
 use serde::{Deserialize, Serialize};
 
 use crate::map::{coerce_priority, map_labels};
-use crate::plan::{ImportPlan, PlanItem, SkipItem};
-use crate::ImportCtx;
 
 /// The HTML-comment marker prefix/suffix used to embed clove-only metadata in a
 /// GitHub issue body so it survives the round-trip (GitHub has no `deps` /
@@ -185,6 +182,17 @@ pub struct GitHubIssue {
     pub assignees: Vec<GitHubUser>,
     #[serde(default)]
     pub closed_at: Option<DateTime<Utc>>,
+    /// Last-modified time reported by GitHub. The two-way sync compares this
+    /// against the timestamp recorded at the previous sync to decide whether the
+    /// remote side changed (see [`crate::sync`]). Absent in older fixtures →
+    /// treated as "unknown / always re-examine".
+    #[serde(default)]
+    pub updated_at: Option<DateTime<Utc>>,
+    /// `completed` / `not_planned` / `reopened` / `duplicate` on a closed issue.
+    /// clove has no equivalent field, but the sync preserves it on push so a
+    /// human's `not_planned` is not reset to `completed` when clove pushes a close.
+    #[serde(default)]
+    pub state_reason: Option<String>,
     /// Present on real issues; used to skip PRs (which the issues API also returns).
     #[serde(default)]
     pub pull_request: Option<serde_json::Value>,
@@ -207,6 +215,9 @@ pub struct StagedIssue {
     pub labels: Vec<String>,
     pub closed: Option<DateTime<Utc>>,
     pub body: String,
+    /// The issue's GitHub `updated_at` (carried through so a sync can record it
+    /// as the last-synced remote fingerprint). `None` when the source omitted it.
+    pub updated_at: Option<DateTime<Utc>>,
 }
 
 /// The `external_ref` (== idempotency key) for a GitHub issue number.
@@ -266,41 +277,8 @@ pub fn map_issue(issue: &GitHubIssue) -> Result<StagedIssue, String> {
         labels,
         closed: issue.closed_at,
         body,
+        updated_at: issue.updated_at,
     })
-}
-
-/// Compute the write-free [`ImportPlan`] over a slice of fetched issues: map each,
-/// skipping pull requests, and partition into create/skip by the `external_ref`
-/// idempotency index in `ctx`.
-///
-/// Returns the plan and the staged issues that would be created (in `would_create`
-/// order) so the caller can apply them without re-mapping.
-pub fn plan_issues(
-    issues: &[GitHubIssue],
-    ctx: &ImportCtx,
-) -> Result<(ImportPlan, Vec<StagedIssue>), String> {
-    let mut plan = ImportPlan::new();
-    let mut staged = Vec::new();
-    for issue in issues {
-        // The issues REST endpoint also returns PRs; skip them.
-        if issue.pull_request.is_some() {
-            continue;
-        }
-        let mapped = map_issue(issue)?;
-        if ctx.is_imported(&mapped.external_ref) {
-            plan.would_skip.push(SkipItem {
-                id: mapped.source_id.clone(),
-                reason: "already_imported".to_owned(),
-            });
-        } else {
-            plan.would_create.push(PlanItem {
-                id: mapped.source_id.clone(),
-                title: mapped.title.clone(),
-            });
-            staged.push(mapped);
-        }
-    }
-    Ok((plan, staged))
 }
 
 /// A local clove item prepared for export to GitHub: the issue payload plus the
@@ -396,74 +374,18 @@ pub fn build_export_item(obj: &serde_json::Map<String, serde_json::Value>) -> Ex
     }
 }
 
-/// The write-free export plan: which local items would be created vs. updated on
-/// GitHub. Fully offline (computed from local items only) so `--dry-run` never
-/// touches the network.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
-pub struct ExportPlan {
-    /// Items with no `gh-<number>` yet — would be CREATED.
-    pub would_create: Vec<ExportPlanItem>,
-    /// Items already synced (`external_ref = "gh-<n>"`) — would be UPDATED.
-    pub would_update: Vec<ExportPlanItem>,
-}
-
-/// One entry in an [`ExportPlan`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ExportPlanItem {
-    /// The clove id.
-    pub id: String,
-    pub title: String,
-    /// The target GitHub issue number for updates (`None` for creates).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub number: Option<u64>,
-}
-
-/// Partition exported item objects into a create/update [`ExportPlan`] (pure).
-pub fn plan_export(objs: &[serde_json::Map<String, serde_json::Value>]) -> ExportPlan {
-    let mut plan = ExportPlan::default();
-    for obj in objs {
-        let item = build_export_item(obj);
-        let entry = ExportPlanItem {
-            id: item.clove_id.clone(),
-            title: item.title.clone(),
-            number: item.gh_number,
-        };
-        match item.gh_number {
-            Some(_) => plan.would_update.push(entry),
-            None => plan.would_create.push(entry),
-        }
-    }
-    plan
-}
-
-/// A summary of what an export `apply` run actually pushed to GitHub.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
-pub struct ExportReport {
-    /// Issues created (with their new numbers).
-    pub created: Vec<u64>,
-    /// Issues updated.
-    pub updated: Vec<u64>,
-}
-
 // ---------------------------------------------------------------------------
 // Network layer (octocrab + tokio) — only compiled with the `github` feature.
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "github")]
-mod net {
+pub(crate) mod net {
     use super::*;
     use crate::error::ImportError;
-    use crate::plan::ImportReport;
-    use chrono::Utc;
-    use clove_core::write::write_item_file;
-    use clove_core::ItemStore;
-    use clove_types::id::new_id;
-    use clove_types::model::CURRENT_SCHEMA_VERSION;
-    use clove_types::{Item, ItemFrontmatter, ItemType};
     use octocrab::Octocrab;
 
     /// Split an `owner/repo` spec into its parts, erroring cleanly on a bad shape.
-    fn parse_repo_spec(spec: &str) -> Result<(String, String), ImportError> {
+    pub(crate) fn parse_repo_spec(spec: &str) -> Result<(String, String), ImportError> {
         let mut parts = spec.trim().splitn(2, '/');
         match (parts.next(), parts.next()) {
             (Some(owner), Some(repo)) if !owner.is_empty() && !repo.is_empty() => {
@@ -522,7 +444,12 @@ mod net {
     /// Build an authenticated octocrab client from a resolved token
     /// (`GITHUB_TOKEN` or the `gh` CLI), erroring cleanly when neither is
     /// available (a network call needs it).
-    fn build_client() -> Result<Octocrab, ImportError> {
+    ///
+    /// The API base URI is overridable via `CLOVE_GITHUB_API_URL` (falling back
+    /// to `GITHUB_API_URL`). This points clove at GitHub Enterprise, and — the
+    /// reason it exists — lets the integration test-suite aim every REST call at
+    /// a local deterministic mock server instead of github.com.
+    pub(crate) fn build_client() -> Result<Octocrab, ImportError> {
         install_crypto_provider();
         let token = resolve_github_token().ok_or_else(|| ImportError::Source {
             path: camino::Utf8PathBuf::from("<github>"),
@@ -530,19 +457,39 @@ mod net {
                       (`gh auth login`); a token is required to reach the GitHub API"
                 .to_owned(),
         })?;
-        Octocrab::builder()
-            .personal_token(token)
-            .build()
-            .map_err(|err| ImportError::Source {
-                path: camino::Utf8PathBuf::from("<github>"),
-                message: format!("failed to build GitHub client: {err}"),
-            })
+        let mut builder = Octocrab::builder().personal_token(token);
+        if let Some(base) = api_base_override() {
+            builder = builder
+                .base_uri(base.clone())
+                .map_err(|err| ImportError::Source {
+                    path: camino::Utf8PathBuf::from("<github>"),
+                    message: format!("invalid GitHub API base `{base}`: {err}"),
+                })?;
+        }
+        builder.build().map_err(|err| ImportError::Source {
+            path: camino::Utf8PathBuf::from("<github>"),
+            message: format!("failed to build GitHub client: {err}"),
+        })
+    }
+
+    /// The API base-URI override, if any (`CLOVE_GITHUB_API_URL`, then
+    /// `GITHUB_API_URL`). Empty values are ignored.
+    fn api_base_override() -> Option<String> {
+        for key in ["CLOVE_GITHUB_API_URL", "GITHUB_API_URL"] {
+            if let Ok(val) = std::env::var(key) {
+                let val = val.trim();
+                if !val.is_empty() {
+                    return Some(val.to_owned());
+                }
+            }
+        }
+        None
     }
 
     /// Convert an octocrab `Issue` into our pure [`GitHubIssue`] via a serde_json
     /// round-trip (the octocrab model is `#[non_exhaustive]`, so we cannot build
     /// it directly — but it is `Serialize`).
-    fn to_intermediate(
+    pub(crate) fn to_intermediate(
         issue: &octocrab::models::issues::Issue,
     ) -> Result<GitHubIssue, ImportError> {
         let value = serde_json::to_value(issue).map_err(|err| ImportError::Record {
@@ -554,7 +501,7 @@ mod net {
     }
 
     /// Fetch every issue (all states, paginated) from `owner/repo`.
-    async fn fetch_all(
+    pub(crate) async fn fetch_all(
         crab: &Octocrab,
         owner: &str,
         repo: &str,
@@ -571,170 +518,13 @@ mod net {
         all.iter().map(to_intermediate).collect()
     }
 
-    fn net_err(err: octocrab::Error) -> ImportError {
+    pub(crate) fn net_err(err: octocrab::Error) -> ImportError {
         ImportError::Source {
             path: camino::Utf8PathBuf::from("<github>"),
             message: format!("github api error: {err}"),
         }
     }
-
-    /// Import every issue from `owner/repo` into `store` (or, for a dry run,
-    /// compute the plan only — but the fetch still needs a token). Returns the
-    /// plan plus, when not a dry run, the apply report.
-    pub fn import_github(
-        spec: &str,
-        ctx: &ImportCtx,
-        store: &ItemStore,
-        prefix: &str,
-    ) -> Result<(ImportPlan, Option<ImportReport>), ImportError> {
-        let (owner, repo) = parse_repo_spec(spec)?;
-        let rt = tokio::runtime::Runtime::new().map_err(|err| ImportError::Source {
-            path: camino::Utf8PathBuf::from("<github>"),
-            message: format!("failed to start async runtime: {err}"),
-        })?;
-        // The octocrab client must be built *inside* the runtime context: its
-        // tower `Buffer` layer spawns a worker task at build time, which panics
-        // ("there is no reactor running") if no runtime is entered. Building it
-        // within `block_on` keeps the context active. (Using `rt.enter()` here
-        // would instead panic with "Cannot start a runtime from within a
-        // runtime" once `block_on` re-enters.)
-        let issues = rt.block_on(async {
-            let crab = build_client()?;
-            fetch_all(&crab, &owner, &repo).await
-        })?;
-
-        let (plan, staged) =
-            plan_issues(&issues, ctx).map_err(|message| ImportError::Record { message })?;
-
-        if ctx.dry_run {
-            return Ok((plan, None));
-        }
-
-        let now = Utc::now();
-        let mut created = 0usize;
-        for item in &staged {
-            let id = new_id(prefix, store.issues_dir())?;
-            let frontmatter = ItemFrontmatter {
-                schema: CURRENT_SCHEMA_VERSION,
-                id: id.clone(),
-                title: item.title.clone(),
-                status: item.status,
-                item_type: ItemType::default(),
-                priority: item.priority,
-                created: now,
-                updated: now,
-                closed: item.closed.or(if item.status == ItemStatus::Closed {
-                    Some(now)
-                } else {
-                    None
-                }),
-                assignee: item.assignee.clone(),
-                parent: None,
-                labels: item.labels.clone(),
-                deps: item.deps.clone(),
-                relates: Vec::new(),
-                duplicates: Vec::new(),
-                supersedes: Vec::new(),
-                source_system: Some("github".to_owned()),
-                external_ref: Some(item.external_ref.clone()),
-            };
-            let new_item = Item {
-                frontmatter,
-                body: item.body.clone(),
-            };
-            write_item_file(&new_item, &store.path_for(&id))?;
-            created += 1;
-        }
-
-        let report = ImportReport {
-            created,
-            skipped: plan.would_skip.len(),
-            conflicts: plan.conflicts.len(),
-        };
-        Ok((plan, Some(report)))
-    }
-
-    /// Export the given local item objects to `owner/repo`. For a dry run the plan
-    /// is computed entirely offline (no token, no network). Otherwise each item is
-    /// created or updated via octocrab.
-    pub fn export_github(
-        spec: &str,
-        objs: &[serde_json::Map<String, serde_json::Value>],
-        dry_run: bool,
-    ) -> Result<(ExportPlan, Option<ExportReport>), ImportError> {
-        // Validate the spec shape even for dry runs (cheap, offline).
-        let (owner, repo) = parse_repo_spec(spec)?;
-        let plan = plan_export(objs);
-        if dry_run {
-            return Ok((plan, None));
-        }
-
-        let rt = tokio::runtime::Runtime::new().map_err(|err| ImportError::Source {
-            path: camino::Utf8PathBuf::from("<github>"),
-            message: format!("failed to start async runtime: {err}"),
-        })?;
-        // Build the client inside the runtime context (see `import_github`): the
-        // octocrab/tower Buffer worker is spawned at build time and needs a reactor.
-        let report = rt.block_on(async {
-            let crab = build_client()?;
-            push_all(&crab, &owner, &repo, objs).await
-        })?;
-        Ok((plan, Some(report)))
-    }
-
-    /// Create/update every item on GitHub, returning the affected issue numbers.
-    async fn push_all(
-        crab: &Octocrab,
-        owner: &str,
-        repo: &str,
-        objs: &[serde_json::Map<String, serde_json::Value>],
-    ) -> Result<ExportReport, ImportError> {
-        let handler = crab.issues(owner, repo);
-        let mut report = ExportReport::default();
-        for obj in objs {
-            let item = build_export_item(obj);
-            let state = if item.closed {
-                octocrab::models::IssueState::Closed
-            } else {
-                octocrab::models::IssueState::Open
-            };
-            match item.gh_number {
-                Some(number) => {
-                    let mut update = handler.update(number);
-                    update = update.title(&item.title).body(&item.body).state(state);
-                    if !item.labels.is_empty() {
-                        update = update.labels(&item.labels);
-                    }
-                    let assignees = item
-                        .assignee
-                        .as_ref()
-                        .map(|a| vec![a.clone()])
-                        .unwrap_or_default();
-                    if !assignees.is_empty() {
-                        update = update.assignees(&assignees);
-                    }
-                    update.send().await.map_err(net_err)?;
-                    report.updated.push(number);
-                }
-                None => {
-                    let mut create = handler.create(&item.title).body(item.body.clone());
-                    if !item.labels.is_empty() {
-                        create = create.labels(item.labels.clone());
-                    }
-                    if let Some(assignee) = &item.assignee {
-                        create = create.assignees(vec![assignee.clone()]);
-                    }
-                    let created = create.send().await.map_err(net_err)?;
-                    report.created.push(created.number);
-                }
-            }
-        }
-        Ok(report)
-    }
 }
-
-#[cfg(feature = "github")]
-pub use net::{export_github, import_github};
 
 #[cfg(test)]
 mod tests {
@@ -865,63 +655,6 @@ mod tests {
     }
 
     #[test]
-    fn idempotency_skips_already_imported() {
-        use std::collections::{HashMap, HashSet};
-        let issues = vec![
-            GitHubIssue {
-                number: 1,
-                title: "first".to_owned(),
-                state: "open".to_owned(),
-                ..Default::default()
-            },
-            GitHubIssue {
-                number: 2,
-                title: "second".to_owned(),
-                state: "open".to_owned(),
-                ..Default::default()
-            },
-        ];
-        // Pretend gh-1 was already imported.
-        let mut external_refs = HashMap::new();
-        external_refs.insert(
-            "gh-1".to_owned(),
-            CloveId::new("proj-AAAA1111").unwrap().into(),
-        );
-        let ctx = ImportCtx {
-            external_refs,
-            store_ids: HashSet::new(),
-            dry_run: true,
-        };
-        let (plan, staged) = plan_issues(&issues, &ctx).unwrap();
-        assert_eq!(plan.would_skip.len(), 1);
-        assert_eq!(plan.would_skip[0].id, "gh-1");
-        assert_eq!(plan.would_create.len(), 1);
-        assert_eq!(plan.would_create[0].id, "gh-2");
-        assert_eq!(staged.len(), 1);
-        assert_eq!(staged[0].source_id, "gh-2");
-    }
-
-    #[test]
-    fn pull_requests_are_skipped() {
-        use std::collections::{HashMap, HashSet};
-        let issues = vec![GitHubIssue {
-            number: 9,
-            title: "a PR".to_owned(),
-            state: "open".to_owned(),
-            pull_request: Some(serde_json::json!({ "url": "x" })),
-            ..Default::default()
-        }];
-        let ctx = ImportCtx {
-            external_refs: HashMap::new(),
-            store_ids: HashSet::new(),
-            dry_run: true,
-        };
-        let (plan, staged) = plan_issues(&issues, &ctx).unwrap();
-        assert!(plan.would_create.is_empty());
-        assert!(staged.is_empty());
-    }
-
-    #[test]
     fn parse_gh_number_tolerant() {
         assert_eq!(parse_gh_number("gh-42"), Some(42));
         assert_eq!(parse_gh_number("beads:bd-1"), None);
@@ -958,6 +691,8 @@ mod tests {
 
     #[test]
     fn export_existing_ref_is_update() {
+        // An item already carrying `external_ref = gh-<n>` maps to an UPDATE
+        // (the number parses out); the sync planner routes it accordingly.
         let obj: serde_json::Map<String, serde_json::Value> =
             serde_json::from_value(serde_json::json!({
                 "id": "proj-AAAA1111",
@@ -970,10 +705,5 @@ mod tests {
         let item = build_export_item(&obj);
         assert_eq!(item.gh_number, Some(101));
         assert!(item.closed);
-
-        let plan = plan_export(&[obj]);
-        assert_eq!(plan.would_update.len(), 1);
-        assert_eq!(plan.would_update[0].number, Some(101));
-        assert!(plan.would_create.is_empty());
     }
 }

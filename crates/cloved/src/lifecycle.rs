@@ -170,6 +170,25 @@ pub fn run(clove_dir: &Utf8Path) -> anyhow::Result<()> {
         crate::reindexer::sync_once(&issues_dir, &index, &state);
         write_pid(clove_dir).context("writing pid file")?;
 
+        // Opt-in periodic two-way GitHub sync (T-M06). When the feature is off,
+        // or the interval/repo aren't configured, this future never resolves.
+        #[cfg(feature = "github-sync")]
+        let github_sync_fut = {
+            let interval_min = config
+                .as_ref()
+                .map_or(0, |c| c.daemon.github_sync_interval_min);
+            let repo = config
+                .as_ref()
+                .and_then(|c| c.daemon.github_sync_repo.clone());
+            crate::github_sync::github_sync_loop(
+                repo_root.clone(),
+                repo,
+                crate::github_sync::github_sync_interval(interval_min),
+            )
+        };
+        #[cfg(not(feature = "github-sync"))]
+        let github_sync_fut = std::future::pending::<()>();
+
         // 5. Serve IPC + watch for changes until a shutdown signal (or idle
         //    timeout) fires.
         tokio::select! {
@@ -178,6 +197,7 @@ pub fn run(clove_dir: &Utf8Path) -> anyhow::Result<()> {
             _ = serve_web(web_state, web_addr) => {},
             _ = idle_watchdog(Arc::clone(&state), idle_shutdown) => {},
             _ = crate::snapshot::snapshot_loop(repo_root.clone(), Arc::clone(&index), snapshot_interval) => {},
+            _ = github_sync_fut => {},
             _ = shutdown_signal(clove_dir) => {},
         }
         Ok(())

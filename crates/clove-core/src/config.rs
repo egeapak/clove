@@ -19,7 +19,7 @@ pub const CURRENT_CONFIG_SCHEMA: u32 = 1;
 /// writes this set (LF endings on every platform) and `clove doctor` verifies it
 /// is present (`GITIGNORE_DRIFT`), so the canonical list lives here, shared by
 /// both rather than duplicated.
-pub const GITIGNORE_ENTRIES: [&str; 8] = [
+pub const GITIGNORE_ENTRIES: [&str; 9] = [
     "index.db",
     "*.db-shm",
     "*.db-wal",
@@ -28,6 +28,9 @@ pub const GITIGNORE_ENTRIES: [&str; 8] = [
     "reindex.lock",
     "daemon.lock",
     "index.db.tmp",
+    // Per-clone GitHub sync bookkeeping (`sync/github/<owner>__<repo>.json`):
+    // local last-sync clocks, rebuildable, must not enter the source of truth.
+    "sync/",
 ];
 
 /// Minimum / maximum number of random characters in a generated id.
@@ -90,6 +93,14 @@ pub struct DaemonConfig {
     pub idle_shutdown_min: u64,
     #[serde(default = "default_stats_snapshot_min")]
     pub stats_snapshot_min: u64,
+    /// Minutes between automatic two-way GitHub syncs (`0` = disabled, the
+    /// default). Requires `github_sync_repo` to be set.
+    #[serde(default)]
+    pub github_sync_interval_min: u64,
+    /// The `owner/repo` the daemon periodically syncs with (when
+    /// `github_sync_interval_min > 0`).
+    #[serde(default)]
+    pub github_sync_repo: Option<String>,
 }
 
 impl Default for DaemonConfig {
@@ -99,6 +110,8 @@ impl Default for DaemonConfig {
             watch_debounce_ms: default_debounce_ms(),
             idle_shutdown_min: default_idle_shutdown_min(),
             stats_snapshot_min: default_stats_snapshot_min(),
+            github_sync_interval_min: 0,
+            github_sync_repo: None,
         }
     }
 }

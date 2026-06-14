@@ -53,6 +53,7 @@ windows-sys = { version = "0.59", features = [
 
 [dev-dependencies]
 assert_cmd.workspace = true
+fd-lock.workspace = true          # hold the sync lock to test concurrent-sync rejection
 insta = { workspace = true, features = ["json"] }       # golden CLI snapshot tests (T-X01 acceptance gate)
 tempfile.workspace = true
 jsonschema.workspace = true       # T-CLI14: validate JSON output against v1 schema

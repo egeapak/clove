@@ -137,6 +137,7 @@ fn run_repo(
         Commands::Serve(a) => cmd::serve::run(ctx, a, quiet).map(|_| ok),
         Commands::Import(a) => cmd::import::run(ctx, f, a).map(|_| ok),
         Commands::Export(a) => cmd::export::run(ctx, f, a).map(|_| ok),
+        Commands::Sync(a) => cmd::sync::run(ctx, f, a).map(|_| ok),
         // Non-repo commands are dispatched earlier.
         Commands::Version
         | Commands::Init(_)

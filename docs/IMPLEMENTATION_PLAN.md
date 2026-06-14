@@ -734,7 +734,10 @@ condition for M4 planning.
   Deferred follow-ups: auto-start the daemon from `clove mcp`, and server-push
   notifications (MCP `tools/list_changed` / a ready-queue subscription) when the
   graph changes.
-- Bidirectional vendor bridges (GitHub/GitLab/Jira); richer history/changelog.
+- Bidirectional vendor bridges: **GitHub two-way sync shipped** (`clove sync
+  github`, T-M06 — reconciled pull+push, conflict policies, comment sync, opt-in
+  daemon loop; see DESIGN §11.3). GitLab/Jira and richer history/changelog remain
+  follow-ups.
 
 ---
 
