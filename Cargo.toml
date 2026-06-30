@@ -57,6 +57,7 @@ proptest = "1"                  # property tests
 criterion = "0.5"               # benchmarks
 insta = "1"                     # snapshot tests
 assert_cmd = "2"                # CLI integration tests
+escargot = "0.5"                # build the sibling `cloved` bin on demand in tests
 tempfile = "3"                  # atomic writes + test isolation
 camino = "1"                    # UTF-8 paths throughout clove-core
 smol_str = "0.3"                # inline IDs <=23 bytes (crate is smol_str, not smolstr)

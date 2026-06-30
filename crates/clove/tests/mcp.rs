@@ -270,10 +270,22 @@ fn auto_starts_daemon_and_heartbeats() {
     let dir = init_repo();
     let clove_dir = camino::Utf8PathBuf::from_path_buf(dir.path().join(".clove")).unwrap();
 
+    // `clove mcp` auto-starts the daemon by locating `cloved` next to its own
+    // binary — but `cargo test -p clove` builds only `clove`, not the separate
+    // `cloved` crate, so under a scoped run the daemon could never spawn (a 6s
+    // timeout). Build `cloved` on demand and point `CLOVED_PATH` at it so the
+    // test is self-sufficient under any invocation (`-p clove` or `--workspace`).
+    let cloved = escargot::CargoBuild::new()
+        .package("cloved")
+        .bin("cloved")
+        .run()
+        .expect("build cloved for the daemon auto-start test");
+
     // Daemon auto-start enabled; web disabled (avoid port contention) and a fast
     // heartbeat so the test observes pings accruing without a long wait.
     let mut cmd = clove(dir.path());
-    cmd.env("CLOVED_DISABLE_WEB", "1")
+    cmd.env("CLOVED_PATH", cloved.path())
+        .env("CLOVED_DISABLE_WEB", "1")
         .env("CLOVE_MCP_HEARTBEAT_MS", "150");
     let mut s = Session::start_cmd(cmd);
 
