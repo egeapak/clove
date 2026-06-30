@@ -339,7 +339,11 @@ fn guard_not_symlink_escape(path: &Utf8Path, repo_root: &Utf8Path) -> Result<(),
 }
 
 /// Whether `s` is a valid id prefix: `^[a-z][a-z0-9]{0,7}$`.
-fn is_valid_prefix(s: &str) -> bool {
+///
+/// This is the single source of truth for prefix validity. It gates both the
+/// config-load check ([`CloveConfig::validate`]) and the `clove init --prefix`
+/// argument parser, so a prefix accepted at init can never be rejected on load.
+pub fn is_valid_prefix(s: &str) -> bool {
     if s.is_empty() || s.len() > 8 {
         return false;
     }

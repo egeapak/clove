@@ -400,7 +400,7 @@ pub fn search(store: &ItemStore, text: &str, limit: Option<usize>) -> Result<Val
             hits.push((rank, Value::Object(item_object(item))));
         }
     }
-    hits.sort_by(|a, b| a.0.cmp(&b.0));
+    hits.sort_by_key(|a| a.0);
     let objects: Vec<Value> = hits.into_iter().map(|(_, o)| o).collect();
     Ok(page(objects, 0, limit))
 }

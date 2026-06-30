@@ -168,7 +168,7 @@ pub struct IdArg {
 #[derive(Debug, Args)]
 pub struct InitArgs {
     /// Override the generated id prefix.
-    #[arg(long, value_name = "STR")]
+    #[arg(long, value_name = "STR", value_parser = parse_id_prefix)]
     pub prefix: Option<String>,
     /// Also install the 3-way merge driver (`.gitattributes` + `.git/config`).
     #[arg(long)]
@@ -523,4 +523,17 @@ pub struct MergeDriverArgs {
 fn parse_format(raw: &str) -> Result<OutputFormat, String> {
     OutputFormat::parse(raw)
         .ok_or_else(|| format!("invalid format `{raw}` (expected human|json|jsonl)"))
+}
+
+/// clap value-parser for `init --prefix`: reject anything `config.toml`'s loader
+/// would later refuse, so a bad prefix fails at parse time (creating nothing)
+/// instead of being written and bricking the repo on the next command.
+fn parse_id_prefix(raw: &str) -> Result<String, String> {
+    if clove_core::config::is_valid_prefix(raw) {
+        Ok(raw.to_owned())
+    } else {
+        Err(format!(
+            "id_prefix `{raw}` must match ^[a-z][a-z0-9]{{0,7}}$"
+        ))
+    }
 }

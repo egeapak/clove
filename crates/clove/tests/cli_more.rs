@@ -597,3 +597,44 @@ fn quiet_suppresses_human_dependent_warning_on_close() {
         "--quiet must suppress warnings, got: {quiet_err:?}"
     );
 }
+
+// --- init argument validation --------------------------------------------
+
+/// `init --prefix <bad>` used to write the invalid prefix to config.toml and
+/// succeed, bricking the repo: every later command then failed to load config.
+/// It must now be rejected at parse time, before anything is written.
+#[test]
+fn init_rejects_invalid_prefix_and_writes_nothing() {
+    // One representative of each rejection class: uppercase, illegal char,
+    // empty, and over-length (max is 8).
+    for bad in ["UP", "with-dash", "", "toolongprefix"] {
+        let dir = tempfile::tempdir().unwrap();
+        let out = clove(dir.path())
+            .args(["init", "--prefix", bad])
+            .output()
+            .unwrap();
+        assert!(
+            !out.status.success(),
+            "init --prefix {bad:?} should fail, but succeeded"
+        );
+        // Nothing may be left behind: no half-initialized .clove/.
+        assert!(
+            !dir.path().join(".clove").exists(),
+            "init --prefix {bad:?} must not create .clove/ on rejection"
+        );
+    }
+}
+
+/// A valid prefix still initializes, and a follow-up command loads cleanly —
+/// guards against the validator over-rejecting (e.g. the 8-char boundary).
+#[test]
+fn init_accepts_valid_prefix() {
+    for good in ["a", "proj", "abcd1234"] {
+        let dir = tempfile::tempdir().unwrap();
+        clove(dir.path())
+            .args(["init", "--prefix", good])
+            .assert()
+            .success();
+        clove(dir.path()).arg("ls").assert().success();
+    }
+}
