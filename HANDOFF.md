@@ -1,10 +1,11 @@
 # clove — Session Handoff
 
-**Updated:** 2026-06-08
-**State:** **M0–M3 are complete and gated; the first M4 items have landed**
-(`clove stats` + analytics history, the `clove tui` browser, and an
-exact-incremental index/daemon graph — see the "M4" sections below). Full CLI
-command surface;
+**Updated:** 2026-06-30
+**State:** **M0–M4 are complete and gated.** The full surface has shipped:
+`clove stats` + analytics history, the `clove tui` browser, an exact-incremental
+index/daemon graph, the `clove serve` web UI, the `clove mcp` server, two-way
+`clove sync github`, and a Claude Code plugin/marketplace (`.claude-plugin/`) —
+see the "M4" sections below. Full CLI command surface;
 the SQLite index serves `ls`/`ready`/`query` (lean covering-index scan, default
 `--limit 100`, fast staleness with `--deep`), `search`, `reindex`, and
 `doctor` divergence. **M2 (Interop)** adds import (tk/beads/github), export

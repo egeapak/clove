@@ -23,6 +23,9 @@ version = "0.1.0"
 license = "MIT OR Apache-2.0"
 authors = ["Ege Apak"]
 repository = "https://github.com/egeapak/clove"
+homepage = "https://github.com/egeapak/clove"
+keywords = ["issue-tracker", "git", "cli", "dependency-graph", "mcp"]
+categories = ["command-line-utilities", "development-tools"]
 
 # Pinned shared dependencies — see docs/DESIGN.md §1.
 [workspace.dependencies]

@@ -1,6 +1,10 @@
 # clove — Web UI Plan (M4)
 
-> **Status:** Planning. Produced by a multi-agent design/architecture pass
+> **Status:** Design history — superseded by the shipped code. The web UI
+> described here has **landed** (`clove serve`, `crates/clove-web/`); this
+> document is kept as the original design record, not a current to-do list.
+>
+> _Original status:_ Planning. Produced by a multi-agent design/architecture pass
 > (web-backend architect + frontend architect + 4 design directions). Pairs with
 > `DESIGN.md` (§ refs), `IMPLEMENTATION_PLAN.md` (M4 backlog), and the visual
 > mockups under `docs/web-ui-mockups/`. No code has been written yet — the visual

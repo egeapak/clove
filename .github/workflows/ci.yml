@@ -68,6 +68,11 @@ jobs:
   fuzz:
     name: fuzz (30s/target)
     runs-on: ubuntu-latest
+    # The repo-root rust-toolchain.toml pins `stable`, which rustup honors over
+    # the action's default for any cargo invocation in the tree. cargo-fuzz needs
+    # nightly (`-Z` sanitizer flags), so force the toolchain explicitly here.
+    env:
+      RUSTUP_TOOLCHAIN: nightly
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly

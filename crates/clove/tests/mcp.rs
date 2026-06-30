@@ -244,6 +244,33 @@ fn edit_body_dep_remove_and_set_parent_round_trip() {
     s.shutdown();
 }
 
+/// The plugin spawns `clove mcp` per session, possibly before `clove init`. The
+/// server must still **start and complete the handshake** in a directory with no
+/// `.clove/` repository (rather than the process failing to launch), and its
+/// tools surface a "no repository" error until the repo exists.
+#[test]
+fn starts_without_a_repository() {
+    let dir = tempfile::tempdir().unwrap(); // NOT init'd — no .clove/
+    let mut s = Session::start(dir.path());
+
+    // Handshake already succeeded inside Session::start; tools are still listed.
+    let resp = s.request(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
+    assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 14);
+
+    // A read tool returns a tool error (not a protocol error / crash) because
+    // there is no repository yet.
+    let ready = s.call(3, "clove_ready", json!({}));
+    assert_eq!(ready["isError"], true, "no repo → tool reports an error");
+
+    // No stray `.clove/` was materialized just by starting the server.
+    assert!(
+        !dir.path().join(".clove").exists(),
+        "starting the server must not create a repository"
+    );
+
+    s.shutdown();
+}
+
 #[test]
 fn tool_error_is_reported_as_is_error() {
     let dir = init_repo();

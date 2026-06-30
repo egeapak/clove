@@ -9,18 +9,31 @@ delete them and nothing is lost. Written in Rust as a single cross-platform bina
 
 ## Status
 
-M0–M3 complete and gated; M4 in progress: `clove stats` + analytics history, an
-exact-incremental index/daemon graph, the read-only `clove tui` terminal browser,
-and the **`clove serve` web UI** (Kanban / list / detail / timeline). See
-`HANDOFF.md` for the current state and `docs/` for the full design
-(`docs/M4_WEB_UI_PLAN.md` for the web UI).
+The full surface has landed and is gated in CI: the `clove` CLI and `cloved`
+daemon, the SQLite index, the exact-incremental index/daemon dependency graph,
+analytics (`clove stats` + history), the read-only `clove tui` terminal browser,
+the **`clove serve` web UI** (Kanban / list / detail / timeline), two-way
+**GitHub sync** (`clove sync github`), the **`clove mcp`** server, and a **Claude
+Code plugin**. See `HANDOFF.md` for the current state and `docs/DESIGN.md` for the
+authoritative spec.
+
+## Install
+
+```sh
+cargo install --locked --git https://github.com/egeapak/clove clove cloved
+clove version
+```
+
+This installs the `clove` CLI and the optional `cloved` daemon onto your `PATH`.
+A Rust toolchain compiles them; no Node is required (the web UI embeds a
+placeholder unless built with Node — see [`clove-web/web/README.md`](crates/clove-web/web/README.md)).
 
 ## Build & test
 
 ```sh
 cargo build --release          # binaries: clove (CLI), cloved (daemon)
 cargo test --workspace         # unit + integration + doctests
-cargo clippy --workspace --all-targets -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 ## Quick start
@@ -92,6 +105,11 @@ create/edit/transition plus dep/parent/comment writes. Reads compute from the
 file store; writes prefer the auto-started `cloved` daemon (and fall back to
 direct file access), so concurrent agents stay coherent.
 
+For **any MCP client** (not just Claude Code), register `clove mcp` as a stdio
+server with command `clove` and args `["mcp"]`, run from inside the repository.
+The server starts even before `clove init`; until the repo exists its tools
+return a "no clove repository" error rather than failing to launch.
+
 For **Claude Code**, this repo is also a plugin marketplace — install it with:
 
 ```sh
@@ -117,9 +135,10 @@ The plugin wires up the `clove mcp` server automatically (tools surface as
 | `crates/clove-tui` | read-only terminal browser (`clove tui`, ratatui) |
 | `crates/clove-web` | web UI server + embedded SvelteKit SPA (`clove serve`); see `web/README.md` |
 | `docs/DESIGN.md` | authoritative, implementation-ready spec |
-| `docs/IMPLEMENTATION_PLAN.md` | phased M0–M4 task plan |
-| `docs/M4_WEB_UI_PLAN.md` | web UI plan + status; `docs/web-ui-mockups/` the design themes |
-| `docs/*_ACCEPTANCE_GATES.md` | per-milestone acceptance gates |
+| `docs/IMPLEMENTATION_PLAN.md` | phased M0–M4 task plan (design history) |
+| `docs/M4_WEB_UI_PLAN.md` | web UI design notes; `docs/web-ui-mockups/` the themes (design history) |
+| `docs/*_ACCEPTANCE_GATES.md` | per-milestone acceptance gates (design history) |
+| `CHANGELOG.md` | release notes |
 
 ## License
 
