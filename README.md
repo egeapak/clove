@@ -84,6 +84,26 @@ per-repo last-sync clock lives under `.clove/sync/` (git-ignored), and a running
 daemon can run the sync on a timer (`[daemon] github_sync_interval_min` +
 `github_sync_repo`). Auth via `GITHUB_TOKEN` or the `gh` CLI.
 
+### AI agents: MCP server & Claude Code plugin
+
+`clove mcp` runs an MCP server (stdio) that exposes clove's items to AI agents as
+native tools — list/search/show, dependency tree and ready/blocked, stats, and
+create/edit/transition plus dep/parent/comment writes. Reads compute from the
+file store; writes prefer the auto-started `cloved` daemon (and fall back to
+direct file access), so concurrent agents stay coherent.
+
+For **Claude Code**, this repo is also a plugin marketplace — install it with:
+
+```sh
+/plugin marketplace add egeapak/clove
+/plugin install clove@clove
+```
+
+The plugin wires up the `clove mcp` server automatically (tools surface as
+`mcp__plugin_clove_tracker__*`); it needs `clove` (and, for coordinated writes,
+`cloved`) on your `PATH` and an initialized repo (`clove init`). See
+[`.claude-plugin/README.md`](.claude-plugin/README.md) for details.
+
 ## Layout
 
 | Path | What |

@@ -1,0 +1,14 @@
+{
+  "name": "clove",
+  "owner": {
+    "name": "Ege Apak",
+    "email": "egeapak@gmail.com"
+  },
+  "plugins": [
+    {
+      "name": "clove",
+      "source": "./",
+      "description": "Fast, git-native, dependency-aware work-item tracker. Exposes clove's work items to AI agents as MCP tools: browse/search items, inspect the dependency graph and readiness, create/edit/transition items, and manage deps and comments."
+    }
+  ]
+}

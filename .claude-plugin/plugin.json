@@ -1,0 +1,12 @@
+{
+  "name": "clove",
+  "version": "0.1.0",
+  "description": "Fast, git-native, dependency-aware work-item tracker. Exposes clove's work items to AI agents as MCP tools: list/search/show items, inspect the dependency graph and what's ready vs. blocked, view repository analytics, and create/edit/transition items plus manage dependencies, parents, and comments. Reads compute directly from the file store; writes prefer the single `cloved` daemon (auto-started) so concurrent agents stay coherent, and fall back to direct file access when no daemon is available. Requires an initialized repository (`clove init`).",
+  "mcpServers": {
+    "tracker": {
+      "command": "clove",
+      "args": ["mcp"],
+      "env": {}
+    }
+  }
+}
