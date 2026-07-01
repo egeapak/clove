@@ -271,6 +271,45 @@ fn starts_without_a_repository() {
     s.shutdown();
 }
 
+/// With the daemon **enabled** (the default) but no `.clove/` repository, the
+/// server must NOT auto-start `cloved` or materialize a `.clove/` — the
+/// `clove_dir.exists()` guard skips coordination when there is nothing to
+/// coordinate. (The `no_daemon` variant above can't cover this: it disables the
+/// daemon outright, so it would pass even if the guard were removed.)
+#[cfg(unix)]
+#[test]
+fn no_repo_does_not_spawn_daemon_or_create_clove_dir() {
+    use std::time::{Duration, Instant};
+
+    let dir = tempfile::tempdir().unwrap(); // NOT init'd — no .clove/
+
+    // Build `cloved` and point `CLOVED_PATH` at it, so that if the guard were
+    // broken the server WOULD find a daemon to spawn (and create `.clove/`).
+    let cloved = escargot::CargoBuild::new()
+        .package("cloved")
+        .bin("cloved")
+        .run()
+        .expect("build cloved");
+
+    let mut cmd = clove(dir.path()); // daemon enabled (no CLOVE_MCP_NO_DAEMON)
+    cmd.env("CLOVED_PATH", cloved.path())
+        .env("CLOVED_DISABLE_WEB", "1")
+        .env("CLOVE_MCP_HEARTBEAT_MS", "100");
+    let s = Session::start_cmd(cmd); // handshake still succeeds
+
+    // Give a broken guard time to spawn cloved / create the dir, then assert it did not.
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_millis(600) {
+        assert!(
+            !dir.path().join(".clove").exists(),
+            "no repo → the server must not create a .clove/ directory"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    s.shutdown();
+}
+
 #[test]
 fn tool_error_is_reported_as_is_error() {
     let dir = init_repo();

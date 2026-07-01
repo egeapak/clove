@@ -8,8 +8,9 @@ index/daemon graph, the `clove serve` web UI, the `clove mcp` server, two-way
 see the "M4" sections below. Full CLI command surface;
 the SQLite index serves `ls`/`ready`/`query` (lean covering-index scan, default
 `--limit 100`, fast staleness with `--deep`), `search`, `reindex`, and
-`doctor` divergence. **M2 (Interop)** adds import (tk/beads/github), export
-(json/jsonl/github), and a real 3-way `clove merge-driver`. **M3 (Daemon)** adds
+`doctor` divergence. **M2 (Interop)** adds import (tk/beads), export
+(json/jsonl), and a real 3-way `clove merge-driver` (GitHub is now handled by the
+two-way `clove sync github`, not import/export). **M3 (Daemon)** adds
 the optional `cloved` (file-watch incremental index, IPC, opt-in git auto-sync),
 `clove daemon start|stop|status`, transparent read routing through the daemon, and
 a `doctor` daemon-health check — see `docs/M3_PLAN.md` and
@@ -32,9 +33,11 @@ published + validated. Perf/parity/fuzz/golden gates pass (M0
 except one environment-only failure (`repo::tests::linked_worktree…`, a sandbox
 git-signing artifact, not a code defect; the token-gated `github_roundtrip`
 shows as `1 ignored`).
-**M4 — Extras** has begun: two items have landed — **`clove stats`** (the
-analytics command; see the "M4 — `clove stats`" section below) and **`clove
-tui`** (T-U01), a read-only terminal browser. New crate `clove-tui` (ratatui,
+**M4** is complete — **`clove stats`** (the analytics command; see the "M4 —
+`clove stats`" section below), **`clove tui`** (T-U01) the read-only terminal
+browser, the `clove serve` web UI, the `clove mcp` server, two-way `clove sync
+github`, and the Claude Code plugin have all landed (see the dedicated M4
+sections further down). New crate `clove-tui` (ratatui,
 depends only on `clove-core`; reads via
 the file-store scan path so it is always correct and never touches the index or
 daemon). Master-detail UI: **All / Ready / Blocked** tabs with live counts, an

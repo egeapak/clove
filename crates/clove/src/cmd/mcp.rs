@@ -14,7 +14,7 @@
 //! repo context itself (with a no-repo fallback) instead of going through the
 //! `discover()`-first dispatch path in `main.rs`.
 
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::Utf8Path;
 use clove_types::CloveError;
 
 #[cfg(feature = "mcp")]
@@ -38,21 +38,14 @@ pub fn run(clove_dir_override: Option<&Utf8Path>) -> Result<(), CloveError> {
                 .unwrap_or_else(|| ctx.root.join(".clove"));
             (ctx.root, clove_dir, ctx.config)
         }
+        // `NoRepo` only arises on the auto-discover (no `--clove-dir`) path:
+        // `discover` with an explicit `--clove-dir` roots at the override and
+        // derives default config rather than returning `NoRepo`. So the fallback
+        // roots at the cwd with defaults; the server starts and its tools report
+        // "no clove repository" until `clove init` runs.
         Err(CloveError::NoRepo { .. }) => {
-            let (root, clove_dir) = match clove_dir_override {
-                Some(dir) => {
-                    let root = dir
-                        .parent()
-                        .map(Utf8Path::to_owned)
-                        .unwrap_or_else(|| Utf8PathBuf::from("."));
-                    (root, dir.to_owned())
-                }
-                None => {
-                    let root = current_dir()?;
-                    let clove_dir = root.join(".clove");
-                    (root, clove_dir)
-                }
-            };
+            let root = current_dir()?;
+            let clove_dir = root.join(".clove");
             (root, clove_dir, CloveConfig::default())
         }
         Err(e) => return Err(e),
@@ -70,7 +63,7 @@ pub fn run(clove_dir_override: Option<&Utf8Path>) -> Result<(), CloveError> {
 #[cfg(not(feature = "mcp"))]
 pub fn run(_clove_dir_override: Option<&Utf8Path>) -> Result<(), CloveError> {
     Err(CloveError::Io {
-        path: Utf8PathBuf::from("."),
+        path: camino::Utf8PathBuf::from("."),
         source: std::io::Error::other(
             "this clove binary was built without MCP support (enable the `mcp` feature)",
         ),
