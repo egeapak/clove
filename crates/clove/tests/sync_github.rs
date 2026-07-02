@@ -45,6 +45,24 @@ struct State {
     /// Monotonic clock (seconds past a fixed far-future base) for `updated_at`,
     /// so a created/edited issue always looks strictly newer than seeded data.
     clock: u64,
+
+    // --- Fault injection (retry / idempotency / partial-failure coverage) ---
+    /// Number of upcoming issue-create POSTs that still create the issue but then
+    /// respond 500 — simulating a write the server committed whose response was
+    /// lost. A blind retry would create a duplicate.
+    create_commit_then_fail: usize,
+    /// While `Some`, every issue PATCH responds with this HTTP status and mutates
+    /// nothing (used to test the retry error-class gating).
+    patch_fail_status: Option<u16>,
+    /// Number of upcoming issue PATCHes that fail 503 (transient) before behaving
+    /// normally — used to confirm idempotent updates *are* retried on 5xx.
+    patch_transient_fails: usize,
+    /// While `Some(n)`, a comment POST to issue `n` responds 500 and adds nothing.
+    fail_comment_post_for: Option<u64>,
+    /// Count of issue-create POSTs actually received.
+    issue_post_count: u64,
+    /// Count of issue PATCHes actually received.
+    patch_count: u64,
 }
 
 impl State {
@@ -73,6 +91,12 @@ impl MockGitHub {
             next_number: 1,
             next_comment_id: 1000,
             clock: 0,
+            create_commit_then_fail: 0,
+            patch_fail_status: None,
+            patch_transient_fails: 0,
+            fail_comment_post_for: None,
+            issue_post_count: 0,
+            patch_count: 0,
         }));
         let thread_state = Arc::clone(&state);
         std::thread::spawn(move || {
@@ -127,6 +151,34 @@ impl MockGitHub {
 
     fn issue_count(&self) -> usize {
         self.state.lock().unwrap().issues.len()
+    }
+
+    /// Arm the next `n` issue-create POSTs to commit the write but respond 500.
+    fn arm_create_commit_then_fail(&self, n: usize) {
+        self.state.lock().unwrap().create_commit_then_fail = n;
+    }
+
+    /// Make every issue PATCH respond with `status` (no mutation) until cleared.
+    fn set_patch_fail_status(&self, status: Option<u16>) {
+        self.state.lock().unwrap().patch_fail_status = status;
+    }
+
+    /// Arm the next `n` issue PATCHes to fail 503 (transient) before succeeding.
+    fn arm_patch_transient_fails(&self, n: usize) {
+        self.state.lock().unwrap().patch_transient_fails = n;
+    }
+
+    /// Make comment POSTs to `number` fail with 500 (no mutation) until cleared.
+    fn set_fail_comment_post_for(&self, number: Option<u64>) {
+        self.state.lock().unwrap().fail_comment_post_for = number;
+    }
+
+    fn issue_post_count(&self) -> u64 {
+        self.state.lock().unwrap().issue_post_count
+    }
+
+    fn patch_count(&self) -> u64 {
+        self.state.lock().unwrap().patch_count
     }
 
     /// Seed a comment on an existing issue (simulating a GitHub-side comment).
@@ -305,12 +357,25 @@ fn route(
                 Value::Array(s.comments.get(&number).cloned().unwrap_or_default()),
             ),
             "POST" => {
+                if s.fail_comment_post_for == Some(number) {
+                    return (
+                        "500 Internal Server Error",
+                        json!({ "message": "comment post failed" }),
+                    );
+                }
                 let id = s.next_comment_id;
                 s.next_comment_id += 1;
                 let created = s.tick();
                 let body_text = body["body"].as_str().unwrap_or("").to_owned();
                 let comment = make_comment(id, "tester", &body_text, &created);
                 s.comments.entry(number).or_default().push(comment.clone());
+                // Real GitHub bumps the issue's `updated_at` when a comment is
+                // posted; mirror that so the sync's comment-fingerprint handling is
+                // exercised faithfully (a stale fingerprint would flag a spurious
+                // remote change on the next run).
+                if let Some(issue) = s.issues.iter_mut().find(|i| i["number"] == json!(number)) {
+                    issue["updated_at"] = json!(created);
+                }
                 ("201 Created", comment)
             }
             _ => ("404 Not Found", json!({ "message": "unsupported" })),
@@ -320,6 +385,7 @@ fn route(
     match (method, number) {
         ("GET", None) => ("200 OK", Value::Array(s.issues.clone())),
         ("POST", None) => {
+            s.issue_post_count += 1;
             let number = s.next_number;
             s.next_number += 1;
             let updated = s.tick();
@@ -338,9 +404,27 @@ fn route(
                 None,
             );
             s.issues.push(issue.clone());
+            // Simulate a committed-write-with-lost-response: the issue exists on
+            // the server, but the client sees an error. A blind retry would create
+            // a duplicate.
+            if s.create_commit_then_fail > 0 {
+                s.create_commit_then_fail -= 1;
+                return (
+                    "500 Internal Server Error",
+                    json!({ "message": "created but response lost" }),
+                );
+            }
             ("201 Created", issue)
         }
         ("PATCH", Some(number)) => {
+            s.patch_count += 1;
+            if s.patch_transient_fails > 0 {
+                s.patch_transient_fails -= 1;
+                return (status_line(503), json!({ "message": "try again later" }));
+            }
+            if let Some(code) = s.patch_fail_status {
+                return (status_line(code), json!({ "message": "patch failed" }));
+            }
             let updated = s.tick();
             let Some(issue) = s.issues.iter_mut().find(|i| i["number"] == json!(number)) else {
                 return ("404 Not Found", json!({ "message": "no such issue" }));
@@ -385,6 +469,17 @@ fn route(
             ("200 OK", issue.clone())
         }
         _ => ("404 Not Found", json!({ "message": "unsupported" })),
+    }
+}
+
+/// Map an HTTP status code to a status line for the fault-injection responses.
+fn status_line(code: u16) -> &'static str {
+    match code {
+        422 => "422 Unprocessable Entity",
+        429 => "429 Too Many Requests",
+        500 => "500 Internal Server Error",
+        503 => "503 Service Unavailable",
+        _ => "400 Bad Request",
     }
 }
 
@@ -542,6 +637,13 @@ fn sync(dir: &Path, addr: SocketAddr, extra: &[&str]) -> Value {
     let out = clove(dir, addr).args(&args).output().unwrap();
     assert!(out.status.success(), "sync failed: {out:?}");
     serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("bad json: {e}\n{out:?}"))
+}
+
+/// Run `clove sync github <repo>` allowing failure; returns the raw process output.
+fn sync_raw(dir: &Path, addr: SocketAddr, extra: &[&str]) -> std::process::Output {
+    let mut args = vec!["sync", "github", "owner/repo", "--format", "json"];
+    args.extend_from_slice(extra);
+    clove(dir, addr).args(&args).output().unwrap()
 }
 
 /// The single local item's id (assumes exactly one).
@@ -1058,4 +1160,355 @@ fn concurrent_sync_is_rejected_while_locked() {
     );
     // Nothing was pushed while the lock was held.
     assert_eq!(mock.issue_count(), 0, "locked sync must not push");
+}
+
+// ---------------------------------------------------------------------------
+// Regression coverage for the sync-correctness defects.
+// ---------------------------------------------------------------------------
+
+/// All local item ids (any order).
+fn all_item_ids(dir: &Path, addr: SocketAddr) -> Vec<String> {
+    let out = clove(dir, addr)
+        .args(["ls", "--format", "json"])
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    v["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// C-sync-1: a remote-only edit must never demote a local `in_progress` to
+/// `open` (GitHub has no `in_progress`; the pull only carries `open`).
+#[test]
+fn pull_update_preserves_local_in_progress() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    clove(dir.path(), mock.addr)
+        .args(["new", "Task", "--type", "bug"])
+        .assert()
+        .success();
+    sync(dir.path(), mock.addr, &[]); // push-create gh-1
+    let id = only_item_id(dir.path(), mock.addr);
+
+    // Mark it in_progress locally and sync so both sides are in sync again (the
+    // GitHub issue stays "open" — there is no in_progress there).
+    std::thread::sleep(Duration::from_millis(1100));
+    clove(dir.path(), mock.addr)
+        .args(["start", &id])
+        .assert()
+        .success();
+    sync(dir.path(), mock.addr, &[]);
+    assert_eq!(show(dir.path(), mock.addr, &id)["status"], "in_progress");
+
+    // A remote-only edit triggers a pull_update. It must apply the new title but
+    // NOT rewrite the status back to open.
+    mock.edit(1, |i| i["title"] = json!("Edited remotely"));
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["pulled_updated"], 1, "{v}");
+    let item = show(dir.path(), mock.addr, &id);
+    assert_eq!(item["title"], "Edited remotely");
+    assert_eq!(
+        item["status"], "in_progress",
+        "a remote non-status edit must not demote in_progress to open"
+    );
+}
+
+/// C-sync-2 (create+close variant): the fingerprint recorded after a push-create
+/// of a *closed* item must reflect the close PATCH, not the superseded create
+/// response — otherwise the next run sees a spurious remote change.
+#[test]
+fn create_and_close_records_close_fingerprint() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    clove(dir.path(), mock.addr)
+        .args(["new", "Done already", "--type", "chore"])
+        .assert()
+        .success();
+    let id = only_item_id(dir.path(), mock.addr);
+    clove(dir.path(), mock.addr)
+        .args(["close", &id])
+        .assert()
+        .success();
+    sync(dir.path(), mock.addr, &[]); // push-create then close (two updated_at bumps)
+    assert!(mock.is_closed(1));
+
+    // Nothing changed on either side; the pair must be in sync, not pull-updated.
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(
+        v["data"]["pulled_updated"], 0,
+        "create+close must not leave a stale fingerprint: {v}"
+    );
+    assert_eq!(v["data"]["in_sync"], 1, "{v}");
+}
+
+/// C-sync-2 (comment variant): pushing a comment bumps the issue's updated_at on
+/// GitHub, but that self-inflicted bump must not read as a remote change and
+/// cause a spurious pull_update on the next run.
+#[test]
+fn comment_push_does_not_trigger_spurious_pull() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    clove(dir.path(), mock.addr)
+        .args(["new", "Task", "--type", "bug"])
+        .assert()
+        .success();
+    let id = only_item_id(dir.path(), mock.addr);
+    sync(dir.path(), mock.addr, &[]); // push-create gh-1
+    clove(dir.path(), mock.addr)
+        .args(["comment", &id, "A local comment"])
+        .assert()
+        .success();
+
+    let v1 = sync(dir.path(), mock.addr, &[]); // pushes the comment (bumps issue updated_at)
+    assert_eq!(v1["data"]["comments_pushed"], 1, "{v1}");
+
+    let v2 = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(
+        v2["data"]["pulled_updated"], 0,
+        "a pushed comment must not masquerade as a remote change: {v2}"
+    );
+    assert_eq!(v2["data"]["in_sync"], 1, "{v2}");
+}
+
+/// C-sync-3: a mid-run failure (a comment POST exhausting its attempts) must
+/// still persist the bookkeeping for actions already applied, so the next run
+/// does not re-pull the already-pushed comment into a duplicate local comment.
+#[test]
+fn mid_run_failure_persists_comment_bookkeeping() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    clove(dir.path(), mock.addr)
+        .args(["new", "First", "--type", "bug"])
+        .assert()
+        .success();
+    clove(dir.path(), mock.addr)
+        .args(["new", "Second", "--type", "bug"])
+        .assert()
+        .success();
+    for id in all_item_ids(dir.path(), mock.addr) {
+        clove(dir.path(), mock.addr)
+            .args(["comment", &id, &format!("note for {id}")])
+            .assert()
+            .success();
+    }
+
+    // The comment push for gh-1 succeeds; the one for gh-2 fails, aborting the run
+    // after gh-1's comment is already on GitHub.
+    mock.set_fail_comment_post_for(Some(2));
+    let out = sync_raw(dir.path(), mock.addr, &[]);
+    assert!(
+        !out.status.success(),
+        "the mid-run comment failure must surface: {out:?}"
+    );
+    assert_eq!(
+        mock.issue_count(),
+        2,
+        "both issues were created before the failure"
+    );
+
+    // Recover: the next run must NOT re-pull gh-1's already-pushed comment as a
+    // duplicate local comment. Total local comments stays 2 (one per item).
+    mock.set_fail_comment_post_for(None);
+    let v = sync_raw(dir.path(), mock.addr, &[]);
+    assert!(v.status.success(), "recovery sync should succeed: {v:?}");
+    let total_local: usize = all_item_ids(dir.path(), mock.addr)
+        .iter()
+        .map(|id| local_comment_bodies(dir.path(), mock.addr, id).len())
+        .sum();
+    assert_eq!(
+        total_local, 2,
+        "already-pushed comment must not be re-pulled as a duplicate"
+    );
+}
+
+/// C-sync-4: removing the last local label must propagate — the push has to send
+/// an empty label set to clear it on GitHub, not skip the field.
+#[test]
+fn push_clears_last_local_label() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    clove(dir.path(), mock.addr)
+        .args(["new", "Tagged", "--type", "bug", "--label", "area:core"])
+        .assert()
+        .success();
+    sync(dir.path(), mock.addr, &[]); // push-create gh-1 with the label
+    assert_eq!(mock.label_names(1), vec!["area:core".to_owned()]);
+    let id = only_item_id(dir.path(), mock.addr);
+
+    std::thread::sleep(Duration::from_millis(1100));
+    clove(dir.path(), mock.addr)
+        .args(["label", &id, "rm", "area:core"])
+        .assert()
+        .success();
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["pushed_updated"], 1, "{v}");
+    assert!(
+        mock.label_names(1).is_empty(),
+        "removing the last label must clear it on GitHub: {:?}",
+        mock.label_names(1)
+    );
+}
+
+/// C-sync-6 (non-idempotent create): a create whose response is lost must not be
+/// retried — a retry would mint a duplicate issue.
+#[test]
+fn issue_create_is_not_retried_on_lost_response() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    clove(dir.path(), mock.addr)
+        .args(["new", "Task", "--type", "bug"])
+        .assert()
+        .success();
+
+    mock.arm_create_commit_then_fail(1);
+    let out = sync_raw(dir.path(), mock.addr, &[]);
+    assert!(
+        !out.status.success(),
+        "a lost-response create must surface, not silently retry: {out:?}"
+    );
+    assert_eq!(
+        mock.issue_count(),
+        1,
+        "a non-idempotent create must not be retried into a duplicate"
+    );
+    assert_eq!(mock.issue_post_count(), 1, "create attempted exactly once");
+}
+
+/// C-sync-6 (permanent 4xx): an idempotent update that gets a permanent 4xx must
+/// fail fast, not burn its full retry budget.
+#[test]
+fn idempotent_update_is_not_retried_on_4xx() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    clove(dir.path(), mock.addr)
+        .args(["new", "Task", "--type", "bug"])
+        .assert()
+        .success();
+    sync(dir.path(), mock.addr, &[]); // push-create gh-1 (open → no PATCH)
+    let id = only_item_id(dir.path(), mock.addr);
+    std::thread::sleep(Duration::from_millis(1100));
+    clove(dir.path(), mock.addr)
+        .args(["set", &id, "title=Renamed"])
+        .assert()
+        .success();
+
+    mock.set_patch_fail_status(Some(422));
+    let before = mock.patch_count();
+    let out = sync_raw(dir.path(), mock.addr, &[]);
+    assert!(!out.status.success(), "a 422 must surface: {out:?}");
+    assert_eq!(
+        mock.patch_count() - before,
+        1,
+        "a permanent 4xx must not be retried"
+    );
+}
+
+/// C-sync-6 (guard): an idempotent update *is* retried through a transient 5xx.
+#[test]
+fn idempotent_update_retries_transient_5xx() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    clove(dir.path(), mock.addr)
+        .args(["new", "Task", "--type", "bug"])
+        .assert()
+        .success();
+    sync(dir.path(), mock.addr, &[]); // push-create gh-1
+    let id = only_item_id(dir.path(), mock.addr);
+    std::thread::sleep(Duration::from_millis(1100));
+    clove(dir.path(), mock.addr)
+        .args(["set", &id, "title=Renamed"])
+        .assert()
+        .success();
+
+    mock.arm_patch_transient_fails(2); // two 503s, then success
+    let before = mock.patch_count();
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["pushed_updated"], 1, "{v}");
+    assert_eq!(
+        mock.patch_count() - before,
+        3,
+        "two transient failures then success = three attempts"
+    );
+    assert_eq!(mock.issue(1).unwrap()["title"], "Renamed");
+}
+
+/// C-sync-7: an unparseable local item file must abort the sync rather than being
+/// silently dropped (which would pull-create its linked issue as a duplicate).
+#[test]
+fn unparseable_local_file_aborts_sync() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    clove(dir.path(), mock.addr)
+        .args(["new", "Good", "--type", "bug"])
+        .assert()
+        .success();
+
+    // Drop a corrupt item file into the store.
+    let bad = dir.path().join(".clove/issues/proj-BADBAD01.md");
+    std::fs::write(&bad, "---\n: : not : valid : yaml\n---\nbody\n").unwrap();
+
+    let out = sync_raw(dir.path(), mock.addr, &[]);
+    assert!(
+        !out.status.success(),
+        "an unparseable local file must abort the sync: {out:?}"
+    );
+    assert_eq!(
+        mock.issue_count(),
+        0,
+        "nothing must be pushed while a local file is unparseable"
+    );
+}
+
+/// C-sync-8: a conflict skipped under `--prefer manual` must NOT advance the
+/// assignee baseline. If it does, a later local-wins push treats the stale GitHub
+/// assignee as a human-added extra and leaves both the old and new assignee.
+#[test]
+fn manual_skipped_conflict_does_not_restamp_assignee() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    clove(dir.path(), mock.addr)
+        .args(["new", "Task", "--type", "bug", "--assignee", "alice"])
+        .assert()
+        .success();
+    sync(dir.path(), mock.addr, &[]); // push-create gh-1 assigned [alice]
+    let id = only_item_id(dir.path(), mock.addr);
+    assert_eq!(mock.assignee_logins(1), vec!["alice".to_owned()]);
+
+    // Reassign locally to bob AND change the issue remotely → a both-sides conflict.
+    std::thread::sleep(Duration::from_millis(1100));
+    clove(dir.path(), mock.addr)
+        .args(["assign", &id, "bob"])
+        .assert()
+        .success();
+    mock.edit(1, |i| i["title"] = json!("Remote title change"));
+
+    let v = sync(dir.path(), mock.addr, &["--prefer", "manual"]);
+    assert_eq!(v["data"]["conflicts"].as_array().unwrap().len(), 1, "{v}");
+    assert_eq!(v["data"]["conflicts"][0]["resolution"], "skipped", "{v}");
+    assert_eq!(
+        mock.assignee_logins(1),
+        vec!["alice".to_owned()],
+        "the skipped conflict pushed nothing"
+    );
+
+    // Resolve local-wins: the push replaces clove's assignee (alice → bob) and,
+    // with a correct baseline, does not leave the stale alice behind.
+    let v3 = sync(dir.path(), mock.addr, &["--prefer", "local"]);
+    assert_eq!(
+        v3["data"]["conflicts"][0]["resolution"], "local_wins",
+        "{v3}"
+    );
+    let logins = mock.assignee_logins(1);
+    assert!(
+        logins.contains(&"bob".to_owned()),
+        "bob must be assigned: {logins:?}"
+    );
+    assert!(
+        !logins.contains(&"alice".to_owned()),
+        "the stale assignee must not linger as a phantom human extra: {logins:?}"
+    );
 }

@@ -450,15 +450,24 @@ pub struct CommentPlan {
     pub push: Vec<LocalComment>,
 }
 
-/// A stable, dependency-free hash of a comment body (the push-dedup key). Uses
-/// the fixed-seed [`DefaultHasher`](std::collections::hash_map::DefaultHasher) so
-/// the value is reproducible across runs and machines. The body is trimmed first
-/// so a trailing-newline difference never forks the identity.
+/// A stable hash of a comment body (the push-dedup key), reproducible across
+/// runs, machines, **and toolchain upgrades**.
+///
+/// These `u64`s are persisted in [`SyncEntry::local_comment_hashes`] and compared
+/// against values written by (potentially) a different build on a later run, so
+/// the algorithm must be fixed forever. std's `DefaultHasher` is explicitly
+/// documented as unstable across Rust releases ("should not be relied upon over
+/// releases"), so it must not back a persisted fingerprint — a toolchain bump
+/// would silently invalidate every stored hash and re-push every comment as a
+/// duplicate. We use blake3 (the project's content hasher), truncated to 64 bits;
+/// truncation is fine because this is a dedup key, not a security boundary. The
+/// body is trimmed first so a trailing-newline difference never forks the identity.
 pub fn body_hash(body: &str) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    body.trim().hash(&mut hasher);
-    hasher.finish()
+    let digest = blake3::hash(body.trim().as_bytes());
+    let head: [u8; 8] = digest.as_bytes()[..8]
+        .try_into()
+        .expect("blake3 digest is 32 bytes");
+    u64::from_le_bytes(head)
 }
 
 /// Reconcile an issue's GitHub comments against its local sidecar comments,
@@ -1244,5 +1253,15 @@ mod tests {
     fn body_hash_ignores_trailing_whitespace() {
         assert_eq!(body_hash("hello"), body_hash("hello\n"));
         assert_ne!(body_hash("hello"), body_hash("world"));
+    }
+
+    #[test]
+    fn body_hash_is_a_fixed_stable_vector() {
+        // These hashes are persisted and compared across toolchain upgrades, so
+        // the algorithm must never drift. Pin known vectors: a change here (e.g. a
+        // regression back to the unstable std `DefaultHasher`) breaks this test
+        // and forces a deliberate, documented migration.
+        assert_eq!(body_hash("hello"), 10557148580892020714);
+        assert_eq!(body_hash("A local comment"), 1232548354274388200);
     }
 }
