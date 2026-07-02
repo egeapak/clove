@@ -20,11 +20,12 @@ export function applyFilters(items: Item[], q: ListQuery): Item[] {
   if (q.label?.length) out = out.filter((i) => q.label!.every((l) => i.labels.includes(l)));
   if (q.q) {
     const n = q.q.toLowerCase();
-    out = out.filter(
-      (i) =>
-        i.title.toLowerCase().includes(n) ||
-        i.id.toLowerCase().includes(n) ||
-        i.body.toLowerCase().includes(n)
+    // Match the server's `q` contract exactly (read.rs matches(): substring over
+    // "id title labels"). The lean list endpoint (GET /items) omits `body`, so it
+    // must NOT be searched here — doing so both crashes on live data (body is
+    // undefined) and diverges from server-side filtering.
+    out = out.filter((i) =>
+      `${i.id} ${i.title} ${i.labels.join(' ')}`.toLowerCase().includes(n)
     );
   }
   return out;

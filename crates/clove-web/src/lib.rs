@@ -20,10 +20,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use axum::extract::DefaultBodyLimit;
+use axum::http::{header, StatusCode};
+use axum::response::IntoResponse;
 use axum::routing::{delete, get, post, put};
 use axum::Router;
 use camino::Utf8PathBuf;
 use clove_core::ItemStore;
+use clove_types::ItemType;
 use tokio::sync::broadcast;
 use tower_http::compression::{CompressionLayer, CompressionLevel};
 
@@ -44,6 +47,9 @@ pub struct AppState {
     pub issues_dir: Utf8PathBuf,
     /// The configured id prefix (for the create form / `/meta`).
     pub id_prefix: String,
+    /// The configured default item type, honored by `POST /items` when the
+    /// request omits a type (matches every other surface's `config.default_type`).
+    pub default_type: ItemType,
     /// Serving mode label surfaced to clients: `"standalone"` or `"daemon"`.
     pub source: String,
     /// Whether a daemon is known to be running for this repo.
@@ -63,12 +69,14 @@ impl AppState {
         id_prefix: String,
         source: impl Into<String>,
         daemon_running: bool,
+        default_type: ItemType,
     ) -> Self {
         let (events, _rx) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         Self {
             store,
             issues_dir,
             id_prefix,
+            default_type,
             source: source.into(),
             daemon_running,
             events,
@@ -100,6 +108,41 @@ impl AppState {
     pub fn next_seq(&self) -> u64 {
         self.seq.fetch_add(1, Ordering::Relaxed) + 1
     }
+}
+
+/// Whether an HTTP `Host`/authority (or `Origin` authority) names the loopback
+/// interface. Accepts an optional port and bracketed IPv6. This is the guard
+/// against DNS-rebinding: a rebound hostname (e.g. `evil.com`) never matches.
+pub(crate) fn host_is_local(host: &str) -> bool {
+    let hostname = if let Some(rest) = host.strip_prefix('[') {
+        // Bracketed IPv6 literal: take up to the closing ']'.
+        rest.split_once(']').map(|(h, _)| h).unwrap_or(rest)
+    } else {
+        // `host` or `host:port` — strip a trailing `:port` if present.
+        host.rsplit_once(':').map(|(h, _)| h).unwrap_or(host)
+    };
+    matches!(hostname, "localhost" | "127.0.0.1" | "::1")
+}
+
+/// Middleware rejecting requests whose `Host` header is not loopback. Loopback
+/// binding alone doesn't stop a malicious page from using DNS rebinding to reach
+/// `127.0.0.1:<port>` under an attacker-controlled name; validating `Host` does.
+/// An absent `Host` (HTTP/2 uses `:authority`; some non-browser clients) is
+/// allowed — browsers always send a `Host`, which is the rebinding vector.
+async fn host_guard(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let ok = request
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(host_is_local)
+        .unwrap_or(true);
+    if !ok {
+        return (StatusCode::FORBIDDEN, "forbidden: non-local Host header").into_response();
+    }
+    next.run(request).await
 }
 
 /// Middleware that fires the per-request heartbeat hook before handling.
@@ -147,6 +190,9 @@ pub fn build_router(state: AppState) -> Router {
             state.clone(),
             heartbeat_layer,
         ))
+        // DNS-rebinding guard: reject any request (API + WS + assets) whose Host
+        // header isn't loopback. Outermost so it runs before everything else.
+        .layer(axum::middleware::from_fn(host_guard))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         // gzip-only compression for the *dynamic* API responses (e.g. /items at
         // 10k items). Static SPA assets are already served pre-gzipped from
@@ -158,13 +204,62 @@ pub fn build_router(state: AppState) -> Router {
 
 /// Serve the web UI on `addr` until the process is terminated.
 pub async fn serve(state: AppState, addr: SocketAddr) -> std::io::Result<()> {
-    let app = build_router(state);
     let listener = tokio::net::TcpListener::bind(addr).await?;
+    serve_on(state, listener).await
+}
+
+/// Serve the web UI on an already-bound `listener`. Splitting the bind out lets a
+/// caller (the daemon) learn whether the bind succeeded *before* committing to
+/// serve — e.g. to only advertise its web address once it truly holds the port.
+pub async fn serve_on(state: AppState, listener: tokio::net::TcpListener) -> std::io::Result<()> {
+    let app = build_router(state);
     axum::serve(listener, app).await
 }
 
 /// Serve the web UI with a standalone file-watcher that pushes real-time updates.
 pub async fn serve_with_watch(state: AppState, addr: SocketAddr) -> std::io::Result<()> {
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    serve_with_watch_on(state, listener).await
+}
+
+/// [`serve_with_watch`] on an already-bound `listener` (see [`serve_on`]).
+pub async fn serve_with_watch_on(
+    state: AppState,
+    listener: tokio::net::TcpListener,
+) -> std::io::Result<()> {
     let _watcher = watch::spawn(state.clone());
-    serve(state, addr).await
+    serve_on(state, listener).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::host_is_local;
+
+    #[test]
+    fn host_is_local_accepts_loopback_with_and_without_port() {
+        for h in [
+            "localhost",
+            "localhost:7373",
+            "127.0.0.1",
+            "127.0.0.1:7373",
+            "[::1]",
+            "[::1]:7373",
+        ] {
+            assert!(host_is_local(h), "should be local: {h}");
+        }
+    }
+
+    #[test]
+    fn host_is_local_rejects_non_loopback() {
+        for h in [
+            "evil.example.com",
+            "evil.example.com:7373",
+            "10.0.0.5:7373",
+            "example.com",
+            "127.0.0.1.evil.com",
+            "",
+        ] {
+            assert!(!host_is_local(h), "should be rejected: {h}");
+        }
+    }
 }

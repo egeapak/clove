@@ -77,7 +77,7 @@ pub async fn create_item(State(state): State<AppState>, body: ApiJson<CreateBody
     let created = ops::create(
         &state.store,
         &state.id_prefix,
-        ItemType::default(),
+        state.default_type,
         spec,
         Utc::now(),
     )?;

@@ -12,8 +12,15 @@ class Store {
    *  distinct error/retry panel instead of the empty state. Cleared on success. */
   loadError = $state<string | null>(null);
 
-  // pending optimistic ops: id -> snapshot before write
-  private pending = new Map<string, Item>();
+  // Pending optimistic ops per id. Concurrent edits to the same id must compose:
+  // we keep the pre-edit `base` (server-authoritative) plus an ordered list of
+  // in-flight patches (each with its own token). The visible item is always
+  // `base` with every pending patch layered on top, so one edit settling or
+  // rolling back never clobbers another edit that is still in flight.
+  private pending = new Map<
+    string,
+    { base: Item; patches: Array<{ token: symbol; patch: Partial<Item> }> }
+  >();
   // Canonical server order: id -> insertion index from the last replaceAll.
   // The list's default ("rank") sort uses this so it preserves the server's
   // (priority, topo, id) ordering instead of approximating with priority.
@@ -52,41 +59,83 @@ class Store {
     this.rankIndex = new Map(list.map((i, idx) => [i.id, idx]));
     // Re-apply any in-flight optimistic writes on top of the (possibly stale)
     // server list so a batch-triggered refetch can't clobber a pending write.
-    for (const [id, before] of this.pending) {
-      const cur = this.items.get(id);
-      if (cur) next.set(id, cur); // keep the optimistic value
-      else if (before) next.set(id, before);
+    // Rebase each pending entry's `base` onto the fresh server value so a later
+    // settle/rollback converges on current data.
+    for (const [id, entry] of this.pending) {
+      const fresh = next.get(id);
+      if (fresh) entry.base = fresh;
+      next.set(id, this.merge(entry));
     }
     this.items = next;
     this.loaded = true;
   }
 
-  /** Apply an optimistic local patch; returns a rollback fn. */
+  /** Layer every pending patch (in order) over `base`, stamping `updated`. */
+  private merge(entry: { base: Item; patches: Array<{ patch: Partial<Item> }> }): Item {
+    let merged = entry.base;
+    for (const { patch } of entry.patches) merged = { ...merged, ...patch };
+    return { ...merged, updated: new Date().toISOString() };
+  }
+
+  /** Force `id` to `item`, bypassing the stale-`updated` guard in upsert(). */
+  private forceSet(id: string, item: Item) {
+    const next = new Map(this.items);
+    next.set(id, item);
+    this.items = next;
+  }
+
+  /** Recompute the visible item for `id` from its pending entry (if any). */
+  private recompute(id: string) {
+    const entry = this.pending.get(id);
+    if (entry) this.forceSet(id, this.merge(entry));
+  }
+
+  /** Apply an optimistic local patch; returns a rollback fn for *this* edit. */
   optimistic(id: string, patch: Partial<Item>): () => void {
     const before = this.items.get(id);
     if (!before) return () => {};
-    if (!this.pending.has(id)) this.pending.set(id, before);
-    this.upsert({ ...before, ...patch, updated: new Date().toISOString() });
+    let entry = this.pending.get(id);
+    if (!entry) {
+      entry = { base: before, patches: [] };
+      this.pending.set(id, entry);
+    }
+    const token = Symbol();
+    entry.patches.push({ token, patch });
+    this.recompute(id);
+    // Rollback removes only this edit's patch; other in-flight edits survive.
     return () => {
-      const snap = this.pending.get(id);
-      this.pending.delete(id);
-      if (snap) {
-        // Force the snapshot back even though pending was just cleared.
-        const next = new Map(this.items);
-        next.set(id, snap);
-        this.items = next;
+      const e = this.pending.get(id);
+      if (!e) return;
+      const idx = e.patches.findIndex((p) => p.token === token);
+      if (idx < 0) return;
+      e.patches.splice(idx, 1);
+      if (e.patches.length === 0) {
+        this.pending.delete(id);
+        this.forceSet(id, e.base);
+      } else {
+        this.recompute(id);
       }
     };
   }
 
-  /** Settle a pending optimistic write with the authoritative server payload. */
+  /** Settle one pending optimistic write with the authoritative server payload. */
   settle(id: string, server?: Item) {
-    this.pending.delete(id);
-    if (server) {
-      // Apply authoritatively, bypassing the stale-updated guard.
-      const next = new Map(this.items);
-      next.set(server.id, server);
-      this.items = next;
+    const entry = this.pending.get(id);
+    if (!entry) {
+      // No tracked edit (already rolled back): still apply the server payload.
+      if (server) this.forceSet(id, server);
+      return;
+    }
+    // This settle corresponds to one in-flight edit; drop the oldest patch and
+    // rebase any still-pending edits on top of the fresh server payload so they
+    // are not clobbered.
+    entry.patches.shift();
+    if (server) entry.base = server;
+    if (entry.patches.length === 0) {
+      this.pending.delete(id);
+      this.forceSet(id, entry.base);
+    } else {
+      this.recompute(id);
     }
   }
 
@@ -158,7 +207,11 @@ function connect() {
         // future gap detection.
         const seq = frame.data?.seq;
         lastSeq = seq ?? lastSeq;
-        void store.refetch();
+        // Mirror the onopen resync: surface a failed refetch as a loadError
+        // instead of an unhandled rejection + stale data under a 'live' badge.
+        void store.refetch().catch((e) => {
+          store.loadError = e instanceof Error ? e.message : 'load failed';
+        });
         break;
       }
       case 'stats.updated':

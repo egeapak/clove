@@ -67,6 +67,7 @@ pub fn run(ctx: &Ctx, args: ServeArgs, quiet: bool) -> Result<(), CloveError> {
         ctx.config.id_prefix.clone(),
         "standalone",
         false,
+        ctx.config.default_type,
     );
 
     if !quiet {
