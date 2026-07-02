@@ -10,11 +10,30 @@
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
+use crate::store::ScanError;
 use crate::view::item_object;
 use crate::{
     add_comment, fields, list_comments, CloveError, CloveId, EditRequest, GraphStore, Item,
     ItemFrontmatter, ItemStatus, ItemStore, ItemType, NewItem,
 };
+
+/// Scan the store's frontmatter, refusing to proceed if *any* file failed to
+/// parse. Store-wide validations (cycle detection, ancestry walks) that run
+/// against a partial graph would silently admit invalid edges — a real cycle or
+/// a hidden dependent living in the unparseable file — so a mutation that
+/// depends on such a validation must fail loudly instead (`clove doctor` lists
+/// the broken files).
+fn scan_or_fail(store: &ItemStore) -> Result<Vec<ItemFrontmatter>, CloveError> {
+    let (frontmatters, errors) = store.scan_frontmatter()?;
+    if let Some(ScanError::ParseFailed { path, source }) = errors.first() {
+        return Err(CloveError::ScanFailed {
+            path: path.clone(),
+            count: errors.len(),
+            message: source.to_string(),
+        });
+    }
+    Ok(frontmatters)
+}
 
 // The request types and the pure frontmatter mutators live in `clove-types`;
 // re-export them here so the `clove_core::ops::*` paths used by the daemon, CLI,
@@ -70,9 +89,10 @@ pub fn transition(
     status: ItemStatus,
     now: DateTime<Utc>,
 ) -> Result<Value, CloveError> {
-    let mut item = store.get(id)?;
-    set_status(&mut item.frontmatter, status, now);
-    let saved = store.update(&item, now)?;
+    let saved = store.update_with(id, now, |item| {
+        set_status(&mut item.frontmatter, status, now);
+        Ok(())
+    })?;
     Ok(Value::Object(item_object(&saved)))
 }
 
@@ -115,37 +135,46 @@ pub fn dep_add(
     dep_id: &CloveId,
     now: DateTime<Utc>,
 ) -> Result<Value, CloveError> {
-    if !store.exists(id) {
-        return Err(CloveError::NotFound { id: id.to_string() });
+    if id == dep_id {
+        return Err(CloveError::SelfDependency { id: id.to_string() });
     }
+    // Cheap up-front existence check for a clean error; re-validated under the
+    // lock below.
     if !store.exists(dep_id) {
         return Err(CloveError::NotFound {
             id: dep_id.to_string(),
         });
     }
-    if id == dep_id {
-        return Err(CloveError::SelfDependency { id: id.to_string() });
-    }
-    let (frontmatters, _errors) = store.scan_frontmatter()?;
-    let (graph, _dangling) = GraphStore::build(&frontmatters);
-    if graph.check_would_cycle(id, dep_id) {
-        return Err(CloveError::DependencyCycle {
-            from: id.to_string(),
-            to: dep_id.to_string(),
-            cycle: vec![id.to_string(), dep_id.to_string()],
-        });
-    }
-    let mut item = store.get(id)?;
-    if item.frontmatter.deps.contains(dep_id) {
-        return Err(CloveError::DependencyExists {
-            from: id.to_string(),
-            to: dep_id.to_string(),
-        });
-    }
-    item.frontmatter.deps.push(dep_id.clone());
-    item.frontmatter.deps.sort();
-    item.frontmatter.deps.dedup();
-    let saved = store.update(&item, now)?;
+    // The cycle check and the write run under the same store-wide lock, so two
+    // concurrent `dep add`s can't each pass a check against the pre-edit graph
+    // and then both write, persisting a cycle (TOCTOU). `update_with` reads `id`
+    // (→ NotFound if it's gone) under the lock too.
+    let saved = store.update_with(id, now, |item| {
+        if !store.exists(dep_id) {
+            return Err(CloveError::NotFound {
+                id: dep_id.to_string(),
+            });
+        }
+        let frontmatters = scan_or_fail(store)?;
+        let (graph, _dangling) = GraphStore::build(&frontmatters);
+        if graph.check_would_cycle(id, dep_id) {
+            return Err(CloveError::DependencyCycle {
+                from: id.to_string(),
+                to: dep_id.to_string(),
+                cycle: vec![id.to_string(), dep_id.to_string()],
+            });
+        }
+        if item.frontmatter.deps.contains(dep_id) {
+            return Err(CloveError::DependencyExists {
+                from: id.to_string(),
+                to: dep_id.to_string(),
+            });
+        }
+        item.frontmatter.deps.push(dep_id.clone());
+        item.frontmatter.deps.sort();
+        item.frontmatter.deps.dedup();
+        Ok(())
+    })?;
     Ok(Value::Object(item_object(&saved)))
 }
 
@@ -157,15 +186,16 @@ pub fn dep_remove(
     dep_id: &CloveId,
     now: DateTime<Utc>,
 ) -> Result<Value, CloveError> {
-    let mut item = store.get(id)?;
-    if !item.frontmatter.deps.contains(dep_id) {
-        return Err(CloveError::InvalidField {
-            field: "deps".to_owned(),
-            reason: format!("{id} does not depend on {dep_id}"),
-        });
-    }
-    item.frontmatter.deps.retain(|d| d != dep_id);
-    let saved = store.update(&item, now)?;
+    let saved = store.update_with(id, now, |item| {
+        if !item.frontmatter.deps.contains(dep_id) {
+            return Err(CloveError::InvalidField {
+                field: "deps".to_owned(),
+                reason: format!("{id} does not depend on {dep_id}"),
+            });
+        }
+        item.frontmatter.deps.retain(|d| d != dep_id);
+        Ok(())
+    })?;
     Ok(Value::Object(item_object(&saved)))
 }
 
@@ -179,48 +209,54 @@ pub fn set_parent(
     parent: Option<&CloveId>,
     now: DateTime<Utc>,
 ) -> Result<Value, CloveError> {
-    let mut item = store.get(id)?;
-    match parent {
-        None => item.frontmatter.parent = None,
-        Some(parent) => {
-            if parent == id {
-                return Err(CloveError::InvalidField {
-                    field: "parent".to_owned(),
-                    reason: format!("{id} cannot be its own parent"),
-                });
-            }
-            if !store.exists(parent) {
-                return Err(CloveError::NotFound {
-                    id: parent.to_string(),
-                });
-            }
-            // Walk the proposed parent's ancestry; if we reach `id`, the
-            // assignment would close a parent cycle. The `visited` set bounds the
-            // walk so a *pre-existing* parent cycle in the store (a representable
-            // but invalid state, e.g. from a bad hand-edit or merge) can't hang us.
-            let (frontmatters, _errors) = store.scan_frontmatter()?;
-            let parent_of: std::collections::HashMap<&CloveId, Option<&CloveId>> = frontmatters
-                .iter()
-                .map(|fm| (&fm.id, fm.parent.as_ref()))
-                .collect();
-            let mut visited = std::collections::HashSet::new();
-            let mut cursor = Some(parent);
-            while let Some(node) = cursor {
-                if node == id {
+    // The ancestry check and the write run under the same store-wide lock, so a
+    // concurrent reparent can't invalidate the check between here and the write.
+    let saved = store.update_with(id, now, |item| {
+        match parent {
+            None => item.frontmatter.parent = None,
+            Some(parent) => {
+                if parent == id {
                     return Err(CloveError::InvalidField {
                         field: "parent".to_owned(),
-                        reason: format!("setting parent of {id} to {parent} would create a cycle"),
+                        reason: format!("{id} cannot be its own parent"),
                     });
                 }
-                if !visited.insert(node) {
-                    break; // a pre-existing cycle that doesn't involve `id`
+                if !store.exists(parent) {
+                    return Err(CloveError::NotFound {
+                        id: parent.to_string(),
+                    });
                 }
-                cursor = parent_of.get(node).copied().flatten();
+                // Walk the proposed parent's ancestry; if we reach `id`, the
+                // assignment would close a parent cycle. The `visited` set bounds
+                // the walk so a *pre-existing* parent cycle in the store (a
+                // representable but invalid state, e.g. from a bad hand-edit or
+                // merge) can't hang us.
+                let frontmatters = scan_or_fail(store)?;
+                let parent_of: std::collections::HashMap<&CloveId, Option<&CloveId>> = frontmatters
+                    .iter()
+                    .map(|fm| (&fm.id, fm.parent.as_ref()))
+                    .collect();
+                let mut visited = std::collections::HashSet::new();
+                let mut cursor = Some(parent);
+                while let Some(node) = cursor {
+                    if node == id {
+                        return Err(CloveError::InvalidField {
+                            field: "parent".to_owned(),
+                            reason: format!(
+                                "setting parent of {id} to {parent} would create a cycle"
+                            ),
+                        });
+                    }
+                    if !visited.insert(node) {
+                        break; // a pre-existing cycle that doesn't involve `id`
+                    }
+                    cursor = parent_of.get(node).copied().flatten();
+                }
+                item.frontmatter.parent = Some(parent.clone());
             }
-            item.frontmatter.parent = Some(parent.clone());
         }
-    }
-    let saved = store.update(&item, now)?;
+        Ok(())
+    })?;
     Ok(Value::Object(item_object(&saved)))
 }
 
@@ -620,6 +656,141 @@ mod tests {
             dep_add(&store, &a, &missing, Utc::now()),
             Err(CloveError::NotFound { .. })
         ));
+    }
+
+    #[test]
+    fn create_enforces_edit_path_validations() {
+        let (_d, store) = store();
+        let existing = new_id(&store, "real");
+
+        // Empty / whitespace title is rejected (matches the edit path).
+        assert!(matches!(
+            create(
+                &store,
+                "proj",
+                ItemType::Feature,
+                NewSpec {
+                    title: "   ".to_owned(),
+                    ..Default::default()
+                },
+                Utc::now()
+            ),
+            Err(CloveError::InvalidField { .. })
+        ));
+        // A blank assignee is rejected — "unassigned" is `None`, never `Some("")`.
+        assert!(matches!(
+            create(
+                &store,
+                "proj",
+                ItemType::Feature,
+                NewSpec {
+                    title: "ok".to_owned(),
+                    assignee: Some("  ".to_owned()),
+                    ..Default::default()
+                },
+                Utc::now()
+            ),
+            Err(CloveError::InvalidField { .. })
+        ));
+        // A well-formed but non-existent dep id is a dangling ref (NotFound),
+        // just like `dep add` to a missing target.
+        assert!(matches!(
+            create(
+                &store,
+                "proj",
+                ItemType::Feature,
+                NewSpec {
+                    title: "ok".to_owned(),
+                    deps: vec!["proj-ZZZZZZZZ".to_owned()],
+                    ..Default::default()
+                },
+                Utc::now()
+            ),
+            Err(CloveError::NotFound { .. })
+        ));
+        // A dangling parent is likewise NotFound.
+        assert!(matches!(
+            create(
+                &store,
+                "proj",
+                ItemType::Feature,
+                NewSpec {
+                    title: "ok".to_owned(),
+                    parent: Some("proj-ZZZZZZZZ".to_owned()),
+                    ..Default::default()
+                },
+                Utc::now()
+            ),
+            Err(CloveError::NotFound { .. })
+        ));
+        // Sanity: an existing dep/parent still creates fine.
+        assert!(create(
+            &store,
+            "proj",
+            ItemType::Feature,
+            NewSpec {
+                title: "ok".to_owned(),
+                deps: vec![existing.to_string()],
+                ..Default::default()
+            },
+            Utc::now()
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn cycle_validation_refuses_a_partially_unparseable_store() {
+        // If a file fails to parse, the graph built for the cycle/ancestry check
+        // is incomplete; validating against it could admit a real cycle. Both
+        // graph-edge ops must refuse rather than validate against a partial store.
+        let (_d, store) = store();
+        let a = new_id(&store, "a");
+        let b = new_id(&store, "b");
+        std::fs::write(
+            store.issues_dir().join("proj-BROKEN01.md"),
+            "---\nnot: [valid yaml\n---\nbody",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            dep_add(&store, &a, &b, Utc::now()),
+            Err(CloveError::ScanFailed { .. })
+        ));
+        assert!(matches!(
+            set_parent(&store, &a, Some(&b), Utc::now()),
+            Err(CloveError::ScanFailed { .. })
+        ));
+    }
+
+    #[test]
+    fn concurrent_dep_adds_do_not_lose_updates() {
+        // Regression for the read-modify-write lock window: each `dep add` reads
+        // the item, appends one dep, and writes. Without a store-wide lock held
+        // across that whole window, concurrent writers overwrite each other and
+        // deps are silently lost. With it, all N serialize and survive.
+        let (_d, store) = store();
+        let root = new_id(&store, "root");
+        let deps: Vec<CloveId> = (0..8).map(|i| new_id(&store, &format!("d{i}"))).collect();
+
+        let handles: Vec<_> = deps
+            .iter()
+            .map(|dep| {
+                let store = store.clone();
+                let root = root.clone();
+                let dep = dep.clone();
+                std::thread::spawn(move || dep_add(&store, &root, &dep, Utc::now()).unwrap())
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let reloaded = store.get(&root).unwrap();
+        assert_eq!(
+            reloaded.frontmatter.deps.len(),
+            deps.len(),
+            "every concurrent dep add must survive (no lost updates)"
+        );
     }
 
     #[test]

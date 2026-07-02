@@ -237,6 +237,19 @@ pub fn normalize_label(raw: &str) -> Result<String, CloveError> {
     Ok(canonical)
 }
 
+/// Truncate a timestamp to whole seconds — the canonical on-disk precision
+/// (the frontmatter writer renders RFC 3339 with seconds precision).
+///
+/// Every place that *stamps* a timestamp destined for frontmatter
+/// (`ItemStore::create`/`update`, [`crate::set_status`]) truncates through this
+/// one helper, so the in-memory value a mutation returns is byte-identical to
+/// what a re-read parses back from disk.
+pub fn truncate_to_seconds(ts: DateTime<Utc>) -> DateTime<Utc> {
+    use chrono::Timelike;
+    ts.with_nanosecond(0)
+        .expect("zero nanoseconds is always valid")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

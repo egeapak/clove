@@ -8,13 +8,17 @@
 use std::fs::OpenOptions;
 
 use camino::{Utf8Path, Utf8PathBuf};
-use chrono::{DateTime, Timelike, Utc};
+use chrono::{DateTime, Utc};
 use rayon::prelude::*;
 use thiserror::Error;
 
 use crate::error::CloveError;
+use crate::fields;
 use crate::id::{new_id, CloveId};
-use crate::model::{Item, ItemFrontmatter, ItemStatus, ItemType, Priority, CURRENT_SCHEMA_VERSION};
+use crate::model::{
+    truncate_to_seconds, Item, ItemFrontmatter, ItemStatus, ItemType, Priority,
+    CURRENT_SCHEMA_VERSION,
+};
 use crate::parse::{parse_frontmatter_file, parse_item_file};
 use crate::validate::validate_item;
 use crate::write::write_item_file;
@@ -55,6 +59,31 @@ impl ScanError {
         match self {
             ScanError::ParseFailed { path, .. } => path,
         }
+    }
+}
+
+/// The store-wide advisory write lock (`.clove/write.lock`), open but not yet
+/// acquired. Obtain one with [`ItemStore::write_lock`], then hold the guard
+/// from [`StoreWriteLock::lock`] across a read-modify-write window.
+///
+/// The lock lives in its own file with a stable inode: item files are replaced
+/// by temp+rename on every write, so an advisory lock taken on an item file
+/// itself cannot reliably serialize writers (a second writer that opened the
+/// path before the first's rename would lock the unlinked old inode).
+#[derive(Debug)]
+pub struct StoreWriteLock {
+    path: Utf8PathBuf,
+    lock: fd_lock::RwLock<std::fs::File>,
+}
+
+impl StoreWriteLock {
+    /// Block until the exclusive lock is acquired; it releases when the returned
+    /// guard (or this struct) is dropped.
+    pub fn lock(&mut self) -> Result<fd_lock::RwLockWriteGuard<'_, std::fs::File>, CloveError> {
+        self.lock.write().map_err(|source| CloveError::Io {
+            path: self.path.clone(),
+            source,
+        })
     }
 }
 
@@ -100,26 +129,48 @@ impl ItemStore {
     /// `now` is supplied by the caller (the CLI passes `Utc::now()`); it is
     /// truncated to whole seconds to match the canonical on-disk timestamp
     /// precision.
+    ///
+    /// Enforces the same field validations as the edit path (a title must be
+    /// non-empty, an assignee must be non-blank) plus referential integrity for
+    /// the graph edges the spec carries: every `deps` entry and the `parent`
+    /// must name an existing item, matching `dep add`/`set_parent`.
     pub fn create(
         &self,
         prefix: &str,
         spec: NewItem,
         now: DateTime<Utc>,
     ) -> Result<Item, CloveError> {
+        let title = fields::parse_title(&spec.title)?;
+        let assignee = fields::parse_assignee(spec.assignee)?;
+        for dep in &spec.deps {
+            if !self.exists(dep) {
+                return Err(CloveError::NotFound {
+                    id: dep.to_string(),
+                });
+            }
+        }
+        if let Some(parent) = &spec.parent {
+            if !self.exists(parent) {
+                return Err(CloveError::NotFound {
+                    id: parent.to_string(),
+                });
+            }
+        }
+
         let now = truncate_to_seconds(now);
         let id = new_id(prefix, &self.issues_dir)?;
 
         let frontmatter = ItemFrontmatter {
             schema: CURRENT_SCHEMA_VERSION,
             id: id.clone(),
-            title: spec.title,
+            title,
             status: ItemStatus::Open,
             item_type: spec.item_type,
             priority: spec.priority,
             created: now,
             updated: now,
             closed: None,
-            assignee: spec.assignee,
+            assignee,
             parent: spec.parent,
             labels: spec.labels,
             deps: spec.deps,
@@ -153,9 +204,70 @@ impl ItemStore {
         self.path_for(id).exists()
     }
 
-    /// Persist `item`, stamping `updated = now` (truncated to seconds). Takes an
-    /// exclusive advisory lock on the file for the read-modify-write window.
+    /// Persist `item`, stamping `updated = now` (truncated to seconds). Holds the
+    /// store-wide write lock across validate + write.
+    ///
+    /// Note: `update` alone cannot cover the caller's earlier read. Callers that
+    /// read-modify-write (`get` → mutate → persist) should use
+    /// [`ItemStore::update_with`], which holds the lock across the *whole*
+    /// window so a concurrent writer cannot interleave (DESIGN §4: lock before
+    /// reading, hold through rename). Do not call `update` while already holding
+    /// the [`StoreWriteLock`] — the advisory lock is not reentrant.
     pub fn update(&self, item: &Item, now: DateTime<Utc>) -> Result<Item, CloveError> {
+        let mut lock = self.write_lock()?;
+        let _guard = lock.lock()?;
+        self.update_locked(item, now)
+    }
+
+    /// Read `id`, apply `mutate`, and persist — all under the store-wide write
+    /// lock, so the read-modify-write is atomic with respect to every other
+    /// writer that goes through the store (DESIGN §4).
+    ///
+    /// `mutate` may perform additional *reads* of the store (scans, existence
+    /// checks) — they are covered by the same lock — but must not call
+    /// [`ItemStore::update`]/[`ItemStore::update_with`], which would deadlock on
+    /// the non-reentrant advisory lock.
+    pub fn update_with<F>(
+        &self,
+        id: &CloveId,
+        now: DateTime<Utc>,
+        mutate: F,
+    ) -> Result<Item, CloveError>
+    where
+        F: FnOnce(&mut Item) -> Result<(), CloveError>,
+    {
+        let mut lock = self.write_lock()?;
+        let _guard = lock.lock()?;
+        let mut item = self.get(id)?;
+        mutate(&mut item)?;
+        self.update_locked(&item, now)
+    }
+
+    /// Open (creating if needed) the store-wide advisory write lock
+    /// (`.clove/write.lock`). The caller acquires it via
+    /// [`StoreWriteLock::lock`] and holds the guard for the whole
+    /// read-modify-write window.
+    pub fn write_lock(&self) -> Result<StoreWriteLock, CloveError> {
+        let path = self.repo_root.join(".clove").join("write.lock");
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path.as_std_path())
+            .map_err(|source| CloveError::Io {
+                path: path.clone(),
+                source,
+            })?;
+        Ok(StoreWriteLock {
+            path,
+            lock: fd_lock::RwLock::new(file),
+        })
+    }
+
+    /// The unlocked stamp + validate + atomic-write tail shared by
+    /// [`ItemStore::update`] and [`ItemStore::update_with`].
+    fn update_locked(&self, item: &Item, now: DateTime<Utc>) -> Result<Item, CloveError> {
         let mut next = item.clone();
         next.frontmatter.updated = truncate_to_seconds(now);
 
@@ -166,23 +278,6 @@ impl ItemStore {
             });
         }
         ensure_valid(&next.frontmatter, &path)?;
-
-        // Hold an exclusive advisory lock across the atomic write so concurrent
-        // writers to the same item serialize (DESIGN §4).
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path.as_std_path())
-            .map_err(|source| CloveError::Io {
-                path: path.clone(),
-                source,
-            })?;
-        let mut lock = fd_lock::RwLock::new(file);
-        let _guard = lock.write().map_err(|source| CloveError::Io {
-            path: path.clone(),
-            source,
-        })?;
-
         write_item_file(&next, &path)?;
         Ok(next)
     }
@@ -314,12 +409,6 @@ impl ItemStore {
         }
         Ok(paths)
     }
-}
-
-/// Truncate a timestamp to whole seconds (canonical on-disk precision).
-fn truncate_to_seconds(ts: DateTime<Utc>) -> DateTime<Utc> {
-    ts.with_nanosecond(0)
-        .expect("zero nanoseconds is always valid")
 }
 
 /// Return `Err(Invalid)` if the frontmatter has any validation errors.

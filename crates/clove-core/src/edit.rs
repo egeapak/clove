@@ -20,18 +20,21 @@ pub fn apply_edit(
     req: &EditRequest,
     now: DateTime<Utc>,
 ) -> Result<Value, CloveError> {
-    let item = store.get(id)?;
     // An empty request changes nothing — don't rewrite the file (which would bump
     // `updated` and re-trigger the watcher → push loop for no reason).
     if req.is_empty() {
+        let item = store.get(id)?;
         return Ok(Value::Object(item_object(&item)));
     }
-    let mut item = item;
-    req.apply_to_frontmatter(&mut item.frontmatter, now)?;
-    if let Some(body) = &req.body {
-        item.body = normalize_body(body);
-    }
-    let saved = store.update(&item, now)?;
+    // Hold the store-wide write lock across load → apply → write so a concurrent
+    // writer to the same item can't clobber this edit (lost update).
+    let saved = store.update_with(id, now, |item| {
+        req.apply_to_frontmatter(&mut item.frontmatter, now)?;
+        if let Some(body) = &req.body {
+            item.body = normalize_body(body);
+        }
+        Ok(())
+    })?;
     Ok(Value::Object(item_object(&saved)))
 }
 

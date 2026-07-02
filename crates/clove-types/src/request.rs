@@ -15,7 +15,10 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::{fields, normalize_label, CloveError, ItemFrontmatter, ItemStatus, ItemType, Priority};
+use crate::{
+    fields, normalize_label, truncate_to_seconds, CloveError, ItemFrontmatter, ItemStatus,
+    ItemType, Priority,
+};
 
 /// A raw "new item" spec. Strings are parsed/validated by `clove_core::ops::create`;
 /// the struct is serializable so it can also ride the daemon RPC wire unchanged.
@@ -38,12 +41,16 @@ pub struct NewSpec {
 
 /// Apply a status transition to frontmatter, maintaining the closed-timestamp
 /// invariant: set `closed` when moving to closed, clear it otherwise.
+///
+/// `closed` is truncated to whole seconds (the persisted precision), so the
+/// in-memory frontmatter a mutation returns is identical to what a re-read
+/// parses back from disk — no phantom sub-second diff.
 pub fn set_status(fm: &mut ItemFrontmatter, status: ItemStatus, now: DateTime<Utc>) {
     fm.status = status;
     match status {
         ItemStatus::Closed => {
             if fm.closed.is_none() {
-                fm.closed = Some(now);
+                fm.closed = Some(truncate_to_seconds(now));
             }
         }
         ItemStatus::Open | ItemStatus::InProgress => fm.closed = None,
@@ -204,15 +211,7 @@ impl EditRequest {
                         Some(value.to_owned())
                     });
                 }
-                "title" => {
-                    if value.trim().is_empty() {
-                        return Err(CloveError::InvalidField {
-                            field: "title".to_owned(),
-                            reason: "title cannot be empty".to_owned(),
-                        });
-                    }
-                    req.title = Some(value.to_owned());
-                }
+                "title" => req.title = Some(fields::parse_title(value)?),
                 other => {
                     return Err(CloveError::InvalidField {
                         field: other.to_owned(),
@@ -239,13 +238,7 @@ impl EditRequest {
         now: DateTime<Utc>,
     ) -> Result<(), CloveError> {
         if let Some(title) = &self.title {
-            if title.trim().is_empty() {
-                return Err(CloveError::InvalidField {
-                    field: "title".to_owned(),
-                    reason: "title cannot be empty".to_owned(),
-                });
-            }
-            fm.title = title.clone();
+            fm.title = fields::parse_title(title)?;
         }
         if let Some(status) = self.status {
             set_status(fm, status, now);
@@ -457,12 +450,23 @@ mod tests {
     #[test]
     fn set_status_maintains_closed_invariant() {
         let mut fm = sample();
-        let now = Utc::now();
+        let now = "2026-06-02T10:00:05Z".parse().unwrap();
         set_status(&mut fm, ItemStatus::Closed, now);
         assert_eq!(fm.status, ItemStatus::Closed);
         assert_eq!(fm.closed, Some(now));
         set_status(&mut fm, ItemStatus::Open, now);
         assert_eq!(fm.closed, None);
+    }
+
+    #[test]
+    fn set_status_truncates_closed_to_persisted_precision() {
+        // The frontmatter writer persists whole seconds; the stamped in-memory
+        // value must match, or a mutation's return value would disagree with a
+        // subsequent re-read.
+        let mut fm = sample();
+        let now: DateTime<Utc> = "2026-06-02T10:00:05.123456789Z".parse().unwrap();
+        set_status(&mut fm, ItemStatus::Closed, now);
+        assert_eq!(fm.closed, Some("2026-06-02T10:00:05Z".parse().unwrap()));
     }
 
     #[test]
