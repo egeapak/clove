@@ -1,3 +1,8 @@
+# NOTE: GitHub Actions (.github/workflows/release.yml) is the canonical release
+# path for this repo (origin is GitHub). This Woodpecker pipeline is kept as the
+# self-hosted-forge variant (Gitea/Forgejo) and cross-compiles via zigbuild; it
+# only runs if a Woodpecker server is wired to the repo.
+#
 # Tag-triggered: build shippable binaries entirely on Linux, each carrying the
 # REAL embedded SvelteKit SPA — macOS universal2 (arm64 + x86_64) and Windows
 # x86_64 (gnu ABI). All steps share the workspace:
