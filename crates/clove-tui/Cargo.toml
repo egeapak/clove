@@ -1,6 +1,6 @@
 [package]
 name = "clove-tui"
-description = "clove: read-only terminal UI for browsing work items"
+description = "clove: terminal UI for browsing and editing work items"
 edition.workspace = true
 version.workspace = true
 license.workspace = true

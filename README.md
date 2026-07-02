@@ -10,7 +10,7 @@ delete them and nothing is lost. Written in Rust as a single cross-platform bina
 ## Status
 
 M0–M3 complete and gated; M4 in progress: `clove stats` + analytics history, an
-exact-incremental index/daemon graph, the read-only `clove tui` terminal browser,
+exact-incremental index/daemon graph, the `clove tui` terminal browser/editor,
 and the **`clove serve` web UI** (Kanban / list / detail / timeline). See
 `HANDOFF.md` for the current state and `docs/` for the full design
 (`docs/M4_WEB_UI_PLAN.md` for the web UI).
@@ -20,7 +20,7 @@ and the **`clove serve` web UI** (Kanban / list / detail / timeline). See
 ```sh
 cargo build --release          # binaries: clove (CLI), cloved (daemon)
 cargo test --workspace         # unit + integration + doctests
-cargo clippy --workspace --all-targets -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 ## Quick start
@@ -52,7 +52,7 @@ clove stats --history         # replay recorded snapshots (a running daemon also
 ### Browse: terminal & web UI
 
 ```sh
-clove tui                     # read-only terminal browser (master-detail, tabs, filters)
+clove tui                     # terminal browser + add/edit form (master-detail, tabs, filters)
 clove serve                   # serve the web UI on http://127.0.0.1:7373 (loopback)
 clove serve --open            # …and open it in the browser
 ```
@@ -114,7 +114,7 @@ The plugin wires up the `clove mcp` server automatically (tools surface as
 | `crates/cloved` | the optional `cloved` daemon (file-watch, IPC, optional git sync, web serving) |
 | `crates/clove-import` | import/export + merge driver |
 | `crates/clove-ipc` | CLI↔daemon wire protocol |
-| `crates/clove-tui` | read-only terminal browser (`clove tui`, ratatui) |
+| `crates/clove-tui` | terminal browser + add/edit form (`clove tui`, ratatui) |
 | `crates/clove-web` | web UI server + embedded SvelteKit SPA (`clove serve`); see `web/README.md` |
 | `docs/DESIGN.md` | authoritative, implementation-ready spec |
 | `docs/IMPLEMENTATION_PLAN.md` | phased M0–M4 task plan |

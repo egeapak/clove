@@ -30,7 +30,7 @@ clove-index.workspace = true
 clove-import = { workspace = true, default-features = false }   # M2 import/export/merge-driver; `github` via this crate's `github` feature
 clove-ipc.workspace = true       # M3: daemon liveness probe + QUERY routing
 clove-mcp = { workspace = true, optional = true }   # M4: `clove mcp` server (rmcp), behind the `mcp` feature
-clove-tui.workspace = true       # M4: `clove tui` read-only terminal browser
+clove-tui.workspace = true       # M4: `clove tui` terminal browser + add/edit form
 clove-web.workspace = true       # M4: `clove serve` web UI server
 tokio.workspace = true           # M4: async runtime for `clove serve`
 clap.workspace = true

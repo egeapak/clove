@@ -1,9 +1,10 @@
-//! `clove-tui` — a read-only terminal UI for browsing clove work items.
+//! `clove-tui` — a terminal UI for browsing and editing clove work items.
 //!
 //! Launched by `clove tui`. It scans the file store (the source of truth) and
 //! presents a master-detail browser: an All / Ready / Blocked item list on the
 //! left and a per-item overview / dependency-tree / comments pane on the right.
-//! It never mutates the store; refresh (`r`) re-scans from disk.
+//! Items can be added (`n`) and edited (`e`) through the unified write
+//! path (`clove_core::ops` / `apply_edit`); refresh (`r`) re-scans from disk.
 
 mod app;
 mod markdown;

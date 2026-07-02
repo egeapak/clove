@@ -105,7 +105,7 @@ pub enum Commands {
     Doctor(DoctorArgs),
     /// Control the optional background daemon (`start|stop|status`).
     Daemon(DaemonArgs),
-    /// Browse items in an interactive, read-only terminal UI.
+    /// Browse and edit items in an interactive terminal UI.
     Tui,
     /// Run the MCP server (stdio) so AI agents can use clove as native tools.
     Mcp,

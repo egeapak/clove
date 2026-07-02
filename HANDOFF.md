@@ -1,6 +1,6 @@
 # clove — Session Handoff
 
-**Updated:** 2026-06-08
+**Updated:** 2026-07-02
 **State:** **M0–M3 are complete and gated; the first M4 items have landed**
 (`clove stats` + analytics history, the `clove tui` browser, and an
 exact-incremental index/daemon graph — see the "M4" sections below). Full CLI
@@ -33,7 +33,8 @@ git-signing artifact, not a code defect; the token-gated `github_roundtrip`
 shows as `1 ignored`).
 **M4 — Extras** has begun: two items have landed — **`clove stats`** (the
 analytics command; see the "M4 — `clove stats`" section below) and **`clove
-tui`** (T-U01), a read-only terminal browser. New crate `clove-tui` (ratatui,
+tui`** (T-U01), a terminal browser (add/edit landed later; see the unified
+add/edit section below). New crate `clove-tui` (ratatui,
 depends only on `clove-core`; reads via
 the file-store scan path so it is always correct and never touches the index or
 daemon). Master-detail UI: **All / Ready / Blocked** tabs with live counts, an
@@ -524,18 +525,21 @@ already written and task-structured.
   structural; `--strict` → exit 4. Index-divergence check added in M1 (T-S08).
 - **JSON envelope** `{ v, ok, data, _meta }` on every response; **exit codes
   0–7** (see DESIGN §7.6).
-- **UI:** terminal only for now (tables + `cargo tree`-style `dep tree` + JSON).
-  TUI/web are **M4 and not yet designed.**
+- **UI:** CLI tables + `cargo tree`-style `dep tree` + JSON, plus the shipped
+  M4 surfaces: the `clove tui` terminal browser/editor and the `clove serve`
+  web UI (see the "M4 — Web UI (DONE)" section above).
 
 See `DESIGN.md §14` for how expert conflicts were resolved (ID length, parser,
 comment layout, empty-array serialization, cycle exit codes).
 
 ## Open / deferred (decide when you get there)
 
-- **M4 in progress:** `clove stats` (+ durable history, daemon auto-snapshot) and
-  the exact-incremental index/daemon graph are **done** (see the M4 sections
-  above). The **remaining** M4 items are undesigned (TUI, web UI, bidirectional
-  vendor bridges, richer changelog) — plan each in its own session.
+- **M4 in progress:** `clove stats` (+ durable history, daemon auto-snapshot),
+  the exact-incremental index/daemon graph, the TUI (browse + add/edit), the
+  web UI, the MCP server (+ the Claude Code plugin/marketplace in
+  `.claude-plugin/`), and two-way GitHub sync are **done** (see the M4 sections
+  above). The **remaining** M4 items are undesigned (GitLab/Jira vendor
+  bridges, richer changelog) — plan each in its own session.
 - **Vendor bridges** (GitHub/GitLab/Jira) are documented for import/export, not
   built in M0–M3.
 - **Optional soft dep cap** (warn past N deps/item) — offered but not added; add
