@@ -81,6 +81,23 @@ fn stop(clove_dir: &Utf8Path, format: OutputFormat) -> Result<ExitCode, CloveErr
         );
     };
 
+    // Verify a live daemon actually answers on this repo's socket before
+    // signalling the pid. A `daemon.pid` can outlive its daemon (SIGKILL / power
+    // loss skip the clean-shutdown removal), and after OS pid recycling that
+    // number may name an unrelated same-user process — SIGTERM-ing it blindly
+    // would kill the wrong process and then hang waiting for a pid file nothing
+    // removes. `probe` connects over IPC and only succeeds against our daemon
+    // (D-daemon-6). If nothing answers, treat it as already stopped and clean up
+    // the corpse footprint.
+    if DaemonClient::probe(clove_dir).is_none() {
+        clove_ipc::client::cleanup_stale(clove_dir);
+        return emit(
+            format,
+            json!({ "stopped": false, "running": false }),
+            "no daemon running",
+        );
+    }
+
     signal_shutdown(clove_dir, pid)?;
 
     let start = Instant::now();

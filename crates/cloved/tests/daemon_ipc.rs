@@ -267,6 +267,89 @@ fn mutations_round_trip_through_daemon() {
 }
 
 #[test]
+fn concurrent_daemon_writes_serialize() {
+    // Regression (D-daemon-3): concurrent write RPCs to the daemon must not lose
+    // updates. Each `dep_add` is a read-modify-write; without the store-wide
+    // write lock (held across the whole window by `update_with`), parallel adds
+    // would clobber each other and silently drop deps. Fire N concurrent adds of
+    // distinct deps to one root and assert all survive.
+    use clove_types::NewSpec;
+
+    let (_tmp, clove_dir) = init_repo_with_items(0);
+    let mut child = spawn_ready(&clove_dir);
+
+    let mut client = DaemonClient::probe(&clove_dir).expect("daemon alive");
+    let mk = |c: &mut DaemonClient, title: &str| -> String {
+        c.create(NewSpec {
+            title: title.to_owned(),
+            ..Default::default()
+        })
+        .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let root = mk(&mut client, "root");
+    let n = 6usize;
+    let deps: Vec<String> = (0..n).map(|i| mk(&mut client, &format!("d{i}"))).collect();
+    drop(client);
+
+    let handles: Vec<_> = deps
+        .into_iter()
+        .map(|dep| {
+            let cd = clove_dir.clone();
+            let root = root.clone();
+            std::thread::spawn(move || {
+                let mut c = DaemonClient::probe(&cd).expect("daemon alive");
+                c.dep_add(root, dep).unwrap();
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    let mut client = DaemonClient::probe(&clove_dir).expect("daemon alive");
+    let shown = client.show(root).unwrap();
+    assert_eq!(
+        shown["deps"].as_array().unwrap().len(),
+        n,
+        "every concurrent dep add must survive (writes serialize in the daemon)"
+    );
+
+    sigterm(child.id());
+    let _ = child.wait();
+}
+
+#[test]
+fn socket_and_state_dir_are_owner_only() {
+    // Regression (D-daemon-SEC-1): the mutating control socket and the state dir
+    // holding it must be owner-only, not default-umask, on a shared machine.
+    use std::os::unix::fs::PermissionsExt;
+
+    let (_tmp, clove_dir) = init_repo_with_items(1);
+    let mut child = spawn_ready(&clove_dir);
+
+    let sock = clove_dir.join("daemon.sock");
+    let sock_mode = std::fs::metadata(sock.as_std_path())
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(sock_mode, 0o600, "control socket must be owner-only (0600)");
+
+    let dir_mode = std::fs::metadata(clove_dir.as_std_path())
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(dir_mode, 0o700, "state dir must be owner-only (0700)");
+
+    sigterm(child.id());
+    let _ = child.wait();
+}
+
+#[test]
 fn stale_socket_recovery_is_fast() {
     let (_tmp, clove_dir) = init_repo_with_items(1);
     let mut child = spawn_ready(&clove_dir);

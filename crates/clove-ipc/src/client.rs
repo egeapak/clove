@@ -84,22 +84,28 @@ impl DaemonClient {
     /// healthy daemon is present — in which case any stale `daemon.sock`/
     /// `daemon.pid` left by a crashed daemon is removed first (DESIGN §8.3).
     pub fn probe(clove_dir: &Utf8Path) -> Option<DaemonClient> {
-        // Fast path: no socket file at all → definitely no daemon, nothing to clean.
-        if !sock_path(clove_dir).exists() {
+        // Fast path: no footprint at all → definitely no daemon, nothing to clean.
+        // The footprint is the socket file on Unix, but on Windows the transport
+        // is a named pipe with no filesystem entry, so there the pid file is the
+        // liveness signal (see `footprint_present`).
+        if !footprint_present(clove_dir) {
             return None;
         }
         match Self::connect_and_ping(clove_dir) {
             Ok(client) => Some(client),
-            Err(ClientError::Protocol(_)) => {
-                // The daemon answered but with an incompatible protocol version
-                // (or unexpected reply): it is alive, so leave its socket/pid in
-                // place — we just decline to use it and fall back to direct ops.
+            Err(ClientError::Connect(_)) => {
+                // Connection refused / no listener: the daemon is provably gone,
+                // so clean up its crashed-daemon corpse files.
+                cleanup_stale(clove_dir);
                 None
             }
             Err(_) => {
-                // Transport failure (no daemon / refused / stale socket): clean up
-                // the crashed daemon's leftover footprint.
-                cleanup_stale(clove_dir);
+                // Timeout, protocol mismatch, or name error: the daemon may well
+                // be *alive but slow* (a ping can miss the 50ms budget during the
+                // startup sweep or under load) — unlinking the socket here would
+                // orphan a live daemon. Leave the footprint in place and fall back
+                // to direct ops. (A truly dead socket is force-removed by the next
+                // daemon's own startup, so this cannot deadlock.)
                 None
             }
         }
@@ -124,8 +130,13 @@ impl DaemonClient {
         if !sock && !pid {
             return DaemonHealth::Absent;
         }
-        // No socket to probe → a lone `daemon.pid` is a dead footprint.
-        if !sock {
+        // Decide whether there is anything to connect to. On Unix, the socket
+        // file is the connect target, so a lone `daemon.pid` (no socket) is a
+        // dead footprint. On Windows the transport is a named pipe with no
+        // filesystem entry, so the pid file is the liveness signal instead —
+        // gating on the (never-created) socket would misreport every live
+        // Windows daemon as Dead.
+        if !footprint_present(clove_dir) {
             return DaemonHealth::Dead;
         }
         match Self::connect_and_ping(clove_dir) {
@@ -289,6 +300,24 @@ impl DaemonClient {
     }
 }
 
+/// Whether a daemon footprint exists that is worth attempting a connect to.
+///
+/// The transport differs by platform, so the "is anything there" signal does
+/// too: on Unix the daemon binds a filesystem socket (`daemon.sock`), so its
+/// presence gates the connect; on Windows the daemon binds a namespaced named
+/// pipe that leaves no filesystem entry, so the `daemon.pid` file — written on
+/// both platforms only after a successful bind — is the liveness signal instead.
+fn footprint_present(clove_dir: &Utf8Path) -> bool {
+    #[cfg(windows)]
+    {
+        pid_path(clove_dir).exists()
+    }
+    #[cfg(not(windows))]
+    {
+        sock_path(clove_dir).exists()
+    }
+}
+
 /// Remove a stale `daemon.sock` and `daemon.pid` (best effort). Called when a
 /// connect/handshake fails, so a crashed daemon's corpse files do not linger
 /// (DESIGN §8.3).
@@ -351,5 +380,67 @@ mod tests {
         assert!(DaemonClient::probe(&clove_dir).is_none());
         assert!(!sock_path(&clove_dir).exists(), "stale sock removed");
         assert!(!pid_path(&clove_dir).exists(), "stale pid removed");
+    }
+
+    /// Regression (D-daemon-1): a live-but-slow daemon that accepts the
+    /// connection but does not answer `ping` within the budget must NOT have its
+    /// socket unlinked — doing so orphans a running daemon. A ping *timeout* is
+    /// treated as "alive but busy", unlike a connection *refusal*.
+    #[cfg(unix)]
+    #[test]
+    fn probe_keeps_socket_when_daemon_is_alive_but_slow() {
+        use interprocess::local_socket::traits::tokio::Listener as _;
+        use interprocess::local_socket::ListenerOptions;
+        use std::sync::{Arc, Barrier};
+
+        let dir = tempfile::tempdir().unwrap();
+        let clove_dir = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
+        let name = socket_name(&clove_dir).unwrap();
+
+        // A "daemon" that binds the socket and accepts connections but never
+        // replies — modelling a daemon whose workers are all busy past the 50ms
+        // ping budget (a startup sweep, or saturated blocking I/O).
+        let bound = Arc::new(Barrier::new(2));
+        let bound_srv = Arc::clone(&bound);
+        let handle = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                let listener = ListenerOptions::new().name(name).create_tokio().unwrap();
+                bound_srv.wait();
+                let mut held = Vec::new();
+                // Accept (so connect() succeeds) but answer nothing, for a bounded
+                // window that outlives the client's probe.
+                let _ = timeout(Duration::from_secs(2), async {
+                    loop {
+                        if let Ok(stream) = listener.accept().await {
+                            held.push(stream);
+                        }
+                    }
+                })
+                .await;
+            });
+        });
+
+        bound.wait();
+        assert!(
+            sock_path(&clove_dir).exists(),
+            "listener created the socket file"
+        );
+
+        // The probe connects, pings, times out → returns None (fall back to
+        // direct ops) but leaves the live daemon's socket untouched.
+        assert!(
+            DaemonClient::probe(&clove_dir).is_none(),
+            "a non-answering daemon yields no usable client"
+        );
+        assert!(
+            sock_path(&clove_dir).exists(),
+            "live-but-slow daemon's socket must survive a ping timeout"
+        );
+
+        handle.join().unwrap();
     }
 }
