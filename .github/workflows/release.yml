@@ -1,0 +1,117 @@
+# Tag-triggered release: build native `clove` + `cloved` binaries (each carrying
+# the REAL embedded SvelteKit SPA) for Linux, macOS (arm64 + x86_64), and Windows,
+# then publish them — with SHA256 checksums — to a GitHub Release.
+#
+# Each build job first runs the Node SPA build into crates/clove-web/dist (the
+# path clove-web/build.rs embeds) and then compiles the Rust binaries with
+# CLOVE_SKIP_WEB_BUILD=1, so build.rs embeds that dist instead of the placeholder.
+#
+# Validate by pushing a tag (e.g. `git tag v0.1.0 && git push origin v0.1.0`).
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.suffix }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            suffix: linux-x86_64
+          - os: macos-13
+            target: x86_64-apple-darwin
+            suffix: macos-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            suffix: macos-aarch64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            suffix: windows-x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/clove-web/web/package-lock.json
+      - name: Build web SPA
+        working-directory: crates/clove-web/web
+        run: |
+          npm ci
+          npm run build   # -> crates/clove-web/dist, embedded by clove-web/build.rs
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binaries
+        env:
+          CLOVE_SKIP_WEB_BUILD: "1"   # embed the dist built above; never run npm
+        run: cargo build --release --target ${{ matrix.target }} -p clove -p cloved
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="clove-${GITHUB_REF_NAME}-${{ matrix.suffix }}"
+          mkdir "$stage"
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            cp "target/${{ matrix.target }}/release/clove.exe" "$stage/"
+            cp "target/${{ matrix.target }}/release/cloved.exe" "$stage/"
+          else
+            cp "target/${{ matrix.target }}/release/clove" "$stage/"
+            cp "target/${{ matrix.target }}/release/cloved" "$stage/"
+          fi
+          cp README.md LICENSE-MIT LICENSE-APACHE "$stage/"
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            7z a "$stage.zip" "$stage" >/dev/null
+            sha256sum "$stage.zip" > "$stage.zip.sha256"
+          else
+            tar -czf "$stage.tar.gz" "$stage"
+            shasum -a 256 "$stage.tar.gz" > "$stage.tar.gz.sha256"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clove-${{ matrix.suffix }}
+          path: |
+            clove-*.tar.gz
+            clove-*.tar.gz.sha256
+            clove-*.zip
+            clove-*.zip.sha256
+          if-no-files-found: error
+
+  release:
+    name: publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true   # review the assets, then publish from the Releases page
+          generate_release_notes: true
+          files: |
+            artifacts/clove-*.tar.gz
+            artifacts/clove-*.tar.gz.sha256
+            artifacts/clove-*.zip
+            artifacts/clove-*.zip.sha256

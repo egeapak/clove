@@ -81,6 +81,17 @@ fn dispatch(cli: Cli) -> (OutputFormat, Result<ExitCode, CloveError>) {
             // conflict) per the git merge-driver contract.
             (f, cmd::merge_driver::run(f, args))
         }
+        // The MCP server owns stdin/stdout for JSON-RPC framing (so it ignores
+        // `--format`) and must start even without an initialized repo: a plugin
+        // spawns it per session, and its tools surface a "no clove repository"
+        // error until `clove init` runs, instead of the server failing to launch.
+        Commands::Mcp => {
+            let f = resolve_format(flag, None);
+            (
+                f,
+                cmd::mcp::run(clove_dir.as_deref()).map(|_| ExitCode::Success),
+            )
+        }
         // Everything else operates on a discovered repository.
         command => {
             let ctx = match discover(clove_dir.as_deref()) {
@@ -133,7 +144,6 @@ fn run_repo(
         Commands::Doctor(a) => cmd::doctor::run(ctx, f, a, no_index),
         Commands::Daemon(a) => cmd::daemon::run(ctx, f, a.action),
         Commands::Tui => cmd::tui::run(ctx, f).map(|_| ok),
-        Commands::Mcp => cmd::mcp::run(ctx).map(|_| ok),
         Commands::Serve(a) => cmd::serve::run(ctx, a, quiet).map(|_| ok),
         Commands::Import(a) => cmd::import::run(ctx, f, a).map(|_| ok),
         Commands::Export(a) => cmd::export::run(ctx, f, a).map(|_| ok),
@@ -142,6 +152,7 @@ fn run_repo(
         Commands::Version
         | Commands::Init(_)
         | Commands::AgentDoc(_)
-        | Commands::MergeDriver(_) => Ok(ok),
+        | Commands::MergeDriver(_)
+        | Commands::Mcp => Ok(ok),
     }
 }

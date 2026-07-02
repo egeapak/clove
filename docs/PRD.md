@@ -1,6 +1,6 @@
 # clove — Product Requirements Document
 
-- **Status:** Draft for review (build planned for a later session)
+- **Status:** Design history — the product described here has been built and shipped (M0–M4). Kept as the original requirements record.
 - **Date:** 2026-06-02
 - **Owner:** Ege Apak
 - **Working name:** `clove` (a clove-hitch knot — items tied to each other; verified free on crates.io 2026-06-02)

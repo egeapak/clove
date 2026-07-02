@@ -45,7 +45,12 @@ pub fn run(
         default_type,
     };
 
-    if daemon_enabled() {
+    // Only coordinate through the daemon when the repo actually exists. The
+    // server starts even without a `.clove/` (so its tools can report "no
+    // repository" rather than the process failing to launch); in that case there
+    // is nothing to coordinate, and spawning `cloved` against a missing dir would
+    // just waste the readiness wait — and must not materialize a stray `.clove/`.
+    if daemon_enabled() && clove_dir.exists() {
         // Bring the coordinator up before serving tools so the first write routes
         // to it; best-effort — tool calls fall back to direct ops if it can't start.
         let _ = clove_ipc::ensure_daemon(&clove_dir);

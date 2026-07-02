@@ -244,6 +244,72 @@ fn edit_body_dep_remove_and_set_parent_round_trip() {
     s.shutdown();
 }
 
+/// The plugin spawns `clove mcp` per session, possibly before `clove init`. The
+/// server must still **start and complete the handshake** in a directory with no
+/// `.clove/` repository (rather than the process failing to launch), and its
+/// tools surface a "no repository" error until the repo exists.
+#[test]
+fn starts_without_a_repository() {
+    let dir = tempfile::tempdir().unwrap(); // NOT init'd — no .clove/
+    let mut s = Session::start(dir.path());
+
+    // Handshake already succeeded inside Session::start; tools are still listed.
+    let resp = s.request(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
+    assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 14);
+
+    // A read tool returns a tool error (not a protocol error / crash) because
+    // there is no repository yet.
+    let ready = s.call(3, "clove_ready", json!({}));
+    assert_eq!(ready["isError"], true, "no repo → tool reports an error");
+
+    // No stray `.clove/` was materialized just by starting the server.
+    assert!(
+        !dir.path().join(".clove").exists(),
+        "starting the server must not create a repository"
+    );
+
+    s.shutdown();
+}
+
+/// With the daemon **enabled** (the default) but no `.clove/` repository, the
+/// server must NOT auto-start `cloved` or materialize a `.clove/` — the
+/// `clove_dir.exists()` guard skips coordination when there is nothing to
+/// coordinate. (The `no_daemon` variant above can't cover this: it disables the
+/// daemon outright, so it would pass even if the guard were removed.)
+#[cfg(unix)]
+#[test]
+fn no_repo_does_not_spawn_daemon_or_create_clove_dir() {
+    use std::time::{Duration, Instant};
+
+    let dir = tempfile::tempdir().unwrap(); // NOT init'd — no .clove/
+
+    // Build `cloved` and point `CLOVED_PATH` at it, so that if the guard were
+    // broken the server WOULD find a daemon to spawn (and create `.clove/`).
+    let cloved = escargot::CargoBuild::new()
+        .package("cloved")
+        .bin("cloved")
+        .run()
+        .expect("build cloved");
+
+    let mut cmd = clove(dir.path()); // daemon enabled (no CLOVE_MCP_NO_DAEMON)
+    cmd.env("CLOVED_PATH", cloved.path())
+        .env("CLOVED_DISABLE_WEB", "1")
+        .env("CLOVE_MCP_HEARTBEAT_MS", "100");
+    let s = Session::start_cmd(cmd); // handshake still succeeds
+
+    // Give a broken guard time to spawn cloved / create the dir, then assert it did not.
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_millis(600) {
+        assert!(
+            !dir.path().join(".clove").exists(),
+            "no repo → the server must not create a .clove/ directory"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    s.shutdown();
+}
+
 #[test]
 fn tool_error_is_reported_as_is_error() {
     let dir = init_repo();
