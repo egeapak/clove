@@ -9,7 +9,8 @@
 
 use camino::Utf8Path;
 use clove_core::fixtures::{deps_fuzz_document, FUZZ_ID};
-use clove_core::{parse_item_bytes, CloveId};
+use clove_core::parse_item_bytes;
+use clove_types::CloveId;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

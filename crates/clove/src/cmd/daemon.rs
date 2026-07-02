@@ -47,12 +47,19 @@ fn start(clove_dir: &Utf8Path, format: OutputFormat) -> Result<ExitCode, CloveEr
 
     clove_ipc::spawn_daemon(clove_dir).map_err(|e| daemon_err(&format!("spawning cloved: {e}")))?;
 
-    // Wait for readiness (the pid file, written only after bind + startup sweep).
+    // Wait for readiness. The pid file appears after bind + the startup sweep, but
+    // the daemon only *answers IPC* once its accept loop is actually polling — a
+    // window a slow runner (or extra startup work) can widen. Gate readiness on a
+    // real probe round-trip, not just the pid file's existence, so a status/read
+    // issued right after `start` returns is guaranteed to connect; then read the
+    // pid to report it.
     let pid_file = pid_path(clove_dir);
     let start = Instant::now();
     while start.elapsed() < WAIT_TIMEOUT {
-        if let Ok(contents) = std::fs::read_to_string(&pid_file) {
-            let pid = contents.trim().to_owned();
+        if DaemonClient::probe(clove_dir).is_some() {
+            let pid = std::fs::read_to_string(&pid_file)
+                .map(|s| s.trim().to_owned())
+                .unwrap_or_default();
             return emit(
                 format,
                 json!({ "started": true, "pid": pid }),

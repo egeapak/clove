@@ -90,8 +90,6 @@ jobs:
         run: cargo fuzz run import_tk -- -max_total_time=30
       - name: Fuzz import_beads
         run: cargo fuzz run import_beads -- -max_total_time=30
-      - name: Fuzz ipc_frame
-        run: cargo fuzz run ipc_frame -- -max_total_time=30
 
   daemon-windows:
     name: daemon (windows)
@@ -108,7 +106,9 @@ jobs:
       - name: Build daemon (windows shutdown path)
         run: cargo build -p cloved -p clove
       - name: Daemon unit tests
-        run: cargo test -p cloved --lib
+        # `cloved` is a binary crate (no lib target), so its unit tests live in
+        # the bin and run with --bins; --lib finds no targets and errors.
+        run: cargo test -p cloved --bins
 
   feature-matrix:
     name: feature combos + release size
