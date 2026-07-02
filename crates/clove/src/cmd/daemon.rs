@@ -87,10 +87,14 @@ fn stop(clove_dir: &Utf8Path, format: OutputFormat) -> Result<ExitCode, CloveErr
     // number may name an unrelated same-user process — SIGTERM-ing it blindly
     // would kill the wrong process and then hang waiting for a pid file nothing
     // removes. `probe` connects over IPC and only succeeds against our daemon
-    // (D-daemon-6). If nothing answers, treat it as already stopped and clean up
-    // the corpse footprint.
+    // (D-daemon-6). If nothing answers, treat it as already stopped.
+    //
+    // Don't clean up the footprint here: `probe` already removes it in the
+    // provably-dead (connection-refused) case, and deliberately preserves it when
+    // the daemon may be alive-but-slow or on a mismatched protocol version. Doing
+    // our own unconditional cleanup would unlink a *live* daemon's socket/pid,
+    // orphaning it while we report "not running".
     if DaemonClient::probe(clove_dir).is_none() {
-        clove_ipc::client::cleanup_stale(clove_dir);
         return emit(
             format,
             json!({ "stopped": false, "running": false }),
