@@ -5,6 +5,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::style::{ACCENT, DIM, LABEL};
 
@@ -63,14 +64,67 @@ pub(crate) fn field_line(key: &str, mut value: Vec<Span<'static>>) -> Line<'stat
     Line::from(spans)
 }
 
+/// Truncate `s` to at most `max` **display columns** (not chars), appending an
+/// `…` (1 column) when it doesn't fit. Wide (CJK/emoji) chars count as 2 columns
+/// so the result never overflows a column budget computed from `Span::width`.
 pub(crate) fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
-        out.push('…');
-        out
+    if s.width() <= max {
+        return s.to_string();
     }
+    let budget = max.saturating_sub(1); // reserve a column for the ellipsis
+    let mut out = String::new();
+    let mut w = 0usize;
+    for ch in s.chars() {
+        let cw = ch.width().unwrap_or(0);
+        if w + cw > budget {
+            break;
+        }
+        out.push(ch);
+        w += cw;
+    }
+    out.push('…');
+    out
+}
+
+/// Count the display rows `lines` occupy when word-wrapped to `width` columns
+/// (approximating ratatui's `Wrap { trim: false }`), using display widths so a
+/// wrapped legend / long body is measured correctly for sizing and scroll
+/// clamping. Never returns 0.
+pub(crate) fn wrapped_height(lines: &[Line], width: u16) -> u16 {
+    let width = (width as usize).max(1);
+    lines
+        .iter()
+        .map(|line| {
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            wrap_rows(&text, width)
+        })
+        .sum::<u16>()
+        .max(1)
+}
+
+/// The number of rows a single logical line of `text` wraps to at `width`
+/// display columns (greedy word wrap; a word wider than `width` is broken).
+fn wrap_rows(text: &str, width: usize) -> u16 {
+    let mut rows = 1u16;
+    let mut col = 0usize;
+    for (i, word) in text.split(' ').enumerate() {
+        let ww = word.width();
+        let sep = usize::from(i != 0);
+        if col == 0 {
+            col = ww;
+        } else if col + sep + ww <= width {
+            col += sep + ww;
+        } else {
+            rows = rows.saturating_add(1);
+            col = ww;
+        }
+        // A single word longer than the width is broken across rows.
+        while col > width {
+            rows = rows.saturating_add(1);
+            col -= width;
+        }
+    }
+    rows
 }
 
 /// A `w`×`h` rectangle centered in `area`.
@@ -129,8 +183,8 @@ pub(crate) fn fit_labels(labels: &[String], budget: usize) -> (String, usize) {
     let mut shown = 0;
     for (i, l) in labels.iter().enumerate() {
         let sep = if i == 0 { "" } else { ", " };
-        let add = sep.chars().count() + l.chars().count();
-        if shown > 0 && out.chars().count() + add > budget {
+        let add = sep.width() + l.width();
+        if shown > 0 && out.width() + add > budget {
             break;
         }
         out.push_str(sep);
@@ -138,4 +192,51 @@ pub(crate) fn fit_labels(labels: &[String], budget: usize) -> (String, usize) {
         shown += 1;
     }
     (out, labels.len() - shown)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_counts_display_columns_not_chars() {
+        // ASCII: unchanged when it fits, ellipsized (…, 1 col) when it doesn't.
+        assert_eq!(truncate("hello", 10), "hello");
+        assert_eq!(truncate("hello world", 5), "hell…");
+        // Wide (CJK) chars are 2 columns each: 4 chars = 8 columns. A budget of 4
+        // columns fits only one wide char plus the ellipsis (2 + 1 = 3 ≤ 4).
+        let cjk = "日本語文"; // 4 chars, 8 columns
+        assert_eq!(cjk.width(), 8);
+        let out = truncate(cjk, 4);
+        assert!(
+            out.width() <= 4,
+            "truncated width {} exceeds budget",
+            out.width()
+        );
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn fit_labels_budget_is_display_columns() {
+        // Two wide-char labels of 4 columns each + ", " (2) = 10 columns. A budget
+        // of 8 fits only the first (the second would push it to 10 > 8).
+        let labels = vec!["日本".to_owned(), "言語".to_owned()];
+        let (out, omitted) = fit_labels(&labels, 8);
+        assert_eq!(out, "日本");
+        assert_eq!(omitted, 1);
+    }
+
+    #[test]
+    fn wrapped_height_accounts_for_wrapping() {
+        // A short line occupies one row; a line wider than the width wraps.
+        let short = vec![Line::raw("hi")];
+        assert_eq!(wrapped_height(&short, 10), 1);
+        let long = vec![Line::raw("aaaa bbbb cccc dddd")]; // 19 cols
+        assert_eq!(wrapped_height(&long, 10), 2);
+        // Wide chars count double, so 6 CJK chars (12 cols) wrap at width 8.
+        let wide = vec![Line::raw("日本語文字体")]; // 6 chars, 12 cols
+        assert!(wrapped_height(&wide, 8) >= 2);
+        // Empty content still occupies at least one row.
+        assert_eq!(wrapped_height(&[], 10), 1);
+    }
 }

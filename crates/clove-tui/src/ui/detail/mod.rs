@@ -13,13 +13,13 @@ use ratatui::Frame;
 use crate::app::{App, DetailTab, Focus};
 
 use super::style::{ACCENT, DIM, LABEL};
-use super::util::{border_style, render_rule};
+use super::util::{border_style, render_rule, wrapped_height};
 
 use comments::comment_lines;
 use overview::{footer_line, overview_body, overview_header, overview_lines};
 use tree::tree_lines;
 
-pub(crate) fn render_detail(f: &mut Frame, app: &App, area: Rect) {
+pub(crate) fn render_detail(f: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::Detail;
     let block = Block::default()
         .borders(Borders::ALL)
@@ -55,6 +55,8 @@ pub(crate) fn render_detail(f: &mut Frame, app: &App, area: Rect) {
                 Constraint::Length(1),                   // sticky footer
             ])
             .split(inner);
+        let max = clamp_scroll(&body, zones[2].width, zones[2].height);
+        app.detail.detail_scroll = app.detail.detail_scroll.min(max);
         f.render_widget(Paragraph::new(header), zones[0]);
         render_rule(f, area, zones[1].y);
         f.render_widget(
@@ -73,12 +75,21 @@ pub(crate) fn render_detail(f: &mut Frame, app: &App, area: Rect) {
         DetailTab::Tree => tree_lines(detail),
         DetailTab::Comments => comment_lines(detail),
     };
+    let max = clamp_scroll(&lines, inner.width, inner.height);
+    app.detail.detail_scroll = app.detail.detail_scroll.min(max);
     f.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .scroll((app.detail.detail_scroll, 0)),
         inner,
     );
+}
+
+/// The maximum vertical scroll offset that still keeps content on screen: the
+/// wrapped content height minus the viewport, clamped to 0. Prevents PageDown
+/// from scrolling the pane into blank space past the end of the content.
+fn clamp_scroll(lines: &[Line], width: u16, viewport: u16) -> u16 {
+    wrapped_height(lines, width).saturating_sub(viewport)
 }
 
 fn detail_title(app: &App) -> Line<'static> {
