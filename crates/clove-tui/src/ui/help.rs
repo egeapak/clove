@@ -7,7 +7,7 @@ use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 use ratatui::Frame;
 
 use super::style::{ACCENT, LABEL};
-use super::util::centered_fixed;
+use super::util::{centered_fixed, wrapped_height};
 
 pub(crate) fn render_help(f: &mut Frame, area: Rect) {
     let rows = [
@@ -49,13 +49,18 @@ pub(crate) fn render_help(f: &mut Frame, area: Rect) {
     ]));
 
     // Content-sized and centered when there's room; a full-screen modal on
-    // small terminals (where a centered box would be all border and no room).
-    let popup = if area.width < 50 || area.height < 18 {
+    // small/short terminals (where a centered box would clip or be all border).
+    // The height is measured from the *rendered* line count — the priority
+    // legend wraps to two rows inside the narrow box, so a naive `rows.len()`
+    // undercounts and clips the bottom of the overlay.
+    let w = 50.min(area.width.saturating_sub(2));
+    // Inner text width = box width − 2 borders − 2 horizontal padding.
+    let inner_w = w.saturating_sub(4);
+    let needed_h = wrapped_height(&lines, inner_w).saturating_add(2); // + borders
+    let popup = if area.width < 50 || area.height < needed_h {
         area
     } else {
-        let w = 50.min(area.width.saturating_sub(2));
-        let h = (rows.len() as u16 + 4).min(area.height.saturating_sub(2));
-        centered_fixed(area, w, h)
+        centered_fixed(area, w, needed_h)
     };
     let block = Block::default()
         .borders(Borders::ALL)

@@ -37,6 +37,31 @@ pub fn parse_ids(raw: &[String]) -> Result<Vec<CloveId>, CloveError> {
     raw.iter().map(|id| CloveId::new(id)).collect()
 }
 
+/// Validate a title: rejected if empty or whitespace-only. The single title
+/// check shared by item creation and the edit path.
+pub fn parse_title(raw: &str) -> Result<String, CloveError> {
+    if raw.trim().is_empty() {
+        return Err(CloveError::InvalidField {
+            field: "title".to_owned(),
+            reason: "title cannot be empty".to_owned(),
+        });
+    }
+    Ok(raw.to_owned())
+}
+
+/// Validate an optional assignee: `Some` must be non-blank ("nobody" is spelled
+/// `None`, never an empty string — matching the edit path, which likewise
+/// refuses `Some("")`).
+pub fn parse_assignee(raw: Option<String>) -> Result<Option<String>, CloveError> {
+    match raw {
+        Some(name) if name.trim().is_empty() => Err(CloveError::InvalidField {
+            field: "assignee".to_owned(),
+            reason: "assignee cannot be empty (omit it to leave unassigned)".to_owned(),
+        }),
+        other => Ok(other),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -71,5 +96,31 @@ mod tests {
     fn ids_are_validated() {
         assert!(parse_ids(&["proj-7AF3K2MN".to_owned()]).is_ok());
         assert!(parse_ids(&["not a real id".to_owned()]).is_err());
+    }
+
+    #[test]
+    fn title_rejects_empty_and_whitespace() {
+        assert_eq!(parse_title("fix it").unwrap(), "fix it");
+        assert!(matches!(
+            parse_title(""),
+            Err(CloveError::InvalidField { .. })
+        ));
+        assert!(matches!(
+            parse_title("   "),
+            Err(CloveError::InvalidField { .. })
+        ));
+    }
+
+    #[test]
+    fn assignee_rejects_blank_but_passes_none() {
+        assert_eq!(parse_assignee(None).unwrap(), None);
+        assert_eq!(
+            parse_assignee(Some("alice".to_owned())).unwrap(),
+            Some("alice".to_owned())
+        );
+        assert!(matches!(
+            parse_assignee(Some("  ".to_owned())),
+            Err(CloveError::InvalidField { .. })
+        ));
     }
 }

@@ -37,9 +37,11 @@ fn add(ctx: &Ctx, format: OutputFormat, id_s: &str, dep_s: &str) -> Result<(), C
 fn rm(ctx: &Ctx, format: OutputFormat, id_s: &str, dep_s: &str) -> Result<(), CloveError> {
     let id = parse_id(id_s)?;
     let dep = parse_id(dep_s)?;
-    let mut item = ctx.store.get(&id)?;
-    item.frontmatter.deps.retain(|d| d != &dep);
-    let saved = ctx.store.update(&item, now_seconds())?;
+    // Same shared op as web/MCP/daemon: errors (InvalidField) when the dep is
+    // absent, so a no-op `rm` doesn't silently bump `updated`. Re-read to print
+    // in the CLI's item shape (the op returns the §7.4 JSON the other surfaces use).
+    clove_core::ops::dep_remove(&ctx.store, &id, &dep, now_seconds())?;
+    let saved = ctx.store.get(&id)?;
     print_item(format, &saved, Map::new());
     Ok(())
 }

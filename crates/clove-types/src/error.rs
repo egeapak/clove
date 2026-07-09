@@ -112,6 +112,18 @@ pub enum CloveError {
     #[error("`{from}` already depends on `{to}`")]
     DependencyExists { from: String, to: String },
 
+    /// A store-wide validation (cycle check, ancestry walk, dependents check)
+    /// could not be performed because one or more item files failed to parse.
+    /// Validating against the partial graph would silently let invalid edges
+    /// (real cycles, hidden dependents) through, so the mutation is refused
+    /// until the broken file(s) are repaired (`clove doctor` lists them).
+    #[error("cannot validate against the store: {count} item file(s) failed to parse (first: `{path}`: {message})")]
+    ScanFailed {
+        path: Utf8PathBuf,
+        count: usize,
+        message: String,
+    },
+
     /// A filesystem operation failed.
     #[error("io error at `{path}`: {source}")]
     Io {
@@ -156,7 +168,8 @@ pub fn error_code(error: &CloveError) -> (&'static str, u8) {
         | CloveError::MissingFrontmatter { .. }
         | CloveError::UnterminatedFrontmatter { .. }
         | CloveError::IdMismatch { .. }
-        | CloveError::InvalidYaml { .. } => ("PARSE_ERROR", 4),
+        | CloveError::InvalidYaml { .. }
+        | CloveError::ScanFailed { .. } => ("PARSE_ERROR", 4),
 
         CloveError::NoRepo { .. } => ("NO_REPO", 5),
         CloveError::Io { .. } => ("IO_ERROR", 5),

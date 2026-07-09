@@ -43,6 +43,11 @@ pub fn run(clove_dir: &Utf8Path) -> anyhow::Result<()> {
         }
     };
 
+    // Harden the runtime/state dir to owner-only (Unix): it holds the mutating
+    // control socket + pid + write lock, which under a default umask would be
+    // reachable by other local users on a shared machine (D-daemon-SEC-1).
+    restrict_to_owner(clove_dir, 0o700);
+
     // 2. Open the index (rebuilt if stale/corrupt — it is a cache).
     let db_path = clove_dir.join("index.db");
     let issues_dir = clove_dir.join("issues");
@@ -113,15 +118,19 @@ pub fn run(clove_dir: &Utf8Path) -> anyhow::Result<()> {
             id_prefix,
             "daemon",
             true,
+            config.as_ref().map_or_else(
+                || clove_core::CloveConfig::default().default_type,
+                |c| c.default_type,
+            ),
         )
         .with_heartbeat(heartbeat)
     });
+    // The web address is advertised to clients only *after* a successful bind
+    // (inside `serve_web`), never up front: per-project daemons share one fixed
+    // port, so a second daemon that loses the bind must not claim it serves the
+    // web UI — else `clove serve` would hand the user off to another project's
+    // tracker (D-daemon-5).
     let web_addr: std::net::SocketAddr = (std::net::Ipv4Addr::LOCALHOST, web_port).into();
-    if web_enabled {
-        if let Ok(mut s) = state.lock() {
-            s.set_web_addr(Some(web_addr.to_string()));
-        }
-    }
 
     // 3. Tokio runtime — 2 workers (IPC + watcher), per DESIGN §8.1.
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -160,6 +169,9 @@ pub fn run(clove_dir: &Utf8Path) -> anyhow::Result<()> {
             .name(name)
             .create_tokio()
             .with_context(|| format!("binding {}", sock_path(clove_dir)))?;
+        // The control socket is a mutating RPC channel — restrict it to the owner
+        // (Unix; the Windows named pipe is unaffected). (D-daemon-SEC-1)
+        restrict_to_owner(&sock_path(clove_dir), 0o600);
 
         // 4. Startup mtime sweep (DESIGN §8.6): re-index anything changed while
         //    the daemon was down (e.g. a `git pull`), BEFORE advertising
@@ -169,6 +181,7 @@ pub fn run(clove_dir: &Utf8Path) -> anyhow::Result<()> {
         }
         crate::reindexer::sync_once(&issues_dir, &index, &state);
         write_pid(clove_dir).context("writing pid file")?;
+        restrict_to_owner(&pid_path(clove_dir), 0o600);
 
         // Opt-in periodic two-way GitHub sync (T-M06). When the feature is off,
         // or the interval/repo aren't configured, this future never resolves.
@@ -194,7 +207,7 @@ pub fn run(clove_dir: &Utf8Path) -> anyhow::Result<()> {
         tokio::select! {
             _ = accept_loop(listener, dispatcher) => {},
             _ = crate::watcher::watch(issues_dir.clone(), Arc::clone(&index), Arc::clone(&state), debounce, watch_options.clone(), Arc::clone(&graph)) => {},
-            _ = serve_web(web_state, web_addr) => {},
+            _ = serve_web(web_state, web_addr, Arc::clone(&state)) => {},
             _ = idle_watchdog(Arc::clone(&state), idle_shutdown) => {},
             _ = crate::snapshot::snapshot_loop(repo_root.clone(), Arc::clone(&index), snapshot_interval) => {},
             _ = github_sync_fut => {},
@@ -245,6 +258,19 @@ async fn idle_watchdog(state: Arc<Mutex<DaemonState>>, idle: Option<Duration>) {
     }
 }
 
+/// Restrict a runtime file or directory to owner-only access (Unix). A no-op on
+/// other platforms (Windows named pipes carry their own ACLs). Best-effort:
+/// a chmod failure must not bring the daemon down (D-daemon-SEC-1).
+#[cfg(unix)]
+fn restrict_to_owner(path: &Utf8Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+}
+
+/// No-op on non-Unix platforms.
+#[cfg(not(unix))]
+fn restrict_to_owner(_path: &Utf8Path, _mode: u32) {}
+
 /// Write the current process id to `daemon.pid` (DESIGN §8.2).
 fn write_pid(clove_dir: &Utf8Path) -> std::io::Result<()> {
     let mut file = File::create(pid_path(clove_dir))?;
@@ -256,18 +282,41 @@ fn write_pid(clove_dir: &Utf8Path) -> std::io::Result<()> {
 /// A bind/serve failure is logged but does not bring the daemon down — the web UI
 /// is an optional accelerator like the rest of the daemon. Resolves never on the
 /// success path so the `select!` arm only completes if serving truly ends.
-async fn serve_web(state: Option<clove_web::AppState>, addr: std::net::SocketAddr) {
+///
+/// The daemon's `web_addr` (surfaced by `STATUS` and trusted by `clove serve`) is
+/// advertised **only after the bind succeeds** and cleared if serving later
+/// errors, so a daemon that lost the shared port never claims to serve the UI
+/// (D-daemon-5).
+async fn serve_web(
+    state: Option<clove_web::AppState>,
+    addr: std::net::SocketAddr,
+    daemon_state: Arc<Mutex<DaemonState>>,
+) {
     if let Some(state) = state {
-        if let Err(e) = clove_web::serve_with_watch(state, addr).await {
-            if e.kind() == std::io::ErrorKind::AddrInUse {
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => {
+                // We hold the port: now it is safe to advertise the address.
+                if let Ok(mut s) = daemon_state.lock() {
+                    s.set_web_addr(Some(addr.to_string()));
+                }
+                if let Err(e) = clove_web::serve_with_watch_on(state, listener).await {
+                    eprintln!("cloved: web server error ({addr}): {e}");
+                    // Serving ended in error — stop advertising a UI we no longer serve.
+                    if let Ok(mut s) = daemon_state.lock() {
+                        s.set_web_addr(None);
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
                 // Expected when another daemon or `clove serve` already holds the
                 // port (per-project daemons share one web port). The daemon keeps
-                // running without the web UI.
+                // running without the web UI and does NOT advertise `web_addr`.
                 eprintln!(
                     "cloved: web UI port {addr} in use; this daemon will not serve the web UI"
                 );
-            } else {
-                eprintln!("cloved: web server error ({addr}): {e}");
+            }
+            Err(e) => {
+                eprintln!("cloved: web server bind error ({addr}): {e}");
             }
         }
     }

@@ -73,36 +73,39 @@ impl CloveRpc for Dispatcher {
 
     async fn query(self, _: Context, req: QueryRequest) -> Result<QueryListResponse, RpcError> {
         self.touch();
-        self.handle_query(req)
+        self.blocking(move |this| this.handle_query(req)).await
     }
 
     async fn search(self, _: Context, req: SearchRequest) -> Result<Vec<String>, RpcError> {
         self.touch();
-        self.handle_search(req)
+        self.blocking(move |this| this.handle_search(req)).await
     }
 
     async fn graph(self, _: Context, req: GraphRequest) -> Result<GraphResponse, RpcError> {
         self.touch();
-        self.handle_graph(req)
+        self.blocking(move |this| this.handle_graph(req)).await
     }
 
     async fn reindex(self, _: Context) -> Result<ReindexDone, RpcError> {
         self.touch();
-        self.handle_reindex()
+        self.blocking(|this| this.handle_reindex()).await
     }
 
     async fn create(self, _: Context, spec: NewSpec) -> Result<Value, RpcError> {
         self.touch();
-        let out = clove_core::ops::create(
-            &self.store(),
-            &self.id_prefix,
-            self.default_type,
-            spec,
-            now(),
-        )
-        .map_err(rpc_err);
-        self.after_write(&out);
-        out
+        self.blocking(move |this| {
+            let out = clove_core::ops::create(
+                &this.store(),
+                &this.id_prefix,
+                this.default_type,
+                spec,
+                now(),
+            )
+            .map_err(rpc_err);
+            this.after_write(&out);
+            out
+        })
+        .await
     }
 
     async fn set_status(
@@ -113,9 +116,13 @@ impl CloveRpc for Dispatcher {
     ) -> Result<Value, RpcError> {
         self.touch();
         let cid = CloveId::new(&id).map_err(rpc_err)?;
-        let out = clove_core::ops::transition(&self.store(), &cid, status, now()).map_err(rpc_err);
-        self.after_write(&out);
-        out
+        self.blocking(move |this| {
+            let out =
+                clove_core::ops::transition(&this.store(), &cid, status, now()).map_err(rpc_err);
+            this.after_write(&out);
+            out
+        })
+        .await
     }
 
     async fn edit(
@@ -126,9 +133,13 @@ impl CloveRpc for Dispatcher {
     ) -> Result<Value, RpcError> {
         self.touch();
         let cid = CloveId::new(&id).map_err(rpc_err)?;
-        let out = clove_core::ops::edit(&self.store(), &cid, &assignments, now()).map_err(rpc_err);
-        self.after_write(&out);
-        out
+        self.blocking(move |this| {
+            let out =
+                clove_core::ops::edit(&this.store(), &cid, &assignments, now()).map_err(rpc_err);
+            this.after_write(&out);
+            out
+        })
+        .await
     }
 
     async fn apply_edit(
@@ -139,9 +150,12 @@ impl CloveRpc for Dispatcher {
     ) -> Result<Value, RpcError> {
         self.touch();
         let cid = CloveId::new(&id).map_err(rpc_err)?;
-        let out = clove_core::apply_edit(&self.store(), &cid, &req, now()).map_err(rpc_err);
-        self.after_write(&out);
-        out
+        self.blocking(move |this| {
+            let out = clove_core::apply_edit(&this.store(), &cid, &req, now()).map_err(rpc_err);
+            this.after_write(&out);
+            out
+        })
+        .await
     }
 
     async fn add_comment(
@@ -153,27 +167,38 @@ impl CloveRpc for Dispatcher {
     ) -> Result<Value, RpcError> {
         self.touch();
         let cid = CloveId::new(&id).map_err(rpc_err)?;
-        let out = clove_core::ops::comment(&self.store(), &cid, &author, &body).map_err(rpc_err);
-        self.after_write(&out);
-        out
+        self.blocking(move |this| {
+            let out =
+                clove_core::ops::comment(&this.store(), &cid, &author, &body).map_err(rpc_err);
+            this.after_write(&out);
+            out
+        })
+        .await
     }
 
     async fn dep_add(self, _: Context, id: String, dep_id: String) -> Result<Value, RpcError> {
         self.touch();
         let cid = CloveId::new(&id).map_err(rpc_err)?;
         let dep = CloveId::new(&dep_id).map_err(rpc_err)?;
-        let out = clove_core::ops::dep_add(&self.store(), &cid, &dep, now()).map_err(rpc_err);
-        self.after_write(&out);
-        out
+        self.blocking(move |this| {
+            let out = clove_core::ops::dep_add(&this.store(), &cid, &dep, now()).map_err(rpc_err);
+            this.after_write(&out);
+            out
+        })
+        .await
     }
 
     async fn dep_remove(self, _: Context, id: String, dep_id: String) -> Result<Value, RpcError> {
         self.touch();
         let cid = CloveId::new(&id).map_err(rpc_err)?;
         let dep = CloveId::new(&dep_id).map_err(rpc_err)?;
-        let out = clove_core::ops::dep_remove(&self.store(), &cid, &dep, now()).map_err(rpc_err);
-        self.after_write(&out);
-        out
+        self.blocking(move |this| {
+            let out =
+                clove_core::ops::dep_remove(&this.store(), &cid, &dep, now()).map_err(rpc_err);
+            this.after_write(&out);
+            out
+        })
+        .await
     }
 
     async fn set_parent(
@@ -188,25 +213,55 @@ impl CloveRpc for Dispatcher {
             Some(p) => Some(CloveId::new(&p).map_err(rpc_err)?),
             None => None,
         };
-        let out = clove_core::ops::set_parent(&self.store(), &cid, parent.as_ref(), now())
-            .map_err(rpc_err);
-        self.after_write(&out);
-        out
+        self.blocking(move |this| {
+            let out = clove_core::ops::set_parent(&this.store(), &cid, parent.as_ref(), now())
+                .map_err(rpc_err);
+            this.after_write(&out);
+            out
+        })
+        .await
     }
 
     async fn show(self, _: Context, id: String) -> Result<Value, RpcError> {
         self.touch();
         let cid = CloveId::new(&id).map_err(rpc_err)?;
-        clove_core::ops::show(&self.store(), &cid).map_err(rpc_err)
+        self.blocking(move |this| clove_core::ops::show(&this.store(), &cid).map_err(rpc_err))
+            .await
     }
 
     async fn stats(self, _: Context, top: u32, include_epics: bool) -> Result<Value, RpcError> {
         self.touch();
-        clove_core::ops::stats(&self.store(), top as usize, include_epics, now()).map_err(rpc_err)
+        self.blocking(move |this| {
+            clove_core::ops::stats(&this.store(), top as usize, include_epics, now())
+                .map_err(rpc_err)
+        })
+        .await
     }
 }
 
 impl Dispatcher {
+    /// Run blocking store/index work (SQLite queries, `std::sync::Mutex`
+    /// acquisition, full-directory scans, reindex) off the async worker threads.
+    ///
+    /// The daemon's runtime has only 2 workers (DESIGN §8.1) and also hosts the
+    /// accept loop, the watcher, the idle watchdog, and the axum web server, so
+    /// running blocking handler work inline would let one slow op (e.g. a reindex
+    /// holding the index mutex) park a worker and starve `ping`/`status`/the web
+    /// UI — which in turn trips the client's 50ms ping budget. Offloading to the
+    /// blocking pool keeps the async workers responsive. `Dispatcher` is cheap to
+    /// clone (all `Arc`), so the closure owns its own handle.
+    async fn blocking<T, F>(&self, f: F) -> Result<T, RpcError>
+    where
+        F: FnOnce(Dispatcher) -> Result<T, RpcError> + Send + 'static,
+        T: Send + 'static,
+    {
+        let this = self.clone();
+        match tokio::task::spawn_blocking(move || f(this)).await {
+            Ok(res) => res,
+            Err(_) => Err(RpcError::new("internal", "daemon worker task failed")),
+        }
+    }
+
     /// Record that an IPC event happened (resets the idle-shutdown window).
     fn touch(&self) {
         if let Ok(mut state) = self.state.lock() {

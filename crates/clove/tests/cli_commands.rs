@@ -197,6 +197,39 @@ fn dep_validation_exit_codes() {
 }
 
 #[test]
+fn dep_rm_absent_dependency_errors_but_present_one_removes() {
+    let dir = init_repo();
+    let a = new_item(dir.path(), "A", &[]);
+    let b = new_item(dir.path(), "B", &[]);
+
+    // Removing a dependency that doesn't exist must fail (same as web/MCP/daemon,
+    // which route through ops::dep_remove) rather than silently no-op → exit 4.
+    let out = clove(dir.path())
+        .args(["dep", "rm", &a, &b, "--format", "json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(4));
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["error"]["exit"], 4);
+
+    // Happy path: add then remove an existing dependency succeeds and clears it.
+    clove(dir.path())
+        .args(["dep", "add", &a, &b])
+        .assert()
+        .success();
+    let added = json_ok(clove(dir.path()).arg("show").arg(&a));
+    assert!(added["data"]["deps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|d| d == &b));
+
+    let removed = json_ok(clove(dir.path()).args(["dep", "rm", &a, &b]));
+    assert!(removed["data"]["deps"].as_array().unwrap().is_empty());
+}
+
+#[test]
 fn show_missing_item_json_error_envelope() {
     let dir = init_repo();
     let out = clove(dir.path())

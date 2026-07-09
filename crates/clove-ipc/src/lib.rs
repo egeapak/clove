@@ -18,8 +18,6 @@ pub mod service;
 pub mod spawn;
 pub mod transport;
 
-use std::hash::{Hash, Hasher};
-
 use camino::{Utf8Path, Utf8PathBuf};
 
 pub use client::{cleanup_stale, ClientError, DaemonClient, DaemonHealth};
@@ -84,13 +82,25 @@ pub fn event_name(clove_dir: &Utf8Path) -> String {
 
 /// A short, stable hash of the `.clove/` directory path, used to derive the
 /// Windows named-pipe name (`\\.\pipe\clove-<hash>`) and the Windows shutdown
-/// event name (DESIGN §8.2/§8.9). Deterministic across processes so the CLI and
-/// daemon agree; the standard-library [`std::collections::hash_map::DefaultHasher`]
-/// is seeded with fixed keys (not randomized), which is sufficient here.
+/// event name (DESIGN §8.2/§8.9). Must be deterministic *across processes and
+/// across builds* so independently-compiled binaries (`clove`, `cloved`,
+/// `clove-mcp`) — possibly built with different toolchains (a distro-packaged
+/// `clove` alongside a `cargo install`ed `cloved`) — always agree on the name.
+///
+/// This uses an inlined, explicitly-versioned FNV-1a rather than
+/// `std::collections::hash_map::DefaultHasher`, whose algorithm std documents as
+/// unspecified and *not* stable across releases — relying on it across a binary
+/// boundary is a latent contract violation.
 pub fn repo_hash(clove_dir: &Utf8Path) -> String {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    clove_dir.as_str().hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    // FNV-1a, 64-bit (offset basis + prime are the published FNV constants).
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = FNV_OFFSET;
+    for byte in clove_dir.as_str().as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("{hash:016x}")
 }
 
 /// The Windows named-pipe name for this `.clove/` directory.

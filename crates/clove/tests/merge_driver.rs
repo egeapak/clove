@@ -52,6 +52,12 @@ fn setup_repo() -> TempDir {
     git_ok(p, &["config", "commit.gpgsign", "false"]);
     git_ok(p, &["config", "user.name", "T"]);
     git_ok(p, &["config", "user.email", "t@example.com"]);
+    // Keep line endings byte-for-byte across platforms. Windows CI runners set
+    // core.autocrlf=true globally, which would rewrite item files to CRLF on
+    // checkout — desyncing the base/ours/theirs the merge driver diffs and
+    // breaking these exact-content assertions. clove item files are always LF.
+    git_ok(p, &["config", "core.autocrlf", "false"]);
+    git_ok(p, &["config", "core.eol", "lf"]);
 
     clove(p)
         .args(["init", "--prefix", "proj", "--merge-driver"])

@@ -217,7 +217,9 @@ export const api = {
     return withMock(
       async () => {
         await req<unknown>(
-          `/items/${encodeURIComponent(id)}${opts.force ? '?force=' : ''}`,
+          // Server requires the literal value `force=true` (write.rs delete_item);
+          // an empty `?force=` param parses to "" and is treated as no-force.
+          `/items/${encodeURIComponent(id)}${opts.force ? '?force=true' : ''}`,
           { method: 'DELETE' }
         );
       },

@@ -11,8 +11,8 @@ delete them and nothing is lost. Written in Rust as a single cross-platform bina
 
 The full surface has landed and is gated in CI: the `clove` CLI and `cloved`
 daemon, the SQLite index, the exact-incremental index/daemon dependency graph,
-analytics (`clove stats` + history), the read-only `clove tui` terminal browser,
-the **`clove serve` web UI** (Kanban / list / detail / timeline), two-way
+analytics (`clove stats` + history), the `clove tui` terminal browser + add/edit
+form, the **`clove serve` web UI** (Kanban / list / detail / timeline), two-way
 **GitHub sync** (`clove sync github`), the **`clove mcp`** server, and a **Claude
 Code plugin**. See `HANDOFF.md` for the current state and `docs/DESIGN.md` for the
 authoritative spec.
@@ -65,7 +65,7 @@ clove stats --history         # replay recorded snapshots (a running daemon also
 ### Browse: terminal & web UI
 
 ```sh
-clove tui                     # read-only terminal browser (master-detail, tabs, filters)
+clove tui                     # terminal browser + add/edit form (master-detail, tabs, filters)
 clove serve                   # serve the web UI on http://127.0.0.1:7373 (loopback)
 clove serve --open            # …and open it in the browser
 ```
@@ -132,7 +132,7 @@ The plugin wires up the `clove mcp` server automatically (tools surface as
 | `crates/cloved` | the optional `cloved` daemon (file-watch, IPC, optional git sync, web serving) |
 | `crates/clove-import` | import/export + merge driver |
 | `crates/clove-ipc` | CLI↔daemon wire protocol |
-| `crates/clove-tui` | read-only terminal browser (`clove tui`, ratatui) |
+| `crates/clove-tui` | terminal browser + add/edit form (`clove tui`, ratatui) |
 | `crates/clove-web` | web UI server + embedded SvelteKit SPA (`clove serve`); see `web/README.md` |
 | `docs/DESIGN.md` | authoritative, implementation-ready spec |
 | `docs/IMPLEMENTATION_PLAN.md` | phased M0–M4 task plan (design history) |

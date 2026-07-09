@@ -24,6 +24,11 @@ camino.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 chrono.workspace = true
+# Stable, versioned content hash for the persisted comment-dedup fingerprints.
+# std's DefaultHasher is explicitly unstable across Rust releases, so a persisted
+# hash must not use it (see `sync::body_hash`); blake3 is the project's chosen
+# content hasher (clove-core) and is fixed across releases/machines.
+blake3.workspace = true
 
 # GitHub-only deps, gated behind the `github` feature.
 octocrab = { workspace = true, optional = true }

@@ -83,6 +83,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }  # 
 toml = { version = "0.8", default-features = false, features = ["parse"] }  # config.toml parsing only (no serialize/display)
 jsonschema = "0.46"             # JSON Schema validation in tests (T-CLI14)
 ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }  # terminal UI (M4 `clove tui`); drop unused underline-color
+unicode-width = "0.2"           # display-column widths for TUI truncation/wrapping/caret (matches ratatui's own)
 pulldown-cmark = { version = "0.13", default-features = false }  # Markdown body rendering in `clove tui`
 # M4 MCP server: rmcp for the MCP (JSON-RPC stdio) surface; tarpc for the typed
 # CLI<->daemon RPC seam (replaces the hand-rolled clove-ipc frame/protocol).

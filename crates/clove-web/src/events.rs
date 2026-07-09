@@ -7,7 +7,8 @@
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
-use axum::response::Response;
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
 use serde_json::Value;
@@ -48,8 +49,30 @@ pub enum Event {
     Ping { ts: i64 },
 }
 
+/// Whether a browser `Origin` header names a loopback origin. WS handshakes are
+/// not subject to the same-origin policy, so without this any web page could open
+/// `ws://127.0.0.1:<port>/api/v1/events` and read full item data (cross-origin WS
+/// read / DNS-rebinding exfiltration). An absent Origin (non-browser clients) is
+/// allowed; a present, non-local Origin (including the literal `"null"`) is not.
+fn origin_is_local(origin: &str) -> bool {
+    let after = origin.split_once("://").map(|(_, r)| r).unwrap_or(origin);
+    let authority = after.split(['/', '?', '#']).next().unwrap_or(after);
+    crate::host_is_local(authority)
+}
+
 /// The `/api/v1/events` WebSocket upgrade handler.
-pub async fn ws_handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> Response {
+pub async fn ws_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    // Reject cross-origin handshakes before upgrading (the Host middleware covers
+    // the Host header; Origin is the browser-controlled cross-origin signal).
+    if let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
+        if !origin_is_local(origin) {
+            return (StatusCode::FORBIDDEN, "forbidden: cross-origin WebSocket").into_response();
+        }
+    }
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
@@ -106,4 +129,32 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         }
     }
     forward.abort();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::origin_is_local;
+
+    #[test]
+    fn origin_is_local_accepts_loopback_origins() {
+        for o in [
+            "http://localhost",
+            "http://localhost:5173",
+            "http://127.0.0.1:7373",
+            "https://[::1]:7373",
+        ] {
+            assert!(origin_is_local(o), "should be local: {o}");
+        }
+    }
+
+    #[test]
+    fn origin_is_local_rejects_cross_origin() {
+        for o in [
+            "http://evil.example.com",
+            "https://evil.example.com:443",
+            "null",
+        ] {
+            assert!(!origin_is_local(o), "should be rejected: {o}");
+        }
+    }
 }

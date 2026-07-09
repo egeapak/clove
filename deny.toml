@@ -18,9 +18,12 @@ allow = [
     "BSD-3-Clause",
     "ISC",
     "Unicode-3.0",
-    "Unicode-DFS-2016",
     "Zlib",
 ]
+# An allow-list entry that no dependency currently carries is a harmless
+# forward-declaration, not a failure: don't error when an allowed license isn't
+# encountered in the tree (e.g. after a dep upgraded off Unicode-DFS-2016).
+unused-allowed-license = "allow"
 confidence-threshold = 0.9
 
 [bans]

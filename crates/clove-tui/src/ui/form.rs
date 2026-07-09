@@ -6,6 +6,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 use ratatui::Frame;
 
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
 use crate::app::{App, Field, FormMode};
 
 use super::style::{ACCENT, DIM, LABEL};
@@ -50,7 +52,8 @@ pub(crate) fn render_form(f: &mut Frame, app: &App, area: Rect) {
             if focused {
                 let before = &form.body[..char_byte(&form.body, form.cursor)];
                 let lines_before = before.matches('\n').count() as u16;
-                let col = before.rsplit('\n').next().unwrap_or("").chars().count() as u16;
+                // Display columns (not chars) so wide chars don't offset the caret.
+                let col = before.rsplit('\n').next().unwrap_or("").width() as u16;
                 caret = Some((cursor_line + 1 + lines_before, 2 + col));
             }
             let body = if focused && app.caret_glyph {
@@ -78,7 +81,10 @@ pub(crate) fn render_form(f: &mut Frame, app: &App, area: Rect) {
             let arrows = if focused { ("‹ ", " ›") } else { ("", "") };
             format!("{}{}{}", arrows.0, form.enum_value(field), arrows.1)
         } else if focused {
-            caret = Some((cursor_line, LABEL_COLS + form.cursor as u16));
+            // Caret column in *display* columns from the value's start, so wide /
+            // zero-width chars before the caret don't offset it from the glyph.
+            let prefix_w = prefix_width(&text_value(form, field), form.cursor);
+            caret = Some((cursor_line, LABEL_COLS + prefix_w));
             if app.caret_glyph {
                 with_caret(&text_value(form, field), form.cursor)
             } else {
@@ -131,9 +137,14 @@ pub(crate) fn render_form(f: &mut Frame, app: &App, area: Rect) {
         centered_fixed(area, w, h)
     };
     let inner_h = popup.height.saturating_sub(2);
-    // Scroll so the caret (or, for enum fields, the focused row) stays visible.
+    let inner_w = popup.width.saturating_sub(4); // 2 borders + 2 padding cols
+                                                 // Vertical scroll so the caret (or, for enum fields, the focused row) stays
+                                                 // visible; horizontal scroll so a caret past the right edge of a long value
+                                                 // is brought back into view instead of vanishing (blind typing).
     let focus_line = caret.map(|(l, _)| l).unwrap_or(cursor_line);
     let scroll = focus_line.saturating_sub(inner_h.saturating_sub(2));
+    let caret_col = caret.map(|(_, c)| c).unwrap_or(0);
+    let hscroll = caret_col.saturating_sub(inner_w.saturating_sub(1));
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(ACCENT))
@@ -142,26 +153,33 @@ pub(crate) fn render_form(f: &mut Frame, app: &App, area: Rect) {
         .style(Style::default().bg(Color::Black));
     f.render_widget(Clear, popup);
     f.render_widget(
-        Paragraph::new(lines).block(block).scroll((scroll, 0)),
+        Paragraph::new(lines).block(block).scroll((scroll, hscroll)),
         popup,
     );
 
     // Place the terminal's hardware cursor on the caret cell (coincides with the
     // glyph) when it's within the visible, scrolled content area — so real
     // terminals show a native blinking cursor, while the glyph keeps the caret
-    // visible in the (cursor-less) snapshot/PNG tooling.
-    //
-    // `col` counts chars, not display columns, so a wide/zero-width Unicode char
-    // before the caret would offset the hardware cursor from the rendered glyph.
-    // Item ids/labels/titles are effectively single-width, so this is accepted.
+    // visible in the (cursor-less) snapshot/PNG tooling. `col` is a display
+    // column, so wide/zero-width chars before the caret keep cursor and glyph
+    // aligned; `hscroll` maps it back to a screen column.
     if let Some((line, col)) = caret {
         let inner_x = popup.x + 2; // left border + left padding
         let inner_y = popup.y + 1; // top border (no top padding)
-        let inner_w = popup.width.saturating_sub(4);
-        if line >= scroll && line < scroll + inner_h && col < inner_w {
-            f.set_cursor_position((inner_x + col, inner_y + (line - scroll)));
+        let vis_col = col.saturating_sub(hscroll);
+        if line >= scroll && line < scroll + inner_h && vis_col < inner_w {
+            f.set_cursor_position((inner_x + vis_col, inner_y + (line - scroll)));
         }
     }
+}
+
+/// The display-column width of the first `chars` characters of `s` (the caret's
+/// column offset from the value's start).
+fn prefix_width(s: &str, chars: usize) -> u16 {
+    s.chars()
+        .take(chars)
+        .map(|c| c.width().unwrap_or(0))
+        .sum::<usize>() as u16
 }
 
 /// The byte offset of char index `idx` in `s` (clamped to `s.len()`).

@@ -100,25 +100,42 @@ pub fn sync_github(
         return Ok((summary, None));
     }
 
-    let report = rt.block_on(async {
+    let apply_result = rt.block_on(async {
         let crab = build_client()?;
-        let mut report = apply_plan(&crab, &owner, &repo, plan, store, prefix, &mut state).await?;
+        let outcome = apply_plan(&crab, &owner, &repo, plan, store, prefix, &mut state).await?;
+        let mut report = outcome.report;
         if sync_comments {
             let (pulled, pushed) =
                 sync_all_comments(&crab, &owner, &repo, store, &mut state).await?;
             report.comments_pulled = pulled;
             report.comments_pushed = pushed;
         }
-        Ok::<SyncReport, ImportError>(report)
-    })?;
+        Ok::<(SyncReport, std::collections::HashSet<String>), ImportError>((
+            report,
+            outcome.reconciled,
+        ))
+    });
 
-    // Record each linked item's post-apply assignee, so the next push can tell
-    // clove's assignee apart from human-added extras. Done in one pass (not per
-    // action) and after apply, so pushes above still see the *previous* value.
-    record_synced_assignees(store, &mut state)?;
-
-    state.save(&state_path)?;
-    Ok((summary, Some(report)))
+    match apply_result {
+        Ok((report, reconciled)) => {
+            // Record each reconciled item's post-apply assignee, so the next push
+            // can tell clove's assignee apart from human-added extras. Done in one
+            // pass (not per action) and after apply, so the pushes above still saw
+            // the *previous* value.
+            record_synced_assignees(store, &mut state, &reconciled)?;
+            state.save(&state_path)?;
+            Ok((summary, Some(report)))
+        }
+        Err(err) => {
+            // A mid-run failure (e.g. an API call exhausting its retries) must not
+            // discard the bookkeeping for actions already applied: the comment ids,
+            // `external_ref` links, and fingerprints accumulated in `state` are what
+            // stop the next run from re-pulling / re-pushing them as duplicates.
+            // Persist what we have (best-effort), then surface the original error.
+            let _ = state.save(&state_path);
+            Err(err)
+        }
+    }
 }
 
 /// Open (creating if needed) the per-repo sync lock file next to the state file,
@@ -147,12 +164,25 @@ fn open_sync_lock(
     Ok(fd_lock::RwLock::new(file))
 }
 
-/// Stamp every linked item's current assignee onto its sync entry.
-fn record_synced_assignees(store: &ItemStore, state: &mut SyncState) -> Result<(), ImportError> {
+/// Stamp the current local assignee onto the sync entry of every item that was
+/// actually reconciled this run, so the next push can tell clove's assignee apart
+/// from human-added extras.
+///
+/// Only `reconciled` refs are stamped: an item whose reconciliation was skipped
+/// (a `Manual`-policy conflict) or whose remote issue is missing was *not* pushed,
+/// so its GitHub assignee still reflects the *previous* local assignee. Restamping
+/// the baseline to the new local value there would make the next push treat the
+/// stale GitHub assignee as a human-added extra and keep it, leaving both the old
+/// and new assignee on the issue.
+fn record_synced_assignees(
+    store: &ItemStore,
+    state: &mut SyncState,
+    reconciled: &std::collections::HashSet<String>,
+) -> Result<(), ImportError> {
     let (frontmatters, _errors) = store.scan_frontmatter()?;
     for fm in frontmatters {
         if let Some(external_ref) = &fm.external_ref {
-            if external_ref.starts_with("gh-") {
+            if external_ref.starts_with("gh-") && reconciled.contains(external_ref) {
                 if let Some(entry) = state.entries.get_mut(external_ref) {
                     entry.synced_assignee = fm.assignee.clone();
                 }
@@ -164,9 +194,24 @@ fn record_synced_assignees(store: &ItemStore, state: &mut SyncState) -> Result<(
 
 /// Build the local side of the diff: one object per item, its serialized
 /// frontmatter plus `body` (the exact fields [`plan_sync`] / `build_export_item`
-/// read). Parse failures are dropped, matching the export path.
+/// read). Errors if any item file fails to parse (see below).
 fn local_objects(store: &ItemStore) -> Result<Vec<Map<String, Value>>, ImportError> {
-    let (items, _errors) = store.scan()?;
+    let (items, errors) = store.scan()?;
+    // Refuse to sync when any local item file fails to parse. A dropped item is
+    // invisible to the planner, so its linked remote issue would be seen as having
+    // no local counterpart and pull-created as a DUPLICATE local item carrying the
+    // same `external_ref` — permanently forking the link. Fail loudly instead so
+    // the user repairs the file first (`clove doctor` lists the broken ones).
+    if let Some(err) = errors.first() {
+        return Err(ImportError::Source {
+            path: err.path().to_owned(),
+            message: format!(
+                "{} local item file(s) failed to parse; fix them before syncing \
+                 (see `clove doctor`): {err}",
+                errors.len()
+            ),
+        });
+    }
     Ok(items
         .iter()
         .map(|item| {
@@ -175,6 +220,16 @@ fn local_objects(store: &ItemStore) -> Result<Vec<Map<String, Value>>, ImportErr
             obj
         })
         .collect())
+}
+
+/// The result of an apply pass: the [`SyncReport`] plus the set of
+/// `external_ref`s whose item was actually reconciled this run (in-sync,
+/// pulled, or pushed). Manual-skipped conflicts and remote-missing refs are
+/// deliberately absent — their local side was not touched, so their assignee
+/// baseline must not be restamped (see [`record_synced_assignees`]).
+struct ApplyOutcome {
+    report: SyncReport,
+    reconciled: std::collections::HashSet<String>,
 }
 
 /// Apply every action in `plan`, mutating both GitHub and the local store and
@@ -187,12 +242,13 @@ async fn apply_plan(
     store: &ItemStore,
     prefix: &str,
     state: &mut SyncState,
-) -> Result<SyncReport, ImportError> {
+) -> Result<ApplyOutcome, ImportError> {
     let mut report = SyncReport {
         conflicts: plan.conflicts.len(),
         remote_missing: plan.remote_missing.len(),
         ..SyncReport::default()
     };
+    let mut reconciled: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // Already-in-sync pairs: just (re)record their fingerprint so a first sync
     // over an old one-way link becomes incremental next time.
@@ -202,30 +258,35 @@ async fn apply_plan(
             entry.gh_updated_at,
             entry.local_updated,
         );
+        reconciled.insert(entry.external_ref.clone());
         report.in_sync += 1;
     }
 
     // --- Pulls (remote → local), through the unified write path. ---
     for pull in &plan.pull_create {
         pull_create(store, prefix, &pull.staged, state)?;
+        reconciled.insert(pull.staged.external_ref.clone());
         report.pulled_created += 1;
     }
     for pull in &plan.pull_update {
         pull_update(store, pull, state)?;
+        reconciled.insert(pull.staged.external_ref.clone());
         report.pulled_updated += 1;
     }
 
     // --- Pushes (local → remote), writing the link back locally. ---
     for push in &plan.push_create {
-        push_create(crab, owner, repo, push, store, state).await?;
+        let external_ref = push_create(crab, owner, repo, push, store, state).await?;
+        reconciled.insert(external_ref);
         report.pushed_created += 1;
     }
     for push in &plan.push_update {
         push_update(crab, owner, repo, push, state).await?;
+        reconciled.insert(crate::github::external_ref_for(push.number));
         report.pushed_updated += 1;
     }
 
-    Ok(report)
+    Ok(ApplyOutcome { report, reconciled })
 }
 
 /// Create a brand-new local item from a remote issue (mirrors the importer's
@@ -279,10 +340,23 @@ fn pull_update(
     state: &mut SyncState,
 ) -> Result<(), ImportError> {
     let staged = &pull.staged;
+
+    // GitHub only distinguishes closed vs. not-closed, and `map_issue` collapses
+    // every non-closed state to `Open` (there is no `in_progress` on GitHub, nor
+    // does the `clove-meta` codec round-trip it). So only touch `status` when the
+    // *closed-ness* actually differs — otherwise a remote non-status edit (a title
+    // tweak, a pushed comment bumping `updated_at`, …) would silently demote a
+    // local `in_progress` back to `open`. This mirrors `sync::content_equal`'s
+    // `in_progress == open` equivalence.
+    let current = store.get(&pull.clove_id)?;
+    let local_closed = current.frontmatter.status == ItemStatus::Closed;
+    let remote_closed = staged.status == ItemStatus::Closed;
+    let status = (local_closed != remote_closed).then_some(staged.status);
+
     let req = EditRequest {
         title: Some(staged.title.clone()),
         body: Some(staged.body.clone()),
-        status: Some(staged.status),
+        status,
         priority: Some(staged.priority),
         item_type: None,
         // `Some(None)` clears the assignee when GitHub has none, `Some(Some(x))`
@@ -307,10 +381,10 @@ async fn push_create(
     push: &PushCreate,
     store: &ItemStore,
     state: &mut SyncState,
-) -> Result<(), ImportError> {
+) -> Result<String, ImportError> {
     let item = &push.item;
     let handler = crab.issues(owner, repo);
-    let created: Issue = with_retry(|| {
+    let created: Issue = with_retry(false, || {
         let mut builder = handler.create(&item.title).body(item.body.clone());
         if !item.labels.is_empty() {
             builder = builder.labels(item.labels.clone());
@@ -323,21 +397,26 @@ async fn push_create(
     .await?;
 
     // GitHub created the issue OPEN. If the local item is closed, close it too so
-    // the two sides actually match after a create-of-a-closed-item.
+    // the two sides actually match after a create-of-a-closed-item. The close is a
+    // second PATCH that bumps `updated_at` past the create response's — record the
+    // *close* response's timestamp as the fingerprint, or the next sync would see
+    // a spurious remote change and pull-update the just-created item.
+    let mut gh_updated = created.updated_at;
     if item.closed {
-        with_retry(|| {
+        let closed: Issue = with_retry(true, || {
             handler
                 .update(created.number)
                 .state(octocrab::models::IssueState::Closed)
                 .send()
         })
         .await?;
+        gh_updated = closed.updated_at;
     }
 
     let external_ref = crate::github::external_ref_for(created.number);
     let local_updated = link_local(store, &push.clove_id, &external_ref)?;
-    state.record(&external_ref, Some(created.updated_at), local_updated);
-    Ok(())
+    state.record(&external_ref, Some(gh_updated), local_updated);
+    Ok(external_ref)
 }
 
 /// Update an existing GitHub issue from local fields, then record the fingerprint.
@@ -383,7 +462,7 @@ async fn push_update(
     // assignee, leave GitHub's untouched (don't disturb purely-human assignees).
     let touch_assignees = item.assignee.is_some() || prev_owned.is_some();
 
-    let updated: Issue = with_retry(|| {
+    let updated: Issue = with_retry(true, || {
         let state_param = if want_closed {
             octocrab::models::IssueState::Closed
         } else {
@@ -394,9 +473,12 @@ async fn push_update(
             .title(&item.title)
             .body(&item.body)
             .state(state_param);
-        if !item.labels.is_empty() {
-            builder = builder.labels(&item.labels);
-        }
+        // Always send labels on update — clove's label set is authoritative on
+        // push (a pull mirrors GitHub's labels down via `LabelEdit::Set`). Sending
+        // an empty list is what clears the last label; skipping the field would
+        // leave a removed label stranded on GitHub forever, and the fresh
+        // fingerprint would then mark the pair as synced so it is never re-examined.
+        builder = builder.labels(&item.labels);
         if touch_assignees {
             builder = builder.assignees(&assignees);
         }
@@ -480,9 +562,21 @@ async fn sync_all_comments(
         for comment in &plan.push {
             let handler = crab.issues(owner, repo);
             let body = comment.body.clone();
-            let created = with_retry(|| handler.create_comment(number, body.clone())).await?;
+            // A comment create is non-idempotent — a retry on a lost response would
+            // post a duplicate — so it is never retried (see `with_retry`).
+            let created =
+                with_retry(false, || handler.create_comment(number, body.clone())).await?;
             entry.gh_comment_ids.insert(created.id.into_inner());
             entry.local_comment_hashes.insert(body_hash(&comment.body));
+            // Posting a comment bumps the issue's `updated_at` on GitHub. Advance
+            // the recorded remote fingerprint to the new comment's timestamp so the
+            // next sync doesn't see a spurious remote change and pull-update (or
+            // false-conflict) the item whose only "remote change" was clove's own
+            // comment push.
+            let created_at = created.created_at;
+            if entry.gh_updated_at.is_none_or(|cur| created_at > cur) {
+                entry.gh_updated_at = Some(created_at);
+            }
             pushed += 1;
         }
     }
@@ -504,7 +598,10 @@ async fn fetch_comments(
     number: u64,
 ) -> Result<Vec<GhComment>, ImportError> {
     let handler = crab.issues(owner, repo);
-    let first = with_retry(|| handler.list_comments(number).per_page(100u8).send()).await?;
+    let first = with_retry(true, || {
+        handler.list_comments(number).per_page(100u8).send()
+    })
+    .await?;
     let all = crab.all_pages(first).await.map_err(net_err)?;
     Ok(all
         .into_iter()
@@ -558,12 +655,39 @@ fn retry_base_ms() -> u64 {
         .unwrap_or(500)
 }
 
+/// Whether an octocrab error is worth retrying (transient), as opposed to a
+/// permanent failure a retry can never fix.
+///
+/// A GitHub 4xx (bad token, not found, 422 validation) is permanent — retrying
+/// only triples latency — so only 5xx, `408 Request Timeout`, and `429 Too Many
+/// Requests` are retried. Transport-level failures (hyper / tower `Service`)
+/// *may* be transient, but whether the server already committed the request is
+/// unknown; the caller decides via `idempotent` whether replaying is safe.
+fn is_transient(err: &octocrab::Error) -> bool {
+    use octocrab::Error;
+    match err {
+        Error::GitHub { source, .. } => {
+            let code = source.status_code.as_u16();
+            code == 408 || code == 429 || (500..=599).contains(&code)
+        }
+        Error::Hyper { .. } | Error::Service { .. } => true,
+        // Deterministic client-side failures (serde, URI, JWT, …): never transient.
+        _ => false,
+    }
+}
+
 /// Run an octocrab call with bounded exponential backoff (up to 3 attempts).
 ///
 /// A transient blip (network, 5xx, secondary rate-limit) shouldn't abort a sync
-/// mid-stream and leave the two sides half-reconciled, so each call is retried a
-/// few times before the error is surfaced. The happy path never sleeps.
-async fn with_retry<T, F, Fut>(mut op: F) -> Result<T, ImportError>
+/// mid-stream and leave the two sides half-reconciled, so a retryable call is
+/// retried a few times before the error is surfaced. The happy path never sleeps.
+///
+/// `idempotent` gates retrying: an update/fetch can be safely replayed, but a
+/// **create** (issue or comment) must not — if the server processed the POST but
+/// the response was lost, a retry would create a duplicate. Non-idempotent calls
+/// therefore make exactly one attempt. Permanent errors (4xx) are never retried
+/// regardless (see [`is_transient`]).
+async fn with_retry<T, F, Fut>(idempotent: bool, mut op: F) -> Result<T, ImportError>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T, octocrab::Error>>,
@@ -576,7 +700,7 @@ where
             Ok(value) => return Ok(value),
             Err(err) => {
                 attempt += 1;
-                if attempt >= MAX_ATTEMPTS {
+                if attempt >= MAX_ATTEMPTS || !idempotent || !is_transient(&err) {
                     return Err(net_err(err));
                 }
                 tokio::time::sleep(delay).await;

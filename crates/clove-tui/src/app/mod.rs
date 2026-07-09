@@ -383,41 +383,48 @@ impl App {
         if self.list.view.is_empty() {
             return;
         }
-        let next = match self.list.list_state.selected() {
+        let cur = self.list.list_state.selected();
+        let next = match cur {
             Some(i) if i + 1 < self.list.view.len() => i + 1,
             Some(i) => i,
             None => 0,
         };
-        self.list.list_state.select(Some(next));
-        self.on_selection_changed();
+        self.select_index(next, cur);
     }
 
     pub fn select_prev(&mut self) {
         if self.list.view.is_empty() {
             return;
         }
-        let prev = self
-            .list
-            .list_state
-            .selected()
-            .unwrap_or(0)
-            .saturating_sub(1);
-        self.list.list_state.select(Some(prev));
-        self.on_selection_changed();
+        let cur = self.list.list_state.selected();
+        let prev = cur.unwrap_or(0).saturating_sub(1);
+        self.select_index(prev, cur);
     }
 
     pub fn select_first(&mut self) {
         if !self.list.view.is_empty() {
-            self.list.list_state.select(Some(0));
-            self.on_selection_changed();
+            let cur = self.list.list_state.selected();
+            self.select_index(0, cur);
         }
     }
 
     pub fn select_last(&mut self) {
         if !self.list.view.is_empty() {
-            self.list.list_state.select(Some(self.list.view.len() - 1));
-            self.on_selection_changed();
+            let cur = self.list.list_state.selected();
+            self.select_index(self.list.view.len() - 1, cur);
         }
+    }
+
+    /// Select `next`, firing `on_selection_changed` (which resets detail scroll
+    /// and re-reads the item) only when the index actually changed — so a no-op
+    /// move (e.g. `j` on the last row) doesn't discard the detail scroll or
+    /// redundantly hit disk.
+    fn select_index(&mut self, next: usize, cur: Option<usize>) {
+        if cur == Some(next) {
+            return;
+        }
+        self.list.list_state.select(Some(next));
+        self.on_selection_changed();
     }
 
     fn on_selection_changed(&mut self) {
@@ -671,7 +678,17 @@ impl App {
                 self.refresh();
                 self.status = status;
             }
-            Err(e) => self.form.error = Some(e.to_string()),
+            Err(e) => {
+                self.form.error = Some(e.to_string());
+                // An edit is not transactional: the scalar/label/body write lands
+                // before the graph ops, so a later parent/dep failure can leave
+                // disk ahead of the cached view. Re-scan so the list/detail behind
+                // the still-open form reflect what actually reached disk (a create
+                // is a single atomic op, so it can't partially apply).
+                if self.form.mode == FormMode::Edit {
+                    self.refresh();
+                }
+            }
         }
     }
 
@@ -957,6 +974,74 @@ mod tests {
         // Moving past the end stays at the end.
         app.select_next();
         assert_eq!(app.list.list_state.selected(), Some(2));
+    }
+
+    #[test]
+    fn noop_selection_preserves_detail_scroll() {
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+
+        // Scroll the detail pane, then a *no-op* move (already on the last row)
+        // must not reset the scroll or re-read the item.
+        app.select_last();
+        app.detail.detail_scroll = 5;
+        app.select_next(); // already at the last row → no selection change
+        assert_eq!(
+            app.detail.detail_scroll, 5,
+            "no-op select_next must not reset the detail scroll"
+        );
+        app.select_last(); // re-selecting the same row is also a no-op
+        assert_eq!(app.detail.detail_scroll, 5);
+        // A real move does reset it.
+        app.select_prev();
+        assert_eq!(app.detail.detail_scroll, 0);
+    }
+
+    #[test]
+    fn failed_multi_op_edit_refreshes_view_to_disk() {
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+
+        let base = app
+            .data
+            .all
+            .iter()
+            .find(|fm| fm.title == "Base task")
+            .unwrap()
+            .id
+            .clone();
+        let dependent = app
+            .data
+            .all
+            .iter()
+            .find(|fm| fm.title == "Depends on base")
+            .unwrap()
+            .id
+            .clone();
+
+        // Edit `base`: rename it AND add a dep on `dependent`. `dependent` already
+        // depends on `base`, so `dep_add` fails with a cycle — but only *after* the
+        // rename has been persisted by `apply_edit`.
+        let item = app.data.store.get(&base).unwrap();
+        app.form = FormState::edit_item(&item);
+        app.mode = Mode::Form;
+        app.form.title = "Renamed base".to_owned();
+        app.form.deps = dependent.to_string();
+        app.form_submit();
+
+        // The graph op failed → the form stays open with the error shown.
+        assert_eq!(app.mode, Mode::Form);
+        assert!(app.form.error.is_some());
+        // The earlier title write reached disk, and the cached view was re-scanned
+        // to match (no stale old title behind the form).
+        assert!(
+            app.data.all.iter().any(|fm| fm.title == "Renamed base"),
+            "list refreshed to the partially-applied disk state"
+        );
+        assert_eq!(
+            app.data.store.get(&base).unwrap().frontmatter.title,
+            "Renamed base"
+        );
     }
 
     // --- Add / edit form --------------------------------------------------

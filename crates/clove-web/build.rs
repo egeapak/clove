@@ -25,7 +25,9 @@ fn main() {
     let dist_gz = Path::new("dist-gz");
     for p in [
         "web/src",
+        "web/static",
         "web/package.json",
+        "web/package-lock.json",
         "web/svelte.config.js",
         "web/vite.config.ts",
         "web/tsconfig.json",
@@ -50,13 +52,25 @@ fn maybe_npm_build(web: &Path, dist: &Path) {
         return;
     }
     if !npm_available() {
-        println!("cargo:warning=npm not found; embedding a placeholder web UI (run `npm run build` in crates/clove-web/web for the real UI)");
+        // Distinguish embedding a real (but possibly stale) prior build from
+        // embedding the placeholder — ensure_placeholder keeps an existing
+        // dist/index.html, so a previous real build is what actually ships.
+        if real_dist_mtime(dist).is_some() {
+            println!("cargo:warning=clove-web: npm not found; keeping the existing (possibly stale) web UI build");
+        } else {
+            println!("cargo:warning=clove-web: npm not found; embedding a placeholder web UI (run `npm run build` in crates/clove-web/web for the real UI)");
+        }
         return;
     }
-    // Skip the npm build when the previous dist is already up to date.
+    // Skip the npm build when the previous dist is already up to date. The
+    // staleness inputs must mirror the rerun-if-changed set above: a lock-only
+    // dependency bump (package-lock.json) or a static-asset change (web/static/,
+    // copied into dist by adapter-static) must force a rebuild.
     let dist_stamp = real_dist_mtime(dist);
     let src_newest = newest_mtime(web.join("src"))
+        .max(newest_mtime(web.join("static")))
         .max(mtime(&web.join("package.json")))
+        .max(mtime(&web.join("package-lock.json")))
         .max(mtime(&web.join("svelte.config.js")))
         .max(mtime(&web.join("vite.config.ts")));
     if let (Some(d), Some(s)) = (dist_stamp, src_newest) {

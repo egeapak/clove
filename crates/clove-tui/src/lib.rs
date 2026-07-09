@@ -1,9 +1,10 @@
-//! `clove-tui` — a read-only terminal UI for browsing clove work items.
+//! `clove-tui` — a terminal UI for browsing and editing clove work items.
 //!
 //! Launched by `clove tui`. It scans the file store (the source of truth) and
 //! presents a master-detail browser: an All / Ready / Blocked item list on the
 //! left and a per-item overview / dependency-tree / comments pane on the right.
-//! It never mutates the store; refresh (`r`) re-scans from disk.
+//! Items can be added (`n`) and edited (`e`) through the unified write
+//! path (`clove_core::ops` / `apply_edit`); refresh (`r`) re-scans from disk.
 
 mod app;
 mod markdown;
@@ -69,7 +70,17 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         return;
     }
 
+    // A Char event carrying Ctrl/Alt (crossterm reports e.g. Ctrl+A as
+    // Char('a')+CONTROL without the enhanced keyboard protocol) is a chord, not
+    // text — never insert its letter into search/form fields. Ctrl-C / Ctrl-S are
+    // handled above; any other modified letter is a no-op here.
+    let modified_char = matches!(code, KeyCode::Char(_))
+        && mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+
     if app.mode == Mode::Search {
+        if modified_char {
+            return;
+        }
         match code {
             KeyCode::Char(c) => app.push_search(c),
             KeyCode::Backspace => app.pop_search(),
@@ -84,6 +95,9 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     if app.mode == Mode::Form {
         if mods.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('s') {
             app.form_submit();
+            return;
+        }
+        if modified_char {
             return;
         }
         match code {
@@ -166,5 +180,47 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('e') => app.start_edit(),
 
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_app() -> (tempfile::TempDir, App) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = camino::Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
+        std::fs::create_dir_all(root.join(".clove").join("issues")).unwrap();
+        (dir, App::new(ItemStore::new(root)))
+    }
+
+    #[test]
+    fn ctrl_alt_letters_are_not_inserted_into_search() {
+        let (_dir, mut app) = empty_app();
+        app.start_search();
+        // Ctrl+A / Alt+V are chords, not text: no stray literal inserted.
+        handle_key(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
+        handle_key(&mut app, KeyCode::Char('v'), KeyModifiers::ALT);
+        assert_eq!(app.list.search, "");
+        // A plain letter still types.
+        handle_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+        assert_eq!(app.list.search, "a");
+    }
+
+    #[test]
+    fn ctrl_alt_letters_are_not_inserted_into_form() {
+        let (_dir, mut app) = empty_app();
+        app.start_new(); // Title field focused
+        handle_key(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
+        handle_key(&mut app, KeyCode::Char('v'), KeyModifiers::ALT);
+        assert_eq!(app.form.title, "");
+        // Ctrl-S still submits (not treated as a stray character); with an empty
+        // title it keeps the form open with a validation error rather than typing.
+        handle_key(&mut app, KeyCode::Char('s'), KeyModifiers::CONTROL);
+        assert_eq!(app.mode, Mode::Form);
+        assert_eq!(app.form.title, "", "Ctrl-S must not insert an 's'");
+        // A plain letter still types.
+        handle_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+        assert_eq!(app.form.title, "a");
     }
 }

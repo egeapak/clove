@@ -2,21 +2,21 @@
 source: crates/clove-tui/src/snapshot.rs
 expression: rendered
 ---
-  All 7  │  Ready 4  │  Blocked 1
-┌ Items (7) ───────────────────────┌ Help ──────────────────────────────────────────┐──────────────────────────────────┐
-│▌◐ F #9QX4D1B7 ! Build REST API ● │ clove tui — browser + editor                   │            ◐ in_progress · ready │
-│ ○ B #2HZ6C3PW ↑ Investigate flaky│                                                │                  @grace · deps 1 │
-│ ● C #7AF3K2MN ↑ Set up database s│ ↑/k ↓/j      move selection                    │──────────────────────────────────│
-│ ○ E #3HT6WYG5 • Ship v1 release ●│ g / G        jump to top / bottom              │                                  │
-│ ○ F #K2M8ZP5R • Write integration│ Tab / 1 2 3  All / Ready / Blocked             │                                  │
-│ ○ F #5RB9NC2V • Frontend dashboar│ o / t / c    overview / dep tree / comments    │s/api.md.                         │
-│ ● D #8XQ4F7DM ↓ Docs site        │ →/l  ←/h     focus detail / list (narrow)      │                                  │
-│                                  │ PgUp / PgDn  scroll detail                     │                                  │
-│                                  │ s / S        cycle sort field / direction      │                                  │
-│                                  │ f            filter menu (facets)              │                                  │
-│                                  │ x            clear all filters                 │                                  │
-│                                  │ /            search id, title, labels          │                                  │
-│                                  │ n / e        new / edit item                   │──────────────────────────────────│
-│                                  │ Esc          clear search / back / close       │   created Jan 1 · updated Jan 20 │
-└──────────────────────────────────└────────────────────────────────────────────────┘──────────────────────────────────┘
-7 item(s) loaded   ?: help · q: quit
+┌ Help ────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ clove tui — browser + editor                                                                                         │
+│                                                                                                                      │
+│ ↑/k ↓/j      move selection                                                                                          │
+│ g / G        jump to top / bottom                                                                                    │
+│ Tab / 1 2 3  All / Ready / Blocked                                                                                   │
+│ o / t / c    overview / dep tree / comments                                                                          │
+│ →/l  ←/h     focus detail / list (narrow)                                                                            │
+│ PgUp / PgDn  scroll detail                                                                                           │
+│ s / S        cycle sort field / direction                                                                            │
+│ f            filter menu (facets)                                                                                    │
+│ x            clear all filters                                                                                       │
+│ /            search id, title, labels                                                                                │
+│ n / e        new / edit item                                                                                         │
+│ Esc          clear search / back / close                                                                             │
+│ r            refresh from disk                                                                                       │
+│ ?            toggle this help                                                                                        │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

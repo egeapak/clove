@@ -23,6 +23,14 @@
   });
 </script>
 
+<!--
+  SECURITY INVARIANT: this {@html} sink is only safe because `renderMarkdown`
+  (markdown.ts) runs micromark with its default `allowDangerousHtml: false`, so
+  raw HTML in a body is escaped (`<script>` → `&lt;script&gt;`) and dangerous
+  link protocols are neutralized before it ever reaches here — no sanitizer is
+  applied after. If markdown.ts ever enables raw HTML, this becomes an XSS sink.
+  Pinned by markdown.test.ts ("escapes raw <script>" / "<img onerror>" / js: hrefs).
+-->
 <!-- eslint-disable-next-line svelte/no-at-html-tags -- micromark escapes raw HTML by default (see markdown.ts) -->
 <div class="md">{@html html}</div>
 

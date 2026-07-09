@@ -1,6 +1,6 @@
 [package]
 name = "clove-tui"
-description = "clove: read-only terminal UI for browsing work items"
+description = "clove: terminal UI for browsing and editing work items"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
@@ -11,6 +11,7 @@ repository.workspace = true
 clove-types.workspace = true
 clove-core.workspace = true
 ratatui.workspace = true        # terminal UI; re-exports crossterm at `ratatui::crossterm`
+unicode-width.workspace = true  # display-column widths (truncation, wrapping, form caret)
 pulldown-cmark.workspace = true # Markdown body rendering in the detail pane
 anyhow.workspace = true
 camino.workspace = true

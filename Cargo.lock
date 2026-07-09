@@ -621,6 +621,7 @@ name = "clove-import"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "camino",
  "chrono",
  "clove-core",
@@ -708,6 +709,7 @@ dependencies = [
  "pulldown-cmark",
  "ratatui",
  "tempfile",
+ "unicode-width 0.2.0",
 ]
 
 [[package]]

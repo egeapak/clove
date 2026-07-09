@@ -12,11 +12,12 @@ libfuzzer-sys = "0.4"
 camino = "1"
 serde_json = "1"
 clove-core = { path = "../crates/clove-core" }
+# `CloveId` lives in the pure type layer; depend on it directly (clove-core
+# re-exports clove-types only crate-internally, per its layering rule).
+clove-types = { path = "../crates/clove-types" }
 # Merge-driver fuzz target needs only the pure merge logic; skip the GitHub
 # feature (tokio/octocrab) so the fuzz build stays lean.
 clove-import = { path = "../crates/clove-import", default-features = false }
-# IPC frame + protocol decode fuzzing (M3 T-X02).
-clove-ipc = { path = "../crates/clove-ipc" }
 
 [[bin]]
 name = "parse_item_file"
@@ -49,13 +50,6 @@ bench = false
 [[bin]]
 name = "import_beads"
 path = "fuzz_targets/import_beads.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "ipc_frame"
-path = "fuzz_targets/ipc_frame.rs"
 test = false
 doc = false
 bench = false
