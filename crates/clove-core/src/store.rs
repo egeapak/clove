@@ -142,6 +142,16 @@ impl ItemStore {
     ) -> Result<Item, CloveError> {
         let title = fields::parse_title(&spec.title)?;
         let assignee = fields::parse_assignee(spec.assignee)?;
+
+        // Everything from the referential-integrity checks through the write
+        // runs under the store-wide write lock: a concurrent (locked) `delete`
+        // could otherwise remove a dep/parent target between our existence
+        // check and the write, leaving exactly the dangling reference the
+        // check exists to prevent — and two concurrent creates could race id
+        // generation.
+        let mut lock = self.write_lock()?;
+        let _guard = lock.lock()?;
+
         for dep in &spec.deps {
             if !self.exists(dep) {
                 return Err(CloveError::NotFound {
@@ -156,6 +166,16 @@ impl ItemStore {
                 });
             }
         }
+
+        // Match the serializer, which sorts + de-dupes lists at write time, so
+        // the returned in-memory `Item` is identical to what a re-read parses
+        // (the same guarantee `dep_add` maintains).
+        let mut deps = spec.deps;
+        deps.sort();
+        deps.dedup();
+        let mut labels = spec.labels;
+        labels.sort();
+        labels.dedup();
 
         let now = truncate_to_seconds(now);
         let id = new_id(prefix, &self.issues_dir)?;
@@ -172,8 +192,8 @@ impl ItemStore {
             closed: None,
             assignee,
             parent: spec.parent,
-            labels: spec.labels,
-            deps: spec.deps,
+            labels,
+            deps,
             relates: Vec::new(),
             duplicates: Vec::new(),
             supersedes: Vec::new(),
@@ -287,6 +307,12 @@ impl ItemStore {
     /// Unless `force`, refuses with [`CloveError::HasDependents`] when other
     /// items list this id in their `deps`.
     pub fn delete(&self, id: &CloveId, force: bool) -> Result<(), CloveError> {
+        // Held across the dependents check + removal so a concurrent locked
+        // writer (e.g. `dep_add` re-verifying this id exists before writing
+        // the edge) cannot interleave and end up referencing a deleted item.
+        let mut lock = self.write_lock()?;
+        let _guard = lock.lock()?;
+
         let path = self.path_for(id);
         if !path.exists() {
             return Err(CloveError::NotFound { id: id.to_string() });

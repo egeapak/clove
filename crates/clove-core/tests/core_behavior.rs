@@ -838,6 +838,47 @@ labels:\n- Area:Core\n---\nbody\n";
 }
 
 #[test]
+fn doctor_never_deletes_comments_of_an_unparseable_item() {
+    // An item whose FILE EXISTS but fails to parse (e.g. leftover conflict
+    // markers) still owns its comments: they must be neither reported as
+    // orphaned nor deleted by `fix` — the parse error is repairable, deleted
+    // comment history is not.
+    let (_tmp, store) = repo();
+    std::fs::write(
+        CloveConfig::path_in(store.repo_root()),
+        "id_prefix = \"proj\"\n",
+    )
+    .unwrap();
+
+    let broken_id = "proj-BROKEN00";
+    std::fs::write(
+        store.issues_dir().join(format!("{broken_id}.md")),
+        "---\n<<<<<<< ours\nschema: 1\n---\nbody\n",
+    )
+    .unwrap();
+    let comments_dir = store.issues_dir().join(broken_id).join("comments");
+    std::fs::create_dir_all(&comments_dir).unwrap();
+    let comment_file = comments_dir.join("20260602T100000.000000000Z-ege-example-com-abcd.md");
+    std::fs::write(&comment_file, "precious comment").unwrap();
+
+    let report = diagnose(&store);
+    assert!(
+        report
+            .issues
+            .iter()
+            .all(|issue| issue.code != "ORPHAN_COMMENTS"),
+        "unparseable item's comments misreported as orphaned: {:?}",
+        report.issues
+    );
+
+    doctor_fix(&store).unwrap();
+    assert!(
+        comment_file.exists(),
+        "fix deleted the comments of an unparseable item"
+    );
+}
+
+#[test]
 fn doctor_reports_dangling_dep_and_cycle_as_unfixed_errors() {
     let (_tmp, store) = repo();
     std::fs::write(

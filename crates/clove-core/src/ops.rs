@@ -461,6 +461,7 @@ fn tree_to_json(node: &crate::DepTreeNode) -> Value {
         "status": node.status.as_str(),
         "ready": node.ready,
         "cycle_ref": node.cycle_ref,
+        "repeat_ref": node.repeat_ref,
         "children": node.children.iter().map(tree_to_json).collect::<Vec<_>>(),
     })
 }

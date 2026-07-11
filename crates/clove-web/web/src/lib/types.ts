@@ -34,6 +34,8 @@ export interface DepTreeNode {
   status: Status;
   ready: boolean;
   cycle_ref: boolean;
+  /** Subtree already expanded elsewhere in the tree (shown as a reference). */
+  repeat_ref?: boolean;
   children: DepTreeNode[];
 }
 

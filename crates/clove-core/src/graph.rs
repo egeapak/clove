@@ -127,6 +127,11 @@ pub struct DepTreeNode {
     pub ready: bool,
     /// True when this node repeats an ancestor (a cycle), and is not expanded.
     pub cycle_ref: bool,
+    /// True when this node's subtree was already expanded elsewhere in the
+    /// tree (a shared sub-DAG, `cargo tree`'s `(*)`), and is not re-expanded.
+    /// Without this, a diamond ladder of n items renders 2^(n/2) nodes.
+    #[serde(default)]
+    pub repeat_ref: bool,
     pub children: Vec<DepTreeNode>,
 }
 
@@ -434,7 +439,8 @@ impl GraphStore {
         let &root_node = self.id_to_node.get(root)?;
         let ready: HashSet<CloveId> = self.ready_items().into_iter().collect();
         let mut path = HashSet::new();
-        Some(self.dep_tree_node(root_node, max_depth, &ready, &mut path))
+        let mut expanded = HashSet::new();
+        Some(self.dep_tree_node(root_node, max_depth, &ready, &mut path, &mut expanded))
     }
 
     fn dep_tree_node(
@@ -443,6 +449,7 @@ impl GraphStore {
         remaining_depth: usize,
         ready: &HashSet<CloveId>,
         path: &mut HashSet<NodeIndex>,
+        expanded: &mut HashSet<NodeIndex>,
     ) -> DepTreeNode {
         let meta = &self.graph[node];
         let base = DepTreeNode {
@@ -451,6 +458,7 @@ impl GraphStore {
             status: meta.status,
             ready: ready.contains(&meta.id),
             cycle_ref: false,
+            repeat_ref: false,
             children: Vec::new(),
         };
 
@@ -465,18 +473,31 @@ impl GraphStore {
             return base;
         }
 
-        path.insert(node);
         let mut child_targets: Vec<NodeIndex> = self
             .graph
             .edges(node)
             .filter(|e| is_hard_dep(*e.weight()))
             .map(|e| e.target())
             .collect();
+
+        // A subtree already expanded elsewhere in this tree is referenced, not
+        // re-expanded (`cargo tree`'s `(*)`). Pruning only true ancestors would
+        // re-walk every shared sub-DAG: a diamond ladder of ~60 items expands
+        // to 2^30 nodes, and both the CLI `--full` (usize::MAX) and the web
+        // `?depth=` reach this with an unclamped depth.
+        if !child_targets.is_empty() && !expanded.insert(node) {
+            return DepTreeNode {
+                repeat_ref: true,
+                ..base
+            };
+        }
+
+        path.insert(node);
         child_targets.sort_by(|&a, &b| self.graph[a].id.cmp(&self.graph[b].id));
 
         let children = child_targets
             .into_iter()
-            .map(|child| self.dep_tree_node(child, remaining_depth - 1, ready, path))
+            .map(|child| self.dep_tree_node(child, remaining_depth - 1, ready, path, expanded))
             .collect();
         path.remove(&node);
 
@@ -682,6 +703,9 @@ fn render_children(out: &mut String, children: &[DepTreeNode], prefix: &str) {
 fn push_node_suffix(out: &mut String, node: &DepTreeNode) {
     if node.cycle_ref {
         out.push_str(" (cycle)");
+    }
+    if node.repeat_ref {
+        out.push_str(" (*)");
     }
 }
 
@@ -953,6 +977,45 @@ mod tests {
             "a node should be marked cycle_ref"
         );
         // Completes without infinite recursion (reaching here proves it).
+    }
+
+    #[test]
+    fn dep_tree_references_shared_subdags_instead_of_re_expanding() {
+        // A diamond ladder: every node at level i depends on BOTH nodes at
+        // level i+1. Pruning only true ancestors re-expands each shared
+        // subtree per branch — 2^30 nodes here. With cross-branch dedup the
+        // tree stays linear, repeats marked `repeat_ref`.
+        let levels = 30usize;
+        let xid = |i: usize| format!("proj-{i:04}XXXX");
+        let yid = |i: usize| format!("proj-{i:04}YYYY");
+        let mut items = Vec::new();
+        for i in 0..levels {
+            let deps: Vec<String> = if i + 1 < levels {
+                vec![xid(i + 1), yid(i + 1)]
+            } else {
+                Vec::new()
+            };
+            let deps_ref: Vec<&str> = deps.iter().map(String::as_str).collect();
+            items.push(fm(&xid(i), ItemStatus::Open, &deps_ref));
+            items.push(fm(&yid(i), ItemStatus::Open, &deps_ref));
+        }
+        let (graph, _) = GraphStore::build(&items);
+        // Unbounded depth, exactly what the CLI `--full` passes.
+        let tree = graph.dep_tree(&id(&xid(0)), usize::MAX).unwrap();
+        let count = tree_node_count(&tree);
+        assert!(
+            count <= 4 * levels,
+            "tree must stay linear in the item count, got {count} nodes"
+        );
+        assert!(tree_has_repeat_ref(&tree), "shared subtrees must be marked");
+    }
+
+    fn tree_node_count(node: &DepTreeNode) -> usize {
+        1 + node.children.iter().map(tree_node_count).sum::<usize>()
+    }
+
+    fn tree_has_repeat_ref(node: &DepTreeNode) -> bool {
+        node.repeat_ref || node.children.iter().any(tree_has_repeat_ref)
     }
 
     // V-U10
