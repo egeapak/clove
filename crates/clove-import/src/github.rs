@@ -48,7 +48,7 @@
 //! onto the local item after a create, so the link is established exactly once.
 
 use chrono::{DateTime, Utc};
-use clove_types::{CloveId, ItemStatus, Priority};
+use clove_types::{CloveId, ItemStatus, ItemType, Priority};
 use serde::{Deserialize, Serialize};
 
 use crate::map::{coerce_priority, map_labels};
@@ -73,6 +73,11 @@ pub struct CloveMeta {
     /// The item priority (0..=4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<u8>,
+    /// The item type (`bug|feature|chore|docs|epic`). Kept as a string so an
+    /// unknown value from a foreign body degrades to "absent" instead of
+    /// failing the whole decode.
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub item_type: Option<String>,
     /// The item's dependency ids.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deps: Vec<String>,
@@ -210,8 +215,15 @@ pub struct StagedIssue {
     pub title: String,
     pub status: ItemStatus,
     pub priority: Priority,
+    /// The item type from `clove-meta`. `None` when the body carried no (or an
+    /// unrecognized) type — e.g. an issue clove never pushed — so a pull knows
+    /// not to reset the local type to a default.
+    pub item_type: Option<ItemType>,
     pub assignee: Option<String>,
-    pub deps: Vec<CloveId>,
+    /// The dependency ids from `clove-meta`. `None` when the body carried no
+    /// meta at all (dep ownership unknown — a pull must not clear local deps);
+    /// `Some` (possibly empty) when clove owns the dep set.
+    pub deps: Option<Vec<CloveId>>,
     pub labels: Vec<String>,
     pub closed: Option<DateTime<Utc>>,
     pub body: String,
@@ -227,8 +239,10 @@ pub fn external_ref_for(number: u64) -> String {
 
 /// Map a [`GitHubIssue`] to a [`StagedIssue`] (pure; no network, no writes).
 ///
-/// Returns an error message string on a malformed `deps` id reference inside the
-/// `clove-meta` comment (mirrors the file importers' record-level errors).
+/// Invalid `deps` ids inside the `clove-meta` comment are dropped rather than
+/// treated as errors: anyone who can edit an issue body can plant arbitrary
+/// meta, and a single bad id must never abort a whole sync (the same tolerance
+/// rationale as [`decode_clove_meta`]).
 pub fn map_issue(issue: &GitHubIssue) -> Result<StagedIssue, String> {
     let external_ref = external_ref_for(issue.number);
 
@@ -238,7 +252,9 @@ pub fn map_issue(issue: &GitHubIssue) -> Result<StagedIssue, String> {
     };
 
     let raw_body = issue.body.clone().unwrap_or_default();
-    let meta = decode_clove_meta(&raw_body).unwrap_or_default();
+    let meta = decode_clove_meta(&raw_body);
+    let has_meta = meta.is_some();
+    let meta = meta.unwrap_or_default();
     let body = strip_clove_meta(&raw_body);
 
     let priority = meta
@@ -246,14 +262,19 @@ pub fn map_issue(issue: &GitHubIssue) -> Result<StagedIssue, String> {
         .map(|p| coerce_priority(i64::from(p)))
         .unwrap_or(Priority::DEFAULT);
 
-    let deps = meta
-        .deps
-        .iter()
-        .map(|d| {
-            CloveId::new(d.trim())
-                .map_err(|err| format!("invalid dep id `{d}` in clove-meta: {err}"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let item_type = meta
+        .item_type
+        .as_deref()
+        .and_then(|t| ItemType::parse(t).ok());
+
+    // A body with no clove-meta gives no dep information at all (`None`);
+    // present meta owns the dep set even when empty (`Some(vec![])`).
+    let deps = has_meta.then(|| {
+        meta.deps
+            .iter()
+            .filter_map(|d| CloveId::new(d.trim()).ok())
+            .collect()
+    });
 
     let label_names: Vec<&str> = issue.labels.iter().map(|l| l.name.as_str()).collect();
     let mut labels = map_labels(&label_names).map_err(|e| e.to_string())?;
@@ -272,6 +293,7 @@ pub fn map_issue(issue: &GitHubIssue) -> Result<StagedIssue, String> {
         title: issue.title.clone(),
         status,
         priority,
+        item_type,
         assignee,
         deps,
         labels,
@@ -308,7 +330,7 @@ pub fn parse_gh_number(external_ref: &str) -> Option<u64> {
 /// object (the `item_json::export_object` shape). Pure: no network.
 ///
 /// - `title` ← `title`
-/// - body ← `body` with `<!-- clove-meta: {id,priority,deps} -->` appended
+/// - body ← `body` with `<!-- clove-meta: {id,priority,type,deps} -->` appended
 /// - `labels` ← `labels`
 /// - `assignee` ← `assignee`
 /// - `gh_number` ← parsed from `external_ref` (`Some` → update, `None` → create)
@@ -359,6 +381,7 @@ pub fn build_export_item(obj: &serde_json::Map<String, serde_json::Value>) -> Ex
             Some(clove_id.clone())
         },
         priority,
+        item_type: s("type"),
         deps,
     };
     let body = append_clove_meta(&body, &meta);
@@ -535,6 +558,7 @@ mod tests {
         let meta = CloveMeta {
             id: Some("proj-AAAA1111".to_owned()),
             priority: Some(2),
+            item_type: Some("bug".to_owned()),
             deps: vec!["proj-BBBB2222".to_owned(), "proj-CCCC3333".to_owned()],
         };
         let encoded = encode_clove_meta(&meta);
@@ -563,6 +587,7 @@ mod tests {
         let meta = CloveMeta {
             id: Some("proj-AAAA1111".to_owned()),
             priority: Some(1),
+            item_type: None,
             deps: vec![],
         };
         let body = "Human readable description.\n";
@@ -582,6 +607,7 @@ mod tests {
         let real = CloveMeta {
             id: Some("proj-AAAA1111".to_owned()),
             priority: Some(2),
+            item_type: None,
             deps: vec!["proj-BBBB2222".to_owned()],
         };
         let human = "Human readable description.\n\n<!-- clove-meta: {\"priority\":4} -->\n";
@@ -628,9 +654,9 @@ mod tests {
         assert_eq!(s.labels, vec!["area:core", "bug"]);
         // assignees[0].login → assignee.
         assert_eq!(s.assignee.as_deref(), Some("octocat"));
-        // clove-meta deps + priority parsed.
+        // clove-meta deps + priority parsed (meta present → deps owned).
         assert_eq!(s.priority, Priority(0));
-        assert_eq!(s.deps.len(), 1);
+        assert_eq!(s.deps.as_deref().map(<[CloveId]>::len), Some(1));
         // The human body survives, the marker is stripped.
         assert!(s.body.contains("It crashes."));
         assert!(!s.body.contains("clove-meta"));
@@ -649,7 +675,9 @@ mod tests {
         assert_eq!(s.status, ItemStatus::Open);
         assert!(s.closed.is_none());
         assert_eq!(s.priority, Priority::DEFAULT);
-        assert!(s.deps.is_empty());
+        // No meta at all → dep ownership unknown, type unknown.
+        assert!(s.deps.is_none());
+        assert!(s.item_type.is_none());
         assert_eq!(s.body, "no marker here");
         assert!(s.assignee.is_none());
     }
@@ -669,6 +697,7 @@ mod tests {
                 "title": "Do the thing",
                 "body": "Some description.",
                 "priority": 1,
+                "type": "bug",
                 "deps": ["proj-BBBB2222"],
                 "labels": ["bug"],
                 "assignee": "octocat",
@@ -679,9 +708,10 @@ mod tests {
         assert_eq!(item.gh_number, None); // no external_ref → create
         assert!(item.body.contains("Some description."));
         assert!(item.body.contains("<!-- clove-meta:"));
-        // The clove-meta carries deps + priority + id.
+        // The clove-meta carries deps + priority + type + id.
         let meta = decode_clove_meta(&item.body).unwrap();
         assert_eq!(meta.priority, Some(1));
+        assert_eq!(meta.item_type.as_deref(), Some("bug"));
         assert_eq!(meta.deps, vec!["proj-BBBB2222".to_owned()]);
         assert_eq!(meta.id.as_deref(), Some("proj-AAAA1111"));
         assert_eq!(item.labels, vec!["bug".to_owned()]);

@@ -1032,6 +1032,71 @@ fn labels_round_trip_push_and_pull() {
 }
 
 #[test]
+fn type_and_deps_round_trip_through_clove_meta() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    clove(dir.path(), mock.addr)
+        .args(["new", "Parent", "--type", "bug"])
+        .assert()
+        .success();
+    clove(dir.path(), mock.addr)
+        .args(["new", "Dep target"])
+        .assert()
+        .success();
+    sync(dir.path(), mock.addr, &[]);
+
+    // Find the two clove ids and the parent's GitHub number.
+    let ids = all_item_ids(dir.path(), mock.addr);
+    let mut parent: Option<(String, u64)> = None;
+    let mut target_id = String::new();
+    for id in &ids {
+        let item = show(dir.path(), mock.addr, id);
+        if item["title"] == "Parent" {
+            let number = item["external_ref"]
+                .as_str()
+                .unwrap()
+                .strip_prefix("gh-")
+                .unwrap()
+                .parse()
+                .unwrap();
+            parent = Some((id.clone(), number));
+        } else {
+            target_id = id.clone();
+        }
+    }
+    let (parent_id, parent_gh) = parent.expect("parent pushed");
+
+    // The push encoded the type into the clove-meta marker.
+    let body = mock.issue(parent_gh).unwrap()["body"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(body.contains("\"type\":\"bug\""), "{body}");
+
+    // Remote-only edit: another clone changed the type and added a dep (both
+    // ride the clove-meta marker). A pull must apply them.
+    mock.edit(parent_gh, |i| {
+        i["body"] = json!(format!(
+            "Body.\n\n<!-- clove-meta: {{\"type\":\"chore\",\"deps\":[\"{target_id}\"]}} -->"
+        ));
+    });
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["pulled_updated"], 1, "{v}");
+    let item = show(dir.path(), mock.addr, &parent_id);
+    assert_eq!(item["type"], "chore", "{item}");
+    assert_eq!(item["deps"], json!([target_id]), "{item}");
+
+    // A remote meta that owns an EMPTY dep set removes the dep locally too.
+    mock.edit(parent_gh, |i| {
+        i["body"] = json!("Body two.\n\n<!-- clove-meta: {\"type\":\"chore\"} -->");
+    });
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["pulled_updated"], 1, "{v}");
+    let item = show(dir.path(), mock.addr, &parent_id);
+    assert_eq!(item["deps"], json!([]), "{item}");
+}
+
+#[test]
 fn close_state_round_trips() {
     let mock = MockGitHub::start();
     let dir = init_repo();

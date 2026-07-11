@@ -319,6 +319,10 @@ pub struct SyncPlan {
     /// `external_ref`s present locally whose GitHub issue was not found (deleted
     /// remotely, or wrong repo) — reported, never auto-applied.
     pub remote_missing: Vec<String>,
+    /// `external_ref`s owned by a *different* external system (`tk:…`,
+    /// `beads:…`) — not GitHub links, so they take no part in a GitHub sync.
+    /// Reported so the skip is visible, never auto-applied.
+    pub foreign: Vec<String>,
 }
 
 impl SyncPlan {
@@ -367,6 +371,7 @@ impl SyncPlan {
             conflicts: self.conflicts.clone(),
             in_sync: self.in_sync.len(),
             remote_missing: self.remote_missing.clone(),
+            foreign: self.foreign.clone(),
         }
     }
 }
@@ -390,6 +395,8 @@ pub struct SyncSummary {
     pub conflicts: Vec<SyncConflict>,
     pub in_sync: usize,
     pub remote_missing: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub foreign: Vec<String>,
 }
 
 /// What a sync `apply` run actually pushed/pulled.
@@ -562,6 +569,26 @@ fn content_equal(staged: &StagedIssue, obj: &Map<String, Value>) -> bool {
     if staged_labels != local_labels {
         return false;
     }
+    // Type/deps are only comparable when the remote body carried clove-meta
+    // (`None` = unknown, which never counts as a difference).
+    if let Some(t) = staged.item_type {
+        if !s("type").eq_ignore_ascii_case(t.as_str()) {
+            return false;
+        }
+    }
+    if let Some(remote_deps) = &staged.deps {
+        let mut local_deps: Vec<&str> = obj
+            .get("deps")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        local_deps.sort_unstable();
+        let mut remote: Vec<&str> = remote_deps.iter().map(CloveId::as_str).collect();
+        remote.sort_unstable();
+        if remote != local_deps {
+            return false;
+        }
+    }
     let local_body = s("body").trim();
     staged.body.trim() == local_body
 }
@@ -606,6 +633,10 @@ pub fn plan_sync(
                 item,
                 local_updated,
             }),
+            // Linked to a *different* external system (`tk:…`, `beads:…`) — not
+            // a GitHub link at all, so it neither matches a remote issue nor
+            // counts as "deleted remotely". Skipped, reported.
+            Some(ext) if parse_gh_number(&ext).is_none() => plan.foreign.push(ext),
             Some(ext) => match remote_by_ref.get(ext.as_str()) {
                 // Linked locally but the remote issue is gone.
                 None => plan.remote_missing.push(ext),
@@ -680,6 +711,16 @@ fn decide_linked(
         }),
         (true, false) => push_pull_update(plan, clove_id, staged)?,
         (false, true) => push_push_update(plan, ext, clove_id, item, local_updated, issue),
+        // Both clocks moved but the synced content agrees — e.g. a third-party
+        // GitHub comment bumped the issue's `updated_at` without changing any
+        // field, alongside a local edit that was already pushed (or vice
+        // versa). Not a real conflict: refresh the fingerprint instead of
+        // letting the policy overwrite one side with identical/stale content.
+        (true, true) if content_equal(&staged, obj) => plan.in_sync.push(InSyncEntry {
+            external_ref: ext.to_owned(),
+            gh_updated_at: issue.updated_at,
+            local_updated,
+        }),
         (true, true) => resolve_conflict(
             plan,
             ext,
@@ -1114,6 +1155,72 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.remote_missing, vec!["gh-99".to_owned()]);
+        assert!(plan.is_noop());
+    }
+
+    #[test]
+    fn foreign_external_ref_is_skipped_not_remote_missing() {
+        // An item imported from tk/beads carries a non-GitHub external_ref: it
+        // takes no part in a GitHub sync — neither "deleted remotely" nor a
+        // push-create candidate.
+        let plan = plan_sync(
+            &[],
+            &[local(
+                "proj-AAAA1111",
+                "From tk",
+                "open",
+                Some("tk:abc-123"),
+                "2026-06-03T00:00:00Z",
+            )],
+            &SyncState::default(),
+            ConflictPolicy::Newer,
+        )
+        .unwrap();
+        assert!(plan.remote_missing.is_empty());
+        assert!(plan.push_create.is_empty());
+        assert_eq!(plan.foreign, vec!["tk:abc-123".to_owned()]);
+        assert!(plan.is_noop());
+    }
+
+    #[test]
+    fn invalid_meta_dep_id_does_not_abort_the_plan() {
+        // Anyone who can edit an issue body can plant a malformed clove-meta;
+        // a bad dep id must be dropped, not abort the whole sync.
+        let mut bad = issue(7, "Foreign meta", "open", "2026-06-04T00:00:00Z");
+        bad.body = Some("Body.\n\n<!-- clove-meta: {\"deps\":[\"lol\"]} -->".to_owned());
+        let plan = plan_sync(&[bad], &[], &SyncState::default(), ConflictPolicy::Newer)
+            .expect("a bad dep id in a foreign body must not fail the plan");
+        assert_eq!(plan.pull_create.len(), 1);
+        assert_eq!(plan.pull_create[0].staged.deps, Some(Vec::new()));
+    }
+
+    #[test]
+    fn both_clocks_moved_but_identical_content_is_in_sync() {
+        // A third-party GitHub comment bumps `updated_at` without changing any
+        // synced field; with a concurrent local clock bump but identical
+        // content this must not surface as a conflict (which would overwrite a
+        // side with identical/stale content).
+        let mut state = SyncState::default();
+        state.record(
+            "gh-7",
+            Some(ts("2026-06-01T00:00:00Z")),
+            ts("2026-06-01T00:00:00Z"),
+        );
+        let plan = plan_sync(
+            &[issue(7, "Same", "open", "2026-06-04T00:00:00Z")],
+            &[local(
+                "proj-AAAA1111",
+                "Same",
+                "open",
+                Some("gh-7"),
+                "2026-06-03T00:00:00Z",
+            )],
+            &state,
+            ConflictPolicy::Newer,
+        )
+        .unwrap();
+        assert!(plan.conflicts.is_empty());
+        assert_eq!(plan.in_sync.len(), 1);
         assert!(plan.is_noop());
     }
 

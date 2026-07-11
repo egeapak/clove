@@ -196,6 +196,10 @@ struct BeadsIssue {
     #[serde(default)]
     relates: Vec<String>,
     #[serde(default)]
+    duplicates: Vec<String>,
+    #[serde(default)]
+    supersedes: Vec<String>,
+    #[serde(default)]
     parent: Option<String>,
     /// A pre-existing clove external_ref (round-trip idempotency key).
     #[serde(default)]
@@ -218,6 +222,8 @@ struct StagedIssue {
     parent: Option<CloveId>,
     deps: Vec<CloveId>,
     relates: Vec<CloveId>,
+    duplicates: Vec<CloveId>,
+    supersedes: Vec<CloveId>,
     labels: Vec<String>,
     body: String,
 }
@@ -324,6 +330,18 @@ impl Importer for BeadsImporter {
                 &source_id,
                 &mut self.warnings.borrow_mut(),
             );
+            staged_issue.duplicates = cap_dep_array(
+                std::mem::take(&mut staged_issue.duplicates),
+                "duplicates",
+                &source_id,
+                &mut self.warnings.borrow_mut(),
+            );
+            staged_issue.supersedes = cap_dep_array(
+                std::mem::take(&mut staged_issue.supersedes),
+                "supersedes",
+                &source_id,
+                &mut self.warnings.borrow_mut(),
+            );
 
             // M4: flag dangling dependency targets (ids absent from the store).
             let dangling = dangling_targets(
@@ -332,7 +350,9 @@ impl Importer for BeadsImporter {
                     .parent
                     .iter()
                     .chain(staged_issue.deps.iter())
-                    .chain(staged_issue.relates.iter()),
+                    .chain(staged_issue.relates.iter())
+                    .chain(staged_issue.duplicates.iter())
+                    .chain(staged_issue.supersedes.iter()),
             );
             if !dangling.is_empty() {
                 let list = dangling
@@ -410,8 +430,8 @@ impl Importer for BeadsImporter {
                 labels: issue.labels.clone(),
                 deps: issue.deps.clone(),
                 relates: issue.relates.clone(),
-                duplicates: Vec::new(),
-                supersedes: Vec::new(),
+                duplicates: issue.duplicates.clone(),
+                supersedes: issue.supersedes.clone(),
                 source_system: Some("beads".to_owned()),
                 external_ref: Some(issue.external_ref.clone()),
             };
@@ -530,6 +550,11 @@ fn map_line(line: &str) -> Result<StagedIssue, String> {
     };
     let deps = parse_ids(deps_raw.iter().map(String::as_str))?;
     let relates = parse_ids(relates_raw.iter().map(String::as_str))?;
+    // `duplicates`/`supersedes` exist only in the clove-export shape (there is
+    // no structured-beads-edge equivalent), so they are consumed directly —
+    // they are in `MAPPED_KEYS` and must round-trip, not be dropped.
+    let duplicates = parse_ids(issue.duplicates.iter().map(String::as_str))?;
+    let supersedes = parse_ids(issue.supersedes.iter().map(String::as_str))?;
 
     let mut labels = map_labels(&issue.labels).map_err(|e| e.to_string())?;
     if let Some(label) = extra_label {
@@ -551,6 +576,8 @@ fn map_line(line: &str) -> Result<StagedIssue, String> {
         parent,
         deps,
         relates,
+        duplicates,
+        supersedes,
         labels,
         body,
     })
@@ -666,6 +693,20 @@ mod tests {
         let s = map_line(line).unwrap();
         assert_eq!(s.status, ItemStatus::Open);
         assert!(s.labels.contains(&"deferred".to_owned()));
+    }
+
+    #[test]
+    fn duplicates_and_supersedes_are_mapped_not_dropped() {
+        // Both keys are in MAPPED_KEYS (excluded from the meta blob), so they
+        // must actually be consumed — the clove-export → beads-import
+        // round-trip is documented as lossless on mapped fields.
+        let line = r#"{"id":"bd-9","title":"X","duplicates":["proj-AAAA1111"],"supersedes":["proj-BBBB2222"]}"#;
+        let s = map_line(line).unwrap();
+        assert_eq!(s.duplicates.len(), 1);
+        assert_eq!(s.duplicates[0].as_str(), "proj-AAAA1111");
+        assert_eq!(s.supersedes.len(), 1);
+        assert_eq!(s.supersedes[0].as_str(), "proj-BBBB2222");
+        assert!(!s.external_ref.contains("meta:"), "{}", s.external_ref);
     }
 
     #[test]

@@ -22,7 +22,7 @@ use clove_core::write::write_item_file;
 use clove_core::{apply_edit, ItemStore};
 use clove_types::id::new_id;
 use clove_types::model::CURRENT_SCHEMA_VERSION;
-use clove_types::{CloveId, EditRequest, Item, ItemFrontmatter, ItemStatus, ItemType, LabelEdit};
+use clove_types::{CloveId, EditRequest, Item, ItemFrontmatter, ItemStatus, LabelEdit};
 
 use octocrab::models::issues::Issue;
 use octocrab::Octocrab;
@@ -304,7 +304,7 @@ fn pull_create(
         id: id.clone(),
         title: staged.title.clone(),
         status: staged.status,
-        item_type: ItemType::default(),
+        item_type: staged.item_type.unwrap_or_default(),
         priority: staged.priority,
         created: now,
         updated: now,
@@ -316,7 +316,7 @@ fn pull_create(
         assignee: staged.assignee.clone(),
         parent: None,
         labels: staged.labels.clone(),
-        deps: staged.deps.clone(),
+        deps: staged.deps.clone().unwrap_or_default(),
         relates: Vec::new(),
         duplicates: Vec::new(),
         supersedes: Vec::new(),
@@ -353,18 +353,46 @@ fn pull_update(
     let remote_closed = staged.status == ItemStatus::Closed;
     let status = (local_closed != remote_closed).then_some(staged.status);
 
+    // Only touch the type when the remote meta actually declared one that
+    // differs — a body with no `clove-meta` says nothing about the type, and a
+    // pull must not reset a local `bug` to the default.
+    let item_type = staged
+        .item_type
+        .filter(|t| *t != current.frontmatter.item_type);
+
     let req = EditRequest {
         title: Some(staged.title.clone()),
         body: Some(staged.body.clone()),
         status,
         priority: Some(staged.priority),
-        item_type: None,
+        item_type,
         // `Some(None)` clears the assignee when GitHub has none, `Some(Some(x))`
         // sets it — exactly the tri-state `apply_edit` expects.
         assignee: Some(staged.assignee.clone()),
         labels: Some(LabelEdit::Set(staged.labels.clone())),
     };
     let now = Utc::now();
+
+    // Remote dep edits ride the dedicated cycle-validated graph ops (deps are
+    // round-tripped through `clove-meta`, so without this a dep added on one
+    // clone is never applied on another — and the other clone's next push then
+    // deletes it from the remote record). `None` means the body carried no
+    // meta at all: dep ownership unknown, leave local deps alone. Applied
+    // BEFORE `apply_edit` so the fingerprint recorded from `apply_edit`'s
+    // returned `updated` covers these writes too. A single edge that fails
+    // (target not present locally, would-cycle) is skipped rather than
+    // aborting the whole sync.
+    if let Some(remote_deps) = &staged.deps {
+        let want: std::collections::BTreeSet<&CloveId> = remote_deps.iter().collect();
+        let have: std::collections::BTreeSet<&CloveId> = current.frontmatter.deps.iter().collect();
+        for dep in want.difference(&have) {
+            let _ = clove_core::ops::dep_add(store, &pull.clove_id, dep, now);
+        }
+        for dep in have.difference(&want) {
+            let _ = clove_core::ops::dep_remove(store, &pull.clove_id, dep, now);
+        }
+    }
+
     let value = apply_edit(store, &pull.clove_id, &req, now)?;
     let local_updated = value_updated(&value).unwrap_or_else(|| truncate(now));
     state.record(&staged.external_ref, staged.updated_at, local_updated);
@@ -396,12 +424,22 @@ async fn push_create(
     })
     .await?;
 
+    // Link the local item to the new issue *before* anything else can fail: the
+    // write-back of `external_ref` (plus the recorded fingerprint) is what makes
+    // every later step idempotent. If it only happened after the close PATCH
+    // below, a failed close would leave the created issue unlinked and the next
+    // sync would create a duplicate on both sides.
+    let external_ref = crate::github::external_ref_for(created.number);
+    let local_updated = link_local(store, &push.clove_id, &external_ref)?;
+    state.record(&external_ref, Some(created.updated_at), local_updated);
+
     // GitHub created the issue OPEN. If the local item is closed, close it too so
     // the two sides actually match after a create-of-a-closed-item. The close is a
     // second PATCH that bumps `updated_at` past the create response's — record the
     // *close* response's timestamp as the fingerprint, or the next sync would see
-    // a spurious remote change and pull-update the just-created item.
-    let mut gh_updated = created.updated_at;
+    // a spurious remote change and pull-update the just-created item. If the PATCH
+    // fails, the pair is already linked: the error surfaces, and the next sync
+    // simply sees a linked open issue to update rather than a duplicate.
     if item.closed {
         let closed: Issue = with_retry(true, || {
             handler
@@ -410,12 +448,9 @@ async fn push_create(
                 .send()
         })
         .await?;
-        gh_updated = closed.updated_at;
+        state.record(&external_ref, Some(closed.updated_at), local_updated);
     }
 
-    let external_ref = crate::github::external_ref_for(created.number);
-    let local_updated = link_local(store, &push.clove_id, &external_ref)?;
-    state.record(&external_ref, Some(gh_updated), local_updated);
     Ok(external_ref)
 }
 

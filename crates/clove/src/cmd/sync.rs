@@ -56,6 +56,7 @@ fn sync_github(ctx: &Ctx, format: OutputFormat, args: SyncArgs) -> Result<(), Cl
                 "in_sync": report.in_sync,
                 "conflicts": summary.conflicts,
                 "remote_missing": summary.remote_missing,
+                "foreign": summary.foreign,
             }),
             json!({ "warnings": [] }),
         ),
@@ -109,11 +110,15 @@ fn print_conflicts(summary: &clove_import::SyncSummary) {
     }
 }
 
-/// Warn about local items whose linked GitHub issue was not found.
+/// Warn about local items whose linked GitHub issue was not found, and note
+/// items linked to a different external system (skipped by a GitHub sync).
 #[cfg(feature = "github")]
 fn print_remote_missing(summary: &clove_import::SyncSummary) {
     for ext in &summary.remote_missing {
         eprintln!("warning: local item links {ext} but the GitHub issue was not found");
+    }
+    for ext in &summary.foreign {
+        eprintln!("note: local item links {ext} (not a GitHub link) — skipped");
     }
 }
 
