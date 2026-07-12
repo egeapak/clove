@@ -80,7 +80,7 @@ fn commit_one(
     let id = file.file_stem().unwrap_or("item");
     let message = format!("clove: auto-sync {id} [{change}]");
 
-    if commit_file(repo, rel_std, &message).is_err() {
+    if commit_file(repo, file, rel_std, &message).is_err() {
         return false;
     }
 
@@ -95,20 +95,46 @@ fn commit_one(
     true
 }
 
-/// Stage `rel_path` and create a commit on `HEAD` with `message`.
+/// Commit `rel_path`'s current worktree content on `HEAD` with `message`.
+///
+/// The commit tree is built from HEAD's tree plus ONLY this file's blob —
+/// never from the repository index, whose `write_tree()` snapshots *every*
+/// staged entry: with unrelated user-staged changes present, the old
+/// implementation silently swept them into the auto-sync commit (attributing
+/// them to the daemon and emptying the user's staging area).
 fn commit_file(
     repo: &Repository,
+    abs_path: &Utf8Path,
     rel_path: &std::path::Path,
     message: &str,
 ) -> Result<(), git2::Error> {
-    let mut index = repo.index()?;
-    index.add_path(rel_path)?;
-    index.write()?;
-    let tree = repo.find_tree(index.write_tree()?)?;
+    let parent = repo.head()?.peel_to_commit()?;
+    let head_tree = parent.tree()?;
+
+    // HEAD's tree + this one blob, assembled in an in-memory index.
+    let blob = repo.blob_path(abs_path.as_std_path())?;
+    let mut staging = git2::Index::new()?;
+    staging.read_tree(&head_tree)?;
+    let path_bytes = rel_path.to_string_lossy().replace('\\', "/").into_bytes();
+    staging.add(&git2::IndexEntry {
+        ctime: git2::IndexTime::new(0, 0),
+        mtime: git2::IndexTime::new(0, 0),
+        dev: 0,
+        ino: 0,
+        mode: 0o100_644,
+        uid: 0,
+        gid: 0,
+        file_size: 0,
+        id: blob,
+        flags: 0,
+        flags_extended: 0,
+        path: path_bytes,
+    })?;
+    let tree = repo.find_tree(staging.write_tree_to(repo)?)?;
+
     let signature = repo
         .signature()
         .or_else(|_| Signature::now("clove-daemon", "clove-daemon@localhost"))?;
-    let parent = repo.head()?.peel_to_commit()?;
     repo.commit(
         Some("HEAD"),
         &signature,
@@ -117,5 +143,12 @@ fn commit_file(
         &tree,
         &[&parent],
     )?;
+
+    // Refresh the real index entry for THIS path only, so the file reads clean
+    // against the new HEAD (the re-commit guard checks status). Other staged
+    // entries are untouched.
+    let mut real_index = repo.index()?;
+    real_index.add_path(rel_path)?;
+    real_index.write()?;
     Ok(())
 }
