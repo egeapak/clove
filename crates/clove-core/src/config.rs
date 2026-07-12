@@ -344,7 +344,7 @@ fn guard_not_symlink_escape(path: &Utf8Path, repo_root: &Utf8Path) -> Result<(),
 /// config-load check ([`CloveConfig::validate`]) and the `clove init --prefix`
 /// argument parser, so a prefix accepted at init can never be rejected on load.
 pub fn is_valid_prefix(s: &str) -> bool {
-    if s.is_empty() || s.len() > 8 {
+    if s.is_empty() || s.len() > clove_types::limits::MAX_PREFIX_LEN {
         return false;
     }
     let mut chars = s.chars();

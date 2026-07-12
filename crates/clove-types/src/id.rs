@@ -89,7 +89,7 @@ fn validate_id(s: &str) -> Result<(), CloveError> {
         .ok_or_else(|| invalid("missing `-` separator"))?;
 
     // Prefix: 1–8 chars, first ascii-lowercase alpha, rest ascii-lowercase alphanumeric.
-    if prefix.is_empty() || prefix.len() > 8 {
+    if prefix.is_empty() || prefix.len() > crate::limits::MAX_PREFIX_LEN {
         return Err(invalid("prefix must be 1–8 characters"));
     }
     let mut prefix_chars = prefix.chars();
