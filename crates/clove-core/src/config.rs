@@ -33,9 +33,10 @@ pub const GITIGNORE_ENTRIES: [&str; 9] = [
     "sync/",
 ];
 
-/// Minimum / maximum number of random characters in a generated id.
-pub const MIN_ID_LENGTH: u8 = 4;
-pub const MAX_ID_LENGTH: u8 = 12;
+/// The number of random characters in a generated id — fixed: the id grammar
+/// (`^[a-z][a-z0-9]{0,7}-[0-9A-Z]{8}$`) *requires* exactly 8, so this is not
+/// configurable (see the deprecated `id_length` config field).
+pub const ID_SUFFIX_LENGTH: u8 = 8;
 
 /// Output format for CLI responses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -146,6 +147,11 @@ pub struct CloveConfig {
     pub config_schema: u32,
     #[serde(default = "default_prefix")]
     pub id_prefix: String,
+    /// **Deprecated and ignored.** Generated ids always carry an 8-character
+    /// suffix — the id grammar *requires* exactly 8, so honoring another value
+    /// would mint ids the validator rejects. Still parsed (configs written by
+    /// older versions set it; the schema denies unknown fields) and surfaced
+    /// as a `clove doctor` warning when set to anything but 8.
     #[serde(default = "default_id_length")]
     pub id_length: u8,
     #[serde(default)]
@@ -243,13 +249,25 @@ impl CloveConfig {
                 self.id_prefix
             )));
         }
-        if self.id_length < MIN_ID_LENGTH || self.id_length > MAX_ID_LENGTH {
-            return Err(invalid(format!(
-                "id_length {} must be between {MIN_ID_LENGTH} and {MAX_ID_LENGTH}",
-                self.id_length
-            )));
-        }
+        // `id_length` is deliberately NOT validated: the field is deprecated
+        // and ignored (ids are always 8 chars), and rejecting a value an older
+        // version accepted would brick the repo's every command. `clove
+        // doctor` warns instead (see `id_length_warning`).
         Ok(())
+    }
+
+    /// The deprecation warning for a non-default `id_length`, if applicable —
+    /// surfaced by `clove doctor` (never a load error: an older version
+    /// accepted 4–12 and silently ignored it).
+    pub fn id_length_warning(&self) -> Option<String> {
+        (self.id_length != ID_SUFFIX_LENGTH).then(|| {
+            format!(
+                "config sets id_length = {}, which is deprecated and ignored: \
+                 generated ids always use {ID_SUFFIX_LENGTH} characters (the id \
+                 grammar requires it); remove the line from .clove/config.toml",
+                self.id_length
+            )
+        })
     }
 
     /// Apply `CLOVE_*` environment overrides using `get` to read variables.
@@ -419,24 +437,19 @@ idle_shutdown_min = 5
     }
 
     #[test]
-    fn rejects_out_of_range_id_length() {
-        for bad in [0u8, 3, 13, 255] {
+    fn id_length_is_tolerated_but_flagged_deprecated() {
+        // Any persisted value must keep loading (older versions accepted 4–12
+        // and wrote the key into every init'd config; rejecting it now would
+        // brick those repos) — but a non-default value gets a doctor warning.
+        for value in [0u8, 3, 4, 6, 12, 255] {
             let config = CloveConfig {
-                id_length: bad,
+                id_length: value,
                 ..Default::default()
             };
-            assert!(
-                config.validate(&p()).is_err(),
-                "should reject id_length {bad}"
-            );
+            assert!(config.validate(&p()).is_ok(), "id_length {value} loads");
+            assert_eq!(config.id_length_warning().is_some(), value != 8);
         }
-        for good in [4u8, 8, 12] {
-            let config = CloveConfig {
-                id_length: good,
-                ..Default::default()
-            };
-            assert!(config.validate(&p()).is_ok());
-        }
+        assert!(CloveConfig::default().id_length_warning().is_none());
     }
 
     #[test]

@@ -7,11 +7,13 @@
 //! returns the §7.4 JSON shape or a human-readable error string for the tool
 //! result. Methods are blocking and meant to run on a blocking task.
 
+use std::sync::{Arc, Mutex};
+
 use camino::Utf8PathBuf;
 use chrono::Utc;
 use clove_core::ops;
 use clove_core::{Filters, ItemStore};
-use clove_ipc::DaemonClient;
+use clove_ipc::{ClientError, DaemonClient};
 use clove_types::{CloveId, ItemStatus, ItemType, NewSpec};
 use serde_json::Value;
 
@@ -27,16 +29,57 @@ pub struct Engine {
     /// Id prefix + default type for `create` (from `.clove/config`).
     pub id_prefix: String,
     pub default_type: ItemType,
+    /// The cached daemon write coordinator. A probe builds a tokio runtime,
+    /// connects, and pings — far too heavy to repeat on every tool call of a
+    /// long-lived server — so the client is kept and only its (cheap, on the
+    /// open connection) `ping` is repeated per call; a dead/restarted daemon
+    /// drops the cache and re-probes.
+    daemon: Arc<Mutex<Option<DaemonClient>>>,
 }
 
 impl Engine {
+    pub fn new(
+        clove_dir: Utf8PathBuf,
+        repo_root: Utf8PathBuf,
+        id_prefix: String,
+        default_type: ItemType,
+    ) -> Self {
+        Self {
+            clove_dir,
+            repo_root,
+            id_prefix,
+            default_type,
+            daemon: Arc::new(Mutex::new(None)),
+        }
+    }
+
     fn store(&self) -> ItemStore {
         ItemStore::new(self.repo_root.clone())
     }
 
-    /// A live daemon write coordinator, if one is running for this repo.
-    fn daemon(&self) -> Option<DaemonClient> {
-        DaemonClient::probe(&self.clove_dir)
+    /// Run `call` against the daemon write coordinator, if one is reachable.
+    ///
+    /// `None` → no daemon (caller falls back to direct ops). The call itself
+    /// is attempted exactly ONCE (a failed write RPC must surface, never be
+    /// blindly retried — the daemon may have applied it before the response
+    /// was lost); only the *liveness check* re-probes.
+    fn with_daemon<T>(
+        &self,
+        call: impl FnOnce(&mut DaemonClient) -> Result<T, ClientError>,
+    ) -> Option<Result<T, String>> {
+        let mut guard = self.daemon.lock().unwrap_or_else(|e| e.into_inner());
+        // Validate the cached connection first: one ping on the already-open
+        // connection, no runtime construction.
+        if let Some(client) = guard.as_mut() {
+            if client.ping().is_err() {
+                *guard = None;
+            }
+        }
+        if guard.is_none() {
+            *guard = DaemonClient::probe(&self.clove_dir);
+        }
+        let client = guard.as_mut()?;
+        Some(call(client).map_err(stringify))
     }
 
     // ---- Read tools (file-based via ops) ------------------------------------
@@ -105,8 +148,8 @@ impl Engine {
             assignee: a.assignee,
             body: a.body,
         };
-        match self.daemon() {
-            Some(mut d) => d.create(spec).map_err(stringify),
+        match self.with_daemon(|d| d.create(spec.clone())) {
+            Some(result) => result,
             None => ops::create(
                 &self.store(),
                 &self.id_prefix,
@@ -120,8 +163,8 @@ impl Engine {
 
     pub fn set_status(&self, a: StatusArgs) -> Result<Value, String> {
         let status = ItemStatus::parse(&a.status).map_err(stringify)?;
-        match self.daemon() {
-            Some(mut d) => d.set_status(a.id, status).map_err(stringify),
+        match self.with_daemon(|d| d.set_status(a.id.clone(), status)) {
+            Some(result) => result,
             None => {
                 let id = parse_id(&a.id)?;
                 ops::transition(&self.store(), &id, status, Utc::now()).map_err(stringify)
@@ -134,8 +177,8 @@ impl Engine {
         if req.is_empty() {
             return Err("no fields to edit".to_owned());
         }
-        match self.daemon() {
-            Some(mut d) => d.apply_edit(a.id, req).map_err(stringify),
+        match self.with_daemon(|d| d.apply_edit(a.id.clone(), req.clone())) {
+            Some(result) => result,
             None => {
                 let id = parse_id(&a.id)?;
                 clove_core::apply_edit(&self.store(), &id, &req, Utc::now()).map_err(stringify)
@@ -145,8 +188,8 @@ impl Engine {
 
     pub fn comment(&self, a: CommentArgs) -> Result<Value, String> {
         let author = author();
-        match self.daemon() {
-            Some(mut d) => d.add_comment(a.id, author, a.message).map_err(stringify),
+        match self.with_daemon(|d| d.add_comment(a.id.clone(), author.clone(), a.message.clone())) {
+            Some(result) => result,
             None => {
                 let id = parse_id(&a.id)?;
                 ops::comment(&self.store(), &id, &author, &a.message).map_err(stringify)
@@ -155,8 +198,8 @@ impl Engine {
     }
 
     pub fn dep_add(&self, a: DepAddArgs) -> Result<Value, String> {
-        match self.daemon() {
-            Some(mut d) => d.dep_add(a.id, a.dep_id).map_err(stringify),
+        match self.with_daemon(|d| d.dep_add(a.id.clone(), a.dep_id.clone())) {
+            Some(result) => result,
             None => {
                 let id = parse_id(&a.id)?;
                 let dep = parse_id(&a.dep_id)?;
@@ -166,8 +209,8 @@ impl Engine {
     }
 
     pub fn dep_remove(&self, a: DepAddArgs) -> Result<Value, String> {
-        match self.daemon() {
-            Some(mut d) => d.dep_remove(a.id, a.dep_id).map_err(stringify),
+        match self.with_daemon(|d| d.dep_remove(a.id.clone(), a.dep_id.clone())) {
+            Some(result) => result,
             None => {
                 let id = parse_id(&a.id)?;
                 let dep = parse_id(&a.dep_id)?;
@@ -177,8 +220,8 @@ impl Engine {
     }
 
     pub fn set_parent(&self, a: SetParentArgs) -> Result<Value, String> {
-        match self.daemon() {
-            Some(mut d) => d.set_parent(a.id, a.parent).map_err(stringify),
+        match self.with_daemon(|d| d.set_parent(a.id.clone(), a.parent.clone())) {
+            Some(result) => result,
             None => {
                 let id = parse_id(&a.id)?;
                 let parent = match a.parent {

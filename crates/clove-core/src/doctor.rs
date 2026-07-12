@@ -237,9 +237,14 @@ pub fn diagnose(store: &ItemStore) -> DoctorReport {
         );
     }
 
-    // (11) config validity.
-    if let Err(e) = load_config(store.repo_root()) {
-        report.push(Severity::Error, "CONFIG_ERROR", None, e.to_string(), false);
+    // (11) config validity, plus deprecated-knob warnings.
+    match load_config(store.repo_root()) {
+        Err(e) => report.push(Severity::Error, "CONFIG_ERROR", None, e.to_string(), false),
+        Ok(config) => {
+            if let Some(warning) = config.id_length_warning() {
+                report.push(Severity::Warning, "CONFIG_DEPRECATED", None, warning, false);
+            }
+        }
     }
 
     // (12) `.clove/.gitignore` drift: the file must keep the rebuildable cache

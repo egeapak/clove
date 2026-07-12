@@ -1,7 +1,10 @@
 //! `clove assign <id> [who] [--clear]` (T-CLI07).
+//!
+//! Thin shim over the unified [`EditRequest`] path — `Some(None)` clears,
+//! `Some(Some(who))` sets — so assignee validation lives in one place.
 
-use clove_core::OutputFormat;
-use clove_types::CloveError;
+use clove_core::{apply_edit, OutputFormat};
+use clove_types::{CloveError, EditRequest};
 use serde_json::Map;
 
 use crate::context::Ctx;
@@ -16,9 +19,10 @@ pub fn run(
     clear: bool,
 ) -> Result<(), CloveError> {
     let id = parse_id(id)?;
-    let mut item = ctx.store.get(&id)?;
 
-    item.frontmatter.assignee = if clear {
+    // Argument-shape check stays here (it is about the flag pairing, not the
+    // field value): with neither a name nor --clear there is nothing to do.
+    let assignee = if clear {
         None
     } else {
         match assignee {
@@ -32,7 +36,13 @@ pub fn run(
         }
     };
 
-    let saved = ctx.store.update(&item, now_seconds())?;
+    let req = EditRequest {
+        assignee: Some(assignee),
+        ..EditRequest::default()
+    };
+    apply_edit(&ctx.store, &id, &req, now_seconds())?;
+
+    let saved = ctx.store.get(&id)?;
     print_item(format, &saved, Map::new());
     Ok(())
 }

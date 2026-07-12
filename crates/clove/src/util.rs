@@ -1,7 +1,7 @@
 //! Small parsing helpers shared across commands.
 
 use chrono::{DateTime, Timelike, Utc};
-use clove_types::{CloveError, CloveId, ItemStatus, ItemType, Priority};
+use clove_types::{CloveError, CloveId, ItemStatus, Priority};
 
 /// The current time truncated to whole seconds (the canonical on-disk timestamp
 /// precision; matches `ItemStore`'s internal truncation).
@@ -17,11 +17,6 @@ pub fn parse_id(raw: &str) -> Result<CloveId, CloveError> {
 /// Parse a status word into [`ItemStatus`] (delegates to the shared core parser).
 pub fn parse_status(raw: &str) -> Result<ItemStatus, CloveError> {
     ItemStatus::parse(raw)
-}
-
-/// Parse a type word into [`ItemType`] (delegates to the shared core parser).
-pub fn parse_type(raw: &str) -> Result<ItemType, CloveError> {
-    ItemType::parse(raw)
 }
 
 /// Parse and validate a priority 0–4.

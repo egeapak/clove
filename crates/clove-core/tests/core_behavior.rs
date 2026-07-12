@@ -631,16 +631,16 @@ fn config_validate_rejects_bad_fields() {
     };
     assert!(bad_prefix.validate(p).is_err());
 
-    // Out-of-range id_length.
-    for bad in [0u8, 3, 13] {
+    // id_length is deprecated-and-ignored: ANY value loads (older versions
+    // wrote/accepted it, so rejecting would brick existing repos), but a
+    // non-default value carries a doctor warning.
+    for value in [0u8, 3, 13] {
         let cfg = CloveConfig {
-            id_length: bad,
+            id_length: value,
             ..Default::default()
         };
-        assert!(
-            cfg.validate(p).is_err(),
-            "id_length {bad} should be rejected"
-        );
+        assert!(cfg.validate(p).is_ok(), "id_length {value} must load");
+        assert!(cfg.id_length_warning().is_some());
     }
 
     // Wrong config_schema.

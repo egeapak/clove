@@ -153,8 +153,11 @@ impl DaemonClient {
     /// Connect + `ping`, bounded by [`CONNECT_TIMEOUT`].
     fn connect_and_ping(clove_dir: &Utf8Path) -> Result<DaemonClient, ClientError> {
         let name = socket_name(clove_dir).map_err(ClientError::Name)?;
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
+        // A current-thread runtime: the client is synchronous (every call is a
+        // `block_on`, which also drives the tarpc dispatch task), so spawning
+        // a dedicated worker thread per client — for every CLI command that
+        // probes — is pure overhead.
+        let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(ClientError::Connect)?;
