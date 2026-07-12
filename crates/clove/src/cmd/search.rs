@@ -8,7 +8,7 @@ use clove_types::{CloveError, CloveId, ItemFrontmatter};
 use clove_ipc::{DaemonClient, SearchRequest};
 
 use crate::cli::SearchArgs;
-use crate::cmd::listing::{emit, objects_from_frontmatters, ListOpts};
+use crate::cmd::listing::{effective_limit, emit, objects_from_frontmatters, ListOpts};
 use crate::context::{index_error, Ctx};
 
 pub fn run(
@@ -18,11 +18,17 @@ pub fn run(
     no_index: bool,
 ) -> Result<(), CloveError> {
     let text = args.text;
+    // Same limit contract as every other list command: no flag → default cap,
+    // `--limit 0` → unlimited.
+    let limit = effective_limit(args.limit);
 
     // Daemon fast path: the daemon runs the FTS over its hot index and returns
     // matched ids; we still read those files for full detail, so the output is
-    // identical to the local index path bar `_meta.source = "daemon"`.
-    if let Some(ids) = search_via_daemon(ctx, no_index, &text, args.limit) {
+    // identical to the local index path bar `_meta.source = "daemon"`. The
+    // daemon is asked for ALL matches (limit applied after `rank_title_first`,
+    // exactly like the local index path) — truncating inside its SQL would cut
+    // by `(priority, topo, id)` before title matches are ranked first.
+    if let Some(ids) = search_via_daemon(ctx, no_index, &text) {
         let frontmatters = ids
             .iter()
             .filter_map(|id| CloveId::new(id).ok())
@@ -38,7 +44,7 @@ pub fn run(
             ListOpts {
                 total,
                 offset: 0,
-                limit: args.limit,
+                limit,
                 fields: None,
                 source: "daemon",
                 warnings: Vec::new(),
@@ -78,7 +84,7 @@ pub fn run(
         ListOpts {
             total,
             offset: 0,
-            limit: args.limit,
+            limit,
             fields: None,
             source,
             warnings: Vec::new(),
@@ -87,14 +93,10 @@ pub fn run(
     Ok(())
 }
 
-/// Try the daemon's FTS, returning matched ids in rank order. `None` (→ local
-/// path) for `--no-index` or when no daemon is live.
-fn search_via_daemon(
-    ctx: &Ctx,
-    no_index: bool,
-    text: &str,
-    limit: Option<usize>,
-) -> Option<Vec<String>> {
+/// Try the daemon's FTS, returning ALL matched ids in rank order (the CLI
+/// re-ranks and applies the page limit). `None` (→ local path) for
+/// `--no-index` or when no daemon is live.
+fn search_via_daemon(ctx: &Ctx, no_index: bool, text: &str) -> Option<Vec<String>> {
     if no_index {
         return None;
     }
@@ -103,7 +105,7 @@ fn search_via_daemon(
     client
         .search(SearchRequest {
             text: text.to_owned(),
-            limit,
+            limit: None,
         })
         .ok()
 }

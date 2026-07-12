@@ -103,6 +103,44 @@ fn index_ls_ready_and_filter_match_file_oracle() {
             "ready mismatch (seed {seed}, count {count})"
         );
 
+        // ready + status filter: narrows WITHIN the ready set, exactly like
+        // the file path (which applies Filters::matches to ready_items()).
+        let by_id: HashMap<&CloveId, &ItemFrontmatter> =
+            fms.iter().map(|fm| (&fm.id, fm)).collect();
+        for status in [
+            clove_types::ItemStatus::Open,
+            clove_types::ItemStatus::InProgress,
+        ] {
+            let oracle: Vec<String> = graph
+                .ready_items()
+                .iter()
+                .filter(|id| by_id.get(id).map(|fm| fm.status) == Some(status))
+                .map(|id| id.to_string())
+                .collect();
+            let got = index_ids(
+                &index,
+                &Filter {
+                    mode: QueryMode::Ready,
+                    status: Some(vec![status]),
+                    ..Default::default()
+                },
+            );
+            assert_eq!(
+                got, oracle,
+                "ready --status {status:?} mismatch (seed {seed}, count {count})"
+            );
+        }
+        // A status outside the active set can never match in ready mode.
+        assert!(index_ids(
+            &index,
+            &Filter {
+                mode: QueryMode::Ready,
+                status: Some(vec![clove_types::ItemStatus::Closed]),
+                ..Default::default()
+            },
+        )
+        .is_empty());
+
         // filtered: type == bug.
         let oracle_bugs = sort_ids(
             fms.iter()
