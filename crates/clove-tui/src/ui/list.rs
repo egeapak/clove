@@ -55,15 +55,39 @@ pub(crate) fn render_list(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    // Size the short-id column to the widest visible ref, so titles stay aligned.
+    // Build ONLY the on-screen window of rows: formatting every row in the
+    // view on each keypress-triggered frame is O(total) per redraw, which at
+    // the ~10k-item design target costs tens of ms per keystroke. The window
+    // is derived by emulating the List widget's own scroll-to-selection rule,
+    // so it always matches what a full render would have shown.
+    let total = app.visible_count();
+    let rows_visible = area.height.saturating_sub(2) as usize; // top+bottom border
+    let selected = app.list.list_state.selected();
+    let mut offset = app.list.list_state.offset().min(total.saturating_sub(1));
+    if let Some(sel) = selected.map(|s| s.min(total.saturating_sub(1))) {
+        if sel < offset {
+            offset = sel;
+        } else if rows_visible > 0 && sel >= offset + rows_visible {
+            offset = sel + 1 - rows_visible;
+        }
+    }
+    let end = (offset + rows_visible.max(1)).min(total);
+
+    // Size the short-id column to the widest ref in the window, so the visible
+    // titles stay aligned (short refs are near-constant width, so alignment is
+    // stable while scrolling).
     let id_w = app
         .visible()
+        .skip(offset)
+        .take(end - offset)
         .map(|fm| short_ref(&fm.id).chars().count())
         .max()
         .unwrap_or(2)
         .clamp(2, 10);
     let items: Vec<ListItem> = app
         .visible()
+        .skip(offset)
+        .take(end - offset)
         .map(|fm| ListItem::new(list_row(app, fm, inner_w, id_w)))
         .collect();
     let list = List::new(items)
@@ -76,7 +100,18 @@ pub(crate) fn render_list(f: &mut Frame, app: &mut App, area: Rect) {
         )
         .highlight_symbol("▌");
 
-    f.render_stateful_widget(list, area, &mut app.list.list_state);
+    // Render through a scratch state whose selection is window-relative, then
+    // persist the emulated offset so the next frame windows from the same spot
+    // (the widget itself only ever sees a full window, so its internal offset
+    // stays 0).
+    let mut window_state = ratatui::widgets::ListState::default().with_selected(
+        selected
+            .map(|s| s.min(total.saturating_sub(1)))
+            .filter(|s| (offset..end).contains(s))
+            .map(|s| s - offset),
+    );
+    f.render_stateful_widget(list, area, &mut window_state);
+    *app.list.list_state.offset_mut() = offset;
 }
 
 /// One width-aware line in the item list: a status glyph, a single-letter type
