@@ -5,23 +5,37 @@ import { cloveId, cloveIdHtml } from './micromark-clove-id';
 
 // Render with the full real stack (GFM + clove-id) so the tests also prove the
 // extension cooperates with code spans, links and autolinks.
-function render(src: string): string {
+function render(src: string, opts: Parameters<typeof cloveIdHtml>[0] = { idPrefix: 'proj' }): string {
   return micromark(src, {
     extensions: [gfm(), cloveId()],
-    htmlExtensions: [gfmHtml(), cloveIdHtml()]
+    htmlExtensions: [gfmHtml(), cloveIdHtml(opts)]
   });
 }
 
 describe('cloveId micromark extension', () => {
-  it('links the prefixed form #proj-7af3q2k9', () => {
+  it('links the prefixed form #proj-7af3q2k9, canonicalizing the suffix case', () => {
+    // The API id grammar requires an UPPERCASE suffix; the visible text keeps
+    // what the author wrote.
     expect(render('#proj-7af3q2k9')).toContain(
-      '<a href="/items/proj-7af3q2k9">#proj-7af3q2k9</a>'
+      '<a href="/items/proj-7AF3Q2K9">#proj-7af3q2k9</a>'
     );
   });
 
-  it('links the bare 8-char base32 form #7AF3Q2K9', () => {
+  it('links the bare 8-char base32 form #7AF3Q2K9 via the repo prefix', () => {
     expect(render('#7AF3Q2K9')).toContain(
-      '<a href="/items/7AF3Q2K9">#7AF3Q2K9</a>'
+      '<a href="/items/proj-7AF3Q2K9">#7AF3Q2K9</a>'
+    );
+  });
+
+  it('renders a bare id as plain text when no repo prefix is known', () => {
+    const out = render('#7AF3Q2K9', {});
+    expect(out).not.toContain('<a href="/items/');
+    expect(out).toContain('#7AF3Q2K9');
+  });
+
+  it('prepends the app base path to hrefs', () => {
+    expect(render('#proj-7af3q2k9', { base: '/clove', idPrefix: 'proj' })).toContain(
+      '<a href="/clove/items/proj-7AF3Q2K9">'
     );
   });
 
@@ -68,14 +82,14 @@ describe('cloveId micromark extension', () => {
   it('links an id wrapped in parentheses, leaving the punctuation', () => {
     const out = render('(#proj-7af3q2k9)');
     expect(out).toContain(
-      '(<a href="/items/proj-7af3q2k9">#proj-7af3q2k9</a>)'
+      '(<a href="/items/proj-7AF3Q2K9">#proj-7af3q2k9</a>)'
     );
   });
 
   it('links an id before a sentence-final period', () => {
     const out = render('see #7AF3Q2K9.');
     expect(out).toContain(
-      'see <a href="/items/7AF3Q2K9">#7AF3Q2K9</a>.'
+      'see <a href="/items/proj-7AF3Q2K9">#7AF3Q2K9</a>.'
     );
   });
 

@@ -12,7 +12,7 @@
   import BlockedBadge from '$lib/components/BlockedBadge.svelte';
   import { relativeTime, priorityLabel } from '$lib/glyphs';
   import { parseQuery } from '$lib/query';
-  import { applyFilters, sortItems } from '$lib/filter';
+  import { applyFilters, defaultDir, sortItems } from '$lib/filter';
   import { Virtual } from '$lib/virtual.svelte';
 
   // Fallbacks when /meta isn't available yet.
@@ -30,7 +30,9 @@
   const fPrios = $derived(query.priority ?? []);
   const fLabels = $derived(query.label ?? []);
   const sort = $derived(query.sort || 'rank');
-  const dir = $derived(query.dir || 'desc');
+  // No explicit dir → the column's natural direction. A blanket 'desc' default
+  // rendered the default (rank) view in REVERSE canonical order.
+  const dir = $derived(query.dir || defaultDir(sort));
 
   let searchInput = $state('');
   $effect(() => {
@@ -74,10 +76,11 @@
   function cycleSort(col: string) {
     setParams((p) => {
       if ((p.get('sort') || 'rank') === col) {
-        p.set('dir', p.get('dir') === 'asc' ? 'desc' : 'asc');
+        const cur = p.get('dir') || defaultDir(col);
+        p.set('dir', cur === 'asc' ? 'desc' : 'asc');
       } else {
         p.set('sort', col);
-        p.set('dir', 'desc');
+        p.set('dir', defaultDir(col));
       }
     });
   }
@@ -107,6 +110,7 @@
     if (cursor >= filtered.length) cursor = Math.max(0, filtered.length - 1);
   });
   function onKey(e: KeyboardEvent) {
+    if (e.ctrlKey || e.metaKey || e.altKey) return; // never hijack shortcuts
     const tag = (e.target as HTMLElement)?.tagName;
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
     if (e.key === 'j') {

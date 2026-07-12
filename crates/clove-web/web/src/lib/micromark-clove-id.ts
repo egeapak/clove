@@ -213,13 +213,32 @@ export function cloveId(): Extension {
   };
 }
 
+/** Options for [`cloveIdHtml`]. */
+export interface CloveIdHtmlOptions {
+  /** The app base path prepended to hrefs (SvelteKit's `$app/paths` base). */
+  base?: string;
+  /**
+   * The repository id prefix (from `/meta`), used to resolve the bare
+   * `#7AF3Q2K9` form to a full `proj-7AF3Q2K9` id. Without it a bare match is
+   * rendered as plain text — a link to a prefixless id can only 404.
+   */
+  idPrefix?: string;
+}
+
 /**
  * micromark HTML compiler extension: renders a `cloveId` token as
- * `<a href="/items/<id>">#<id></a>`, where `<id>` is the matched text without
- * the leading `#`. Both the href and the visible text are escaped with
- * micromark's `encode` utility (no manual escaping / no regex).
+ * `<a href="<base>/items/<canonical-id>">#<matched></a>`.
+ *
+ * The tokenizer matches ids case-insensitively and with or without a prefix,
+ * but the API's id grammar is strict (`^[a-z][a-z0-9]{0,7}-[0-9A-Z]{8}$`), so
+ * the href canonicalizes what was matched: the suffix is upper-cased and a
+ * bare suffix gets `idPrefix` prepended. The visible text stays as written.
+ * Both the href and the visible text are escaped with micromark's `encode`
+ * utility (no manual escaping / no regex).
  */
-export function cloveIdHtml(): HtmlExtension {
+export function cloveIdHtml(options: CloveIdHtmlOptions = {}): HtmlExtension {
+  const base = options.base ?? '';
+  const idPrefix = options.idPrefix ?? '';
   return {
     exit: {
       cloveId(this: CompileContext, token: Token) {
@@ -227,7 +246,15 @@ export function cloveIdHtml(): HtmlExtension {
         // straight from the source via micromark's slice helper.
         const matched = this.sliceSerialize(token); // e.g. "#proj-7af3q2k9"
         const id = matched.slice(1); // strip leading '#'
-        const href = encode('/items/' + id);
+        const dash = id.lastIndexOf('-');
+        const prefix = (dash === -1 ? idPrefix : id.slice(0, dash)).toLowerCase();
+        const body = (dash === -1 ? id : id.slice(dash + 1)).toUpperCase();
+        if (!prefix) {
+          // Bare id with no repo prefix known: plain text beats a dead link.
+          this.raw(encode(matched));
+          return;
+        }
+        const href = encode(`${base}/items/${prefix}-${body}`);
         this.tag('<a href="' + href + '">');
         this.raw(encode(matched));
         this.tag('</a>');

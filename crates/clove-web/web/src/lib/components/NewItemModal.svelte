@@ -3,6 +3,7 @@
   import { store } from '$lib/store.svelte';
   import { toasts } from '$lib/toast.svelte';
   import { goto } from '$app/navigation';
+  import { base } from '$app/paths';
   import { onMount, tick } from 'svelte';
   import ItemForm from '$lib/components/ItemForm.svelte';
   import { buildCreate, type FormState } from '$lib/itemForm';
@@ -60,7 +61,9 @@
       store.upsert(item);
       toasts.push(`Created ${item.id}`);
       onclose();
-      goto(`./items/${item.id}`);
+      // Base-relative: `./items/…` resolved against the CURRENT path, so
+      // creating from a detail page navigated to /items/items/<id> (a 404).
+      goto(`${base}/items/${item.id}`);
     } catch (err) {
       toasts.error('Create failed: ' + (err instanceof Error ? err.message : 'unknown'));
     } finally {

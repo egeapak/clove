@@ -2,6 +2,14 @@ import { browser, dev } from '$app/environment';
 import type { Item, ConnState, Meta } from './types';
 import { api, isMockMode } from './api';
 
+/** Handle for one in-flight optimistic edit (see `Store.optimistic`). */
+export interface OptimisticEdit {
+  /** Undo this edit's patch (the failure path). */
+  rollback(): void;
+  /** Consume this edit's patch with the authoritative server payload. */
+  settle(server?: Item): void;
+}
+
 /** Normalized client cache: Map<id, Item>. All views derive from this. */
 class Store {
   items = $state<Map<string, Item>>(new Map());
@@ -90,10 +98,16 @@ class Store {
     if (entry) this.forceSet(id, this.merge(entry));
   }
 
-  /** Apply an optimistic local patch; returns a rollback fn for *this* edit. */
-  optimistic(id: string, patch: Partial<Item>): () => void {
+  /**
+   * Apply an optimistic local patch; returns a handle whose `settle`/`rollback`
+   * consume exactly THIS edit's patch (matched by token, never by position:
+   * HTTP responses can arrive out of order, and dropping "the oldest" patch on
+   * settle while rolling back by token corrupted the ledger — a patch could
+   * leak into `pending` forever and silently overwrite later server values).
+   */
+  optimistic(id: string, patch: Partial<Item>): OptimisticEdit {
     const before = this.items.get(id);
-    if (!before) return () => {};
+    if (!before) return { rollback: () => {}, settle: () => {} };
     let entry = this.pending.get(id);
     if (!entry) {
       entry = { base: before, patches: [] };
@@ -102,13 +116,18 @@ class Store {
     const token = Symbol();
     entry.patches.push({ token, patch });
     this.recompute(id);
-    // Rollback removes only this edit's patch; other in-flight edits survive.
-    return () => {
+
+    // Remove this edit's patch; on settle also rebase the remaining pending
+    // edits onto the authoritative server payload so they are not clobbered.
+    const consume = (server?: Item) => {
       const e = this.pending.get(id);
-      if (!e) return;
+      if (!e) {
+        if (server) this.forceSet(id, server);
+        return;
+      }
       const idx = e.patches.findIndex((p) => p.token === token);
-      if (idx < 0) return;
-      e.patches.splice(idx, 1);
+      if (idx >= 0) e.patches.splice(idx, 1);
+      if (server) e.base = server;
       if (e.patches.length === 0) {
         this.pending.delete(id);
         this.forceSet(id, e.base);
@@ -116,27 +135,25 @@ class Store {
         this.recompute(id);
       }
     };
+    return {
+      rollback: () => consume(),
+      settle: (server?: Item) => consume(server)
+    };
   }
 
-  /** Settle one pending optimistic write with the authoritative server payload. */
+  /**
+   * Apply an authoritative server payload for an edit that carried no
+   * optimistic patch (e.g. the full edit form). Pending edits, if any, are
+   * rebased on it — their patches stay owned by their own handles.
+   */
   settle(id: string, server?: Item) {
     const entry = this.pending.get(id);
     if (!entry) {
-      // No tracked edit (already rolled back): still apply the server payload.
       if (server) this.forceSet(id, server);
       return;
     }
-    // This settle corresponds to one in-flight edit; drop the oldest patch and
-    // rebase any still-pending edits on top of the fresh server payload so they
-    // are not clobbered.
-    entry.patches.shift();
     if (server) entry.base = server;
-    if (entry.patches.length === 0) {
-      this.pending.delete(id);
-      this.forceSet(id, entry.base);
-    } else {
-      this.recompute(id);
-    }
+    this.recompute(id);
   }
 
   async refetch() {

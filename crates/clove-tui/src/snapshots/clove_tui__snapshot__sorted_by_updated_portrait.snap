@@ -6,11 +6,11 @@ expression: rendered
 │  All 7  │  Rdy 4  │  Blk 1           │
 └──────────────────────────────────────┘
 ┌ Items (7) ───────────────────────────┐
-│ ○ B #2HZ6C3PW ↑ Investigate flaky CI │
+│ ○ B #2HZ6C3PW ↑ Investigate flaky… ● │
 │▌◐ F #9QX4D1B7 ! Build REST API ●     │
 │ ○ F #5RB9NC2V • Frontend dashboard ● │
-│ ○ F #K2M8ZP5R • Write integration t… │
-│ ● C #7AF3K2MN ↑ Set up database sch… │
+│ ○ F #K2M8ZP5R • Write integration… ✗ │
+│ ● C #7AF3K2MN ↑ Set up database s…   │
 │ ● D #8XQ4F7DM ↓ Docs site            │
 │ ○ E #3HT6WYG5 • Ship v1 release ●    │
 │                                      │

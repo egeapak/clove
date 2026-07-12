@@ -35,36 +35,59 @@ describe('store optimistic concurrency', () => {
 
   it('composes two overlapping edits without clobbering each other on settle', () => {
     // Edit A (status) then edit B (priority) before A resolves.
-    store.optimistic('proj-1', { status: 'in_progress' });
-    store.optimistic('proj-1', { priority: 0 });
+    const a = store.optimistic('proj-1', { status: 'in_progress' });
+    const b = store.optimistic('proj-1', { priority: 0 });
     expect(store.items.get('proj-1')!.status).toBe('in_progress');
     expect(store.items.get('proj-1')!.priority).toBe(0);
 
     // A settles: the server payload has A but NOT B. B must survive.
-    store.settle('proj-1', item({ id: 'proj-1', status: 'in_progress', priority: 2 }));
+    a.settle(item({ id: 'proj-1', status: 'in_progress', priority: 2 }));
     expect(store.items.get('proj-1')!.status).toBe('in_progress');
     expect(store.items.get('proj-1')!.priority).toBe(0); // B still applied
 
     // B settles with the fully-updated server payload.
-    store.settle('proj-1', item({ id: 'proj-1', status: 'in_progress', priority: 0 }));
+    b.settle(item({ id: 'proj-1', status: 'in_progress', priority: 0 }));
     expect(store.items.get('proj-1')!.status).toBe('in_progress');
     expect(store.items.get('proj-1')!.priority).toBe(0);
   });
 
+  it('settles edits that complete out of order without leaking a patch', () => {
+    // Edit A (status) then edit B (priority); B's HTTP response arrives FIRST,
+    // then A FAILS. The positional (shift-oldest) settle consumed A's patch on
+    // B's settle, so A's rollback then removed B's patch and… nothing was left
+    // tracking reality: B's value leaked into `pending` forever.
+    const a = store.optimistic('proj-1', { status: 'in_progress' });
+    const b = store.optimistic('proj-1', { priority: 0 });
+
+    b.settle(item({ id: 'proj-1', status: 'open', priority: 0 }));
+    a.rollback();
+
+    // The visible item reflects exactly B's settled server state.
+    expect(store.items.get('proj-1')!.status).toBe('open');
+    expect(store.items.get('proj-1')!.priority).toBe(0);
+    // No pending ledger entry survives to overwrite future refetches.
+    const pending = (store as unknown as { pending: Map<string, unknown> }).pending;
+    expect(pending.size).toBe(0);
+    // A later server refetch is respected, not overwritten by a leaked patch.
+    store.replaceAll([item({ id: 'proj-1', status: 'closed', priority: 4 })]);
+    expect(store.items.get('proj-1')!.status).toBe('closed');
+    expect(store.items.get('proj-1')!.priority).toBe(4);
+  });
+
   it('rolling back one edit leaves the other edit intact', () => {
     store.optimistic('proj-1', { status: 'in_progress' });
-    const rollbackB = store.optimistic('proj-1', { priority: 0 });
+    const b = store.optimistic('proj-1', { priority: 0 });
 
     // B fails → its rollback must restore priority but keep A's status.
-    rollbackB();
+    b.rollback();
     expect(store.items.get('proj-1')!.priority).toBe(2); // B undone
     expect(store.items.get('proj-1')!.status).toBe('in_progress'); // A survives
   });
 
   it('rollback of the only edit restores the pre-edit snapshot', () => {
-    const rollback = store.optimistic('proj-1', { status: 'closed' });
+    const edit = store.optimistic('proj-1', { status: 'closed' });
     expect(store.items.get('proj-1')!.status).toBe('closed');
-    rollback();
+    edit.rollback();
     expect(store.items.get('proj-1')!.status).toBe('open');
   });
 });

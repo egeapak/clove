@@ -16,7 +16,11 @@ use super::style::{
 use super::util::{border_style, short_ref, truncate};
 
 pub(crate) fn render_list(f: &mut Frame, app: &mut App, area: Rect) {
-    let inner_w = area.width.saturating_sub(2);
+    // Row text width = pane width minus the two borders, the 1-column right
+    // padding, and the 1-column highlight symbol the List reserves. Counting
+    // only the borders overflowed rows by 2 columns, clipping exactly the
+    // trailing ready/blocked badge whenever a title filled its budget.
+    let inner_w = area.width.saturating_sub(4);
     let focused = app.focus == Focus::List;
 
     // Title shows visible/total when the view is narrowed by a filter or search.
