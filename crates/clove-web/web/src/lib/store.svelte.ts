@@ -210,14 +210,6 @@ function connect() {
       case 'hello':
         lastSeq = frame.data?.seq ?? lastSeq;
         break;
-      // Live per-id events are no longer emitted by the backend, but the
-      // handlers are kept (harmless, future-proof).
-      case 'item.upserted':
-        if (frame.data?.item) store.upsert(frame.data.item);
-        break;
-      case 'item.deleted':
-        if (frame.data?.id) store.remove(frame.data.id);
-        break;
       case 'batch': {
         // A full rescan is sub-second even at 10k items, so any change just
         // triggers a refetch of the (lean) list. `seq` is tracked for logging /
@@ -231,9 +223,6 @@ function connect() {
         });
         break;
       }
-      case 'stats.updated':
-      case 'ping':
-        break;
     }
   };
 
