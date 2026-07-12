@@ -100,13 +100,32 @@ pub fn sync_github(
         return Ok((summary, None));
     }
 
+    // Remote comment counts from the issues list, for the comment-sync skip.
+    let remote_comment_counts: std::collections::HashMap<String, u64> = issues
+        .iter()
+        .filter(|issue| issue.pull_request.is_none())
+        .map(|issue| {
+            (
+                crate::github::external_ref_for(issue.number),
+                issue.comments,
+            )
+        })
+        .collect();
+
     let apply_result = rt.block_on(async {
         let crab = build_client()?;
         let outcome = apply_plan(&crab, &owner, &repo, plan, store, prefix, &mut state).await?;
         let mut report = outcome.report;
         if sync_comments {
-            let (pulled, pushed) =
-                sync_all_comments(&crab, &owner, &repo, store, &mut state).await?;
+            let (pulled, pushed) = sync_all_comments(
+                &crab,
+                &owner,
+                &repo,
+                store,
+                &mut state,
+                &remote_comment_counts,
+            )
+            .await?;
             report.comments_pulled = pulled;
             report.comments_pushed = pushed;
         }
@@ -258,6 +277,7 @@ async fn apply_plan(
             entry.gh_updated_at,
             entry.local_updated,
         );
+        state.record_content_hash(&entry.external_ref, entry.gh_content_hash);
         reconciled.insert(entry.external_ref.clone());
         report.in_sync += 1;
     }
@@ -329,6 +349,10 @@ fn pull_create(
     };
     write_item_file(&item, &store.path_for(&id))?;
     state.record(&staged.external_ref, staged.updated_at, now);
+    state.record_content_hash(
+        &staged.external_ref,
+        crate::sync::staged_fingerprint(staged),
+    );
     Ok(())
 }
 
@@ -396,6 +420,10 @@ fn pull_update(
     let value = apply_edit(store, &pull.clove_id, &req, now)?;
     let local_updated = value_updated(&value).unwrap_or_else(|| truncate(now));
     state.record(&staged.external_ref, staged.updated_at, local_updated);
+    state.record_content_hash(
+        &staged.external_ref,
+        crate::sync::staged_fingerprint(staged),
+    );
     Ok(())
 }
 
@@ -432,23 +460,47 @@ async fn push_create(
     let external_ref = crate::github::external_ref_for(created.number);
     let local_updated = link_local(store, &push.clove_id, &external_ref)?;
     state.record(&external_ref, Some(created.updated_at), local_updated);
+    // The issue GitHub just created is OPEN regardless of `item.closed` — hash
+    // the open variant until the close below actually lands.
+    let open_item = crate::github::ExportItem {
+        closed: false,
+        ..item.clone()
+    };
+    state.record_content_hash(&external_ref, crate::sync::export_fingerprint(&open_item));
 
     // GitHub created the issue OPEN. If the local item is closed, close it too so
     // the two sides actually match after a create-of-a-closed-item. The close is a
     // second PATCH that bumps `updated_at` past the create response's — record the
     // *close* response's timestamp as the fingerprint, or the next sync would see
-    // a spurious remote change and pull-update the just-created item. If the PATCH
-    // fails, the pair is already linked: the error surfaces, and the next sync
-    // simply sees a linked open issue to update rather than a duplicate.
+    // a spurious remote change and pull-update the just-created item.
     if item.closed {
-        let closed: Issue = with_retry(true, || {
+        match with_retry(true, || {
             handler
                 .update(created.number)
                 .state(octocrab::models::IssueState::Closed)
                 .send()
         })
-        .await?;
-        state.record(&external_ref, Some(closed.updated_at), local_updated);
+        .await
+        {
+            Ok(closed) => {
+                let closed: Issue = closed;
+                state.record(&external_ref, Some(closed.updated_at), local_updated);
+                state.record_content_hash(&external_ref, crate::sync::export_fingerprint(item));
+            }
+            Err(err) => {
+                // The pair is linked but the remote is still OPEN while the
+                // local item is closed. With accurate clocks the next sync
+                // would call that pair in_sync forever — backdate the recorded
+                // local clock so it re-examines and re-pushes the close as an
+                // update.
+                state.record(
+                    &external_ref,
+                    Some(created.updated_at),
+                    crate::sync::epoch(),
+                );
+                return Err(err);
+            }
+        }
     }
 
     Ok(external_ref)
@@ -525,6 +577,7 @@ async fn push_update(
     .await?;
 
     state.record(&external_ref, Some(updated.updated_at), push.local_updated);
+    state.record_content_hash(&external_ref, crate::sync::export_fingerprint(item));
     Ok(())
 }
 
@@ -550,6 +603,7 @@ async fn sync_all_comments(
     repo: &str,
     store: &ItemStore,
     state: &mut SyncState,
+    remote_comment_counts: &std::collections::HashMap<String, u64>,
 ) -> Result<(usize, usize), ImportError> {
     // Re-scan so freshly pull-created / push-created items are included. Sort by
     // ref for a deterministic order of API calls.
@@ -567,7 +621,6 @@ async fn sync_all_comments(
             continue;
         };
 
-        let gh = fetch_comments(crab, owner, repo, number).await?;
         let local: Vec<LocalComment> = list_comments(store.issues_dir(), id)?
             .into_iter()
             .map(|c| LocalComment {
@@ -575,6 +628,24 @@ async fn sync_all_comments(
                 body: c.body,
             })
             .collect();
+
+        // Skip the per-issue comments GET when neither side moved since the
+        // last comment sync: the issues list already told us the remote count,
+        // and the local count is a cheap directory read. Issues created this
+        // run (absent from the pre-apply fetch) always fall through to a fetch.
+        if let Some(entry) = state.entries.get(external_ref) {
+            if let (Some(synced_gh), Some(synced_local)) =
+                (entry.synced_gh_comments, entry.synced_local_comments)
+            {
+                if remote_comment_counts.get(external_ref) == Some(&synced_gh)
+                    && local.len() as u64 == synced_local
+                {
+                    continue;
+                }
+            }
+        }
+
+        let gh = fetch_comments(crab, owner, repo, number).await?;
 
         let entry = state
             .entries
@@ -591,7 +662,7 @@ async fn sync_all_comments(
             };
             add_comment_at(store.issues_dir(), id, &author, &comment.body, when)?;
             entry.gh_comment_ids.insert(comment.id);
-            entry.local_comment_hashes.insert(body_hash(&comment.body));
+            entry.record_comment_hash(body_hash(&comment.body));
             pulled += 1;
         }
         for comment in &plan.push {
@@ -602,7 +673,7 @@ async fn sync_all_comments(
             let created =
                 with_retry(false, || handler.create_comment(number, body.clone())).await?;
             entry.gh_comment_ids.insert(created.id.into_inner());
-            entry.local_comment_hashes.insert(body_hash(&comment.body));
+            entry.record_comment_hash(body_hash(&comment.body));
             // Posting a comment bumps the issue's `updated_at` on GitHub. Advance
             // the recorded remote fingerprint to the new comment's timestamp so the
             // next sync doesn't see a spurious remote change and pull-update (or
@@ -614,6 +685,12 @@ async fn sync_all_comments(
             }
             pushed += 1;
         }
+
+        // Both plans applied fully: record the counts each side now has, which
+        // is what the next sync's skip check compares against. Set only on
+        // full success (an early `?` above leaves them stale → re-fetch).
+        entry.synced_gh_comments = Some((gh.len() + plan.push.len()) as u64);
+        entry.synced_local_comments = Some((local.len() + plan.pull.len()) as u64);
     }
     Ok((pulled, pushed))
 }

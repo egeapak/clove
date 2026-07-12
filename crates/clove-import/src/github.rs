@@ -201,6 +201,10 @@ pub struct GitHubIssue {
     /// Present on real issues; used to skip PRs (which the issues API also returns).
     #[serde(default)]
     pub pull_request: Option<serde_json::Value>,
+    /// The issue's comment count as reported by the issues list — lets the
+    /// comment sync skip the per-issue comments GET when neither side changed.
+    #[serde(default)]
+    pub comments: u64,
 }
 
 /// A fully mapped GitHub issue, ready to be turned into an [`clove_types::Item`].
