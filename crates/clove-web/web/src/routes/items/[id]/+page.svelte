@@ -104,11 +104,11 @@
   // ---- inline edits (optimistic) ----
   async function patch(fields: Partial<Pick<Item, 'status' | 'priority' | 'assignee' | 'type'>>) {
     if (!item) return;
-    const rollback = store.optimistic(id, fields);
+    const edit = store.optimistic(id, fields);
     try {
-      store.settle(id, await api.patch(id, fields));
+      edit.settle(await api.patch(id, fields));
     } catch (e) {
-      rollback();
+      edit.rollback();
       toasts.error('Update failed');
     }
   }
@@ -167,11 +167,11 @@
 
   async function removeLabel(l: string) {
     if (!item) return;
-    const rollback = store.optimistic(id, { labels: item.labels.filter((x) => x !== l) });
+    const edit = store.optimistic(id, { labels: item.labels.filter((x) => x !== l) });
     try {
-      store.settle(id, await api.setLabels(id, [], [l]));
+      edit.settle(await api.setLabels(id, [], [l]));
     } catch {
-      rollback();
+      edit.rollback();
       toasts.error('Label update failed');
     }
   }
@@ -181,11 +181,11 @@
     const l = addingLabel.trim();
     if (!l || !item) return;
     addingLabel = '';
-    const rollback = store.optimistic(id, { labels: [...new Set([...item.labels, l])] });
+    const edit = store.optimistic(id, { labels: [...new Set([...item.labels, l])] });
     try {
-      store.settle(id, await api.setLabels(id, [l], []));
+      edit.settle(await api.setLabels(id, [l], []));
     } catch {
-      rollback();
+      edit.rollback();
       toasts.error('Label update failed');
     }
   }

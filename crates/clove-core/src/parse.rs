@@ -83,6 +83,22 @@ pub fn parse_item_lenient(bytes: &[u8], path: &Utf8Path) -> Result<Item, CloveEr
 /// body — the `scan_lazy` fast path for `ls`/`ready`/`blocked` (DESIGN §13.3).
 /// Still validates the `id` matches the file name stem.
 pub fn parse_frontmatter_file(path: &Utf8Path) -> Result<ItemFrontmatter, CloveError> {
+    let metadata = std::fs::metadata(path).map_err(|source| CloveError::Io {
+        path: path.to_owned(),
+        source,
+    })?;
+    // Same cheap early rejection as `parse_item_file`: this is the hot scan
+    // path (`ls`/`ready`/every mutation's `scan_or_fail`), so a multi-GB file
+    // dropped into the issues dir must be rejected from metadata, not read
+    // fully into memory on every scan just to fail the budget check after.
+    let ceiling = (MAX_FRONTMATTER_BYTES + MAX_BODY_BYTES).saturating_add(4096);
+    if metadata.len() as usize > ceiling {
+        return Err(CloveError::BodyTooLarge {
+            path: path.to_owned(),
+            limit: MAX_BODY_BYTES,
+        });
+    }
+
     let bytes = std::fs::read(path).map_err(|source| CloveError::Io {
         path: path.to_owned(),
         source,
@@ -232,42 +248,151 @@ fn split_frontmatter<'a>(
 /// Heuristic detector for YAML anchors (`&name`) and aliases (`*name`) at node
 /// positions, used as a bomb guard before the YAML parser runs (DESIGN §12.2).
 ///
-/// Only flags a `&`/`*` that (a) is followed by an anchor-name character and
-/// (b) sits at a value or flow-element position — i.e. the nearest preceding
-/// non-space character is `:`, `[`, `{`, or `,`. This catches `key: &a`,
-/// `[*a]`, `{&b}` while leaving free text alone (a title `Fix *the* thing` or
-/// `R&D` is not flagged, since `*`/`&` there are mid-scalar).
+/// Only flags a `&`/`*` that (a) is followed by an anchor-name character, (b)
+/// sits at a node position (see [`at_node_start`]), and (c) is not inside a
+/// quoted scalar. This catches `key: &a`, `[*a]`, `{&b}`, `- *a` while leaving
+/// free text alone — a title `Fix *the* thing` or `R&D` is mid-scalar, and
+/// crucially the writer's own quoted output (`title: 'Fix: *very* broken'`) is
+/// a quoted scalar in which `&`/`*` are literal text, exactly as the YAML
+/// parser will treat them. Without the quote-awareness the guard rejected
+/// files clove itself wrote, bricking the item until hand-edited.
 ///
 /// Exposed (`pub`) so foreign-input parsers outside this crate — notably the tk
 /// importer, which feeds untrusted frontmatter to the YAML parser — can reuse
 /// the exact same guard instead of copy-pasting it.
 pub fn contains_yaml_anchor_or_alias(frontmatter: &[u8]) -> bool {
-    for (index, &byte) in frontmatter.iter().enumerate() {
-        if byte != b'&' && byte != b'*' {
-            continue;
+    // Indent of the line that opened a block scalar (`key: |` / `>`): lines
+    // indented deeper than it are scalar *content* the parser treats as plain
+    // text, so they are skipped entirely (a multiline title rendered as `|-`
+    // may legitimately contain `- *milk*` or `see: *note*` lines).
+    let mut block_scalar_indent: Option<usize> = None;
+    // Flow-collection depth (`[`/`{`): a `,` only separates nodes in flow
+    // context; in block context it is ordinary scalar text.
+    let mut flow_depth = 0usize;
+
+    for line in frontmatter.split(|&b| b == b'\n') {
+        let indent = line
+            .iter()
+            .take_while(|&&b| b == b' ' || b == b'\t')
+            .count();
+        let blank = indent == line.len();
+        if let Some(opener_indent) = block_scalar_indent {
+            if blank || indent > opener_indent {
+                continue; // still inside the block scalar's content
+            }
+            block_scalar_indent = None;
         }
-        // Must be followed by an anchor-name start character.
-        let followed_by_name = frontmatter
-            .get(index + 1)
-            .is_some_and(|&next| next.is_ascii_alphanumeric() || next == b'_');
-        if !followed_by_name {
-            continue;
-        }
-        // Walk back over spaces/tabs to the governing character.
-        let mut back = index;
-        while back > 0 && matches!(frontmatter[back - 1], b' ' | b'\t') {
-            back -= 1;
-        }
-        let governing = if back == 0 {
-            None
-        } else {
-            Some(frontmatter[back - 1])
-        };
-        if matches!(governing, Some(b':') | Some(b'[') | Some(b'{') | Some(b',')) {
+        if scan_line_for_anchor(line, &mut flow_depth) {
             return true;
+        }
+        if opens_block_scalar(line) {
+            block_scalar_indent = Some(indent);
         }
     }
     false
+}
+
+/// Whether a line's value opens a YAML block scalar: after trimming trailing
+/// whitespace and the optional chomping/indent indicators (`+`, `-`, digits),
+/// it ends in `|` or `>` preceded by a space or `:` (i.e. `key: |`, `key: >2-`).
+fn opens_block_scalar(line: &[u8]) -> bool {
+    let mut end = line.len();
+    while end > 0 && matches!(line[end - 1], b' ' | b'\t' | b'\r') {
+        end -= 1;
+    }
+    while end > 0 && matches!(line[end - 1], b'+' | b'-' | b'0'..=b'9') {
+        end -= 1;
+    }
+    end > 0
+        && matches!(line[end - 1], b'|' | b'>')
+        && (end == 1 || matches!(line[end - 2], b' ' | b'\t' | b':'))
+}
+
+/// Scan one line (already known not to be block-scalar content) for an
+/// anchor/alias at a node position, tracking quoted scalars so their content —
+/// including the writer's own `title: 'Fix: *very* broken'` output — is
+/// treated as the literal text the YAML parser sees. `flow_depth` persists
+/// across lines (a flow collection may span several).
+fn scan_line_for_anchor(line: &[u8], flow_depth: &mut usize) -> bool {
+    let mut quote: Option<u8> = None;
+    let mut index = 0;
+    while index < line.len() {
+        let byte = line[index];
+        if let Some(q) = quote {
+            if byte == q {
+                if q == b'\'' && line.get(index + 1) == Some(&b'\'') {
+                    index += 1; // `''` escape inside a single-quoted scalar
+                } else {
+                    quote = None;
+                }
+            } else if q == b'"' && byte == b'\\' {
+                index += 1; // skip the escaped character
+            }
+            index += 1;
+            continue;
+        }
+        match byte {
+            // A quote only *opens* a quoted scalar at a node position; a quote
+            // mid-scalar (`it's`) is literal text and must not swallow the
+            // rest of the line (that would let `[it's, &bomb]` slip through).
+            b'\'' | b'"' if at_node_start(line, index, *flow_depth) => quote = Some(byte),
+            b'[' | b'{' => *flow_depth += 1,
+            b']' | b'}' => *flow_depth = flow_depth.saturating_sub(1),
+            b'&' | b'*' => {
+                let followed_by_name = line
+                    .get(index + 1)
+                    .is_some_and(|&next| next.is_ascii_alphanumeric() || next == b'_');
+                if followed_by_name && at_node_start(line, index, *flow_depth) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    false
+}
+
+/// Whether `index` is a YAML *node start* position: after `key: `, after a
+/// flow `[` / `{`, after a `,` **in flow context**, or after a block-sequence
+/// `- ` whose dash chain reaches the start of the line.
+///
+/// Mirrors the parser's tokenization closely enough for the guard: `key: &a`
+/// is an anchor but `foo:&a`, `a - *b*` and `hello, *world*` are plain-scalar
+/// text (the `:`/`-` forms need a following space; the `,` only separates
+/// nodes inside `[...]`/`{...}`).
+fn at_node_start(bytes: &[u8], index: usize, flow_depth: usize) -> bool {
+    let mut back = index;
+    let mut crossed_dash = false;
+    loop {
+        let start = back;
+        while back > 0 && matches!(bytes[back - 1], b' ' | b'\t') {
+            back -= 1;
+        }
+        let had_space = back < start;
+        if back == 0 {
+            // First non-space token on its line (`bytes` is a single line). A
+            // block-sequence entry (`- &a`, `- - &a`) is a node position; a
+            // bare `&x`/`'x'` at line start is left alone (conservative — the
+            // root of a frontmatter document is always a mapping).
+            return crossed_dash;
+        }
+        return match bytes[back - 1] {
+            b'[' | b'{' => true,
+            b',' => flow_depth > 0,
+            b':' => had_space,
+            // A block-sequence dash opens a node position (`- &a`), but only
+            // when the dash chain itself reaches the start of the line
+            // (`  - &a`, `- - &a`) rather than sitting inside plain text
+            // (`a - *b*`): keep walking left through the chain.
+            b'-' if had_space => {
+                crossed_dash = true;
+                back -= 1;
+                continue;
+            }
+            _ => false,
+        };
+    }
 }
 
 #[cfg(test)]
@@ -364,6 +489,57 @@ mod tests {
         ));
         let (_tmp, path) = write_temp("proj-7AF3K2MN.md", fm);
         assert!(parse_item_file(&path).is_ok());
+    }
+
+    #[test]
+    fn guard_ignores_quoted_scalars_the_writer_produces() {
+        // These titles force the writer into quoted or plain renderings whose
+        // `&`/`*` are literal text; the guard flagging any of them means clove
+        // corrupts its own store (write succeeds, every later read fails).
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = camino::Utf8Path::from_path(tmp.path()).unwrap();
+        for title in [
+            "Fix: *very* broken parser",    // single-quoted by the writer
+            "Fix: &ref handling",           // single-quoted
+            "hello, *world*",               // plain (comma is not special in block context)
+            "foo:*bar",                     // plain (no space after the colon)
+            "It's here: *starred*",         // quoted, with a literal apostrophe
+            "steps\nsee: *note*\n- *milk*", // block scalar: content lines are text
+        ] {
+            let mut item = sample_item();
+            item.frontmatter.title = title.to_owned();
+            let path = dir.join(format!("{}.md", item.frontmatter.id));
+            write_item_file(&item, &path).unwrap();
+            let parsed = parse_item_file(&path).unwrap_or_else(|err| {
+                panic!("writer output for title {title:?} must re-parse: {err}")
+            });
+            assert_eq!(parsed.frontmatter.title, title);
+        }
+    }
+
+    #[test]
+    fn guard_still_rejects_real_anchors_and_aliases() {
+        for fm in [
+            "key: &a x",
+            "deps: [*a]",
+            "deps: [&a x, *a, *a]",
+            "labels:\n  - &a x\n  - *a", // block-sequence entries
+            "labels: [it's, &a x]",      // a mid-scalar quote must not mask it
+            "key: 'quoted' \nother: [&boom x]",
+        ] {
+            assert!(contains_yaml_anchor_or_alias(fm.as_bytes()), "{fm}");
+        }
+        for fm in [
+            "title: 'Fix: *very* broken'",
+            "title: \"Fix: &ref stuff\"",
+            "title: a - *b* c",
+            "title: hello, *world*",
+            "title: foo:*bar",
+            "title: it's *fine* and R&D",
+            "title: |-\n  see: *note*\n  - *milk*\nother: x",
+        ] {
+            assert!(!contains_yaml_anchor_or_alias(fm.as_bytes()), "{fm}");
+        }
     }
 
     #[test]

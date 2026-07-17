@@ -215,7 +215,25 @@ fn atomic_write(path: &Utf8Path, bytes: &[u8]) -> Result<(), CloveError> {
         path: path.to_owned(),
         source,
     })?;
-    persist_with_retry(temp, path)
+    persist_with_retry(temp, path)?;
+
+    // The rename is atomic but not yet *durable*: on POSIX the directory entry
+    // lives in the parent directory, so without fsyncing it a power failure
+    // shortly after a "successful" write can roll the file back to its old
+    // content. Windows has no directory handle to sync; the rename there is
+    // made durable by the target-volume flush semantics of MoveFileEx.
+    #[cfg(unix)]
+    {
+        let dir = std::fs::File::open(parent.as_std_path()).map_err(|source| CloveError::Io {
+            path: parent.to_owned(),
+            source,
+        })?;
+        dir.sync_all().map_err(|source| CloveError::Io {
+            path: parent.to_owned(),
+            source,
+        })?;
+    }
+    Ok(())
 }
 
 /// Rename the temp file onto `path`, retrying on transient failures (Windows

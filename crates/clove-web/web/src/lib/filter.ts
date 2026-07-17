@@ -32,6 +32,15 @@ export function applyFilters(items: Item[], q: ListQuery): Item[] {
 }
 
 /**
+ * The natural first direction for a sort column (mirrors the TUI's
+ * `cycle_sort_field`): rank/id/priority read best ascending (p0 first, the
+ * server's canonical order preserved), timestamps read best newest-first.
+ */
+export function defaultDir(sort: string): 'asc' | 'desc' {
+  return sort === 'created' || sort === 'updated' ? 'desc' : 'asc';
+}
+
+/**
  * Sort items by column + direction. The `rank` sort (default) preserves the
  * server's canonical order — callers pass a `rankOf` lookup (insertion index
  * from the store's replaceAll) so it isn't approximated with priority.

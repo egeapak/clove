@@ -22,7 +22,7 @@ use clove_core::write::write_item_file;
 use clove_core::{apply_edit, ItemStore};
 use clove_types::id::new_id;
 use clove_types::model::CURRENT_SCHEMA_VERSION;
-use clove_types::{CloveId, EditRequest, Item, ItemFrontmatter, ItemStatus, ItemType, LabelEdit};
+use clove_types::{CloveId, EditRequest, Item, ItemFrontmatter, ItemStatus, LabelEdit};
 
 use octocrab::models::issues::Issue;
 use octocrab::Octocrab;
@@ -100,13 +100,32 @@ pub fn sync_github(
         return Ok((summary, None));
     }
 
+    // Remote comment counts from the issues list, for the comment-sync skip.
+    let remote_comment_counts: std::collections::HashMap<String, u64> = issues
+        .iter()
+        .filter(|issue| issue.pull_request.is_none())
+        .map(|issue| {
+            (
+                crate::github::external_ref_for(issue.number),
+                issue.comments,
+            )
+        })
+        .collect();
+
     let apply_result = rt.block_on(async {
         let crab = build_client()?;
         let outcome = apply_plan(&crab, &owner, &repo, plan, store, prefix, &mut state).await?;
         let mut report = outcome.report;
         if sync_comments {
-            let (pulled, pushed) =
-                sync_all_comments(&crab, &owner, &repo, store, &mut state).await?;
+            let (pulled, pushed) = sync_all_comments(
+                &crab,
+                &owner,
+                &repo,
+                store,
+                &mut state,
+                &remote_comment_counts,
+            )
+            .await?;
             report.comments_pulled = pulled;
             report.comments_pushed = pushed;
         }
@@ -258,6 +277,7 @@ async fn apply_plan(
             entry.gh_updated_at,
             entry.local_updated,
         );
+        state.record_content_hash(&entry.external_ref, entry.gh_content_hash);
         reconciled.insert(entry.external_ref.clone());
         report.in_sync += 1;
     }
@@ -304,7 +324,7 @@ fn pull_create(
         id: id.clone(),
         title: staged.title.clone(),
         status: staged.status,
-        item_type: ItemType::default(),
+        item_type: staged.item_type.unwrap_or_default(),
         priority: staged.priority,
         created: now,
         updated: now,
@@ -316,7 +336,7 @@ fn pull_create(
         assignee: staged.assignee.clone(),
         parent: None,
         labels: staged.labels.clone(),
-        deps: staged.deps.clone(),
+        deps: staged.deps.clone().unwrap_or_default(),
         relates: Vec::new(),
         duplicates: Vec::new(),
         supersedes: Vec::new(),
@@ -329,6 +349,10 @@ fn pull_create(
     };
     write_item_file(&item, &store.path_for(&id))?;
     state.record(&staged.external_ref, staged.updated_at, now);
+    state.record_content_hash(
+        &staged.external_ref,
+        crate::sync::staged_fingerprint(staged),
+    );
     Ok(())
 }
 
@@ -353,21 +377,53 @@ fn pull_update(
     let remote_closed = staged.status == ItemStatus::Closed;
     let status = (local_closed != remote_closed).then_some(staged.status);
 
+    // Only touch the type when the remote meta actually declared one that
+    // differs — a body with no `clove-meta` says nothing about the type, and a
+    // pull must not reset a local `bug` to the default.
+    let item_type = staged
+        .item_type
+        .filter(|t| *t != current.frontmatter.item_type);
+
     let req = EditRequest {
         title: Some(staged.title.clone()),
         body: Some(staged.body.clone()),
         status,
         priority: Some(staged.priority),
-        item_type: None,
+        item_type,
         // `Some(None)` clears the assignee when GitHub has none, `Some(Some(x))`
         // sets it — exactly the tri-state `apply_edit` expects.
         assignee: Some(staged.assignee.clone()),
         labels: Some(LabelEdit::Set(staged.labels.clone())),
     };
     let now = Utc::now();
+
+    // Remote dep edits ride the dedicated cycle-validated graph ops (deps are
+    // round-tripped through `clove-meta`, so without this a dep added on one
+    // clone is never applied on another — and the other clone's next push then
+    // deletes it from the remote record). `None` means the body carried no
+    // meta at all: dep ownership unknown, leave local deps alone. Applied
+    // BEFORE `apply_edit` so the fingerprint recorded from `apply_edit`'s
+    // returned `updated` covers these writes too. A single edge that fails
+    // (target not present locally, would-cycle) is skipped rather than
+    // aborting the whole sync.
+    if let Some(remote_deps) = &staged.deps {
+        let want: std::collections::BTreeSet<&CloveId> = remote_deps.iter().collect();
+        let have: std::collections::BTreeSet<&CloveId> = current.frontmatter.deps.iter().collect();
+        for dep in want.difference(&have) {
+            let _ = clove_core::ops::dep_add(store, &pull.clove_id, dep, now);
+        }
+        for dep in have.difference(&want) {
+            let _ = clove_core::ops::dep_remove(store, &pull.clove_id, dep, now);
+        }
+    }
+
     let value = apply_edit(store, &pull.clove_id, &req, now)?;
     let local_updated = value_updated(&value).unwrap_or_else(|| truncate(now));
     state.record(&staged.external_ref, staged.updated_at, local_updated);
+    state.record_content_hash(
+        &staged.external_ref,
+        crate::sync::staged_fingerprint(staged),
+    );
     Ok(())
 }
 
@@ -396,26 +452,57 @@ async fn push_create(
     })
     .await?;
 
+    // Link the local item to the new issue *before* anything else can fail: the
+    // write-back of `external_ref` (plus the recorded fingerprint) is what makes
+    // every later step idempotent. If it only happened after the close PATCH
+    // below, a failed close would leave the created issue unlinked and the next
+    // sync would create a duplicate on both sides.
+    let external_ref = crate::github::external_ref_for(created.number);
+    let local_updated = link_local(store, &push.clove_id, &external_ref)?;
+    state.record(&external_ref, Some(created.updated_at), local_updated);
+    // The issue GitHub just created is OPEN regardless of `item.closed` — hash
+    // the open variant until the close below actually lands.
+    let open_item = crate::github::ExportItem {
+        closed: false,
+        ..item.clone()
+    };
+    state.record_content_hash(&external_ref, crate::sync::export_fingerprint(&open_item));
+
     // GitHub created the issue OPEN. If the local item is closed, close it too so
     // the two sides actually match after a create-of-a-closed-item. The close is a
     // second PATCH that bumps `updated_at` past the create response's — record the
     // *close* response's timestamp as the fingerprint, or the next sync would see
     // a spurious remote change and pull-update the just-created item.
-    let mut gh_updated = created.updated_at;
     if item.closed {
-        let closed: Issue = with_retry(true, || {
+        match with_retry(true, || {
             handler
                 .update(created.number)
                 .state(octocrab::models::IssueState::Closed)
                 .send()
         })
-        .await?;
-        gh_updated = closed.updated_at;
+        .await
+        {
+            Ok(closed) => {
+                let closed: Issue = closed;
+                state.record(&external_ref, Some(closed.updated_at), local_updated);
+                state.record_content_hash(&external_ref, crate::sync::export_fingerprint(item));
+            }
+            Err(err) => {
+                // The pair is linked but the remote is still OPEN while the
+                // local item is closed. With accurate clocks the next sync
+                // would call that pair in_sync forever — backdate the recorded
+                // local clock so it re-examines and re-pushes the close as an
+                // update.
+                state.record(
+                    &external_ref,
+                    Some(created.updated_at),
+                    crate::sync::epoch(),
+                );
+                return Err(err);
+            }
+        }
     }
 
-    let external_ref = crate::github::external_ref_for(created.number);
-    let local_updated = link_local(store, &push.clove_id, &external_ref)?;
-    state.record(&external_ref, Some(gh_updated), local_updated);
     Ok(external_ref)
 }
 
@@ -490,6 +577,7 @@ async fn push_update(
     .await?;
 
     state.record(&external_ref, Some(updated.updated_at), push.local_updated);
+    state.record_content_hash(&external_ref, crate::sync::export_fingerprint(item));
     Ok(())
 }
 
@@ -515,6 +603,7 @@ async fn sync_all_comments(
     repo: &str,
     store: &ItemStore,
     state: &mut SyncState,
+    remote_comment_counts: &std::collections::HashMap<String, u64>,
 ) -> Result<(usize, usize), ImportError> {
     // Re-scan so freshly pull-created / push-created items are included. Sort by
     // ref for a deterministic order of API calls.
@@ -532,7 +621,6 @@ async fn sync_all_comments(
             continue;
         };
 
-        let gh = fetch_comments(crab, owner, repo, number).await?;
         let local: Vec<LocalComment> = list_comments(store.issues_dir(), id)?
             .into_iter()
             .map(|c| LocalComment {
@@ -540,6 +628,24 @@ async fn sync_all_comments(
                 body: c.body,
             })
             .collect();
+
+        // Skip the per-issue comments GET when neither side moved since the
+        // last comment sync: the issues list already told us the remote count,
+        // and the local count is a cheap directory read. Issues created this
+        // run (absent from the pre-apply fetch) always fall through to a fetch.
+        if let Some(entry) = state.entries.get(external_ref) {
+            if let (Some(synced_gh), Some(synced_local)) =
+                (entry.synced_gh_comments, entry.synced_local_comments)
+            {
+                if remote_comment_counts.get(external_ref) == Some(&synced_gh)
+                    && local.len() as u64 == synced_local
+                {
+                    continue;
+                }
+            }
+        }
+
+        let gh = fetch_comments(crab, owner, repo, number).await?;
 
         let entry = state
             .entries
@@ -556,7 +662,7 @@ async fn sync_all_comments(
             };
             add_comment_at(store.issues_dir(), id, &author, &comment.body, when)?;
             entry.gh_comment_ids.insert(comment.id);
-            entry.local_comment_hashes.insert(body_hash(&comment.body));
+            entry.record_comment_hash(body_hash(&comment.body));
             pulled += 1;
         }
         for comment in &plan.push {
@@ -567,7 +673,7 @@ async fn sync_all_comments(
             let created =
                 with_retry(false, || handler.create_comment(number, body.clone())).await?;
             entry.gh_comment_ids.insert(created.id.into_inner());
-            entry.local_comment_hashes.insert(body_hash(&comment.body));
+            entry.record_comment_hash(body_hash(&comment.body));
             // Posting a comment bumps the issue's `updated_at` on GitHub. Advance
             // the recorded remote fingerprint to the new comment's timestamp so the
             // next sync doesn't see a spurious remote change and pull-update (or
@@ -579,6 +685,12 @@ async fn sync_all_comments(
             }
             pushed += 1;
         }
+
+        // Both plans applied fully: record the counts each side now has, which
+        // is what the next sync's skip check compares against. Set only on
+        // full success (an early `?` above leaves them stale → re-fetch).
+        entry.synced_gh_comments = Some((gh.len() + plan.push.len()) as u64);
+        entry.synced_local_comments = Some((local.len() + plan.pull.len()) as u64);
     }
     Ok((pulled, pushed))
 }

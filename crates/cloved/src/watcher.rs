@@ -97,17 +97,34 @@ pub async fn watch(
             .filter_map(|p| Utf8PathBuf::from_path_buf(p).ok())
             .collect();
 
-        // Apply one index batch (one transaction) and record it.
-        sync_once(&issues_dir, &index, &state);
-        // The files changed → the cached dependency graph is now stale.
-        graph.mark_dirty();
-        if let Ok(mut st) = state.lock() {
-            st.mark_event();
-            st.inc_batches();
-        }
+        // Apply one index batch (one transaction) and record it — on the
+        // blocking pool, like the IPC handlers: `sync_once` (SQLite work while
+        // holding the index mutex) and the git sync (libgit2 I/O, one commit
+        // per file) can take seconds on a big batch (e.g. after a `git pull`),
+        // and running them inline would park one of the daemon's two runtime
+        // workers, starving concurrent `ping`s past the client's 50ms budget
+        // exactly when the daemon is most needed.
+        let issues_dir_b = issues_dir.clone();
+        let index_b = index.clone();
+        let state_b = state.clone();
+        let graph_b = graph.clone();
+        let options_b = options.clone();
+        let done = tokio::task::spawn_blocking(move || {
+            sync_once(&issues_dir_b, &index_b, &state_b);
+            // The files changed → the cached dependency graph is now stale.
+            graph_b.mark_dirty();
+            if let Ok(mut st) = state_b.lock() {
+                st.mark_event();
+                st.inc_batches();
+            }
 
-        // Opt-in git auto-sync of the changed files (T-D06).
-        maybe_git_sync(&options, batch, &index);
+            // Opt-in git auto-sync of the changed files (T-D06).
+            maybe_git_sync(&options_b, batch, &index_b);
+        })
+        .await;
+        if done.is_err() {
+            eprintln!("cloved: watcher batch task panicked");
+        }
     }
 
     drop(watcher);

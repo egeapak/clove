@@ -11,11 +11,15 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
-use serde_json::Value;
 
 use crate::AppState;
 
 /// Server → client frames, serialized as `{ "event": "...", "data": {...} }`.
+///
+/// The protocol is deliberately minimal: `hello` on connect, then `batch` for
+/// every change (per-id `item.*`/`stats.*`/`ping` variants once existed but
+/// were never emitted, so both sides carried dead plumbing — the client always
+/// resyncs from a batch).
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "event", content = "data")]
 pub enum Event {
@@ -35,18 +39,6 @@ pub enum Event {
         deleted: Vec<String>,
         seq: u64,
     },
-    /// A single item was created or changed (carries the full item JSON).
-    #[serde(rename = "item.upserted")]
-    ItemUpserted { id: String, item: Value },
-    /// A single item's file was removed.
-    #[serde(rename = "item.deleted")]
-    ItemDeleted { id: String },
-    /// Aggregate stats changed (the client may refetch `/stats`).
-    #[serde(rename = "stats.updated")]
-    StatsUpdated {},
-    /// Server heartbeat.
-    #[serde(rename = "ping")]
-    Ping { ts: i64 },
 }
 
 /// Whether a browser `Origin` header names a loopback origin. WS handshakes are

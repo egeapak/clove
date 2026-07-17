@@ -100,12 +100,11 @@
     if (!item || item.status === key) return;
 
     // optimistic
-    const rollback = store.optimistic(id, { status: key });
+    const edit = store.optimistic(id, { status: key });
     try {
-      const updated = await api.patch(id, { status: key });
-      store.settle(id, updated);
+      edit.settle(await api.patch(id, { status: key }));
     } catch (err) {
-      rollback();
+      edit.rollback();
       toasts.error(`Move failed: ${err instanceof Error ? err.message : 'error'}`);
     }
   }
@@ -116,11 +115,11 @@
     const order: Status[] = ['open', 'in_progress', 'closed'];
     const idx = order.indexOf(item.status);
     const next = order[(idx + dir + order.length) % order.length];
-    const rollback = store.optimistic(item.id, { status: next });
+    const edit = store.optimistic(item.id, { status: next });
     try {
-      store.settle(item.id, await api.patch(item.id, { status: next }));
+      edit.settle(await api.patch(item.id, { status: next }));
     } catch {
-      rollback();
+      edit.rollback();
       toasts.error('Move failed');
     }
   }

@@ -11,9 +11,18 @@
 // Everything is imported dynamically so the markdown machinery only loads on
 // the detail route (its own lazy chunk).
 
-let mdPromise: Promise<(src: string) => string> | null = null;
+import { base } from '$app/paths';
 
-async function getMd() {
+export interface RenderOptions {
+  /** Repo id prefix (from `/meta`) for resolving bare `#7AF3Q2K9` autolinks. */
+  idPrefix?: string;
+}
+
+type Renderer = (src: string, opts?: RenderOptions) => string;
+
+let mdPromise: Promise<Renderer> | null = null;
+
+async function getMd(): Promise<Renderer> {
   const [{ micromark }, { gfm, gfmHtml }, { cloveId, cloveIdHtml }] =
     await Promise.all([
       import('micromark'),
@@ -21,15 +30,15 @@ async function getMd() {
       import('./micromark-clove-id')
     ]);
 
-  return (src: string) =>
+  return (src, opts) =>
     micromark(src, {
       extensions: [gfm(), cloveId()],
-      htmlExtensions: [gfmHtml(), cloveIdHtml()]
+      htmlExtensions: [gfmHtml(), cloveIdHtml({ base, idPrefix: opts?.idPrefix })]
     });
 }
 
-export async function renderMarkdown(src: string): Promise<string> {
+export async function renderMarkdown(src: string, opts?: RenderOptions): Promise<string> {
   if (!mdPromise) mdPromise = getMd();
   const render = await mdPromise;
-  return render(src);
+  return render(src, opts);
 }

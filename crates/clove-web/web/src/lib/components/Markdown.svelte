@@ -1,13 +1,16 @@
 <script lang="ts">
   import { renderMarkdown } from '$lib/markdown';
+  import { store } from '$lib/store.svelte';
   let { source }: { source: string } = $props();
   let html = $state('');
 
   $effect(() => {
     const src = source ?? '';
+    // The repo prefix (from /meta) lets bare `#7AF3Q2K9` autolinks resolve.
+    const idPrefix = store.meta?.id_prefix;
     // Cancellation token: a stale async render must not clobber a newer one.
     let cancelled = false;
-    renderMarkdown(src)
+    renderMarkdown(src, { idPrefix })
       .then((h) => {
         if (!cancelled) html = h;
       })

@@ -19,6 +19,7 @@ pub fn run(
     format: OutputFormat,
     args: FilterArgs,
     _quiet: bool,
+    no_index: bool,
 ) -> Result<(), CloveError> {
     let filters = Filters::parse(
         args.status.as_deref(),
@@ -33,7 +34,7 @@ pub fn run(
     // id)` order from its cached graph and returns ordered ids; we read those
     // files for full detail (filters preserve the daemon's order). Same output as
     // the file path bar `_meta.source = "daemon"`.
-    if let Some(ids) = blocked_via_daemon(ctx, args.include_warnings) {
+    if let Some(ids) = blocked_via_daemon(ctx, no_index, args.include_warnings) {
         let ordered: Vec<ItemFrontmatter> = ids
             .iter()
             .filter_map(|id| CloveId::new(id).ok())
@@ -93,8 +94,12 @@ pub fn run(
     Ok(())
 }
 
-/// Ask a running daemon for the blocked-item ids (ordered). `None` → local path.
-fn blocked_via_daemon(ctx: &Ctx, include_warnings: bool) -> Option<Vec<String>> {
+/// Ask a running daemon for the blocked-item ids (ordered). `None` → local
+/// path, forced by `--no-index` (the flag promises a file scan).
+fn blocked_via_daemon(ctx: &Ctx, no_index: bool, include_warnings: bool) -> Option<Vec<String>> {
+    if no_index {
+        return None;
+    }
     let clove_dir = ctx.issues_dir.parent()?;
     let mut client = DaemonClient::probe(clove_dir)?;
     match client.graph(GraphRequest::Blocked { include_warnings }) {

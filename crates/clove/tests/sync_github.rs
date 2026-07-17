@@ -61,6 +61,8 @@ struct State {
     fail_comment_post_for: Option<u64>,
     /// Count of issue-create POSTs actually received.
     issue_post_count: u64,
+    /// Total GETs of any issue's comments endpoint (for skip-coverage asserts).
+    comment_get_count: u64,
     /// Count of issue PATCHes actually received.
     patch_count: u64,
 }
@@ -88,6 +90,7 @@ impl MockGitHub {
         let state = Arc::new(Mutex::new(State {
             issues: Vec::new(),
             comments: std::collections::HashMap::new(),
+            comment_get_count: 0,
             next_number: 1,
             next_comment_id: 1000,
             clock: 0,
@@ -179,6 +182,10 @@ impl MockGitHub {
 
     fn patch_count(&self) -> u64 {
         self.state.lock().unwrap().patch_count
+    }
+
+    fn comment_get_count(&self) -> u64 {
+        self.state.lock().unwrap().comment_get_count
     }
 
     /// Seed a comment on an existing issue (simulating a GitHub-side comment).
@@ -352,10 +359,13 @@ fn route(
             return ("404 Not Found", json!({ "message": "bad issue" }));
         };
         return match method {
-            "GET" => (
-                "200 OK",
-                Value::Array(s.comments.get(&number).cloned().unwrap_or_default()),
-            ),
+            "GET" => {
+                s.comment_get_count += 1;
+                (
+                    "200 OK",
+                    Value::Array(s.comments.get(&number).cloned().unwrap_or_default()),
+                )
+            }
             "POST" => {
                 if s.fail_comment_post_for == Some(number) {
                     return (
@@ -383,7 +393,16 @@ fn route(
     }
 
     match (method, number) {
-        ("GET", None) => ("200 OK", Value::Array(s.issues.clone())),
+        ("GET", None) => {
+            // Real GitHub reports each issue's live comment count in the list;
+            // the sync's comment-fetch skip relies on it.
+            let mut issues = s.issues.clone();
+            for issue in &mut issues {
+                let number = issue["number"].as_u64().unwrap_or(0);
+                issue["comments"] = json!(s.comments.get(&number).map(Vec::len).unwrap_or(0));
+            }
+            ("200 OK", Value::Array(issues))
+        }
         ("POST", None) => {
             s.issue_post_count += 1;
             let number = s.next_number;
@@ -928,6 +947,60 @@ fn comment_sync_is_idempotent_both_directions() {
 }
 
 #[test]
+fn idle_issue_comment_fetch_is_skipped_on_the_next_sync() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    clove(dir.path(), mock.addr)
+        .args(["new", "Chatty", "--type", "bug"])
+        .assert()
+        .success();
+
+    // First sync links the issue; its comment thread is fetched and the
+    // local comment is pushed.
+    let id = only_item_id(dir.path(), mock.addr);
+    clove(dir.path(), mock.addr)
+        .args(["comment", &id, "hello"])
+        .assert()
+        .success();
+    sync(dir.path(), mock.addr, &[]);
+    let after_first = mock.comment_get_count();
+    assert!(after_first >= 1, "first sync fetches the thread");
+
+    // Nothing changed on either side: the next sync must not re-fetch the
+    // comments for the idle issue.
+    sync(dir.path(), mock.addr, &[]);
+    assert_eq!(
+        mock.comment_get_count(),
+        after_first,
+        "idle issue's comments were re-fetched"
+    );
+
+    // A remote comment changes the count → the fetch happens again and the
+    // comment is pulled.
+    let gh_number = show(dir.path(), mock.addr, &id)["external_ref"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("gh-")
+        .unwrap()
+        .parse()
+        .unwrap();
+    mock.seed_comment(gh_number, "octocat", "from github");
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["comments_pulled"], 1, "{v}");
+    assert!(mock.comment_get_count() > after_first);
+
+    // And a new local comment also breaks the skip.
+    let before = mock.comment_get_count();
+    clove(dir.path(), mock.addr)
+        .args(["comment", &id, "another local"])
+        .assert()
+        .success();
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["comments_pushed"], 1, "{v}");
+    assert!(mock.comment_get_count() > before);
+}
+
+#[test]
 fn no_comments_flag_skips_comment_sync() {
     let mock = MockGitHub::start();
     mock.seed(5, "Issue", "Body.", "open");
@@ -1029,6 +1102,71 @@ fn labels_round_trip_push_and_pull() {
         local.contains(&"regression"),
         "pulled label missing: {local:?}"
     );
+}
+
+#[test]
+fn type_and_deps_round_trip_through_clove_meta() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    clove(dir.path(), mock.addr)
+        .args(["new", "Parent", "--type", "bug"])
+        .assert()
+        .success();
+    clove(dir.path(), mock.addr)
+        .args(["new", "Dep target"])
+        .assert()
+        .success();
+    sync(dir.path(), mock.addr, &[]);
+
+    // Find the two clove ids and the parent's GitHub number.
+    let ids = all_item_ids(dir.path(), mock.addr);
+    let mut parent: Option<(String, u64)> = None;
+    let mut target_id = String::new();
+    for id in &ids {
+        let item = show(dir.path(), mock.addr, id);
+        if item["title"] == "Parent" {
+            let number = item["external_ref"]
+                .as_str()
+                .unwrap()
+                .strip_prefix("gh-")
+                .unwrap()
+                .parse()
+                .unwrap();
+            parent = Some((id.clone(), number));
+        } else {
+            target_id = id.clone();
+        }
+    }
+    let (parent_id, parent_gh) = parent.expect("parent pushed");
+
+    // The push encoded the type into the clove-meta marker.
+    let body = mock.issue(parent_gh).unwrap()["body"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(body.contains("\"type\":\"bug\""), "{body}");
+
+    // Remote-only edit: another clone changed the type and added a dep (both
+    // ride the clove-meta marker). A pull must apply them.
+    mock.edit(parent_gh, |i| {
+        i["body"] = json!(format!(
+            "Body.\n\n<!-- clove-meta: {{\"type\":\"chore\",\"deps\":[\"{target_id}\"]}} -->"
+        ));
+    });
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["pulled_updated"], 1, "{v}");
+    let item = show(dir.path(), mock.addr, &parent_id);
+    assert_eq!(item["type"], "chore", "{item}");
+    assert_eq!(item["deps"], json!([target_id]), "{item}");
+
+    // A remote meta that owns an EMPTY dep set removes the dep locally too.
+    mock.edit(parent_gh, |i| {
+        i["body"] = json!("Body two.\n\n<!-- clove-meta: {\"type\":\"chore\"} -->");
+    });
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["pulled_updated"], 1, "{v}");
+    let item = show(dir.path(), mock.addr, &parent_id);
+    assert_eq!(item["deps"], json!([]), "{item}");
 }
 
 #[test]

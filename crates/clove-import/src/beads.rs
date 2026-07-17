@@ -196,6 +196,10 @@ struct BeadsIssue {
     #[serde(default)]
     relates: Vec<String>,
     #[serde(default)]
+    duplicates: Vec<String>,
+    #[serde(default)]
+    supersedes: Vec<String>,
+    #[serde(default)]
     parent: Option<String>,
     /// A pre-existing clove external_ref (round-trip idempotency key).
     #[serde(default)]
@@ -218,6 +222,8 @@ struct StagedIssue {
     parent: Option<CloveId>,
     deps: Vec<CloveId>,
     relates: Vec<CloveId>,
+    duplicates: Vec<CloveId>,
+    supersedes: Vec<CloveId>,
     labels: Vec<String>,
     body: String,
 }
@@ -288,8 +294,8 @@ impl Importer for BeadsImporter {
 
             // M2: a malformed line must not abort the whole import. Skip-and-report
             // it (with its 1-based line number) and continue with the valid lines.
-            let mut staged_issue = match map_line(line) {
-                Ok(issue) => issue,
+            let (mut staged_issue, comment_count) = match map_line(line) {
+                Ok(pair) => pair,
                 Err(_) => {
                     plan.would_skip.push(SkipItem {
                         id: format!("line {}", lineno + 1),
@@ -301,7 +307,7 @@ impl Importer for BeadsImporter {
 
             // comment_count > 0: comment bodies are not present in the JSONL, so
             // warn (must not silently succeed) — DESIGN §11.2.
-            if let Some(count) = comment_count_of(line) {
+            if let Some(count) = comment_count {
                 if count > 0 {
                     self.warnings.borrow_mut().push(format!(
                         "issue `{}` has {count} comment(s) not present in JSONL; run `bd show --json {}` to extract comment bodies",
@@ -324,6 +330,18 @@ impl Importer for BeadsImporter {
                 &source_id,
                 &mut self.warnings.borrow_mut(),
             );
+            staged_issue.duplicates = cap_dep_array(
+                std::mem::take(&mut staged_issue.duplicates),
+                "duplicates",
+                &source_id,
+                &mut self.warnings.borrow_mut(),
+            );
+            staged_issue.supersedes = cap_dep_array(
+                std::mem::take(&mut staged_issue.supersedes),
+                "supersedes",
+                &source_id,
+                &mut self.warnings.borrow_mut(),
+            );
 
             // M4: flag dangling dependency targets (ids absent from the store).
             let dangling = dangling_targets(
@@ -332,7 +350,9 @@ impl Importer for BeadsImporter {
                     .parent
                     .iter()
                     .chain(staged_issue.deps.iter())
-                    .chain(staged_issue.relates.iter()),
+                    .chain(staged_issue.relates.iter())
+                    .chain(staged_issue.duplicates.iter())
+                    .chain(staged_issue.supersedes.iter()),
             );
             if !dangling.is_empty() {
                 let list = dangling
@@ -410,8 +430,8 @@ impl Importer for BeadsImporter {
                 labels: issue.labels.clone(),
                 deps: issue.deps.clone(),
                 relates: issue.relates.clone(),
-                duplicates: Vec::new(),
-                supersedes: Vec::new(),
+                duplicates: issue.duplicates.clone(),
+                supersedes: issue.supersedes.clone(),
                 source_system: Some("beads".to_owned()),
                 external_ref: Some(issue.external_ref.clone()),
             };
@@ -431,10 +451,15 @@ impl Importer for BeadsImporter {
     }
 }
 
-/// Parse and map a single JSONL line into a [`StagedIssue`], returning a
-/// human-readable error message on malformed input.
-fn map_line(line: &str) -> Result<StagedIssue, String> {
-    let issue: BeadsIssue = serde_json::from_str(line).map_err(|err| err.to_string())?;
+/// Parse and map a single JSONL line into a [`StagedIssue`] plus its
+/// `comment_count` (if present), returning a human-readable error message on
+/// malformed input.
+fn map_line(line: &str) -> Result<(StagedIssue, Option<i64>), String> {
+    // ONE JSON parse per line: the typed view, the `comment_count` read, and
+    // the unmapped-key meta blob all derive from this `Value` (the old code
+    // re-parsed the same line for each, tripling the work on large imports).
+    let value: Value = serde_json::from_str(line).map_err(|err| err.to_string())?;
+    let issue = BeadsIssue::deserialize(&value).map_err(|err| err.to_string())?;
 
     let beads_id = issue
         .id
@@ -530,6 +555,11 @@ fn map_line(line: &str) -> Result<StagedIssue, String> {
     };
     let deps = parse_ids(deps_raw.iter().map(String::as_str))?;
     let relates = parse_ids(relates_raw.iter().map(String::as_str))?;
+    // `duplicates`/`supersedes` exist only in the clove-export shape (there is
+    // no structured-beads-edge equivalent), so they are consumed directly —
+    // they are in `MAPPED_KEYS` and must round-trip, not be dropped.
+    let duplicates = parse_ids(issue.duplicates.iter().map(String::as_str))?;
+    let supersedes = parse_ids(issue.supersedes.iter().map(String::as_str))?;
 
     let mut labels = map_labels(&issue.labels).map_err(|e| e.to_string())?;
     if let Some(label) = extra_label {
@@ -538,22 +568,28 @@ fn map_line(line: &str) -> Result<StagedIssue, String> {
     labels.sort();
     labels.dedup();
 
-    let external_ref = build_external_ref(&beads_id, issue.external_ref.as_deref(), line)?;
+    let external_ref = build_external_ref(&beads_id, issue.external_ref.as_deref(), &value)?;
+    let comment_count = value.get("comment_count").and_then(Value::as_i64);
 
-    Ok(StagedIssue {
-        external_ref,
-        source_id: beads_id,
-        title,
-        status,
-        item_type,
-        priority,
-        assignee,
-        parent,
-        deps,
-        relates,
-        labels,
-        body,
-    })
+    Ok((
+        StagedIssue {
+            external_ref,
+            source_id: beads_id,
+            title,
+            status,
+            item_type,
+            priority,
+            assignee,
+            parent,
+            deps,
+            relates,
+            duplicates,
+            supersedes,
+            labels,
+            body,
+        },
+        comment_count,
+    ))
 }
 
 /// Build the clove `external_ref` for an incoming issue (see module docs).
@@ -564,21 +600,20 @@ fn map_line(line: &str) -> Result<StagedIssue, String> {
 fn build_external_ref(
     beads_id: &str,
     existing: Option<&str>,
-    line: &str,
+    value: &Value,
 ) -> Result<String, String> {
     if let Some(existing) = existing.map(str::trim).filter(|s| !s.is_empty()) {
         return Ok(existing.to_owned());
     }
 
     let base = format!("beads:{beads_id}");
-    let value: Value = serde_json::from_str(line).map_err(|err| err.to_string())?;
     let Value::Object(obj) = value else {
         return Ok(base);
     };
 
     // Collect unmapped keys into a sorted map for a stable, reproducible blob.
-    let unmapped: BTreeMap<String, Value> = obj
-        .into_iter()
+    let unmapped: BTreeMap<&String, &Value> = obj
+        .iter()
         .filter(|(k, _)| !MAPPED_KEYS.contains(&k.as_str()))
         .collect();
 
@@ -587,12 +622,6 @@ fn build_external_ref(
     }
     let meta = serde_json::to_string(&unmapped).map_err(|err| err.to_string())?;
     Ok(format!("{base} meta:{meta}"))
-}
-
-/// Read the `comment_count` of a raw JSONL line, tolerating its absence.
-fn comment_count_of(line: &str) -> Option<i64> {
-    let value: Value = serde_json::from_str(line).ok()?;
-    value.get("comment_count")?.as_i64()
 }
 
 /// Parse a single beads JSONL line through the same tolerant path
@@ -647,7 +676,7 @@ mod tests {
     #[test]
     fn maps_beads_native_shape() {
         let line = r#"{"id":"bd-1","title":"T","description":"body","status":"open","priority":1,"issue_type":"task","owner":"ege","labels":["Area:Core"],"dependencies":[{"id":"proj-AAAA1111","type":"blocks"},{"id":"proj-BBBB2222","type":"parent-child"},{"id":"proj-CCCC3333","type":"related"}]}"#;
-        let s = map_line(line).unwrap();
+        let (s, _) = map_line(line).unwrap();
         assert_eq!(s.source_id, "bd-1");
         assert_eq!(s.title, "T");
         assert_eq!(s.body, "body");
@@ -663,15 +692,29 @@ mod tests {
     #[test]
     fn deferred_status_maps_to_open_plus_label() {
         let line = r#"{"id":"bd-2","title":"X","status":"deferred"}"#;
-        let s = map_line(line).unwrap();
+        let (s, _) = map_line(line).unwrap();
         assert_eq!(s.status, ItemStatus::Open);
         assert!(s.labels.contains(&"deferred".to_owned()));
     }
 
     #[test]
+    fn duplicates_and_supersedes_are_mapped_not_dropped() {
+        // Both keys are in MAPPED_KEYS (excluded from the meta blob), so they
+        // must actually be consumed — the clove-export → beads-import
+        // round-trip is documented as lossless on mapped fields.
+        let line = r#"{"id":"bd-9","title":"X","duplicates":["proj-AAAA1111"],"supersedes":["proj-BBBB2222"]}"#;
+        let (s, _) = map_line(line).unwrap();
+        assert_eq!(s.duplicates.len(), 1);
+        assert_eq!(s.duplicates[0].as_str(), "proj-AAAA1111");
+        assert_eq!(s.supersedes.len(), 1);
+        assert_eq!(s.supersedes[0].as_str(), "proj-BBBB2222");
+        assert!(!s.external_ref.contains("meta:"), "{}", s.external_ref);
+    }
+
+    #[test]
     fn unmapped_fields_folded_into_meta_blob() {
         let line = r#"{"id":"bd-3","title":"X","epic":"e-9","sprint":3}"#;
-        let s = map_line(line).unwrap();
+        let (s, _) = map_line(line).unwrap();
         assert!(s.external_ref.starts_with("beads:bd-3 meta:"));
         assert!(s.external_ref.contains("\"epic\":\"e-9\""));
         assert!(s.external_ref.contains("\"sprint\":3"));
@@ -680,15 +723,15 @@ mod tests {
     #[test]
     fn meta_blob_is_stable_across_calls() {
         let line = r#"{"id":"bd-3","title":"X","sprint":3,"epic":"e-9"}"#;
-        let a = map_line(line).unwrap().external_ref;
-        let b = map_line(line).unwrap().external_ref;
+        let a = map_line(line).unwrap().0.external_ref;
+        let b = map_line(line).unwrap().0.external_ref;
         assert_eq!(a, b, "meta blob must be deterministic for idempotency");
     }
 
     #[test]
     fn reads_clove_export_shape() {
         let line = r#"{"id":"proj-ZZZZ9999","title":"Exported","type":"bug","status":"in_progress","priority":0,"body":"hello","deps":["proj-AAAA1111"],"relates":["proj-BBBB2222"],"parent":"proj-CCCC3333","external_ref":"beads:bd-99","source_system":"beads","ready":true,"blocked_by":[]}"#;
-        let s = map_line(line).unwrap();
+        let (s, _) = map_line(line).unwrap();
         assert_eq!(s.item_type, ItemType::Bug);
         assert_eq!(s.status, ItemStatus::InProgress);
         assert_eq!(s.priority, Priority(0));
@@ -703,14 +746,14 @@ mod tests {
     #[test]
     fn priority_as_string_tolerated() {
         let line = r#"{"id":"bd-5","title":"X","priority":"3"}"#;
-        let s = map_line(line).unwrap();
+        let (s, _) = map_line(line).unwrap();
         assert_eq!(s.priority, Priority(3));
     }
 
     #[test]
     fn assignee_wins_over_owner() {
         let line = r#"{"id":"bd-6","title":"X","assignee":"a","owner":"o"}"#;
-        let s = map_line(line).unwrap();
+        let (s, _) = map_line(line).unwrap();
         assert_eq!(s.assignee.as_deref(), Some("a"));
     }
 
@@ -722,8 +765,10 @@ mod tests {
 
     #[test]
     fn comment_count_extracted() {
-        assert_eq!(comment_count_of(r#"{"id":"x","comment_count":4}"#), Some(4));
-        assert_eq!(comment_count_of(r#"{"id":"x"}"#), None);
+        let (_, count) = map_line(r#"{"id":"x","comment_count":4}"#).unwrap();
+        assert_eq!(count, Some(4));
+        let (_, count) = map_line(r#"{"id":"x"}"#).unwrap();
+        assert_eq!(count, None);
     }
 
     // M2: a malformed line in the middle must not abort parsing of the rest.

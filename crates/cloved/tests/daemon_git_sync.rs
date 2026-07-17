@@ -126,6 +126,49 @@ fn commits_a_new_item_and_does_not_recommit() {
 }
 
 #[test]
+fn does_not_sweep_unrelated_staged_changes_into_the_auto_commit() {
+    let repo = init_repo();
+    let path = repo.add_item("alpha");
+    let index = throwaway_index(&repo.root);
+
+    // The user has an UNRELATED file staged but not committed.
+    std::fs::write(repo.root.join("src.c"), b"int main() {}\n").unwrap();
+    {
+        let mut git_index = repo.repo.index().unwrap();
+        git_index.add_path(std::path::Path::new("src.c")).unwrap();
+        git_index.write().unwrap();
+    }
+
+    let n = git_sync::sync_files(&repo.root, std::slice::from_ref(&path), &index);
+    assert_eq!(n, 1, "the item file is committed");
+
+    // The auto-sync commit's tree must NOT contain the user's staged file.
+    let head = repo.repo.head().unwrap().peel_to_commit().unwrap();
+    assert!(repo.head_message().contains("auto-sync"));
+    assert!(
+        head.tree()
+            .unwrap()
+            .get_path(std::path::Path::new("src.c"))
+            .is_err(),
+        "user-staged src.c was swept into the daemon's auto-sync commit"
+    );
+
+    // ...and it must still be staged for the user afterwards.
+    let status = repo
+        .repo
+        .status_file(std::path::Path::new("src.c"))
+        .unwrap();
+    assert!(
+        status.contains(git2::Status::INDEX_NEW),
+        "user's staged file lost its staged state: {status:?}"
+    );
+
+    // The re-commit guard still holds for the item file.
+    let n = git_sync::sync_files(&repo.root, &[path], &index);
+    assert_eq!(n, 0, "clean item file is not re-committed");
+}
+
+#[test]
 fn skips_during_merge() {
     let repo = init_repo();
     let path = repo.add_item("beta");

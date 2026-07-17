@@ -18,8 +18,10 @@ pub const MAX_DEP_ARRAY_LEN: usize = 1_000;
 /// Maximum length of a full item ID (`<prefix>-<8 chars>`), in bytes.
 pub const MAX_ID_LEN: usize = 32;
 
-/// Maximum length of an ID prefix, in bytes.
-pub const MAX_PREFIX_LEN: usize = 16;
+/// Maximum length of an ID prefix, in bytes. This is the value the id grammar
+/// (`^[a-z][a-z0-9]{0,7}-[0-9A-Z]{8}$`) actually enforces — `validate_id` and
+/// `config::is_valid_prefix` both read it, so the limit has one source of truth.
+pub const MAX_PREFIX_LEN: usize = 8;
 
 /// Item count above which the CLI warns that an index is recommended. This is a
 /// warning threshold, never a hard error.

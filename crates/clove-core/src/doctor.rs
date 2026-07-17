@@ -227,7 +227,7 @@ pub fn diagnose(store: &ItemStore) -> DoctorReport {
     }
 
     // (10) orphaned comment directories (fixable warning).
-    for orphan in orphan_comment_dirs(store, &items) {
+    for orphan in orphan_comment_dirs(store) {
         report.push(
             Severity::Warning,
             "ORPHAN_COMMENTS",
@@ -237,9 +237,14 @@ pub fn diagnose(store: &ItemStore) -> DoctorReport {
         );
     }
 
-    // (11) config validity.
-    if let Err(e) = load_config(store.repo_root()) {
-        report.push(Severity::Error, "CONFIG_ERROR", None, e.to_string(), false);
+    // (11) config validity, plus deprecated-knob warnings.
+    match load_config(store.repo_root()) {
+        Err(e) => report.push(Severity::Error, "CONFIG_ERROR", None, e.to_string(), false),
+        Ok(config) => {
+            if let Some(warning) = config.id_length_warning() {
+                report.push(Severity::Warning, "CONFIG_DEPRECATED", None, warning, false);
+            }
+        }
     }
 
     // (12) `.clove/.gitignore` drift: the file must keep the rebuildable cache
@@ -264,6 +269,12 @@ pub fn diagnose(store: &ItemStore) -> DoctorReport {
 
 /// Apply the safe repairs (checks 8, 9, 10). Returns the number of fixes made.
 pub fn fix(store: &ItemStore) -> Result<usize, CloveError> {
+    // One read-modify-write window under the store-wide write lock: without
+    // it, re-writing an item from our earlier scan could silently revert a
+    // concurrent edit made between the scan and the write (lost update).
+    let mut lock = store.write_lock()?;
+    let _guard = lock.lock()?;
+
     let mut fixed = 0;
 
     let (items, _scan_errors) = store.scan()?;
@@ -305,7 +316,7 @@ pub fn fix(store: &ItemStore) -> Result<usize, CloveError> {
         }
     }
 
-    for orphan in orphan_comment_dirs(store, &items) {
+    for orphan in orphan_comment_dirs(store) {
         let dir = store.issues_dir().join(&orphan);
         if dir.is_dir() {
             std::fs::remove_dir_all(&dir).map_err(|source| CloveError::Io {
@@ -466,26 +477,35 @@ fn is_sorted<T: Ord>(v: &[T]) -> bool {
 }
 
 /// Comment directory names (`<id>`) under `issues/` with no matching `<id>.md`.
-fn orphan_comment_dirs(store: &ItemStore, items: &[crate::model::Item]) -> Vec<String> {
-    let existing: HashSet<String> = items.iter().map(|i| i.frontmatter.id.to_string()).collect();
-    let mut orphans = Vec::new();
+///
+/// The "existing item" set is built from the on-disk `<id>.md` file *stems*,
+/// deliberately NOT from successfully parsed items: an item whose file merely
+/// fails to parse (conflict markers, a bad hand-edit) still owns its comments,
+/// and treating it as absent would let `fix` permanently DELETE real comment
+/// history behind a repairable parse error.
+fn orphan_comment_dirs(store: &ItemStore) -> Vec<String> {
+    let mut item_stems: HashSet<String> = HashSet::new();
+    let mut dirs: Vec<String> = Vec::new();
     let Ok(entries) = std::fs::read_dir(store.issues_dir()) else {
-        return orphans;
+        return dirs;
     };
     for entry in entries.flatten() {
         let Ok(file_type) = entry.file_type() else {
             continue;
         };
-        if !file_type.is_dir() {
-            continue;
-        }
         let Ok(name) = entry.file_name().into_string() else {
             continue;
         };
-        if !existing.contains(&name) {
-            orphans.push(name);
+        if file_type.is_dir() {
+            dirs.push(name);
+        } else if let Some(stem) = name.strip_suffix(".md") {
+            item_stems.insert(stem.to_owned());
         }
     }
+    let mut orphans: Vec<String> = dirs
+        .into_iter()
+        .filter(|name| !item_stems.contains(name))
+        .collect();
     orphans.sort();
     orphans
 }

@@ -37,6 +37,6 @@ describe('renderMarkdown (micromark + GFM + clove-id)', () => {
 
   it('links a clove id in prose', async () => {
     const out = await renderMarkdown('tracking #proj-7af3q2k9 today');
-    expect(out).toContain('<a href="/items/proj-7af3q2k9">#proj-7af3q2k9</a>');
+    expect(out).toContain('<a href="/items/proj-7AF3Q2K9">#proj-7af3q2k9</a>');
   });
 });

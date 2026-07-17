@@ -38,12 +38,7 @@ pub fn run(
     id_prefix: String,
     default_type: ItemType,
 ) -> anyhow::Result<()> {
-    let engine = Engine {
-        clove_dir: clove_dir.clone(),
-        repo_root,
-        id_prefix,
-        default_type,
-    };
+    let engine = Engine::new(clove_dir.clone(), repo_root, id_prefix, default_type);
 
     // Only coordinate through the daemon when the repo actually exists. The
     // server starts even without a `.clove/` (so its tools can report "no

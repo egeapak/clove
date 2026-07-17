@@ -4,7 +4,7 @@ expression: rendered
 ---
   All 2  │  Ready 1  │  Blocked 0
 ┌ Items (2) ───────────────────────────────────┐┌ Overview · Dep tree · Comments ──────────────────────────────────────┐
-│▌◐ F #9QX4D1B7 ! Implement end-to-end offlin… ││ #9QX4D1B7  ! FEATURE                           ◐ in_progress · ready │
+│▌◐ F #9QX4D1B7 ! Implement end-to-end offl… ● ││ #9QX4D1B7  ! FEATURE                           ◐ in_progress · ready │
 │ ● C #7AF3K2MN • Dependency target            ││ Implement end-to-end offline synchronization with co…  @ada · deps 1 │
 │                                              ││──────────────────────────────────────────────────────────────────────│
 │                                              ││ parent     #7AF3K2MN                                                 │

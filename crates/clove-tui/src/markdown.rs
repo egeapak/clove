@@ -97,12 +97,17 @@ impl Renderer {
                 if i > 0 {
                     self.end_line();
                 }
-                if !seg.is_empty() {
-                    self.cur.push(Span::styled(
-                        format!("    {seg}"),
-                        Style::default().fg(CODE),
-                    ));
-                }
+                // An empty segment still contributes a span: `end_line`
+                // no-ops on an empty `cur`, so skipping it entirely would
+                // swallow blank lines inside the code block and fuse the
+                // surrounding lines together.
+                let content = if seg.is_empty() {
+                    String::new()
+                } else {
+                    format!("    {seg}")
+                };
+                self.cur
+                    .push(Span::styled(content, Style::default().fg(CODE)));
             }
         } else {
             let style = self.inline_style();
@@ -208,5 +213,35 @@ impl Renderer {
             self.lines.pop();
         }
         self.lines
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn texts(lines: &[Line<'_>]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn code_block_preserves_blank_lines() {
+        // A blank line inside a fenced block is real code layout; dropping it
+        // fuses the surrounding lines together.
+        let lines = render("```\nfn a() {}\n\nfn b() {}\n```", 80);
+        let rendered = texts(&lines);
+        let a = rendered
+            .iter()
+            .position(|l| l.contains("fn a()"))
+            .expect("first code line rendered");
+        let b = rendered
+            .iter()
+            .position(|l| l.contains("fn b()"))
+            .expect("second code line rendered");
+        assert_eq!(b - a, 2, "blank separator preserved: {rendered:?}");
+        assert!(rendered[a + 1].trim().is_empty());
     }
 }

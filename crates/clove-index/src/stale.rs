@@ -31,6 +31,12 @@ pub struct StalenessReport {
     pub new_ids: Vec<CloveId>,
     /// Index rows whose file no longer exists.
     pub deleted_ids: Vec<CloveId>,
+    /// The `(dir_mtime_ms, file_count)` of `issues_dir` observed when this
+    /// report was computed. [`apply_staleness`] records it as the new `meta`
+    /// oracle — the *check-time* snapshot, so a file added between check and
+    /// apply leaves the stored mtime behind the directory's and the fast path
+    /// falls through to a re-check instead of masking the file.
+    pub observed: Option<(i64, i64)>,
 }
 
 impl StalenessReport {
@@ -162,7 +168,10 @@ pub fn check_staleness(
         }
     }
 
-    let mut report = StalenessReport::default();
+    let mut report = StalenessReport {
+        observed: Some((cur_dir_mtime, cur_count)),
+        ..StalenessReport::default()
+    };
     let mut seen = HashMap::new();
     for entry in &entries {
         seen.insert(entry.id.as_str().to_owned(), ());
@@ -405,6 +414,7 @@ pub(crate) fn apply_staleness_tracked(
             excluded: false,
         };
         write_row(&tx, &item, &meta)?;
+        upsert_file_mtime(&tx, id, &path, &bytes)?;
     }
 
     // Changed-content items: preserve their exact derived columns. If the topology
@@ -430,10 +440,15 @@ pub(crate) fn apply_staleness_tracked(
             excluded: old_derived.excluded,
         };
         write_row(&tx, &item, &meta)?;
+        upsert_file_mtime(&tx, id, &path, &bytes)?;
     }
 
     for id in &report.deleted_ids {
         delete_row(&tx, id.as_str())?;
+        tx.execute(
+            "DELETE FROM file_mtimes WHERE path = ?1",
+            params![format!("{id}.md")],
+        )?;
     }
 
     // Recompute the derived graph columns exactly — but only when this batch
@@ -442,8 +457,54 @@ pub(crate) fn apply_staleness_tracked(
     if topology_changed {
         crate::derive::recompute_derived(&tx)?;
     }
+
+    // Refresh the `meta` oracle to the check-time directory snapshot. Without
+    // this an incremental apply left the last-reindex values in place, so the
+    // O(readdir) clean fast path (`check_staleness_fast`) never matched again
+    // and every later read paid the full per-file stat + table-scan pass until
+    // the next full reindex. Using the *observed* (check-time) snapshot rather
+    // than re-reading the directory now is what makes a file added between
+    // check and apply safe: the stored mtime stays behind the directory's, the
+    // fast path misses, and the next deep check picks the file up.
+    if let Some((dir_mtime, file_count)) = report.observed {
+        tx.execute(
+            "INSERT OR REPLACE INTO meta (id, dir_mtime, file_count, last_git_head) \
+             VALUES (1, ?1, ?2, (SELECT last_git_head FROM meta WHERE id = 1))",
+            params![dir_mtime, file_count],
+        )?;
+    }
+
     tx.commit()?;
     Ok(topology_changed)
+}
+
+/// Upsert an item's `file_mtimes` row (preserving `synced_at`): the incremental
+/// path must maintain this table just like a full reindex, or the git-sync
+/// `synced_at` observability write becomes a silent no-op for any item first
+/// seen after the last full reindex.
+fn upsert_file_mtime(
+    tx: &rusqlite::Transaction<'_>,
+    id: &CloveId,
+    path: &Utf8Path,
+    bytes: &[u8],
+) -> Result<(), IndexError> {
+    let meta = std::fs::metadata(path).map_err(|source| IndexError::IoError {
+        path: path.to_owned(),
+        source,
+    })?;
+    let mtime_ns = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos() as i64)
+        .unwrap_or(0);
+    tx.execute(
+        "INSERT INTO file_mtimes (path, mtime_ns, content_hash) VALUES (?1, ?2, ?3) \
+         ON CONFLICT(path) DO UPDATE SET \
+           mtime_ns = excluded.mtime_ns, content_hash = excluded.content_hash",
+        params![format!("{id}.md"), mtime_ns, &content_hash8(bytes)[..]],
+    )?;
+    Ok(())
 }
 
 /// Remove an item and its edges/labels/FTS shadow row.

@@ -75,7 +75,6 @@ fn render_config(prefix: &str) -> String {
         "# clove configuration. See `clove agent-doc` for the full reference.\n\
          config_schema = 1\n\
          id_prefix = \"{prefix}\"\n\
-         id_length = 8\n\
          default_type = \"feature\"\n\
          default_format = \"human\"\n\
          \n\

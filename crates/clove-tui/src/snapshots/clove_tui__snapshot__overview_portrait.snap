@@ -7,10 +7,10 @@ expression: rendered
 └──────────────────────────────────────┘
 ┌ Items (7) ───────────────────────────┐
 │▌◐ F #9QX4D1B7 ! Build REST API ●     │
-│ ○ B #2HZ6C3PW ↑ Investigate flaky CI │
-│ ● C #7AF3K2MN ↑ Set up database sch… │
+│ ○ B #2HZ6C3PW ↑ Investigate flaky… ● │
+│ ● C #7AF3K2MN ↑ Set up database s…   │
 │ ○ E #3HT6WYG5 • Ship v1 release ●    │
-│ ○ F #K2M8ZP5R • Write integration t… │
+│ ○ F #K2M8ZP5R • Write integration… ✗ │
 │ ○ F #5RB9NC2V • Frontend dashboard ● │
 │ ● D #8XQ4F7DM ↓ Docs site            │
 │                                      │

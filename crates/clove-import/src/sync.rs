@@ -100,13 +100,44 @@ pub struct SyncEntry {
     pub gh_comment_ids: HashSet<u64>,
     /// Body hashes of local comments already on GitHub (push-dedup; also holds the
     /// hashes of pulled-in comments, so they are never pushed back).
+    ///
+    /// Legacy representation: a bare set cannot count *occurrences*, so it is
+    /// superseded by [`SyncEntry::local_comment_hash_counts`] (a set-only hash
+    /// counts as one occurrence). Still written for forward/backward state-file
+    /// compatibility.
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
     pub local_comment_hashes: HashSet<u64>,
+    /// Occurrence counts of local comment bodies already represented on GitHub,
+    /// keyed by [`body_hash`]. Authoritative when a hash is present; see
+    /// [`SyncEntry::comment_hash_counts`]. Without counts, a user commenting
+    /// the same text twice (months apart) would have the second comment
+    /// silently dropped from the push plan forever.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub local_comment_hash_counts: HashMap<u64, u32>,
     /// The local item's assignee at the last sync. Lets a push distinguish the
     /// assignee clove "owns" from extra GitHub assignees a human added, so the
     /// push can replace the former without clobbering the latter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub synced_assignee: Option<String>,
+    /// The remote comment count and the local comment count at the end of the
+    /// last comment sync. When BOTH still match, the per-issue comments GET is
+    /// skipped — on a repo with many linked-but-idle issues this removes
+    /// nearly all per-sync API calls. `None` (pre-tracking state files, or an
+    /// issue whose comment sync errored mid-way) always re-fetches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synced_gh_comments: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synced_local_comments: Option<u64>,
+    /// Fingerprint of the remote issue's *synced content* at the last sync
+    /// (see [`staged_fingerprint`]). With it, "remote changed" requires the
+    /// mapped content to actually differ, not just `updated_at` to move — a
+    /// third-party comment/reaction bumps the clock without changing any
+    /// field, and treating that as a change (combined with a real local edit)
+    /// used to surface a conflict whose `Newer` resolution reverted the local
+    /// edit with stale remote content. `None` (pre-fingerprint state files)
+    /// falls back to clock-only detection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gh_content_hash: Option<u64>,
 }
 
 impl SyncEntry {
@@ -117,8 +148,34 @@ impl SyncEntry {
             local_updated,
             gh_comment_ids: HashSet::new(),
             local_comment_hashes: HashSet::new(),
+            local_comment_hash_counts: HashMap::new(),
+            synced_gh_comments: None,
+            synced_local_comments: None,
             synced_assignee: None,
+            gh_content_hash: None,
         }
+    }
+
+    /// Effective synced-occurrence count per comment body hash: the count map,
+    /// seeded with one occurrence for every legacy set-only hash (state files
+    /// written before the multiset existed).
+    pub fn comment_hash_counts(&self) -> HashMap<u64, u32> {
+        let mut counts = self.local_comment_hash_counts.clone();
+        for hash in &self.local_comment_hashes {
+            counts.entry(*hash).or_insert(1);
+        }
+        counts
+    }
+
+    /// Record one more synced occurrence of a comment body hash (a pull that
+    /// created the local copy, or a push that created the GitHub copy).
+    pub fn record_comment_hash(&mut self, hash: u64) {
+        // Materialize the legacy-set migration first so the increment composes
+        // with pre-multiset bookkeeping; keep the set updated too so an older
+        // binary reading this state file still dedups (at set precision).
+        self.local_comment_hash_counts = self.comment_hash_counts();
+        *self.local_comment_hash_counts.entry(hash).or_insert(0) += 1;
+        self.local_comment_hashes.insert(hash);
     }
 }
 
@@ -222,6 +279,15 @@ impl SyncState {
         entry.gh_updated_at = gh_updated_at;
         entry.local_updated = local_updated;
     }
+
+    /// Record the last-synced remote *content* fingerprint for `external_ref`
+    /// (see [`SyncEntry::gh_content_hash`]). Pair with [`SyncState::record`],
+    /// which refreshes the clocks and creates the entry.
+    pub fn record_content_hash(&mut self, external_ref: &str, hash: u64) {
+        if let Some(entry) = self.entries.get_mut(external_ref) {
+            entry.gh_content_hash = Some(hash);
+        }
+    }
 }
 
 /// A remote issue to be created as a brand-new local item (pull).
@@ -280,6 +346,8 @@ pub struct InSyncEntry {
     pub gh_updated_at: Option<DateTime<Utc>>,
     /// The local `updated` to record.
     pub local_updated: DateTime<Utc>,
+    /// The remote content fingerprint to record ([`staged_fingerprint`]).
+    pub gh_content_hash: u64,
 }
 
 /// A reported both-sides conflict and how it was (or was not) resolved.
@@ -319,6 +387,10 @@ pub struct SyncPlan {
     /// `external_ref`s present locally whose GitHub issue was not found (deleted
     /// remotely, or wrong repo) — reported, never auto-applied.
     pub remote_missing: Vec<String>,
+    /// `external_ref`s owned by a *different* external system (`tk:…`,
+    /// `beads:…`) — not GitHub links, so they take no part in a GitHub sync.
+    /// Reported so the skip is visible, never auto-applied.
+    pub foreign: Vec<String>,
 }
 
 impl SyncPlan {
@@ -367,6 +439,7 @@ impl SyncPlan {
             conflicts: self.conflicts.clone(),
             in_sync: self.in_sync.len(),
             remote_missing: self.remote_missing.clone(),
+            foreign: self.foreign.clone(),
         }
     }
 }
@@ -390,6 +463,8 @@ pub struct SyncSummary {
     pub conflicts: Vec<SyncConflict>,
     pub in_sync: usize,
     pub remote_missing: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub foreign: Vec<String>,
 }
 
 /// What a sync `apply` run actually pushed/pulled.
@@ -470,27 +545,133 @@ pub fn body_hash(body: &str) -> u64 {
     u64::from_le_bytes(head)
 }
 
+/// A stable fingerprint of one side's *synced content* — the fields the sync
+/// round-trips, in a canonical form both sides can produce (blake3, truncated
+/// to 64 bits; persisted in [`SyncEntry::gh_content_hash`], so like
+/// [`body_hash`] the algorithm must stay fixed).
+///
+/// The assignee is deliberately excluded: GitHub does not guarantee the order
+/// of the `assignees` array, and a phantom mismatch there would only re-open
+/// the clock-based path this fingerprint exists to narrow.
+#[allow(clippy::too_many_arguments)]
+fn content_fingerprint(
+    title: &str,
+    closed: bool,
+    priority: u8,
+    item_type: Option<&str>,
+    deps: Option<Vec<&str>>,
+    labels: &[String],
+    body: &str,
+) -> u64 {
+    let mut hasher = blake3::Hasher::new();
+    let mut push = |part: &str| {
+        // Length-prefixed so adjacent fields can never alias each other.
+        hasher.update(&(part.len() as u64).to_le_bytes());
+        hasher.update(part.as_bytes());
+    };
+    push(title);
+    push(if closed { "1" } else { "0" });
+    push(&priority.to_string());
+    push(item_type.unwrap_or(""));
+    match deps {
+        // No clove-meta at all (dep ownership unknown) hashes differently
+        // from meta owning an empty dep set.
+        None => push("<no-meta>"),
+        Some(mut d) => {
+            d.sort_unstable();
+            push(&d.join(","));
+        }
+    }
+    let mut sorted_labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+    sorted_labels.sort_unstable();
+    push(&sorted_labels.join(","));
+    push(body.trim());
+
+    let digest = hasher.finalize();
+    let head: [u8; 8] = digest.as_bytes()[..8]
+        .try_into()
+        .expect("blake3 digest is 32 bytes");
+    u64::from_le_bytes(head)
+}
+
+/// [`content_fingerprint`] of a mapped remote issue (the pull-side view).
+pub fn staged_fingerprint(staged: &StagedIssue) -> u64 {
+    content_fingerprint(
+        &staged.title,
+        staged.status == ItemStatus::Closed,
+        staged.priority.get(),
+        staged.item_type.map(clove_types::ItemType::as_str),
+        staged
+            .deps
+            .as_ref()
+            .map(|deps| deps.iter().map(CloveId::as_str).collect()),
+        &staged.labels,
+        &staged.body,
+    )
+}
+
+/// [`content_fingerprint`] of a local item's push payload — i.e. what the
+/// remote issue will map to *after* this payload is pushed. Decodes the
+/// `clove-meta` marker exactly the way [`map_issue`] will on the next fetch,
+/// so `export_fingerprint(pushed) == staged_fingerprint(map_issue(fetched))`.
+pub fn export_fingerprint(item: &ExportItem) -> u64 {
+    use crate::github::{decode_clove_meta, strip_clove_meta};
+    let meta = decode_clove_meta(&item.body);
+    let has_meta = meta.is_some();
+    let meta = meta.unwrap_or_default();
+    let priority = meta
+        .priority
+        .map(|p| crate::map::coerce_priority(i64::from(p)))
+        .unwrap_or(Priority::DEFAULT)
+        .get();
+    let item_type = meta
+        .item_type
+        .as_deref()
+        .and_then(|t| clove_types::ItemType::parse(t).ok());
+    let deps: Option<Vec<String>> = has_meta.then(|| {
+        meta.deps
+            .iter()
+            .filter_map(|d| CloveId::new(d.trim()).ok())
+            .map(|id| id.to_string())
+            .collect()
+    });
+    content_fingerprint(
+        &item.title,
+        item.closed,
+        priority,
+        item_type.map(clove_types::ItemType::as_str),
+        deps.as_ref()
+            .map(|d| d.iter().map(String::as_str).collect()),
+        &item.labels,
+        &strip_clove_meta(&item.body),
+    )
+}
+
 /// Reconcile an issue's GitHub comments against its local sidecar comments,
 /// given the prior per-issue bookkeeping in `entry`.
 ///
-/// Dedup is symmetric and stateless-per-comment: a GitHub comment is pulled
-/// unless its id was already seen; a local comment is pushed unless its body hash
-/// was already seen. Pulling a comment also marks its body hash seen (so the
-/// freshly-created local copy is never pushed back), so a clean first pass over a
-/// shared thread converges without duplication.
+/// A GitHub comment is pulled unless its id was already seen. Local comments
+/// are pushed by a **multiset** diff on body hashes: each already-synced
+/// occurrence of a body (previously pushed, or just pulled — the fresh local
+/// copy must not echo back) consumes one matching local comment, and only the
+/// surplus is pushed. A plain set would collapse repeats: a user commenting
+/// the same text twice would never get the second one pushed.
 pub fn plan_comments(gh: &[GhComment], local: &[LocalComment], entry: &SyncEntry) -> CommentPlan {
     let mut seen_gh = entry.gh_comment_ids.clone();
-    let mut seen_local = entry.local_comment_hashes.clone();
+    let mut synced = entry.comment_hash_counts();
     let mut plan = CommentPlan::default();
 
     for comment in gh {
         if seen_gh.insert(comment.id) {
-            seen_local.insert(body_hash(&comment.body));
+            *synced.entry(body_hash(&comment.body)).or_insert(0) += 1;
             plan.pull.push(comment.clone());
         }
     }
     for comment in local {
-        if seen_local.insert(body_hash(&comment.body)) {
+        let remaining = synced.entry(body_hash(&comment.body)).or_insert(0);
+        if *remaining > 0 {
+            *remaining -= 1;
+        } else {
             plan.push.push(comment.clone());
         }
     }
@@ -499,8 +680,9 @@ pub fn plan_comments(gh: &[GhComment], local: &[LocalComment], entry: &SyncEntry
 
 /// The Unix epoch as a UTC datetime — the "infinitely old" fallback for a
 /// missing timestamp, so an item with no recorded clock always looks unchanged
-/// rather than spuriously newer.
-fn epoch() -> DateTime<Utc> {
+/// rather than spuriously newer. (Also used by the apply layer to *backdate* a
+/// recorded local clock so the next sync is forced to re-examine a pair.)
+pub(crate) fn epoch() -> DateTime<Utc> {
     DateTime::<Utc>::from_timestamp(0, 0).expect("epoch is valid")
 }
 
@@ -562,6 +744,26 @@ fn content_equal(staged: &StagedIssue, obj: &Map<String, Value>) -> bool {
     if staged_labels != local_labels {
         return false;
     }
+    // Type/deps are only comparable when the remote body carried clove-meta
+    // (`None` = unknown, which never counts as a difference).
+    if let Some(t) = staged.item_type {
+        if !s("type").eq_ignore_ascii_case(t.as_str()) {
+            return false;
+        }
+    }
+    if let Some(remote_deps) = &staged.deps {
+        let mut local_deps: Vec<&str> = obj
+            .get("deps")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        local_deps.sort_unstable();
+        let mut remote: Vec<&str> = remote_deps.iter().map(CloveId::as_str).collect();
+        remote.sort_unstable();
+        if remote != local_deps {
+            return false;
+        }
+    }
     let local_body = s("body").trim();
     staged.body.trim() == local_body
 }
@@ -606,6 +808,10 @@ pub fn plan_sync(
                 item,
                 local_updated,
             }),
+            // Linked to a *different* external system (`tk:…`, `beads:…`) — not
+            // a GitHub link at all, so it neither matches a remote issue nor
+            // counts as "deleted remotely". Skipped, reported.
+            Some(ext) if parse_gh_number(&ext).is_none() => plan.foreign.push(ext),
             Some(ext) => match remote_by_ref.get(ext.as_str()) {
                 // Linked locally but the remote issue is gone.
                 None => plan.remote_missing.push(ext),
@@ -659,11 +865,21 @@ fn decide_linked(
     state: &SyncState,
     policy: ConflictPolicy,
 ) -> Result<(), String> {
+    let remote_hash = staged_fingerprint(&staged);
     let (remote_chg, local_chg) = match state.entries.get(ext) {
-        Some(entry) => (
-            remote_changed(issue.updated_at, entry.gh_updated_at),
-            local_updated > entry.local_updated,
-        ),
+        Some(entry) => {
+            let clock_newer = remote_changed(issue.updated_at, entry.gh_updated_at);
+            // With a recorded content fingerprint, "remote changed" requires
+            // the mapped content to actually differ: a comment/reaction bumps
+            // `updated_at` without changing any synced field, and a phantom
+            // change here (combined with a real local edit) would resolve as a
+            // conflict that reverts the local edit with stale remote content.
+            let remote = match entry.gh_content_hash {
+                Some(prev) => clock_newer && prev != remote_hash,
+                None => clock_newer, // pre-fingerprint state file
+            };
+            (remote, local_updated > entry.local_updated)
+        }
         // No prior sync for an already-linked pair: compare content so a first
         // `sync` can never silently clobber a side.
         None => {
@@ -677,9 +893,21 @@ fn decide_linked(
             external_ref: ext.to_owned(),
             gh_updated_at: issue.updated_at,
             local_updated,
+            gh_content_hash: remote_hash,
         }),
         (true, false) => push_pull_update(plan, clove_id, staged)?,
         (false, true) => push_push_update(plan, ext, clove_id, item, local_updated, issue),
+        // Both clocks moved but the synced content agrees — e.g. a third-party
+        // GitHub comment bumped the issue's `updated_at` without changing any
+        // field, alongside a local edit that was already pushed (or vice
+        // versa). Not a real conflict: refresh the fingerprint instead of
+        // letting the policy overwrite one side with identical/stale content.
+        (true, true) if content_equal(&staged, obj) => plan.in_sync.push(InSyncEntry {
+            external_ref: ext.to_owned(),
+            gh_updated_at: issue.updated_at,
+            local_updated,
+            gh_content_hash: remote_hash,
+        }),
         (true, true) => resolve_conflict(
             plan,
             ext,
@@ -1118,6 +1346,177 @@ mod tests {
     }
 
     #[test]
+    fn foreign_external_ref_is_skipped_not_remote_missing() {
+        // An item imported from tk/beads carries a non-GitHub external_ref: it
+        // takes no part in a GitHub sync — neither "deleted remotely" nor a
+        // push-create candidate.
+        let plan = plan_sync(
+            &[],
+            &[local(
+                "proj-AAAA1111",
+                "From tk",
+                "open",
+                Some("tk:abc-123"),
+                "2026-06-03T00:00:00Z",
+            )],
+            &SyncState::default(),
+            ConflictPolicy::Newer,
+        )
+        .unwrap();
+        assert!(plan.remote_missing.is_empty());
+        assert!(plan.push_create.is_empty());
+        assert_eq!(plan.foreign, vec!["tk:abc-123".to_owned()]);
+        assert!(plan.is_noop());
+    }
+
+    #[test]
+    fn invalid_meta_dep_id_does_not_abort_the_plan() {
+        // Anyone who can edit an issue body can plant a malformed clove-meta;
+        // a bad dep id must be dropped, not abort the whole sync.
+        let mut bad = issue(7, "Foreign meta", "open", "2026-06-04T00:00:00Z");
+        bad.body = Some("Body.\n\n<!-- clove-meta: {\"deps\":[\"lol\"]} -->".to_owned());
+        let plan = plan_sync(&[bad], &[], &SyncState::default(), ConflictPolicy::Newer)
+            .expect("a bad dep id in a foreign body must not fail the plan");
+        assert_eq!(plan.pull_create.len(), 1);
+        assert_eq!(plan.pull_create[0].staged.deps, Some(Vec::new()));
+    }
+
+    #[test]
+    fn phantom_remote_bump_with_local_edit_is_a_push_not_a_conflict() {
+        // Last sync recorded the remote content fingerprint. A third-party
+        // comment then bumps the remote `updated_at` (content unchanged) and
+        // the user edits the local title. Clock-only detection called this a
+        // both-sides conflict and `Newer` reverted the local edit with stale
+        // remote content; the fingerprint proves the remote did not change.
+        let remote = issue(7, "Same title", "open", "2026-06-04T00:00:00Z");
+        let hash = staged_fingerprint(&map_issue(&remote).unwrap());
+        let mut state = SyncState::default();
+        state.record(
+            "gh-7",
+            Some(ts("2026-06-01T00:00:00Z")),
+            ts("2026-06-01T00:00:00Z"),
+        );
+        state.record_content_hash("gh-7", hash);
+
+        let plan = plan_sync(
+            &[remote],
+            &[local(
+                "proj-AAAA1111",
+                "Locally edited title",
+                "open",
+                Some("gh-7"),
+                "2026-06-03T00:00:00Z",
+            )],
+            &state,
+            ConflictPolicy::Newer,
+        )
+        .unwrap();
+        assert!(plan.conflicts.is_empty(), "no phantom conflict");
+        assert_eq!(plan.push_update.len(), 1, "local edit pushes");
+        assert!(plan.pull_update.is_empty());
+    }
+
+    #[test]
+    fn real_remote_change_with_local_edit_is_still_a_conflict() {
+        // Same clocks as above, but the remote content genuinely differs from
+        // the recorded fingerprint → the conflict machinery still engages.
+        let old_remote = issue(7, "Old remote title", "open", "2026-06-01T00:00:00Z");
+        let hash = staged_fingerprint(&map_issue(&old_remote).unwrap());
+        let mut state = SyncState::default();
+        state.record(
+            "gh-7",
+            Some(ts("2026-06-01T00:00:00Z")),
+            ts("2026-06-01T00:00:00Z"),
+        );
+        state.record_content_hash("gh-7", hash);
+
+        let plan = plan_sync(
+            &[issue(7, "New remote title", "open", "2026-06-04T00:00:00Z")],
+            &[local(
+                "proj-AAAA1111",
+                "Locally edited title",
+                "open",
+                Some("gh-7"),
+                "2026-06-03T00:00:00Z",
+            )],
+            &state,
+            ConflictPolicy::Newer,
+        )
+        .unwrap();
+        assert_eq!(plan.conflicts.len(), 1);
+        assert_eq!(plan.conflicts[0].resolution, "remote_wins");
+    }
+
+    #[test]
+    fn export_and_staged_fingerprints_agree_after_a_push() {
+        // What we hash when pushing must equal what we hash when the pushed
+        // payload is fetched back and mapped — otherwise every push would look
+        // like a remote change on the next sync.
+        let obj: Map<String, Value> = json!({
+            "id": "proj-AAAA1111",
+            "title": "Round trip",
+            "body": "The body.",
+            "priority": 1,
+            "type": "bug",
+            "deps": ["proj-BBBB2222"],
+            "labels": ["area:core", "bug"],
+            "status": "open",
+            "updated": "2026-06-03T00:00:00Z",
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let item = build_export_item(&obj);
+
+        // Simulate GitHub echoing the pushed payload back on the next fetch.
+        let echoed = GitHubIssue {
+            number: 7,
+            title: item.title.clone(),
+            state: "open".to_owned(),
+            body: Some(item.body.clone()),
+            labels: item
+                .labels
+                .iter()
+                .map(|l| crate::github::GitHubLabel { name: l.clone() })
+                .collect(),
+            updated_at: Some(ts("2026-06-04T00:00:00Z")),
+            ..Default::default()
+        };
+        let staged = map_issue(&echoed).unwrap();
+        assert_eq!(export_fingerprint(&item), staged_fingerprint(&staged));
+    }
+
+    #[test]
+    fn both_clocks_moved_but_identical_content_is_in_sync() {
+        // A third-party GitHub comment bumps `updated_at` without changing any
+        // synced field; with a concurrent local clock bump but identical
+        // content this must not surface as a conflict (which would overwrite a
+        // side with identical/stale content).
+        let mut state = SyncState::default();
+        state.record(
+            "gh-7",
+            Some(ts("2026-06-01T00:00:00Z")),
+            ts("2026-06-01T00:00:00Z"),
+        );
+        let plan = plan_sync(
+            &[issue(7, "Same", "open", "2026-06-04T00:00:00Z")],
+            &[local(
+                "proj-AAAA1111",
+                "Same",
+                "open",
+                Some("gh-7"),
+                "2026-06-03T00:00:00Z",
+            )],
+            &state,
+            ConflictPolicy::Newer,
+        )
+        .unwrap();
+        assert!(plan.conflicts.is_empty());
+        assert_eq!(plan.in_sync.len(), 1);
+        assert!(plan.is_noop());
+    }
+
+    #[test]
     fn in_progress_local_equals_open_remote() {
         // GitHub has no in_progress; a local in_progress must not flap against a
         // remote open when no other field differs.
@@ -1247,6 +1646,42 @@ mod tests {
         );
         assert_eq!(plan.pull.len(), 1);
         assert!(plan.push.is_empty(), "identical body must not echo back");
+    }
+
+    #[test]
+    fn repeat_identical_local_comment_still_pushes() {
+        // "done." was pushed months ago (recorded once); the user comments
+        // "done." again. The surplus occurrence must push — a plain hash set
+        // dropped it forever.
+        let mut entry = SyncEntry::new(None, ts("2026-06-01T00:00:00Z"));
+        entry.record_comment_hash(body_hash("done."));
+        let plan = plan_comments(
+            &[],
+            &[local_comment("done."), local_comment("done.")],
+            &entry,
+        );
+        assert_eq!(plan.push.len(), 1, "only the surplus occurrence pushes");
+    }
+
+    #[test]
+    fn two_new_identical_local_comments_both_push() {
+        let entry = SyncEntry::new(None, ts("2026-06-01T00:00:00Z"));
+        let plan = plan_comments(&[], &[local_comment("same"), local_comment("same")], &entry);
+        assert_eq!(plan.push.len(), 2);
+    }
+
+    #[test]
+    fn legacy_set_only_state_counts_as_one_occurrence() {
+        // A pre-multiset state file has the hash only in the legacy set: it
+        // must satisfy exactly one local occurrence, not all of them.
+        let mut entry = SyncEntry::new(None, ts("2026-06-01T00:00:00Z"));
+        entry.local_comment_hashes.insert(body_hash("hi"));
+        let plan = plan_comments(&[], &[local_comment("hi"), local_comment("hi")], &entry);
+        assert_eq!(plan.push.len(), 1);
+
+        // And recording on top of the legacy set composes (1 legacy + 1 new).
+        entry.record_comment_hash(body_hash("hi"));
+        assert_eq!(entry.comment_hash_counts()[&body_hash("hi")], 2);
     }
 
     #[test]

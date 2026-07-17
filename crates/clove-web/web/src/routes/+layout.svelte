@@ -3,6 +3,7 @@
   import { onMount } from 'svelte';
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
+  import { base } from '$app/paths';
   import { theme } from '$lib/theme.svelte';
   import { store, startLive } from '$lib/store.svelte';
   import ThemeSwitcher from '$lib/components/ThemeSwitcher.svelte';
@@ -44,10 +45,15 @@
   function submitSearch(e: Event) {
     e.preventDefault();
     const q = search.trim();
-    goto(`./list${q ? '?q=' + encodeURIComponent(q) : ''}`);
+    // Base-relative, NOT `./`-relative: a relative URL resolves against the
+    // current path, so `./list` from `/items/proj-X` lands on `/items/list`.
+    goto(`${base}/list${q ? '?q=' + encodeURIComponent(q) : ''}`);
   }
 
   function onKey(e: KeyboardEvent) {
+    // Never hijack modified keys: Ctrl/Cmd+C must stay "copy", not "create"
+    // (the TUI handles this same pitfall via its modified_char guard).
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
     const tag = (e.target as HTMLElement)?.tagName;
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
       if (e.key === 'Escape') (e.target as HTMLElement).blur();
@@ -72,9 +78,9 @@
     cancelChord();
     const once = (ev: KeyboardEvent) => {
       cancelChord(); // remove-first, then branch
-      if (ev.key === 'b') goto('./board');
-      else if (ev.key === 'l') goto('./list');
-      else if (ev.key === 't') goto('./timeline');
+      if (ev.key === 'b') goto(`${base}/board`);
+      else if (ev.key === 'l') goto(`${base}/list`);
+      else if (ev.key === 't') goto(`${base}/timeline`);
     };
     function cancelChord() {
       window.removeEventListener('keydown', once, true);
@@ -91,7 +97,7 @@
 <svelte:window on:keydown={onKey} />
 
 <div class="topbar">
-  <a class="logo" href="./board">
+  <a class="logo" href="{base}/board">
     <svg class="leaf" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"
       ><path
         d="M12 2C7 5 4 9 4 14a8 8 0 0 0 16 0c0-5-3-9-8-12zm0 4.5c2.8 2 4.5 4.6 4.5 7.5a4.5 4.5 0 0 1-9 0c0-2.9 1.7-5.5 4.5-7.5z"
@@ -101,7 +107,7 @@
   </a>
   <nav class="tabs" aria-label="Views">
     {#each tabs as t (t.href)}
-      <a class="tab" class:active={isActive(t.href)} href="./{t.href}">{t.label}</a>
+      <a class="tab" class:active={isActive(t.href)} href="{base}/{t.href}">{t.label}</a>
     {/each}
   </nav>
   <form class="search" onsubmit={submitSearch}>

@@ -60,6 +60,8 @@ fn push_tree_node(
     spans.push(Span::raw(truncate(&node.title, 48)));
     if node.cycle_ref {
         spans.push(Span::styled(" (cycle)", Style::default().fg(Color::Red)));
+    } else if node.repeat_ref {
+        spans.push(Span::styled(" (*)", Style::default().fg(DIM)));
     } else if node.ready {
         spans.push(Span::styled(" [ready]", Style::default().fg(Color::Green)));
     }

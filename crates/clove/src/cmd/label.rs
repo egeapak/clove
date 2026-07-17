@@ -1,7 +1,11 @@
 //! `clove label <id> <add|rm> <label>` (T-CLI07).
+//!
+//! Thin shim over the unified [`EditRequest`] label-delta path (the same one
+//! the web `PUT /labels` and MCP `add_labels`/`remove_labels` use), so the
+//! normalize/sort/dedup semantics live in exactly one place.
 
-use clove_core::OutputFormat;
-use clove_types::{normalize_label, CloveError};
+use clove_core::{apply_edit, OutputFormat};
+use clove_types::{CloveError, EditRequest, LabelEdit};
 use serde_json::Map;
 
 use crate::context::Ctx;
@@ -16,27 +20,31 @@ pub fn run(
     label: &str,
 ) -> Result<(), CloveError> {
     let id = parse_id(id)?;
-    let mut item = ctx.store.get(&id)?;
-    let canonical = normalize_label(label)?;
 
-    match action.to_ascii_lowercase().as_str() {
-        "add" => {
-            if !item.frontmatter.labels.contains(&canonical) {
-                item.frontmatter.labels.push(canonical);
-                item.frontmatter.labels.sort();
-                item.frontmatter.labels.dedup();
-            }
-        }
-        "rm" | "remove" => item.frontmatter.labels.retain(|l| l != &canonical),
+    let labels = match action.to_ascii_lowercase().as_str() {
+        "add" => LabelEdit::Delta {
+            add: vec![label.to_owned()],
+            remove: Vec::new(),
+        },
+        "rm" | "remove" => LabelEdit::Delta {
+            add: Vec::new(),
+            remove: vec![label.to_owned()],
+        },
         other => {
             return Err(CloveError::InvalidField {
                 field: "action".to_owned(),
                 reason: format!("expected add|rm, got `{other}`"),
             })
         }
-    }
+    };
 
-    let saved = ctx.store.update(&item, now_seconds())?;
+    let req = EditRequest {
+        labels: Some(labels),
+        ..EditRequest::default()
+    };
+    apply_edit(&ctx.store, &id, &req, now_seconds())?;
+
+    let saved = ctx.store.get(&id)?;
     print_item(format, &saved, Map::new());
     Ok(())
 }

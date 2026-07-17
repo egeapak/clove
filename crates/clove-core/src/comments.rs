@@ -64,16 +64,35 @@ pub fn add_comment_at(
     let slug = author_slug(author_email);
 
     // Retry on the astronomically unlikely random-suffix collision.
+    // `create_new` makes the check-and-create atomic: an `exists()` probe
+    // followed by `write` (which truncates) would let two processes that
+    // picked the same name silently overwrite one comment with the other.
     const MAX_ATTEMPTS: u32 = 5;
     for _ in 0..MAX_ATTEMPTS {
         let suffix = random_suffix();
         let path = dir.join(format!("{ts_str}-{slug}-{suffix}.md"));
-        if !path.exists() {
-            std::fs::write(&path, body).map_err(|source| CloveError::Io {
-                path: path.clone(),
-                source,
-            })?;
-            return Ok(path);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path.as_std_path())
+        {
+            Ok(mut file) => {
+                use std::io::Write as _;
+                file.write_all(body.as_bytes())
+                    .and_then(|()| file.sync_all())
+                    .map_err(|source| CloveError::Io {
+                        path: path.clone(),
+                        source,
+                    })?;
+                return Ok(path);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(source) => {
+                return Err(CloveError::Io {
+                    path: path.clone(),
+                    source,
+                })
+            }
         }
     }
     Err(CloveError::CommentConflict {

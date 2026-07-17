@@ -631,16 +631,16 @@ fn config_validate_rejects_bad_fields() {
     };
     assert!(bad_prefix.validate(p).is_err());
 
-    // Out-of-range id_length.
-    for bad in [0u8, 3, 13] {
+    // id_length is deprecated-and-ignored: ANY value loads (older versions
+    // wrote/accepted it, so rejecting would brick existing repos), but a
+    // non-default value carries a doctor warning.
+    for value in [0u8, 3, 13] {
         let cfg = CloveConfig {
-            id_length: bad,
+            id_length: value,
             ..Default::default()
         };
-        assert!(
-            cfg.validate(p).is_err(),
-            "id_length {bad} should be rejected"
-        );
+        assert!(cfg.validate(p).is_ok(), "id_length {value} must load");
+        assert!(cfg.id_length_warning().is_some());
     }
 
     // Wrong config_schema.
@@ -835,6 +835,47 @@ labels:\n- Area:Core\n---\nbody\n";
 
     let after = diagnose(&store);
     assert_eq!(after.warnings(), 0, "issues: {:?}", after.issues);
+}
+
+#[test]
+fn doctor_never_deletes_comments_of_an_unparseable_item() {
+    // An item whose FILE EXISTS but fails to parse (e.g. leftover conflict
+    // markers) still owns its comments: they must be neither reported as
+    // orphaned nor deleted by `fix` — the parse error is repairable, deleted
+    // comment history is not.
+    let (_tmp, store) = repo();
+    std::fs::write(
+        CloveConfig::path_in(store.repo_root()),
+        "id_prefix = \"proj\"\n",
+    )
+    .unwrap();
+
+    let broken_id = "proj-BROKEN00";
+    std::fs::write(
+        store.issues_dir().join(format!("{broken_id}.md")),
+        "---\n<<<<<<< ours\nschema: 1\n---\nbody\n",
+    )
+    .unwrap();
+    let comments_dir = store.issues_dir().join(broken_id).join("comments");
+    std::fs::create_dir_all(&comments_dir).unwrap();
+    let comment_file = comments_dir.join("20260602T100000.000000000Z-ege-example-com-abcd.md");
+    std::fs::write(&comment_file, "precious comment").unwrap();
+
+    let report = diagnose(&store);
+    assert!(
+        report
+            .issues
+            .iter()
+            .all(|issue| issue.code != "ORPHAN_COMMENTS"),
+        "unparseable item's comments misreported as orphaned: {:?}",
+        report.issues
+    );
+
+    doctor_fix(&store).unwrap();
+    assert!(
+        comment_file.exists(),
+        "fix deleted the comments of an unparseable item"
+    );
 }
 
 #[test]

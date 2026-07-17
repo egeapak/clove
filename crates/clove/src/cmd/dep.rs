@@ -13,12 +13,17 @@ use crate::item_json::print_item;
 use crate::output::print_json_success;
 use crate::util::{now_seconds, parse_id};
 
-pub fn run(ctx: &Ctx, format: OutputFormat, action: DepAction) -> Result<ExitCode, CloveError> {
+pub fn run(
+    ctx: &Ctx,
+    format: OutputFormat,
+    action: DepAction,
+    no_index: bool,
+) -> Result<ExitCode, CloveError> {
     match action {
         DepAction::Add { id, dep_id } => add(ctx, format, &id, &dep_id).map(|_| ExitCode::Success),
         DepAction::Rm { id, dep_id } => rm(ctx, format, &id, &dep_id).map(|_| ExitCode::Success),
-        DepAction::Tree(args) => tree(ctx, format, args).map(|_| ExitCode::Success),
-        DepAction::Cycle(args) => cycle(ctx, format, args),
+        DepAction::Tree(args) => tree(ctx, format, args, no_index).map(|_| ExitCode::Success),
+        DepAction::Cycle(args) => cycle(ctx, format, args, no_index),
     }
 }
 
@@ -46,14 +51,19 @@ fn rm(ctx: &Ctx, format: OutputFormat, id_s: &str, dep_s: &str) -> Result<(), Cl
     Ok(())
 }
 
-fn tree(ctx: &Ctx, format: OutputFormat, args: DepTreeArgs) -> Result<(), CloveError> {
+fn tree(
+    ctx: &Ctx,
+    format: OutputFormat,
+    args: DepTreeArgs,
+    no_index: bool,
+) -> Result<(), CloveError> {
     let id = parse_id(&args.id)?;
     if !ctx.store.exists(&id) {
         return Err(CloveError::NotFound { id: id.to_string() });
     }
     let depth = if args.full { usize::MAX } else { args.depth };
     // Daemon fast path: serve the tree from the daemon's cached graph.
-    let root = match dep_tree_via_daemon(ctx, &id, depth) {
+    let root = match dep_tree_via_daemon(ctx, no_index, &id, depth) {
         Some(node_opt) => node_opt.ok_or_else(|| CloveError::NotFound { id: id.to_string() })?,
         None => {
             let (frontmatters, _errors) = ctx.store.scan_frontmatter()?;
@@ -80,9 +90,14 @@ fn tree(ctx: &Ctx, format: OutputFormat, args: DepTreeArgs) -> Result<(), CloveE
     Ok(())
 }
 
-fn cycle(ctx: &Ctx, format: OutputFormat, args: DepCycleArgs) -> Result<ExitCode, CloveError> {
+fn cycle(
+    ctx: &Ctx,
+    format: OutputFormat,
+    args: DepCycleArgs,
+    no_index: bool,
+) -> Result<ExitCode, CloveError> {
     // Daemon fast path: serve cycles from the daemon's cached graph.
-    let cycles: Vec<Vec<String>> = match cycles_via_daemon(ctx) {
+    let cycles: Vec<Vec<String>> = match cycles_via_daemon(ctx, no_index) {
         Some(cycles) => cycles,
         None => {
             let (frontmatters, _errors) = ctx.store.scan_frontmatter()?;
@@ -158,7 +173,15 @@ fn daemon_client(ctx: &Ctx) -> Option<DaemonClient> {
 
 /// Daemon-served dependency tree. Outer `None` = no daemon (caller falls back);
 /// inner `None` = daemon reports the root unknown.
-fn dep_tree_via_daemon(ctx: &Ctx, root: &CloveId, depth: usize) -> Option<Option<DepTreeNode>> {
+fn dep_tree_via_daemon(
+    ctx: &Ctx,
+    no_index: bool,
+    root: &CloveId,
+    depth: usize,
+) -> Option<Option<DepTreeNode>> {
+    if no_index {
+        return None;
+    }
     let mut client = daemon_client(ctx)?;
     match client.graph(GraphRequest::Tree {
         root: root.to_string(),
@@ -170,7 +193,10 @@ fn dep_tree_via_daemon(ctx: &Ctx, root: &CloveId, depth: usize) -> Option<Option
 }
 
 /// Daemon-served cycles (member ids). `None` = no daemon.
-fn cycles_via_daemon(ctx: &Ctx) -> Option<Vec<Vec<String>>> {
+fn cycles_via_daemon(ctx: &Ctx, no_index: bool) -> Option<Vec<Vec<String>>> {
+    if no_index {
+        return None;
+    }
     let mut client = daemon_client(ctx)?;
     match client.graph(GraphRequest::Cycles) {
         Ok(GraphResponse::Cycles { cycles }) => Some(cycles),

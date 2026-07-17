@@ -27,8 +27,9 @@ pub enum QueryMode {
 #[derive(Debug, Default, Clone)]
 pub struct Filter {
     pub mode: QueryMode,
-    /// Restrict to these statuses (ignored in [`QueryMode::Ready`], which fixes
-    /// the active set).
+    /// Restrict to these statuses. In [`QueryMode::Ready`] the requested set is
+    /// *intersected* with the fixed active set (open/in_progress), matching the
+    /// file path, which applies the status filter to the ready list.
     pub status: Option<Vec<ItemStatus>>,
     pub item_type: Option<ItemType>,
     pub priority: Option<Priority>,
@@ -47,7 +48,30 @@ fn where_clause(filter: &Filter) -> (String, Vec<Box<dyn ToSql>>) {
 
     match filter.mode {
         QueryMode::Ready => {
-            where_clauses.push("status IN ('open', 'in_progress')".to_owned());
+            // The ready set is fixed to active statuses; an explicit --status
+            // filter narrows *within* it (`ready --status in_progress` must
+            // return the same rows the file path returns, not ignore the flag).
+            let active: Vec<&ItemStatus> = match &filter.status {
+                Some(statuses) => statuses
+                    .iter()
+                    .filter(|s| matches!(s, ItemStatus::Open | ItemStatus::InProgress))
+                    .collect(),
+                None => Vec::new(),
+            };
+            if filter.status.is_some() {
+                if active.is_empty() {
+                    // e.g. `ready --status closed`: nothing can match.
+                    where_clauses.push("FALSE".to_owned());
+                } else {
+                    let placeholders = vec!["?"; active.len()].join(", ");
+                    where_clauses.push(format!("status IN ({placeholders})"));
+                    for s in active {
+                        params.push(Box::new(s.as_str().to_owned()));
+                    }
+                }
+            } else {
+                where_clauses.push("status IN ('open', 'in_progress')".to_owned());
+            }
             where_clauses.push("has_dangling_deps = FALSE".to_owned());
             // Exclude hard-cycle / malformed-parent members, matching the
             // in-memory `GraphStore::ready_items` exactly (M4 P1). `excluded` is

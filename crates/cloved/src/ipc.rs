@@ -412,11 +412,19 @@ impl Dispatcher {
             .map_err(|_| RpcError::new("internal", "index lock poisoned"))?;
         let report = clove_index::reindex(&self.issues_dir, &self.db_path)
             .map_err(|e| RpcError::new("reindex_failed", e.to_string()))?;
-        if let Ok(fresh) = Index::open_or_create(&self.db_path) {
-            *index = fresh;
-            if let Ok(mut state) = self.state.lock() {
-                state.set_items_indexed(index.item_count().unwrap_or(0) as u64);
-            }
+        // A failed reopen must surface: silently keeping the old handle would
+        // leave the daemon serving the *replaced* (unlinked) inode — diverging
+        // from the on-disk index.db every other process sees — while telling
+        // the client the reindex succeeded.
+        let fresh = Index::open_or_create(&self.db_path).map_err(|e| {
+            RpcError::new(
+                "reindex_reopen_failed",
+                format!("index rebuilt but the daemon could not reopen it: {e}"),
+            )
+        })?;
+        *index = fresh;
+        if let Ok(mut state) = self.state.lock() {
+            state.set_items_indexed(index.item_count().unwrap_or(0) as u64);
         }
         drop(index);
         // The index was rebuilt and reopened; rebuild the hot graph from it.

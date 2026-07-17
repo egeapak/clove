@@ -133,17 +133,10 @@ pub fn merge_set<X: Ord + Clone>(base: &[X], ours: &[X], theirs: &[X]) -> SetMer
         });
     }
 
-    // union(ours, theirs) \ (base \ ours \ theirs)
-    //   = elements present in ours or theirs (everything removed-by-both is
-    //     already excluded because the conflict check above passed, so the only
-    //     base elements missing here are ones removed by *both* sides).
-    let mut merged: BTreeSet<X> = ours_set.union(&theirs_set).cloned().collect();
-    // Subtract base elements that neither side kept (removed by both).
-    for b in &base_set {
-        if !ours_set.contains(b) && !theirs_set.contains(b) {
-            merged.remove(b);
-        }
-    }
+    // With no remove/add conflict, the resolved set is exactly
+    // union(ours, theirs): an element removed by both sides is absent from both
+    // sets and therefore absent from the union — no explicit subtraction needed.
+    let merged: BTreeSet<X> = ours_set.union(&theirs_set).cloned().collect();
     SetMergeResult::Resolved(merged.into_iter().collect())
 }
 

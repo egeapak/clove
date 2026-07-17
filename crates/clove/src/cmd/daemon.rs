@@ -45,30 +45,26 @@ fn start(clove_dir: &Utf8Path, format: OutputFormat) -> Result<ExitCode, CloveEr
         );
     }
 
-    clove_ipc::spawn_daemon(clove_dir).map_err(|e| daemon_err(&format!("spawning cloved: {e}")))?;
-
-    // Wait for readiness. The pid file appears after bind + the startup sweep, but
-    // the daemon only *answers IPC* once its accept loop is actually polling — a
-    // window a slow runner (or extra startup work) can widen. Gate readiness on a
-    // real probe round-trip, not just the pid file's existence, so a status/read
-    // issued right after `start` returns is guaranteed to connect; then read the
-    // pid to report it.
-    let pid_file = pid_path(clove_dir);
-    let start = Instant::now();
-    while start.elapsed() < WAIT_TIMEOUT {
-        if DaemonClient::probe(clove_dir).is_some() {
-            let pid = std::fs::read_to_string(&pid_file)
-                .map(|s| s.trim().to_owned())
-                .unwrap_or_default();
-            return emit(
-                format,
-                json!({ "started": true, "pid": pid }),
-                &format!("daemon started (pid {pid})"),
-            );
-        }
-        std::thread::sleep(Duration::from_millis(50));
+    // The probe→spawn→poll readiness semantics live in exactly one place —
+    // clove-ipc's `ensure_daemon`, which the MCP auto-start also uses. This
+    // command only adds the pid readout for the report. (Readiness is gated on
+    // a real probe round-trip inside `ensure_daemon`, so a status/read issued
+    // right after `start` returns is guaranteed to connect.)
+    if clove_ipc::ensure_daemon(clove_dir).is_none() {
+        return Err(daemon_err(
+            "could not start the daemon (spawn failed, or it did not become \
+             ready within 5s); is `cloved` installed next to `clove`?",
+        ));
     }
-    Err(daemon_err("daemon did not become ready within 5s"))
+
+    let pid = std::fs::read_to_string(pid_path(clove_dir))
+        .map(|s| s.trim().to_owned())
+        .unwrap_or_default();
+    emit(
+        format,
+        json!({ "started": true, "pid": pid }),
+        &format!("daemon started (pid {pid})"),
+    )
 }
 
 /// Stop a running daemon and wait for it to tear down.
