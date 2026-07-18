@@ -203,6 +203,75 @@ async fn stats_history_synthesizes_daily_series() {
     assert!(body.contains("\"created\""));
     assert!(body.contains("\"closed\""));
     assert!(body.contains("\"open\""));
+    // With no recorded snapshots the series is synthesized from files.
+    assert!(body.contains("\"synthesized\":true"), "body: {body}");
+}
+
+#[tokio::test]
+async fn stats_history_serves_recorded_snapshots_when_present() {
+    use clove_core::{compute_stats, GraphStore, StatsOptions};
+    use clove_index::Index;
+
+    let (tmp, addr, _main, _dep) = spawn_ids().await;
+    let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+    let db_path = root.join(".clove").join("index.db");
+    let store = ItemStore::new(root.clone());
+    let index = Index::open_or_create(&db_path).unwrap();
+
+    // Snapshot 1: the 2-item fixture.
+    let (fms1, _) = store.scan_frontmatter().unwrap();
+    let (graph1, _) = GraphStore::build(&fms1);
+
+    // Grow the store, then snapshot 2 (3 items).
+    store
+        .create(
+            "proj",
+            NewItem {
+                title: "Third".to_owned(),
+                item_type: ItemType::Chore,
+                priority: Priority(2),
+                labels: vec![],
+                deps: vec![],
+                parent: None,
+                assignee: None,
+                body: String::new(),
+            },
+            chrono::Utc::now(),
+        )
+        .unwrap();
+    let (fms2, _) = store.scan_frontmatter().unwrap();
+    let (graph2, _) = GraphStore::build(&fms2);
+
+    // Reports computed at a single `now` (so counts are stable) but stored at
+    // distinct past capture times so they order chronologically.
+    let now = chrono::Utc::now();
+    let report1 = compute_stats(&fms1, &graph1, now, StatsOptions::default());
+    let report2 = compute_stats(&fms2, &graph2, now, StatsOptions::default());
+    index
+        .record_snapshot(now - chrono::Duration::days(2), &report1)
+        .unwrap();
+    index
+        .record_snapshot(now - chrono::Duration::days(1), &report2)
+        .unwrap();
+    drop(index);
+
+    let (status, body) = get(addr, "/api/v1/stats/history").await;
+    assert!(status.contains("200"), "status: {status}");
+    // Served from the recorded snapshots, not synthesized from files.
+    assert!(body.contains("\"synthesized\":false"), "body: {body}");
+    assert!(body.contains("\"snapshots\":2"), "body: {body}");
+    // Real recorded levels the file-synthesized series cannot reconstruct.
+    assert!(body.contains("\"ready\""), "body: {body}");
+    assert!(body.contains("\"blocked\""), "body: {body}");
+    // Point-in-time totals: first snapshot 2 items, second 3 (time-independent).
+    assert!(
+        body.contains("\"total\":2"),
+        "expected first total=2: {body}"
+    );
+    assert!(
+        body.contains("\"total\":3"),
+        "expected second total=3: {body}"
+    );
 }
 
 #[tokio::test]
