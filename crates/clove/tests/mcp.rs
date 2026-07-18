@@ -81,6 +81,11 @@ impl Session {
         }));
         assert_eq!(init["result"]["serverInfo"]["name"], "clove");
         assert!(init["result"]["protocolVersion"].is_string());
+        // The server advertises the resources capability with subscribe + listChanged
+        // (gh-21: it pushes resources/updated when the work graph changes).
+        let caps = &init["result"]["capabilities"];
+        assert_eq!(caps["resources"]["subscribe"], true, "caps: {caps}");
+        assert_eq!(caps["resources"]["listChanged"], true, "caps: {caps}");
         s.notify(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
         s
     }
@@ -311,6 +316,57 @@ fn no_repo_does_not_spawn_daemon_or_create_clove_dir() {
 }
 
 #[test]
+fn resources_are_listed_and_readable() {
+    let dir = init_repo();
+    let mut s = Session::start(dir.path());
+
+    // resources/list advertises the two live resources.
+    let list = s.request(json!({ "jsonrpc": "2.0", "id": 2, "method": "resources/list" }));
+    let resources = list["result"]["resources"]
+        .as_array()
+        .expect("resources array");
+    let uris: Vec<&str> = resources
+        .iter()
+        .map(|r| r["uri"].as_str().unwrap())
+        .collect();
+    assert!(uris.contains(&"clove://ready"), "resources: {resources:?}");
+    assert!(uris.contains(&"clove://stats"), "resources: {resources:?}");
+
+    // Create an item, then read clove://ready — its JSON reflects the new item and
+    // is byte-identical to what the clove_ready tool returns.
+    let created = s.call(3, "clove_new", json!({ "title": "resource read me" }));
+    let id = created["structuredContent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let read = s.request(json!({
+        "jsonrpc": "2.0", "id": 4, "method": "resources/read",
+        "params": { "uri": "clove://ready" }
+    }));
+    let contents = read["result"]["contents"]
+        .as_array()
+        .expect("contents array");
+    assert_eq!(contents[0]["mimeType"], "application/json");
+    let text = contents[0]["text"].as_str().expect("text contents");
+    // Valid JSON that mentions the just-created ready item.
+    let _: Value = serde_json::from_str(text).expect("resource text is JSON");
+    assert!(
+        text.contains(&id),
+        "clove://ready should include the new item {id}: {text}"
+    );
+
+    // An unknown resource is a protocol-level error.
+    let bad = s.request(json!({
+        "jsonrpc": "2.0", "id": 5, "method": "resources/read",
+        "params": { "uri": "clove://nope" }
+    }));
+    assert!(bad.get("error").is_some(), "unknown uri → error: {bad}");
+
+    s.shutdown();
+}
+
+#[test]
 fn tool_error_is_reported_as_is_error() {
     let dir = init_repo();
     let mut s = Session::start(dir.path());
@@ -392,6 +448,123 @@ fn auto_starts_daemon_and_heartbeats() {
     s.shutdown();
 
     // Tear down the spawned daemon so the test leaves nothing running.
+    if let Ok(pid) = std::fs::read_to_string(clove_dir.join("daemon.pid")) {
+        if let Ok(pid) = pid.trim().parse::<i32>() {
+            unsafe {
+                libc_kill(pid, 15);
+            }
+        }
+    }
+}
+
+/// gh-21: after subscribing to `clove://ready`, a mutation that bumps the daemon's
+/// change-generation makes the server push a `notifications/resources/updated` for
+/// that URI. Needs the daemon (the change signal), so Unix-only + escargot-built
+/// `cloved`. Uses a reader thread + channel so the notification wait is bounded.
+#[cfg(unix)]
+#[test]
+fn subscribed_resource_updated_on_mutation() {
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    extern "C" {
+        #[link_name = "kill"]
+        fn libc_kill(pid: i32, sig: i32) -> i32;
+    }
+
+    let dir = init_repo();
+    let clove_dir = camino::Utf8PathBuf::from_path_buf(dir.path().join(".clove")).unwrap();
+    let cloved = escargot::CargoBuild::new()
+        .package("cloved")
+        .bin("cloved")
+        .run()
+        .expect("build cloved for the push-notification test");
+
+    let mut child = clove(dir.path())
+        .arg("mcp")
+        .env("CLOVED_PATH", cloved.path())
+        .env("CLOVED_DISABLE_WEB", "1")
+        .env("CLOVE_MCP_NOTIFY_MS", "50") // poll fast so the test doesn't wait
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn clove mcp");
+    let mut stdin = child.stdin.take().unwrap();
+
+    // Reader thread: every stdout line → channel. Bounds the notification wait
+    // (recv_timeout) and never blocks the main thread on a missing message.
+    let (tx, rx) = mpsc::channel::<Value>();
+    let stdout = BufReader::new(child.stdout.take().unwrap());
+    std::thread::spawn(move || {
+        for line in stdout.lines() {
+            let Ok(line) = line else { break };
+            if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                if tx.send(v).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
+    let send = |stdin: &mut ChildStdin, msg: Value| {
+        writeln!(stdin, "{msg}").unwrap();
+        stdin.flush().unwrap();
+    };
+    // Read messages until one satisfies `pred`, or fail after `deadline`.
+    let wait_for =
+        |rx: &mpsc::Receiver<Value>, deadline: Instant, pred: &dyn Fn(&Value) -> bool| loop {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .unwrap_or_default();
+            match rx.recv_timeout(remaining.max(Duration::from_millis(1))) {
+                Ok(v) => {
+                    if pred(&v) {
+                        return v;
+                    }
+                }
+                Err(_) => panic!("timed out waiting for the expected message"),
+            }
+        };
+
+    // Handshake.
+    send(
+        &mut stdin,
+        json!({ "jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "protocolVersion":"2025-06-18","capabilities":{},
+            "clientInfo":{"name":"test","version":"0.0.0"}}}),
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    wait_for(&rx, deadline, &|v| v["id"] == 1);
+    send(
+        &mut stdin,
+        json!({ "jsonrpc":"2.0","method":"notifications/initialized" }),
+    );
+
+    // Subscribe to clove://ready BEFORE mutating, so the change is pushed.
+    send(
+        &mut stdin,
+        json!({ "jsonrpc":"2.0","id":2,"method":"resources/subscribe","params":{"uri":"clove://ready"}}),
+    );
+    wait_for(&rx, deadline, &|v| v["id"] == 2);
+
+    // A write routes through the daemon → mark_dirty → change-generation bump →
+    // the notifier polls (50ms) and pushes resources/updated for the subscription.
+    send(
+        &mut stdin,
+        json!({ "jsonrpc":"2.0","id":3,"method":"tools/call","params":{
+            "name":"clove_new","arguments":{"title":"trigger a push"}}}),
+    );
+
+    // Wait for the resources/updated notification for clove://ready (tolerating the
+    // interleaved tool-call response and the coarse resources/list_changed frame).
+    let note = wait_for(&rx, deadline, &|v| {
+        v["method"] == "notifications/resources/updated" && v["params"]["uri"] == "clove://ready"
+    });
+    assert_eq!(note["params"]["uri"], "clove://ready");
+
+    drop(stdin);
+    let _ = child.wait();
     if let Ok(pid) = std::fs::read_to_string(clove_dir.join("daemon.pid")) {
         if let Ok(pid) = pid.trim().parse::<i32>() {
             unsafe {

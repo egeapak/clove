@@ -227,6 +227,14 @@ impl DaemonClient {
             .map_err(|e| ClientError::Protocol(e.to_string()))
     }
 
+    /// Read the daemon's monotonic graph change-generation counter. Used by the
+    /// MCP server's notifier to detect changes and push `resources/updated`.
+    pub fn change_generation(&mut self) -> Result<u64, ClientError> {
+        self.rt
+            .block_on(self.client.change_generation(context::current()))
+            .map_err(|e| ClientError::Protocol(e.to_string()))
+    }
+
     // ---- M4 mutations + reads (topology B). Each returns the §7.4 item JSON
     // (or `{id, path}`); the daemon serializes writes and keeps itself coherent.
 

@@ -46,6 +46,10 @@ pub trait CloveRpc {
     async fn ping() -> u32;
     /// Operational telemetry (uptime, items indexed, watcher state, …).
     async fn status() -> StatusResponse;
+    /// A monotonic counter bumped on every graph-affecting change (watcher batch,
+    /// daemon-side write, drift-triggered refresh, reindex). A cheap lock-free
+    /// atomic load; the MCP server polls it to push `resources/updated` on change.
+    async fn change_generation() -> u64;
     /// A lean list query (`ls`/`ready`/`query`): page-limited rows + total count.
     async fn query(req: QueryRequest) -> Result<QueryListResponse, RpcError>;
     /// Full-text search; matched item ids in FTS-rank order.

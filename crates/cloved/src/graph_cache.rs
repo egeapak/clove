@@ -16,7 +16,7 @@
 //! the index is an exact mirror of the files.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use clove_core::GraphStore;
@@ -34,6 +34,10 @@ pub struct GraphCache {
     index: Arc<Mutex<Index>>,
     built: Mutex<Option<Built>>,
     dirty: AtomicBool,
+    /// Monotonic counter bumped on every `mark_dirty` — i.e. on every
+    /// graph-affecting change. Exposed over IPC so the MCP server can detect
+    /// changes and push `resources/updated` without re-reading the whole graph.
+    change_generation: AtomicU64,
 }
 
 impl GraphCache {
@@ -42,12 +46,21 @@ impl GraphCache {
             index,
             built: Mutex::new(None),
             dirty: AtomicBool::new(true),
+            change_generation: AtomicU64::new(0),
         }
     }
 
     /// Mark the cache stale (called after each watcher batch + startup sweep).
+    /// Also bumps the change-generation counter — this is the single chokepoint
+    /// through which every real graph change flows.
     pub fn mark_dirty(&self) {
         self.dirty.store(true, Ordering::Relaxed);
+        self.change_generation.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The current change-generation (a lock-free atomic load).
+    pub fn change_generation(&self) -> u64 {
+        self.change_generation.load(Ordering::Relaxed)
     }
 
     /// Run `f` against the current graph, rebuilding first if dirty/empty.
@@ -76,5 +89,44 @@ impl GraphCache {
         }
         let b = built.as_ref()?;
         Some(f(&b.graph, &b.ranks))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clove_index::Index;
+
+    fn cache() -> GraphCache {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = camino::Utf8PathBuf::from_path_buf(tmp.path().join("index.db")).unwrap();
+        let index = Index::open_or_create(&db).unwrap();
+        // Leak the tempdir so the db file outlives the test (fine for a unit test).
+        std::mem::forget(tmp);
+        GraphCache::new(Arc::new(Mutex::new(index)))
+    }
+
+    #[test]
+    fn change_generation_starts_at_zero_and_bumps_on_mark_dirty() {
+        let graph = cache();
+        assert_eq!(graph.change_generation(), 0, "fresh cache starts at 0");
+        graph.mark_dirty();
+        assert_eq!(graph.change_generation(), 1);
+        graph.mark_dirty();
+        assert_eq!(graph.change_generation(), 2, "each mark_dirty bumps by one");
+    }
+
+    #[test]
+    fn rebuilding_the_graph_does_not_bump_the_generation() {
+        let graph = cache();
+        graph.mark_dirty(); // gen = 1, dirty = true
+                            // A rebuild (with_graph) reads the graph but must not touch the counter.
+        let ran = graph.with_graph(|_g, ranks| ranks.len()).unwrap();
+        assert_eq!(ran, 0, "empty index → empty graph");
+        assert_eq!(
+            graph.change_generation(),
+            1,
+            "a rebuild is not a change — only mark_dirty bumps the generation"
+        );
     }
 }

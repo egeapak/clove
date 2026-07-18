@@ -2,23 +2,50 @@
 //! delegating to the [`Engine`]. Tool bodies run on a blocking task (the engine
 //! does file I/O and, for writes, drives the blocking daemon client).
 
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
+
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, Content};
-use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler};
+use rmcp::model::{
+    AnnotateAble, CallToolResult, Content, Implementation, ListResourcesResult,
+    PaginatedRequestParams, RawResource, ReadResourceRequestParams, ReadResourceResult,
+    ResourceContents, ServerCapabilities, ServerInfo, SubscribeRequestParams,
+    UnsubscribeRequestParams,
+};
+use rmcp::service::RequestContext;
+use rmcp::{tool, tool_handler, tool_router, ErrorData, RoleServer, ServerHandler};
 use serde_json::Value;
 
 use crate::args::*;
 use crate::engine::Engine;
 
-/// The MCP server handler. Cheap to clone (the engine is just paths + config).
+/// The two live resources clove exposes. Their contents change on every
+/// graph-affecting mutation; a subscribed client is pushed `resources/updated`
+/// (see the notifier in `lib.rs`).
+pub const READY_URI: &str = "clove://ready";
+pub const STATS_URI: &str = "clove://stats";
+
+/// The MCP server handler. Cheap to clone (the engine is just paths + config; the
+/// subscription set is shared behind an `Arc`).
 #[derive(Clone)]
 pub struct CloveServer {
     engine: Engine,
+    /// Resource URIs the connected client has subscribed to. The notifier only
+    /// pushes `resources/updated` for URIs in this set (per the MCP spec).
+    subscriptions: Arc<Mutex<HashSet<String>>>,
 }
 
 impl CloveServer {
     pub fn new(engine: Engine) -> Self {
-        Self { engine }
+        Self {
+            engine,
+            subscriptions: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
+    /// A handle to the shared subscription set, for the notifier loop in `lib.rs`.
+    pub fn subscriptions(&self) -> Arc<Mutex<HashSet<String>>> {
+        self.subscriptions.clone()
     }
 
     /// Run a blocking engine call and map it to a tool result: `Ok` → structured
@@ -199,14 +226,121 @@ impl CloveServer {
     }
 }
 
-#[tool_handler(
-    name = "clove",
-    instructions = "clove is a fast, dependency-aware work-item tracker. Use \
-                    clove_ready to find unblocked work, clove_show for detail, \
-                    clove_list/clove_blocked/clove_search/clove_dep_tree to \
-                    explore, clove_stats for an overview, and clove_new / \
-                    clove_status / clove_edit / clove_comment / clove_dep_add / \
-                    clove_dep_remove / clove_set_parent to record progress. \
-                    Ids look like `proj-7af3q2k9`."
-)]
-impl ServerHandler for CloveServer {}
+// `#[tool_handler]` generates `call_tool`/`list_tools`; it skips `get_info`
+// because we provide our own (to advertise the resources capability), so the
+// server info + instructions move into `get_info` below.
+#[tool_handler]
+impl ServerHandler for CloveServer {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(
+            // Order matters (builder type-state): resources sub-toggles only exist
+            // after `enable_resources()`.
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .enable_resources_subscribe()
+                .enable_resources_list_changed()
+                .build(),
+        )
+        .with_server_info(Implementation::new("clove", env!("CARGO_PKG_VERSION")))
+        .with_instructions(
+            "clove is a fast, dependency-aware work-item tracker. Use clove_ready \
+             to find unblocked work, clove_show for detail, \
+             clove_list/clove_blocked/clove_search/clove_dep_tree to explore, \
+             clove_stats for an overview, and clove_new / clove_status / \
+             clove_edit / clove_comment / clove_dep_add / clove_dep_remove / \
+             clove_set_parent to record progress. Ids look like `proj-7af3q2k9`. \
+             Two live resources — clove://ready and clove://stats — mirror the \
+             ready queue and the repo overview; subscribe to be pushed \
+             resources/updated whenever the work graph changes."
+                .to_owned(),
+        )
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, ErrorData> {
+        Ok(ListResourcesResult::with_all_items(vec![
+            RawResource::new(READY_URI, "ready-queue")
+                .with_description(
+                    "Work items ready to start now (open/in-progress, all hard \
+                     dependencies closed, no dangling deps). Same JSON as clove_ready.",
+                )
+                .with_mime_type("application/json")
+                .no_annotation(),
+            RawResource::new(STATS_URI, "overview")
+                .with_description(
+                    "Repository analytics: counts by status/type/priority, \
+                     ready/blocked, epics, throughput. Same JSON as clove_stats.",
+                )
+                .with_mime_type("application/json")
+                .no_annotation(),
+        ]))
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResult, ErrorData> {
+        let engine = self.engine.clone();
+        let uri = request.uri.clone();
+        // Reads do file I/O (same as the tools) → run on a blocking task.
+        let result = match uri.as_str() {
+            READY_URI => {
+                tokio::task::spawn_blocking(move || engine.ready(FilterArgs::default())).await
+            }
+            STATS_URI => {
+                tokio::task::spawn_blocking(move || engine.stats(StatsArgs::default())).await
+            }
+            other => {
+                return Err(ErrorData::resource_not_found(
+                    format!("unknown resource: {other}"),
+                    None,
+                ));
+            }
+        };
+        match result {
+            Ok(Ok(value)) => {
+                let json = serde_json::to_string(&value).map_err(|e| {
+                    ErrorData::internal_error(format!("serialize resource: {e}"), None)
+                })?;
+                Ok(ReadResourceResult::new(vec![ResourceContents::text(
+                    json, uri,
+                )
+                .with_mime_type("application/json")]))
+            }
+            // Unlike a tool call (which wraps a repo error in `isError`), a resource
+            // read surfaces the error at the protocol level.
+            Ok(Err(message)) => Err(ErrorData::internal_error(message, None)),
+            Err(join) => Err(ErrorData::internal_error(
+                format!("resource task failed: {join}"),
+                None,
+            )),
+        }
+    }
+
+    async fn subscribe(
+        &self,
+        request: SubscribeRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<(), ErrorData> {
+        if let Ok(mut subs) = self.subscriptions.lock() {
+            subs.insert(request.uri);
+        }
+        Ok(())
+    }
+
+    async fn unsubscribe(
+        &self,
+        request: UnsubscribeRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<(), ErrorData> {
+        if let Ok(mut subs) = self.subscriptions.lock() {
+            subs.remove(&request.uri);
+        }
+        Ok(())
+    }
+}
