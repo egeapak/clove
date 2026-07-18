@@ -27,10 +27,18 @@ emit a `Change { at, author, field, from, to }` per changed field.
   commit. Fully aligned with "files are truth, they travel with the repo."
 - **Cons:** only as granular as commits (several edits in one commit collapse to
   one entry); requires the repo to be a git repo (clove doesn't strictly require
-  git); rename-follow + parsing two frontmatter versions per commit is O(commits
-  for the file) — fine per-item, not for a whole-store scan.
-- **Author quality:** commit author is the git identity, which is exactly what
-  the gh-26 comment-author fix aligns clove writes toward.
+  git); parsing two frontmatter versions per commit is O(commits for the file) —
+  fine per-item, not for a whole-store scan. Two limitations to state up front:
+  (a) **uncommitted working-tree edits are invisible** — a change shows up only
+  once committed, so `updated:` can lead the newest history entry; (b) **rename
+  follow is not free in libgit2** (`--follow` is a git-CLI feature, not a git2
+  API — it needs manual diff-rename detection when walking), but this is **moot in
+  practice** since item files are id-named `<id>.md` and never renamed, so the walk
+  can drop `--follow` entirely.
+- **Author quality:** commit author is the git identity. Note this differs from
+  the gh-26 comment-author chain (which resolves `CLOVE_AUTHOR`→`GIT_AUTHOR_EMAIL`
+  →git config→`$USER`) and the commit author isn't necessarily the field-editor
+  (batch/bot commits) — directionally aligned, not identical.
 
 ### B. Append-only events log
 
@@ -56,9 +64,16 @@ spec designs A.
 
 ## Design (git-derived)
 
-New pure module `clove_core::history` (git access via the `git2` dep the daemon
-already uses, behind the daemon's `git-sync` feature or a new small `history`
-feature so a git-less build degrades gracefully):
+New pure module `clove_core::history`. **Git access: prefer shelling out to the
+`git` CLI, matching clove-core's existing precedent** — `repo.rs` deliberately
+does *not* use `git2`/libgit2 in core because vendored libgit2 blocks the
+macOS→Windows cross-compile, so worktree detection already shells out to `git`.
+`git2` is isolated to `cloved` under its optional `git-sync` feature; putting it
+in core/CLI would pull libgit2 into that build for the first time. (A `clove-core
+history` *cargo feature* with its own optional `git2` dep would be the only valid
+way to use git2 here — cloved's feature can't gate a clove-core module — but the
+CLI-shell approach is lighter and also matches the `git log -p` phrasing below.)
+The module degrades gracefully when git is absent:
 
 ```rust
 pub struct Change {
@@ -93,7 +108,8 @@ pub fn item_history(repo_root: &Utf8Path, id: &CloveId)
 - **Web:** a **History** tab on the item detail page (beside Overview / Dep tree /
   Comments), served by `GET /api/v1/items/:id/history`. Renders a vertical
   timeline; reuses the detail-pane tab machinery.
-- **TUI:** a fourth detail sub-view (`h` = history) alongside `o`/`t`/`c`,
+- **TUI:** a fourth detail sub-view (`H` = history — **not** `h`, which is already
+  bound to list-pane focus in `lib.rs`) alongside `o`/`t`/`c`,
   rendered like the comments list.
 - **agent-doc / MCP:** a `clove_history` read tool (optional follow-up) so agents
   can ask "how did this get here?".
