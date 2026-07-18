@@ -11,7 +11,7 @@
 | Milestone | Description | Exit Criterion |
 |---|---|---|
 | M0 | File-only MVP | All file-store commands work; JSON schema validates; 1k-item scan < 100 ms |
-| M1 | SQLite index | `reindex` + incremental refresh; `search`; lean list queries < 15 ms, search < 20 ms at 10k items |
+| M1 | SQLite index | `reindex` + incremental refresh; `search`; lean list queries < 8 ms, search < 20 ms at 10k items |
 | M2 | Interop | `import beads|tk|github`; `export json|jsonl|github` |
 | M3 | Daemon | `cloved` file-watcher + IPC; incremental index; optional git auto-sync |
 | M4 | Extras | TUI/web UI; bidirectional vendor bridges; richer changelog |

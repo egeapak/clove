@@ -46,7 +46,7 @@ auto-rebuild on open).
 renders) with **no per-item file read**. This removed both the file-reload and
 the full 15-column owned-row materialization (incl. the per-row label-JSON
 parse). The result is ~11 ms — down from ~18 ms, comfortably under the revised
-15 ms gate.
+8 ms gate.
 
 **Timing breakdown** (10k rows, release; `tests/timing_breakdown.rs`), *with the
 covering index*:
@@ -89,10 +89,11 @@ agree on id ordering, and the human table is identical. `_meta.source`
 (`"index"` vs `"files"`) tells consumers which shape they received. `show`
 remains the full-detail view.
 
-The asserted gate bound is an **interim 15 ms** (comfortably above the ~11 ms
-measurement, below the old ~18 ms) pending a final decision: keep chasing < 10 ms
-(would require not returning rows one-by-one) or formally set the target to ~12–15
-ms for a 10k lean list.
+The asserted gate bound is now **8 ms** — the final decision (gh-24), tightened
+from the earlier interim 15 ms once the covering-index scan settled at ~2.5–4.5 ms
+measured. 8 ms keeps ~2× headroom over the observed time while still tripping if
+the index-only plan regresses to a table scan (~11 ms); chasing < 10 ms further
+(which would require not returning rows one-by-one) is not pursued.
 
 ### Staleness 0-stale — ~17 ms → ~3 ms (fast hybrid + `--deep`)
 `check_staleness_fast` (the new CLI default) is O(readdir): when the directory
