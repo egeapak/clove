@@ -54,6 +54,13 @@ impl CloveRpc for Dispatcher {
         PROTOCOL_VERSION
     }
 
+    async fn change_generation(self, _: Context) -> u64 {
+        // Cheap lock-free read; also a heartbeat so an active MCP notify-poll
+        // keeps the daemon's idle-shutdown window reset (like `ping`).
+        self.touch();
+        self.graph.change_generation()
+    }
+
     async fn status(self, _: Context) -> StatusResponse {
         self.touch();
         match self.state.lock() {

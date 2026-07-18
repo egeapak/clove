@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// v3 (M4 add/edit): added the `apply_edit(EditRequest)`, `dep_remove`, and
 /// `set_parent` mutation methods to the service.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// A dependency-graph query (DESIGN §8.4 extension for `blocked`/`dep`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

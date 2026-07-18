@@ -210,10 +210,28 @@ binary through octocrab over HTTP — 13 end-to-end scenarios (push/pull
 create+update, conflict resolution, idempotency/write-back, comments,
 assignee/state_reason preservation, dry-run). See DESIGN §11.3.
 
-**Next step (rest of M4):** the remaining vendor bridges (GitLab/Jira), richer
-history/changelog, and the remaining MCP follow-up — server-push notifications
-(MCP `tools/list_changed` / a ready-queue subscription) when the graph changes —
-see `IMPLEMENTATION_PLAN.md` M4 backlog.
+**MCP server-push (gh-21) — shipped.** `clove mcp` now exposes two live MCP
+**resources** — `clove://ready` (the ready queue) and `clove://stats` (the repo
+overview), both reusing the `Engine` file reads so they're byte-identical to the
+`clove_ready`/`clove_stats` tools and work with no daemon. It advertises the
+resources capability with `subscribe` + `listChanged`, and a background notifier
+pushes `notifications/resources/updated` (for subscribed URIs) when the work
+graph changes. The change signal is a monotonic `change_generation` counter on
+the daemon's `GraphCache`, bumped in `mark_dirty()` (the single chokepoint for
+watcher batches, daemon-side writes, drift refresh, and reindex) and read over a
+new lock-free `change_generation()` tarpc RPC; the notifier polls it (~1s,
+`CLOVE_MCP_NOTIFY_MS`) and fires on any change. `PROTOCOL_VERSION` bumped **3 →
+4** — an old daemon fails the version probe → the MCP server degrades to no-push
++ direct reads. Deliberately **not** `tools/list_changed`: clove's 14 tools are
+static, so a conformant client would just re-list them and never re-read data;
+`resources/updated` is the correct "data changed, re-read" signal. Tests: unit
+(counter + `should_notify`), MCP e2e for the resources list/read + capability,
+and a daemon-backed `subscribed_resource_updated_on_mutation` e2e that
+subscribes → mutates → asserts the pushed notification.
+
+**Next step (rest of M4):** the remaining vendor bridges (GitLab/Jira) and richer
+history/changelog — see `IMPLEMENTATION_PLAN.md` M4 backlog and the design specs
+under `docs/superpowers/specs/`.
 
 ### Small backlog (optional M0/M1 nice-to-haves, non-blocking)
 - Broaden JSON-schema validation to more commands (version/reindex/doctor/new)
