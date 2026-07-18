@@ -84,6 +84,12 @@ pub(crate) fn render_status(f: &mut Frame, app: &App, area: Rect) {
                     Style::default().fg(ACCENT),
                 ));
             }
+            if app.is_busy() {
+                spans.push(Span::styled(
+                    format!("{} ", app.spinner()),
+                    Style::default().fg(ACCENT),
+                ));
+            }
             spans.push(Span::styled(app.status.clone(), Style::default().fg(LABEL)));
             let hint = if narrow {
                 "  ?·q"

@@ -39,6 +39,12 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<
     terminal.draw(|f| ui::render(f, app))?;
 
     while !app.should_quit {
+        // Drain a completed background scan (if any) before blocking on input, so
+        // a finished refresh is applied within a tick and the spinner clears.
+        if app.poll_refresh() {
+            terminal.draw(|f| ui::render(f, app))?;
+        }
+
         // Cadence: 1fps idle, 10fps while busy. An input arriving before the
         // timeout wakes us immediately.
         if event::poll(app.tick_interval())? {
@@ -173,7 +179,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('x') => app.clear_filters(),
 
         KeyCode::Char('/') => app.start_search(),
-        KeyCode::Char('r') => app.refresh(),
+        KeyCode::Char('r') => app.start_refresh(),
 
         // Add / edit.
         KeyCode::Char('n') => app.start_new(),
