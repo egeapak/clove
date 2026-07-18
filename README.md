@@ -22,18 +22,28 @@ authoritative spec.
 ```sh
 cargo install --locked --git https://github.com/egeapak/clove clove cloved
 clove version
+
+# ...or, to include GitHub sync (adds ~2.3 MB of TLS/HTTP per binary):
+cargo install --locked --features full --git https://github.com/egeapak/clove clove cloved
 ```
 
 This installs the `clove` CLI and the optional `cloved` daemon onto your `PATH`.
 A Rust toolchain compiles them; no Node is required (the web UI embeds a
 placeholder unless built with Node — see [`clove-web/web/README.md`](crates/clove-web/web/README.md)).
 
+**GitHub sync is opt-in.** The default build is lean; `clove sync github`
+(and the daemon's periodic sync) live behind the `github` / `github-sync`
+features, bundled as `full`. A default binary prints a clean
+`built without github support` error on `clove sync github`. The **pre-built
+release binaries are built `--features full`**, so downloads keep sync.
+
 ## Build & test
 
 ```sh
-cargo build --release          # binaries: clove (CLI), cloved (daemon)
-cargo test --workspace         # unit + integration + doctests
-cargo clippy --workspace --all-targets -- -D warnings
+cargo build --release                    # lean binaries: clove (CLI), cloved (daemon)
+cargo build --release --features "clove/full cloved/full"   # + GitHub sync
+cargo test --workspace --all-features    # unit + integration + doctests (incl. github)
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
 ## Quick start
@@ -95,7 +105,9 @@ resolves the conflict by policy (`--prefer newer|local|remote|manual`; default
 too (`--no-comments` to skip). `--dry-run` plans without touching either side. A
 per-repo last-sync clock lives under `.clove/sync/` (git-ignored), and a running
 daemon can run the sync on a timer (`[daemon] github_sync_interval_min` +
-`github_sync_repo`). Auth via `GITHUB_TOKEN` or the `gh` CLI.
+`github_sync_repo`). Auth via `GITHUB_TOKEN` or the `gh` CLI. Requires a build
+with the `github` feature (`--features full`; see [Install](#install)) — the
+pre-built release binaries include it.
 
 ### AI agents: MCP server & Claude Code plugin
 

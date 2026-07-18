@@ -69,11 +69,14 @@ fn merge_driver_help_lists_positionals() {
     assert!(text.contains("marker"), "missing marker_size:\n{text}");
 }
 
+#[cfg(feature = "github")]
 #[test]
 fn sync_github_is_recognized_and_needs_a_token() {
     // `sync github` is the single GitHub path. Without a GITHUB_TOKEN the fetch
     // fails cleanly on auth — NOT with NOT_YET_IMPLEMENTED — proving the command
     // is wired through. (Skip the assertion when a token is actually present.)
+    // Only meaningful in a `github`-featured build; the lean build is covered by
+    // `sync_github_reports_clean_error_when_built_without_github` below.
     if std::env::var("GITHUB_TOKEN").is_ok() {
         return;
     }
@@ -90,6 +93,27 @@ fn sync_github_is_recognized_and_needs_a_token() {
     assert_ne!(
         v["error"]["code"], "NOT_YET_IMPLEMENTED",
         "github sync is implemented now: {v}"
+    );
+}
+
+#[cfg(not(feature = "github"))]
+#[test]
+fn sync_github_reports_clean_error_when_built_without_github() {
+    // In the lean (default) build `github` is opt-out, so `sync github` must fail
+    // with a clean, structured "built without github support" error — never a
+    // panic or a malformed envelope.
+    let dir = init_repo();
+    let out = clove(dir.path())
+        .args(["sync", "github", "ege/clove", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "expected non-zero exit: {out:?}");
+    let v: Value = serde_json::from_slice(&out.stdout).expect("valid JSON envelope on stdout");
+    assert_eq!(v["ok"], false, "envelope should not be ok: {v}");
+    let message = v["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("github"),
+        "lean build should explain github is unavailable, got: {v}"
     );
 }
 
