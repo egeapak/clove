@@ -18,26 +18,25 @@ before gh-19, the `VendorSync` extraction is its first step.
 | Concern | GitHub/GitLab | Jira | Handling |
 |---|---|---|---|
 | Issue id | numeric (`gh-42`, `gl-42`) | **string key** `PROJ-123` | `RemoteId` is already a string newtype → `external_ref` = `jira-PROJ-123` |
-| Fetch | `updated_after` | **JQL**: `project = PROJ AND updated >= "<since>"` | `fetch_since` builds the JQL; pure and testable |
+| Fetch | `updated_after` | **JQL**: `project = PROJ AND updated >= "<since>"` | build the JQL + **tz-normalize** `since` (instance tz, minute granularity — see Risks) + paginate; returns the whole set |
 | Status | open/closed | **workflow** (To Do / In Progress / Done / custom) via `transitions` API | see "Status mapping" below — Jira is the one vendor where clove's `in_progress` maps natively |
-| Body | Markdown | **ADF** (Atlassian Document Format) or wiki markup | convert Markdown ↔ ADF at the edge in `jira.rs`; `<!-- clove-meta -->` rides in a dedicated field, not the body (ADF makes HTML-comment smuggling brittle) |
+| Body | Markdown | **ADF** (Atlassian Document Format) or wiki markup | convert Markdown ↔ ADF at the edge in `jira.rs`; `<!-- clove-meta -->` rides in an **issue property** (`/issue/{key}/properties/clove-meta`), not the body (ADF makes HTML-comment smuggling brittle) |
 | Comments | issue comments / notes | issue comments (ADF) | `list_comments`/`add_comment` as usual; ADF body conversion |
 | Auth | token | **email + API token** (Basic) or OAuth | `JiraVendor::new` takes base URL + email + token |
 
 The only trait-surface consequence: `clove-meta` should be carried in a
-**named Jira field** rather than appended to the body (ADF round-tripping an
-embedded HTML comment is lossy). This argues for a small `VendorSync` addition
-already worth having — an associated way to stash/read the clove-meta blob that
-defaults to "append to body" (GitHub/GitLab) and overrides to "a field" (Jira).
-Concretely, add to the trait:
-
-```rust
-/// Read/attach the clove round-trip metadata. Default impls append/parse the
-/// `<!-- clove-meta -->` HTML comment in the body (GitHub, GitLab); Jira stores
-/// it in a dedicated field instead.
-fn read_meta(&self, issue: &StagedIssue) -> Option<CloveMeta> { /* body codec */ }
-fn attach_meta(&self, item: &mut ExportItem, meta: &CloveMeta) { /* body codec */ }
-```
+**Jira issue property** (`PUT/GET /issue/{key}/properties/clove-meta`, which
+stores arbitrary JSON with **no admin setup**) rather than appended to the body
+(ADF round-tripping an
+embedded HTML comment is lossy). Rather than two body-centric trait methods
+(which leak: they assume the meta is *in the body*, but for Jira it's in a
+property the fetch must already have read), make **meta carriage fully the
+vendor's responsibility**: `fetch` strips the vendor's meta location and lands it
+in a neutral `StagedIssue.meta: Option<CloveMeta>`; `create`/`update` re-attach it
+wherever that vendor keeps it. GitHub/GitLab strip/append the `<!-- clove-meta -->`
+body comment; Jira reads/writes the issue property. The planner then only ever
+sees `StagedIssue.meta` — no body-vs-field branching in the trait surface. This is
+the one refinement Jira forces on the gh-19 boundary, so land it with GitLab.
 
 This is the one refinement Jira forces on the gh-19 boundary; GitLab should land
 first so it is added deliberately, not retrofitted.
@@ -101,6 +100,26 @@ ADF↔Markdown conversion, and the clove-meta-in-a-field codec.
 - **Workflow diversity:** the status-category mapping is robust, but push
   transitions can be blocked by workflow conditions (approvals, required
   fields). Surfacing these as conflicts (not hard errors) keeps sync resilient.
+  Two transition cases the "graceful conflict" fallback must cover explicitly:
+  **multi-hop** workflows where no *single* transition reaches the target
+  category (e.g. To Do→Done via In Progress) — status push is **single-hop
+  best-effort**, report a conflict rather than silently no-op; and **ambiguity**
+  when several transitions target the same category — pick deterministically
+  (lowest transition id) and note it.
+- **JQL is not trivially pure/testable.** `updated >= "<since>"` is evaluated in
+  the **instance/user timezone** at **minute** granularity, not UTC seconds. A UTC
+  `since` fed verbatim can miss or double-fetch at boundaries/DST. `jira.rs` must
+  normalize `since` to the instance tz and the `"yyyy/MM/dd HH:mm"` format.
+- **Pagination must be handled** (omitted in the first draft): the search caps at
+  ~50 issues/page — page via `startAt`/`maxResults` (classic `/search`) or the
+  `nextPageToken` cursor (`/rest/api/3/search/jql`, the non-deprecated endpoint).
+  As with gh-19, `fetch` still returns the **whole** current set (the planner
+  infers deletions from absence), so pagination is an internal loop, not a
+  `since`-windowed partial fetch.
+- **Cloud-only assumption (state explicitly).** ADF, `assignee.accountId`,
+  `/user/search`, `statusCategory.key`, issue properties, and email+token Basic
+  auth are all **Jira Cloud**. Server/Data Center uses wiki markup, the v2 API,
+  user `name`/`key`, and PAT bearer auth — a separate mapping. v1 targets Cloud.
 
 ## Non-goals
 
