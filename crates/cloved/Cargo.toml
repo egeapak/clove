@@ -14,11 +14,17 @@ path = "src/main.rs"
 [features]
 # git auto-sync (T-D06) is gated so a lean / cross-compiled build stays free of
 # vendored libgit2 (DESIGN §1 notes git2's C build blocks the macOS->Windows
-# cross-check). Default-on, mirroring clove-import's `github` feature.
-default = ["git-sync", "github-sync"]
+# cross-check). Kept in `default` — it is the daemon's core local capability.
+default = ["git-sync"]
+# `full` adds the periodic two-way GitHub sync loop; the pre-built release
+# artifacts build `--features full` so the daemon retains it.
+full = ["git-sync", "github-sync"]
 git-sync = ["dep:git2"]
-# Opt-in periodic two-way GitHub sync (T-M06). Gated so a lean build stays free
-# of octocrab/tokio-net weight; default-on, mirroring `git-sync`.
+# Periodic two-way GitHub sync (T-M06). **Opt-out** (not in `default`) so a lean
+# build stays free of octocrab/tokio-net weight; enable with `--features
+# github-sync` (or `--features full`). Without it the daemon's sync loop is a
+# no-op and `clove sync github` still works from the CLI when clove is built
+# with its own `github` feature.
 github-sync = ["dep:clove-import", "clove-import/github"]
 
 [dependencies]

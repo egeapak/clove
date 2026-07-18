@@ -8,10 +8,11 @@ authors.workspace = true
 repository.workspace = true
 
 # File-based importers (beads/tk) use only clove-core; the GitHub
-# importer/exporter (T-M03) adds tokio + octocrab behind the `github` feature so
-# non-GitHub / lean builds (`--no-default-features`) stay free of that weight.
+# importer/exporter (T-M03) adds tokio + octocrab behind the `github` feature.
+# `github` is **opt-out** (not in `default`) so a lean build stays free of that
+# ~3.5 MB of vendored TLS/HTTP; enable it with `--features github`.
 [features]
-default = ["github"]
+default = []
 github = ["dep:octocrab", "dep:tokio", "dep:rustls", "dep:fd-lock"]
 
 [dependencies]
