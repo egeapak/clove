@@ -266,7 +266,6 @@ pub async fn get_stats(
     Ok(ok_data(value))
 }
 
-/// `GET /api/v1/stats/history?days=N` — a daily throughput series
 /// Recorded stats snapshots from `.clove/index.db`, mapped to history points
 /// oldest→newest. `created`/`closed` are per-interval throughput deltas between
 /// consecutive snapshots (the first point baselines at 0, since there is no prior
