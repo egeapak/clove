@@ -64,7 +64,7 @@ steps:
     image: *rust_image
     environment: *cargo_env
     commands:
-      - cargo check -p clove --no-default-features
+      - cargo check -p clove-cli --no-default-features
       - cargo check -p cloved --no-default-features
 
   # Informational native (linux x86_64) size trend for the shipped binaries.
@@ -75,6 +75,6 @@ steps:
     image: *rust_image
     environment: *cargo_env
     commands:
-      - cargo build --release -p clove -p cloved
+      - cargo build --release -p clove-cli -p cloved
       - ls -lh target/release/clove target/release/cloved
       - du -h target/release/clove target/release/cloved

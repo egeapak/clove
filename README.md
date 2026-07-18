@@ -20,8 +20,8 @@ authoritative spec.
 ## Install
 
 ```sh
-cargo install --locked --git https://github.com/egeapak/clove clove cloved
-clove version
+cargo install --locked --git https://github.com/egeapak/clove clove-cli cloved
+clove version   # the installed command is `clove` (crate: clove-cli)
 ```
 
 This installs the `clove` CLI and the optional `cloved` daemon onto your `PATH`.
