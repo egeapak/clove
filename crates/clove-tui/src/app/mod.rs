@@ -7,6 +7,7 @@
 
 mod data;
 pub use data::Data;
+use data::ScanResult;
 
 mod detail;
 pub use detail::{Detail, DetailPane, DetailTab};
@@ -56,9 +57,14 @@ pub struct App {
     pub show_help: bool,
     pub status: String,
     pub should_quit: bool,
-    /// Whether a background operation is in progress. Always `false` today; the
-    /// deferred M4 background scan flips this to drive the 10fps cadence.
+    /// Whether a background scan is in flight — drives the 10fps cadence and the
+    /// status-bar spinner. Set by `start_refresh`, cleared by `poll_refresh`.
     busy: bool,
+    /// The channel a background scan worker delivers its [`ScanResult`] on.
+    /// `Some` exactly while a scan is in flight.
+    refresh_rx: Option<std::sync::mpsc::Receiver<Result<ScanResult, String>>>,
+    /// Spinner animation frame, advanced by `on_tick` while busy.
+    spinner_frame: usize,
 
     // Filter menu state.
     pub filter_menu: FilterMenu,
@@ -88,6 +94,8 @@ impl App {
             status: String::new(),
             should_quit: false,
             busy: false,
+            refresh_rx: None,
+            spinner_frame: 0,
             filter_menu: FilterMenu::default(),
             form: FormState::default(),
             id_prefix: "proj".to_owned(),
@@ -105,8 +113,7 @@ impl App {
         self
     }
 
-    /// Whether a background operation is in progress (hook for the deferred
-    /// background scan; always `false` today).
+    /// Whether a background scan is in flight.
     pub fn is_busy(&self) -> bool {
         self.busy
     }
@@ -120,17 +127,75 @@ impl App {
         }
     }
 
-    /// Advance one idle/progress tick. A no-op today (future: spinner frame).
-    pub fn on_tick(&mut self) {}
+    /// Advance one idle/progress tick — animates the spinner while a scan runs.
+    pub fn on_tick(&mut self) {
+        if self.busy {
+            self.spinner_frame = self.spinner_frame.wrapping_add(1);
+        }
+    }
 
-    /// Re-scan the store and rebuild all derived state, preserving the selected
-    /// item where possible.
-    pub fn refresh(&mut self) {
-        if let Err(msg) = self.data.scan() {
-            self.status = msg;
+    /// The current spinner glyph (only meaningful while [`is_busy`]).
+    pub fn spinner(&self) -> char {
+        const FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+        FRAMES[self.spinner_frame % FRAMES.len()]
+    }
+
+    /// Start a non-blocking re-scan on a background worker: it computes the whole
+    /// [`ScanResult`] off the UI thread (`scan_frontmatter` + graph build) and
+    /// ships it back over a channel, which [`poll_refresh`] drains. The UI stays
+    /// responsive (10fps + spinner) meanwhile. A no-op if a scan is already in
+    /// flight, so mashing `r` can't spawn a pile of workers.
+    pub fn start_refresh(&mut self) {
+        if self.refresh_rx.is_some() {
             return;
         }
+        let store = self.data.store.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // The receiver is dropped if the app quits mid-scan; ignore the
+            // send error in that case.
+            let _ = tx.send(Data::compute(&store));
+        });
+        self.refresh_rx = Some(rx);
+        self.busy = true;
+        self.spinner_frame = 0;
+        self.status = "refreshing…".to_owned();
+    }
 
+    /// Drain a completed background scan, if one has arrived. Returns `true` when
+    /// a result was applied (so the caller redraws). Non-blocking.
+    pub fn poll_refresh(&mut self) -> bool {
+        let Some(rx) = &self.refresh_rx else {
+            return false;
+        };
+        match rx.try_recv() {
+            Ok(Ok(result)) => {
+                self.data.apply(result);
+                self.finish_refresh();
+                true
+            }
+            Ok(Err(message)) => {
+                self.status = message;
+                self.busy = false;
+                self.refresh_rx = None;
+                true
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                // The worker panicked/vanished without sending; recover gracefully.
+                self.status = "refresh failed (worker exited)".to_owned();
+                self.busy = false;
+                self.refresh_rx = None;
+                true
+            }
+        }
+    }
+
+    /// Rebuild the view/facets/detail from freshly-applied [`Data`] and clear the
+    /// busy state. Shared by the sync [`refresh`] and the async [`poll_refresh`].
+    fn finish_refresh(&mut self) {
+        self.busy = false;
+        self.refresh_rx = None;
         self.rebuild_facets();
         self.recompute_view();
         self.load_detail();
@@ -143,6 +208,17 @@ impl App {
                 format!(" · {} warning(s)", self.data.load_warnings.len())
             }
         );
+    }
+
+    /// Re-scan the store **synchronously** and rebuild all derived state,
+    /// preserving the selected item where possible. Used at launch and after a
+    /// write (the manual `r` refresh uses the non-blocking [`start_refresh`]).
+    pub fn refresh(&mut self) {
+        if let Err(msg) = self.data.scan() {
+            self.status = msg;
+            return;
+        }
+        self.finish_refresh();
     }
 
     /// Recompute the view indices from the current tab + facet filters + search,
@@ -957,9 +1033,86 @@ mod tests {
         let mut app = App::new(store);
         // Idle: 1 fps.
         assert_eq!(app.tick_interval(), Duration::from_secs(1));
-        // Busy: 10 fps (the hook the deferred background scan will flip).
+        // Busy: 10 fps (set while a background scan is in flight).
         app.busy = true;
         assert_eq!(app.tick_interval(), Duration::from_millis(100));
+    }
+
+    /// Drain a background scan with a bounded wait so a stuck worker fails the
+    /// test fast instead of blocking forever.
+    fn drain_refresh(app: &mut App) -> bool {
+        for _ in 0..500 {
+            if app.poll_refresh() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        false
+    }
+
+    #[test]
+    fn background_refresh_applies_off_thread() {
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        assert_eq!(app.total_count(), 3);
+
+        // Add a 4th item straight to the store, behind the app's cached view.
+        app.data
+            .store
+            .create(
+                "proj",
+                NewItem {
+                    title: "Fourth".to_owned(),
+                    item_type: ItemType::Chore,
+                    priority: Priority::DEFAULT,
+                    labels: vec![],
+                    deps: vec![],
+                    parent: None,
+                    assignee: None,
+                    body: String::new(),
+                },
+                Utc::now(),
+            )
+            .unwrap();
+        // The cached view still shows 3 until a refresh lands.
+        assert_eq!(app.total_count(), 3);
+
+        app.start_refresh();
+        assert!(app.is_busy(), "a scan is in flight");
+        assert!(
+            drain_refresh(&mut app),
+            "the background scan delivered a result"
+        );
+        assert!(!app.is_busy(), "busy clears once the result is applied");
+        assert_eq!(app.total_count(), 4, "the 4th item is now visible");
+        assert!(app.data.all.iter().any(|fm| fm.title == "Fourth"));
+    }
+
+    #[test]
+    fn start_refresh_ignores_a_second_request_in_flight() {
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        app.start_refresh();
+        assert!(app.refresh_rx.is_some() && app.is_busy());
+        // A second `r` while a scan runs must not spawn another worker.
+        app.start_refresh();
+        assert!(app.refresh_rx.is_some() && app.is_busy());
+        assert!(drain_refresh(&mut app), "the single scan still completes");
+    }
+
+    #[test]
+    fn spinner_advances_only_while_busy() {
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        // Idle: a tick does not advance the spinner.
+        app.on_tick();
+        assert_eq!(app.spinner_frame, 0);
+        // Busy: each tick advances one frame.
+        app.busy = true;
+        app.on_tick();
+        assert_eq!(app.spinner_frame, 1);
+        app.on_tick();
+        assert_eq!(app.spinner_frame, 2);
     }
 
     #[test]

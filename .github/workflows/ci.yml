@@ -27,9 +27,18 @@ jobs:
       - name: Format check
         run: cargo fmt --all --check
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        # github/github-sync are now opt-out; lint both the full arm (--all-features,
+        # covers the GitHub code) and the default/lean arm (what `cargo install` builds).
+        run: |
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
-        run: cargo test --workspace
+        # --all-features so the github-gated tests (sync_github mock, clove-import
+        # mapping) still run; plus a default/lean run so the lean-only tests (e.g.
+        # the `built without github support` error path) actually execute in CI.
+        run: |
+          cargo test --workspace --all-features
+          cargo test -p clove-cli
       - name: Benchmarks compile (T-X01)
         run: cargo bench --workspace --no-run
 
@@ -131,10 +140,13 @@ jobs:
       # forces the test/bench harness back to unwind, so `cargo test --release`
       # and `cargo bench --no-run` are unaffected by panic=abort.
       - name: Release binary size
+        # Build BOTH the default lean binary and the `--features full` binary so the
+        # GitHub-feature size cost is visible (github/github-sync are opt-out).
         run: |
           cargo build --release -p clove-cli -p cloved
-          ls -l target/release/clove target/release/cloved
-          du -h target/release/clove target/release/cloved
+          echo "== lean (default) =="; ls -l target/release/clove target/release/cloved
+          cargo build --release -p clove-cli -p cloved --features "clove-cli/full cloved/full"
+          echo "== full (--features full) =="; ls -l target/release/clove target/release/cloved
 
   deny:
     name: cargo-deny

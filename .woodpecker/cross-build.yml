@@ -26,7 +26,9 @@ steps:
       CLOVE_SKIP_WEB_BUILD: '1'
     commands:
       - rustup target add aarch64-apple-darwin
-      - cargo zigbuild --release --target aarch64-apple-darwin -p clove-cli -p cloved
+      # `--features full` mirrors the shipped (release.yml) config so the GitHub /
+      # git2 cross-compile — the historically fragile part — is verified here.
+      - cargo zigbuild --release --target aarch64-apple-darwin -p clove-cli -p cloved --features "clove-cli/full cloved/full"
       - file target/aarch64-apple-darwin/release/clove
       # Informational size trend (release profile: fat LTO + cgu=1 + panic=abort + strip).
       - ls -lh target/aarch64-apple-darwin/release/clove target/aarch64-apple-darwin/release/cloved
@@ -38,7 +40,8 @@ steps:
       CLOVE_SKIP_WEB_BUILD: '1'
     commands:
       - rustup target add x86_64-pc-windows-gnu
-      - cargo zigbuild --release --target x86_64-pc-windows-gnu -p clove-cli -p cloved
+      # `--features full` mirrors the shipped (release.yml) config.
+      - cargo zigbuild --release --target x86_64-pc-windows-gnu -p clove-cli -p cloved --features "clove-cli/full cloved/full"
       - file target/x86_64-pc-windows-gnu/release/clove.exe
       # Informational size trend (release profile: fat LTO + cgu=1 + panic=abort + strip).
       - ls -lh target/x86_64-pc-windows-gnu/release/clove.exe target/x86_64-pc-windows-gnu/release/cloved.exe

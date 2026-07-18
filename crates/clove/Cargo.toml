@@ -15,15 +15,19 @@ default-run = "clove"
 name = "clove"
 path = "src/main.rs"
 
-# The `github` feature wires `import github` / `export github` through to
-# clove-import's GitHub (octocrab/tokio) layer. Default-on; a lean build can opt
-# out with `--no-default-features`, in which case those arms return a clean error.
+# `github` wires `clove sync github` (and `import/export github`) through to
+# clove-import's GitHub (octocrab/tokio) layer — ~3.5 MB of vendored TLS/HTTP.
+# It is **opt-out**: NOT in `default`, so a plain `cargo build` / `cargo install`
+# is lean and the sync arm returns a clean "built without github support" error.
+# Build with `--features github` (or `--features full`) to enable it; the
+# pre-built release artifacts are built `--features full` so they retain sync.
 [features]
-default = ["github", "mcp"]
+default = ["mcp"]
+full = ["github", "mcp"]
 github = ["clove-import/github"]
-# `mcp` wires the `clove mcp` subcommand to the clove-mcp (rmcp) server. Default-on,
-# mirroring `github`; `--no-default-features` drops it (the subcommand then errors
-# cleanly) for lean/cross builds.
+# `mcp` wires the `clove mcp` subcommand to the clove-mcp (rmcp) server. Kept in
+# `default` (it is small); `--no-default-features` drops it (the subcommand then
+# errors cleanly) for the leanest cross builds.
 mcp = ["dep:clove-mcp"]
 
 [dependencies]

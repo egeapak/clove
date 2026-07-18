@@ -33,3 +33,32 @@ describe('api.delete force query param', () => {
     expect(calledUrl).not.toContain('force');
   });
 });
+
+describe('api.history snapshot shape', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('parses recorded-snapshot points including the richer level fields', async () => {
+    vi.stubGlobal('fetch', async () =>
+      new Response(
+        JSON.stringify({
+          v: 1,
+          ok: true,
+          data: [
+            { date: '2026-07-16', created: 0, closed: 0, open: 2, total: 2, ready: 1, blocked: 1 },
+            { date: '2026-07-17', created: 1, closed: 0, open: 3, total: 3, ready: 2, blocked: 1 }
+          ],
+          _meta: { synthesized: false, snapshots: 2 }
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      )
+    );
+    const points = await api.history();
+    expect(points).toHaveLength(2);
+    // The synthesized-fallback fields are always present...
+    expect(points[1].open).toBe(3);
+    // ...and the snapshot-only levels come through when the server sends them.
+    expect(points[1].total).toBe(3);
+    expect(points[1].ready).toBe(2);
+    expect(points[1].blocked).toBe(1);
+  });
+});

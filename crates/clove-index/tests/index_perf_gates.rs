@@ -6,7 +6,7 @@
 //!
 //! Gates (warm index, 10k items):
 //! - `reindex`                < 1000 ms (met, ~735 ms — incl. deferred covering-index build)
-//! - `ls` (lean `query_list`)  <  15 ms (met, ~4.5 ms via the `idx_items_list` covering scan)
+//! - `ls` (lean `query_list`)  <   8 ms (met, ~2.5–4.5 ms via the `idx_items_list` covering scan)
 //! - `search` (FTS5, selective) < 20 ms (met, ~3 ms)
 //! - staleness fast, 0 stale   <   5 ms (met, ~3 ms via `check_staleness_fast`)
 
@@ -98,10 +98,14 @@ fn m1_index_perf_gates() {
         ls_count = index.query_list(&Filter::default()).unwrap().len();
     });
     assert_eq!(ls_count, n, "ls must return every item");
-    // Gate: < 15 ms. With the `idx_items_list` covering index the lean list is an
-    // index-only scan (~4.5 ms; per-row step dropped from ~793 ns to ~116 ns once
-    // the second b-tree lookup was removed). See docs/M1_ACCEPTANCE_GATES.md.
-    assert_within("ls_lean", ls_elapsed, Duration::from_millis(15));
+    // Gate: < 8 ms (tightened from 15 ms). With the `idx_items_list` covering
+    // index the lean list is an index-only scan (~2.5–4.5 ms measured; per-row
+    // step dropped from ~793 ns to ~116 ns once the second b-tree lookup was
+    // removed). The 8 ms bound keeps ~2x headroom over the observed time so CI
+    // catches a covering-scan regression (e.g. the index-only plan silently
+    // reverting to a table scan) instead of hiding it under a loose budget.
+    // See docs/M1_ACCEPTANCE_GATES.md.
+    assert_within("ls_lean", ls_elapsed, Duration::from_millis(8));
 
     // ready gate: the lean projection in Ready mode.
     let ready_elapsed = best_of(20, || {

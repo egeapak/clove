@@ -152,6 +152,41 @@ fn comments_match_schema() {
 }
 
 #[test]
+fn version_output_matches_schema() {
+    let dir = init_with_items();
+    let version = schema("version.json");
+    let (v, code) = run_json(clove(dir.path()).arg("version"));
+    assert_eq!(code, 0);
+    assert_valid(&version, &v);
+    // Sanity: the payload is the real version data, not an empty object.
+    assert!(v["data"]["clove"].as_str().is_some());
+    assert!(v["data"]["schema"].as_i64().is_some());
+}
+
+#[test]
+fn reindex_output_matches_schema() {
+    let dir = init_with_items();
+    let reindex = schema("reindex.json");
+    let (v, code) = run_json(clove(dir.path()).arg("reindex"));
+    assert_eq!(code, 0);
+    assert_valid(&reindex, &v);
+    // The seeded store has two items; the rebuild must report them.
+    assert_eq!(v["data"]["items_indexed"].as_i64().unwrap(), 2);
+}
+
+#[test]
+fn new_output_matches_schema() {
+    let dir = init_with_items();
+    let new = schema("new.json");
+    let (v, code) =
+        run_json(clove(dir.path()).args(["new", "Fresh", "--type", "chore", "-p", "3"]));
+    assert_eq!(code, 0);
+    assert_valid(&new, &v);
+    // The id must match the configured `proj` prefix.
+    assert!(v["data"]["id"].as_str().unwrap().starts_with("proj-"));
+}
+
+#[test]
 fn doctor_output_matches_schema() {
     let dir = init_with_items();
     let doctor = schema("doctor.json");

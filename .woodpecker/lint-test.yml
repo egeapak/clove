@@ -41,13 +41,19 @@ steps:
     image: *rust_image
     environment: *cargo_env
     commands:
+      # github/github-sync are now opt-out (see the feature notes below), so lint
+      # both arms: the full arm (--all-features) covers the GitHub code, and the
+      # default/lean arm is what `cargo install` / from-source builds produce.
+      - cargo clippy --workspace --all-targets --all-features -- -D warnings
       - cargo clippy --workspace --all-targets -- -D warnings
 
   - name: test
     image: *rust_image
     environment: *cargo_env
     commands:
-      - cargo test --workspace
+      # --all-features so the github-gated tests (sync_github mock server,
+      # clove-import mapping) still run now that `github` is opt-out.
+      - cargo test --workspace --all-features
 
   - name: bench-compile
     image: *rust_image
@@ -55,26 +61,31 @@ steps:
     commands:
       - cargo bench --workspace --no-run
 
-  # FEATURE TRIMS: default-on features (github, mcp, git-sync) are trimmed for
-  # binary size, and several deps opt out of their own default features. The
-  # `--no-default-features` build paths are first-class shipping configs (lean CLI
-  # with no GitHub/MCP; daemon with no vendored libgit2), so guard they keep
-  # compiling. cargo check is enough — the opt-out arms only need to resolve.
+  # FEATURE TRIMS: `github`/`github-sync` are opt-out (not in default) so the
+  # default build is lean; `full` re-enables them. Guard that both the default
+  # (lean CLI: mcp, no github; daemon: git-sync, no github-sync) and the leanest
+  # `--no-default-features` arm (no github/mcp; daemon no git-sync/github-sync)
+  # keep compiling — these are first-class shipping configs. cargo check is
+  # enough; the opt-out arms only need to resolve.
   - name: feature-combos
     image: *rust_image
     environment: *cargo_env
     commands:
-      - cargo check -p clove-cli --no-default-features
-      - cargo check -p cloved --no-default-features
+      - cargo check -p clove-cli                       # default (lean: mcp, no github)
+      - cargo check -p clove-cli --no-default-features   # leanest (no github, no mcp)
+      - cargo check -p cloved                        # default (git-sync, no github-sync)
+      - cargo check -p cloved --no-default-features   # leanest (no git-sync/github-sync)
 
   # Informational native (linux x86_64) size trend for the shipped binaries.
-  # Release profile is fat LTO + cgu=1 + panic=abort + strip (root Cargo.toml);
-  # this is the authoritative native number (cross-build.yml reports the
-  # darwin/windows-gnu cross-compiled sizes).
+  # Release profile is fat LTO + cgu=1 + panic=abort + strip (root Cargo.toml).
+  # Build BOTH the default lean binary and the `--features full` binary so the
+  # GitHub-feature size cost is visible (this is the authoritative native number;
+  # cross-build.yml reports the darwin/windows-gnu cross-compiled sizes).
   - name: release-size
     image: *rust_image
     environment: *cargo_env
     commands:
       - cargo build --release -p clove-cli -p cloved
-      - ls -lh target/release/clove target/release/cloved
-      - du -h target/release/clove target/release/cloved
+      - echo "== lean (default) =="; ls -lh target/release/clove target/release/cloved
+      - cargo build --release -p clove-cli -p cloved --features "clove-cli/full cloved/full"
+      - echo "== full (--features full) =="; ls -lh target/release/clove target/release/cloved

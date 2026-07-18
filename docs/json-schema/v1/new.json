@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://clove.dev/schema/v1/new.json",
+  "title": "clove new envelope",
+  "description": "The `clove new --format json` response: the created item's id and file path.",
+  "type": "object",
+  "required": ["v", "ok", "data"],
+  "properties": {
+    "v": { "const": 1 },
+    "ok": { "const": true },
+    "data": {
+      "type": "object",
+      "required": ["id", "path"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9]{0,7}-[0-9A-Z]{8}$" },
+        "path": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "_meta": { "type": "object" }
+  },
+  "additionalProperties": false
+}
