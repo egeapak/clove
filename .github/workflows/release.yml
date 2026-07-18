@@ -62,7 +62,10 @@ jobs:
       - name: Build release binaries
         env:
           CLOVE_SKIP_WEB_BUILD: "1"   # embed the dist built above; never run npm
-        run: cargo build --release --target ${{ matrix.target }} -p clove -p cloved
+        # `--features full`: github/github-sync are opt-out, but the SHIPPED binary
+        # keeps `clove sync github` + the daemon sync loop. Drop `--features full`
+        # to publish the ~2.3 MB-smaller lean binary (no sync) instead.
+        run: cargo build --release --target ${{ matrix.target }} -p clove -p cloved --features "clove/full cloved/full"
 
       - name: Package
         shell: bash
