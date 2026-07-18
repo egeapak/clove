@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://clove.dev/schema/v1/version.json",
+  "title": "clove version envelope",
+  "description": "The `clove version --format json` response: build/schema identity.",
+  "type": "object",
+  "required": ["v", "ok", "data"],
+  "properties": {
+    "v": { "const": 1 },
+    "ok": { "const": true },
+    "data": {
+      "type": "object",
+      "required": ["clove", "schema"],
+      "properties": {
+        "clove": { "type": "string" },
+        "schema": { "type": "integer" },
+        "build_date": { "type": ["string", "null"] },
+        "git_hash": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "_meta": { "type": "object" }
+  },
+  "additionalProperties": false
+}

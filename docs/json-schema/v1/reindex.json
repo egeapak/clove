@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://clove.dev/schema/v1/reindex.json",
+  "title": "clove reindex envelope",
+  "description": "The `clove reindex --format json` response: rebuild outcome.",
+  "type": "object",
+  "required": ["v", "ok", "data"],
+  "properties": {
+    "v": { "const": 1 },
+    "ok": { "const": true },
+    "data": {
+      "type": "object",
+      "required": ["duration_ms", "items_indexed", "warnings"],
+      "properties": {
+        "duration_ms": { "type": "integer", "minimum": 0 },
+        "items_indexed": { "type": "integer", "minimum": 0 },
+        "warnings": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    },
+    "_meta": { "type": "object" }
+  },
+  "additionalProperties": false
+}
