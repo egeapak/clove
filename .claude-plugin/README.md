@@ -12,7 +12,7 @@ The `clove` binary (and, recommended, the `cloved` daemon) must be installed and
 on your `PATH`:
 
 ```bash
-cargo install --git https://github.com/egeapak/clove clove cloved
+cargo install --git https://github.com/egeapak/clove clove-cli cloved
 ```
 
 Verify with:

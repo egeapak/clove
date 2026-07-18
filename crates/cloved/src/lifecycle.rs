@@ -200,7 +200,21 @@ pub fn run(clove_dir: &Utf8Path) -> anyhow::Result<()> {
             )
         };
         #[cfg(not(feature = "github-sync"))]
-        let github_sync_fut = std::future::pending::<()>();
+        let github_sync_fut = {
+            // Symmetric with the git_sync warning above: if the config asks for
+            // periodic GitHub sync but this binary lacks the feature, say so once
+            // instead of silently never running it.
+            let wants_github_sync = config.as_ref().is_some_and(|c| {
+                c.daemon.github_sync_repo.is_some() || c.daemon.github_sync_interval_min > 0
+            });
+            if wants_github_sync {
+                eprintln!(
+                    "cloved: [daemon] github sync is configured but this binary was \
+                     built without github-sync support; periodic GitHub sync is disabled"
+                );
+            }
+            std::future::pending::<()>()
+        };
 
         // 5. Serve IPC + watch for changes until a shutdown signal (or idle
         //    timeout) fires.

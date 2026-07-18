@@ -131,7 +131,11 @@ fn spawn_notifier(
     let interval = notify_interval();
     let handle = tokio::runtime::Handle::current();
     std::thread::spawn(move || {
-        let mut client = clove_ipc::ensure_daemon(&clove_dir);
+        // Probe only — never spawn. The heartbeat thread owns daemon lifecycle
+        // (start/restart); the notifier just needs the change signal, so when the
+        // daemon is down (or an incompatible version lingers after an upgrade) we
+        // quietly re-probe each tick rather than launching doomed `cloved`s.
+        let mut client = clove_ipc::DaemonClient::probe(&clove_dir);
         let mut last: Option<u64> = None;
         loop {
             std::thread::sleep(interval);
@@ -164,7 +168,7 @@ fn spawn_notifier(
                     last = Some(generation);
                 }
                 // Daemon down/unreachable: keep `last`, re-probe next tick.
-                None => client = clove_ipc::ensure_daemon(&clove_dir),
+                None => client = clove_ipc::DaemonClient::probe(&clove_dir),
             }
         }
     });

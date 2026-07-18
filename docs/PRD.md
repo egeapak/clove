@@ -270,7 +270,8 @@ plan):
 
 ## 13. Distribution
 
-- Single binary; `cargo install clove`, GitHub release binaries, and a Homebrew
+- Single binary; `cargo install clove-cli` (installs the `clove` command),
+  GitHub release binaries, and a Homebrew
   tap (later). CI downloads a pinned binary.
 - `clove-core` published as a library so other Rust tools/agents can embed it.
 - Cross-platform (macOS/Linux first; Windows supported by avoiding bash/POSIX-
