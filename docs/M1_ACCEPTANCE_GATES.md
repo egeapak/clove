@@ -11,14 +11,15 @@ and `--test index_parity`.
 | `search` 10k via FTS5 (selective query) | < 20 ms | ~3 ms | ✅ met |
 | Staleness detection, 10k, 0 stale | < 5 ms | ~3 ms (fast path) | ✅ **met** |
 | All M0 tests continue to pass | — | yes | ✅ met |
-| `ls` 10k items, warm index | < 15 ms | **~4.5 ms** (covering index) | ✅ met |
+| `ls` 10k items, warm index | < 8 ms | **~2.5–4.5 ms** (covering index) | ✅ met |
 
-The `ls` gate is **< 15 ms**. With the `idx_items_list` covering index the lean
-list is an index-only scan and lands ~4.5 ms — comfortably under (and under the
-original 10 ms aspiration). The 15 ms bound is kept as headroom; note it does not
-by itself guard against *losing* the covering scan (that would regress to ~11 ms,
-still < 15 ms) — tighten to ~8 ms if you want CI to catch a covering-scan
-regression. Two further levers exist for the interactive case: the default
+The `ls` gate is **< 8 ms** (tightened from 15 ms). With the `idx_items_list`
+covering index the lean list is an index-only scan and lands ~2.5–4.5 ms —
+comfortably under (and under the original 10 ms aspiration). The 8 ms bound keeps
+~2× headroom over the observed time so it *does* guard against *losing* the
+covering scan: if the index-only plan silently regressed to a table scan (~11 ms)
+CI would now catch it instead of hiding it under the old loose 15 ms budget. Two
+further levers exist for the interactive case: the default
 `--limit 100` (the index pushes `LIMIT` into SQL, so a page steps ~100 rows, not
 10k), and `_meta.total` from a cheap `COUNT(*)`.
 
@@ -115,7 +116,7 @@ fast_misses_inplace_edit_that_deep_catches}` pin both behaviors.
 - `crates/clove-index/benches/index.rs` — `reindex`, `ls`, `ready`,
   `staleness_clean`, `search`.
 - `crates/clove-index/tests/index_perf_gates.rs` — release-asserted gate test
-  (`ls_lean` ≤ 15 ms, `search_selective` ≤ 20 ms, `staleness_clean_fast` ≤ 5 ms,
+  (`ls_lean` ≤ 8 ms, `search_selective` ≤ 20 ms, `staleness_clean_fast` ≤ 5 ms,
   `reindex` ≤ 1000 ms), plus informational prints for the broad-match search and
   the deep staleness path.
 - `crates/clove-index/tests/index_parity.rs` — the file↔index id-order parity
