@@ -62,7 +62,7 @@ jobs:
       - name: Build release binaries
         env:
           CLOVE_SKIP_WEB_BUILD: "1"   # embed the dist built above; never run npm
-        run: cargo build --release --target ${{ matrix.target }} -p clove -p cloved
+        run: cargo build --release --target ${{ matrix.target }} -p clove-cli -p cloved
 
       - name: Package
         shell: bash

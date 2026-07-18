@@ -104,7 +104,7 @@ jobs:
       # signal integration tests are `#![cfg(unix)]` and are exercised on the
       # ubuntu/macos matrix.
       - name: Build daemon (windows shutdown path)
-        run: cargo build -p cloved -p clove
+        run: cargo build -p cloved -p clove-cli
       - name: Daemon unit tests
         # `cloved` is a binary crate (no lib target), so its unit tests live in
         # the bin and run with --bins; --lib finds no targets and errors.
@@ -123,7 +123,7 @@ jobs:
       # no GitHub/MCP, a daemon with no vendored libgit2), so guard that they keep
       # compiling — the `--no-default-features` arms must still resolve cleanly.
       - name: clove without github + mcp (lean CLI)
-        run: cargo check -p clove --no-default-features
+        run: cargo check -p clove-cli --no-default-features
       - name: cloved without git-sync
         run: cargo check -p cloved --no-default-features
       # Informational: track the shipped binary size. The release profile is fat
@@ -132,7 +132,7 @@ jobs:
       # and `cargo bench --no-run` are unaffected by panic=abort.
       - name: Release binary size
         run: |
-          cargo build --release -p clove -p cloved
+          cargo build --release -p clove-cli -p cloved
           ls -l target/release/clove target/release/cloved
           du -h target/release/clove target/release/cloved
 
