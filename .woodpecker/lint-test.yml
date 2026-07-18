@@ -71,8 +71,8 @@ steps:
     image: *rust_image
     environment: *cargo_env
     commands:
-      - cargo check -p clove                        # default (lean: mcp, no github)
-      - cargo check -p clove --no-default-features   # leanest (no github, no mcp)
+      - cargo check -p clove-cli                       # default (lean: mcp, no github)
+      - cargo check -p clove-cli --no-default-features   # leanest (no github, no mcp)
       - cargo check -p cloved                        # default (git-sync, no github-sync)
       - cargo check -p cloved --no-default-features   # leanest (no git-sync/github-sync)
 
@@ -85,7 +85,7 @@ steps:
     image: *rust_image
     environment: *cargo_env
     commands:
-      - cargo build --release -p clove -p cloved
+      - cargo build --release -p clove-cli -p cloved
       - echo "== lean (default) =="; ls -lh target/release/clove target/release/cloved
-      - cargo build --release -p clove -p cloved --features "clove/full cloved/full"
+      - cargo build --release -p clove-cli -p cloved --features "clove-cli/full cloved/full"
       - echo "== full (--features full) =="; ls -lh target/release/clove target/release/cloved

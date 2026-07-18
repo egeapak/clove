@@ -38,7 +38,7 @@ jobs:
         # the `built without github support` error path) actually execute in CI.
         run: |
           cargo test --workspace --all-features
-          cargo test -p clove
+          cargo test -p clove-cli
       - name: Benchmarks compile (T-X01)
         run: cargo bench --workspace --no-run
 
@@ -113,7 +113,7 @@ jobs:
       # signal integration tests are `#![cfg(unix)]` and are exercised on the
       # ubuntu/macos matrix.
       - name: Build daemon (windows shutdown path)
-        run: cargo build -p cloved -p clove
+        run: cargo build -p cloved -p clove-cli
       - name: Daemon unit tests
         # `cloved` is a binary crate (no lib target), so its unit tests live in
         # the bin and run with --bins; --lib finds no targets and errors.
@@ -132,7 +132,7 @@ jobs:
       # no GitHub/MCP, a daemon with no vendored libgit2), so guard that they keep
       # compiling — the `--no-default-features` arms must still resolve cleanly.
       - name: clove without github + mcp (lean CLI)
-        run: cargo check -p clove --no-default-features
+        run: cargo check -p clove-cli --no-default-features
       - name: cloved without git-sync
         run: cargo check -p cloved --no-default-features
       # Informational: track the shipped binary size. The release profile is fat
@@ -143,9 +143,9 @@ jobs:
         # Build BOTH the default lean binary and the `--features full` binary so the
         # GitHub-feature size cost is visible (github/github-sync are opt-out).
         run: |
-          cargo build --release -p clove -p cloved
+          cargo build --release -p clove-cli -p cloved
           echo "== lean (default) =="; ls -l target/release/clove target/release/cloved
-          cargo build --release -p clove -p cloved --features "clove/full cloved/full"
+          cargo build --release -p clove-cli -p cloved --features "clove-cli/full cloved/full"
           echo "== full (--features full) =="; ls -l target/release/clove target/release/cloved
 
   deny:

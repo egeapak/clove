@@ -33,7 +33,7 @@ steps:
       # `--features full`: github/github-sync are opt-out, but the SHIPPED binary
       # keeps `clove sync github` + the daemon sync loop. Drop `--features full`
       # here to publish the ~3.5 MB-smaller lean binary (no sync) instead.
-      - cargo zigbuild --release --target universal2-apple-darwin -p clove -p cloved --features "clove/full cloved/full"
+      - cargo zigbuild --release --target universal2-apple-darwin -p clove-cli -p cloved --features "clove-cli/full cloved/full"
       - file target/universal2-apple-darwin/release/clove
       # Informational size trend (release profile: fat LTO + cgu=1 + panic=abort + strip).
       - ls -lh target/universal2-apple-darwin/release/clove target/universal2-apple-darwin/release/cloved
@@ -49,7 +49,7 @@ steps:
     commands:
       - rustup target add x86_64-pc-windows-gnu
       # `--features full` — see the macOS step: shipped binary keeps sync.
-      - cargo zigbuild --release --target x86_64-pc-windows-gnu -p clove -p cloved --features "clove/full cloved/full"
+      - cargo zigbuild --release --target x86_64-pc-windows-gnu -p clove-cli -p cloved --features "clove-cli/full cloved/full"
       - file target/x86_64-pc-windows-gnu/release/clove.exe
       # Informational size trend (release profile: fat LTO + cgu=1 + panic=abort + strip).
       - ls -lh target/x86_64-pc-windows-gnu/release/clove.exe target/x86_64-pc-windows-gnu/release/cloved.exe

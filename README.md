@@ -20,11 +20,11 @@ authoritative spec.
 ## Install
 
 ```sh
-cargo install --locked --git https://github.com/egeapak/clove clove cloved
-clove version
+cargo install --locked --git https://github.com/egeapak/clove clove-cli cloved
+clove version   # the installed command is `clove` (crate: clove-cli)
 
 # ...or, to include GitHub sync (adds ~2.3 MB of TLS/HTTP per binary):
-cargo install --locked --features full --git https://github.com/egeapak/clove clove cloved
+cargo install --locked --features full --git https://github.com/egeapak/clove clove-cli cloved
 ```
 
 This installs the `clove` CLI and the optional `cloved` daemon onto your `PATH`.
@@ -41,7 +41,7 @@ release binaries are built `--features full`**, so downloads keep sync.
 
 ```sh
 cargo build --release                    # lean binaries: clove (CLI), cloved (daemon)
-cargo build --release --features "clove/full cloved/full"   # + GitHub sync
+cargo build --release --features "clove-cli/full cloved/full"   # + GitHub sync
 cargo test --workspace --all-features    # unit + integration + doctests (incl. github)
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```

@@ -1,5 +1,8 @@
 [package]
-name = "clove"
+# The published crate is `clove-cli` (the crates.io name `clove` is taken); the
+# installed binary and command stay `clove` (see `[[bin]]` below). `cargo install
+# clove-cli` gives you the `clove` command.
+name = "clove-cli"
 description = "clove: a fast, git-native, dependency-aware work-item tracker"
 edition.workspace = true
 version.workspace = true
