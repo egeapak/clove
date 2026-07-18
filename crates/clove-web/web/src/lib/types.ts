@@ -66,6 +66,13 @@ export interface StatsHistoryPoint {
   created: number;
   closed: number;
   open: number;
+  // Present only when the series comes from recorded snapshots (real
+  // point-in-time levels); absent for the file-synthesized fallback.
+  captured_at?: string;
+  in_progress?: number;
+  total?: number;
+  ready?: number;
+  blocked?: number;
 }
 
 export interface Envelope<T> {

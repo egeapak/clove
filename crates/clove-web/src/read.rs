@@ -267,15 +267,96 @@ pub async fn get_stats(
 }
 
 /// `GET /api/v1/stats/history?days=N` — a daily throughput series
-/// (`{date, created, closed, open}`) synthesized from item `created`/`closed`
-/// timestamps. Always correct from files alone (no SQLite snapshots required);
-/// `open` is the running net-open count, seeded from items predating the window.
+/// Recorded stats snapshots from `.clove/index.db`, mapped to history points
+/// oldest→newest. `created`/`closed` are per-interval throughput deltas between
+/// consecutive snapshots (the first point baselines at 0, since there is no prior
+/// snapshot to difference against); `open`/`in_progress`/`total`/`ready`/`blocked`
+/// are the real recorded levels at each capture — trends the file-synthesized
+/// series cannot reconstruct. Returns `None` (so the caller synthesizes) when
+/// there is no index or no snapshots. Honors `?since=<rfc3339>` and `?limit=N`.
+fn recorded_history_points(
+    state: &AppState,
+    params: &HashMap<String, String>,
+) -> Option<Vec<Value>> {
+    use clove_index::Index;
+
+    let db_path = state.issues_dir.parent()?.join("index.db");
+    if !db_path.exists() {
+        return None;
+    }
+    let index = Index::open(&db_path).ok()?;
+    let since = params.get("since").map(String::as_str);
+    let limit = params
+        .get("limit")
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n > 0);
+    // snapshot_history returns most-recent-first; reverse to chronological order
+    // so the throughput deltas below run forward in time.
+    let mut snapshots = index.snapshot_history(since, limit).ok()?;
+    if snapshots.is_empty() {
+        return None;
+    }
+    snapshots.reverse();
+
+    let mut points = Vec::with_capacity(snapshots.len());
+    let mut prev_totals: Option<(u64, u64)> = None; // (created_total, closed_total)
+    for snap in &snapshots {
+        let report = &snap.report;
+        let (created, closed) = match prev_totals {
+            Some((prev_created, prev_closed)) => (
+                report.throughput.created_total.saturating_sub(prev_created),
+                report.throughput.closed_total.saturating_sub(prev_closed),
+            ),
+            None => (0, 0),
+        };
+        prev_totals = Some((
+            report.throughput.created_total,
+            report.throughput.closed_total,
+        ));
+        let date = snap
+            .captured_at
+            .split('T')
+            .next()
+            .unwrap_or(&snap.captured_at)
+            .to_owned();
+        points.push(json!({
+            "date": date,
+            "captured_at": snap.captured_at,
+            "created": created,
+            "closed": closed,
+            "open": report.by_status.open,
+            "in_progress": report.by_status.in_progress,
+            "total": report.total,
+            "ready": report.ready,
+            "blocked": report.blocked,
+        }));
+    }
+    Some(points)
+}
+
+/// `GET /api/v1/stats/history` — the throughput/levels history for the timeline.
+///
+/// Prefers the durable snapshots recorded in `.clove/index.db` (real point-in-time
+/// history, incl. ready/blocked levels — see [`recorded_history_points`]). When no
+/// snapshots exist it falls back to a dense daily series (`{date, created, closed,
+/// open}`) synthesized from item `created`/`closed` timestamps, always correct from
+/// files alone; `open` is the running net-open count seeded from items predating the
+/// window. `_meta.synthesized` tells the client which path produced the series.
 pub async fn get_stats_history(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
 ) -> ApiResult {
     use chrono::Duration;
     use std::collections::BTreeMap;
+
+    // Durable recorded snapshots win when present.
+    if let Some(points) = recorded_history_points(&state, &params) {
+        let recorded = points.len();
+        return Ok(ok(
+            json!(points),
+            json!({ "source": state.source, "synthesized": false, "snapshots": recorded }),
+        ));
+    }
 
     let days: i64 = params
         .get("days")
