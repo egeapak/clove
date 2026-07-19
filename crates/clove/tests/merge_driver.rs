@@ -67,7 +67,12 @@ fn setup_repo() -> TempDir {
     // Repoint the installed driver at THIS build's binary (absolute path), so
     // `git merge` runs the version we just compiled regardless of $PATH.
     let bin = assert_cmd::cargo::cargo_bin("clove");
-    let bin = bin.to_str().unwrap();
+    // git runs the merge driver through its bundled `sh -c`, where backslashes
+    // are escape characters: a Windows path like `C:\a\clove.exe` collapses to
+    // `C:aclove.exe` ("command not found"), so the driver never runs and every
+    // merge falls back to git's default (breaking these assertions). Forward
+    // slashes work for `sh` on Windows and are a no-op on Unix paths.
+    let bin = bin.to_str().unwrap().replace('\\', "/");
     git_ok(
         p,
         &[

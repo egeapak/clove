@@ -6,6 +6,9 @@
 //! - `daemon.pid` is written **only after** the socket is bound (DESIGN §8.2), so
 //!   a reader that sees a pid is guaranteed a usable socket. (From P3 the startup
 //!   sweep also completes before the pid is written.)
+//! - The shutdown-signal handler is installed **before** the pid is written, so a
+//!   SIGTERM racing the daemon's readiness is caught (clean teardown) rather than
+//!   hitting the kernel default disposition (abrupt kill, stale socket/pid).
 //! - Shutdown flushes the index (`wal_checkpoint(TRUNCATE)`), then removes the
 //!   socket and pid, then releases the lock (DESIGN §8.9).
 
@@ -180,6 +183,13 @@ pub fn run(clove_dir: &Utf8Path) -> anyhow::Result<()> {
             st.set_watcher_state(WatcherState::Sweeping);
         }
         crate::reindexer::sync_once(&issues_dir, &index, &state);
+        // Register the shutdown-signal handler BEFORE advertising readiness (the
+        // pid file). Otherwise a SIGTERM delivered in the window between the pid
+        // write and the `select!` below (where the handler used to be installed)
+        // hits the kernel default "terminate" disposition — killing the daemon
+        // without the cleanup sequence and leaving a stale socket/pid behind.
+        // "pid present ⇒ ready to shut down cleanly." (DESIGN §8.9)
+        let mut shutdown = ShutdownSignal::install(clove_dir);
         write_pid(clove_dir).context("writing pid file")?;
         restrict_to_owner(&pid_path(clove_dir), 0o600);
 
@@ -225,7 +235,7 @@ pub fn run(clove_dir: &Utf8Path) -> anyhow::Result<()> {
             _ = idle_watchdog(Arc::clone(&state), idle_shutdown) => {},
             _ = crate::snapshot::snapshot_loop(repo_root.clone(), Arc::clone(&index), snapshot_interval) => {},
             _ = github_sync_fut => {},
-            _ = shutdown_signal(clove_dir) => {},
+            _ = shutdown.recv() => {},
         }
         Ok(())
     });
@@ -363,32 +373,67 @@ async fn accept_loop(listener: TokioListener, dispatcher: Dispatcher) {
     }
 }
 
-/// Resolve once a shutdown signal arrives (DESIGN §8.9).
+/// A shutdown-signal source whose OS handler is installed at construction, so it
+/// can be set up *before* the pid file advertises readiness (DESIGN §8.9). Await
+/// [`ShutdownSignal::recv`] to block until a shutdown signal arrives.
 #[cfg(unix)]
-async fn shutdown_signal(_clove_dir: &Utf8Path) {
-    use tokio::signal::unix::{signal, SignalKind};
-    let mut term = match signal(SignalKind::terminate()) {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-    let mut interrupt = match signal(SignalKind::interrupt()) {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-    tokio::select! {
-        _ = term.recv() => {},
-        _ = interrupt.recv() => {},
+enum ShutdownSignal {
+    Signals {
+        term: tokio::signal::unix::Signal,
+        interrupt: tokio::signal::unix::Signal,
+    },
+    /// Registration failed — resolve immediately, matching the prior behaviour
+    /// (an unusable signal handler shouldn't leave the daemon un-stoppable).
+    Failed,
+}
+
+#[cfg(unix)]
+impl ShutdownSignal {
+    fn install(_clove_dir: &Utf8Path) -> Self {
+        use tokio::signal::unix::{signal, SignalKind};
+        match (
+            signal(SignalKind::terminate()),
+            signal(SignalKind::interrupt()),
+        ) {
+            (Ok(term), Ok(interrupt)) => ShutdownSignal::Signals { term, interrupt },
+            _ => ShutdownSignal::Failed,
+        }
+    }
+
+    async fn recv(&mut self) {
+        match self {
+            ShutdownSignal::Signals { term, interrupt } => {
+                tokio::select! {
+                    _ = term.recv() => {},
+                    _ = interrupt.recv() => {},
+                }
+            }
+            ShutdownSignal::Failed => {}
+        }
     }
 }
 
 /// Windows has no SIGTERM: wait on Ctrl-C (interactive) or the named shutdown
 /// event that `clove daemon stop` signals (DESIGN §8.9).
 #[cfg(windows)]
-async fn shutdown_signal(clove_dir: &Utf8Path) {
-    let event = clove_ipc::event_name(clove_dir);
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {},
-        _ = wait_named_event(event) => {},
+struct ShutdownSignal {
+    clove_dir: camino::Utf8PathBuf,
+}
+
+#[cfg(windows)]
+impl ShutdownSignal {
+    fn install(clove_dir: &Utf8Path) -> Self {
+        ShutdownSignal {
+            clove_dir: clove_dir.to_owned(),
+        }
+    }
+
+    async fn recv(&mut self) {
+        let event = clove_ipc::event_name(&self.clove_dir);
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = wait_named_event(event) => {},
+        }
     }
 }
 
