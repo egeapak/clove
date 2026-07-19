@@ -5,7 +5,7 @@
 //! feature. This crate provides the shared scaffolding — the [`Importer`] trait,
 //! the [`ImportPlan`]/[`ImportReport`] planning types, the field-mapping helpers
 //! in [`map`], and the `external_ref` idempotency index — that every concrete
-//! importer reuses. See `docs/M2_PLAN.md` §2 and DESIGN.md §11.
+//! importer reuses. See DESIGN.md §11.
 
 pub mod beads;
 pub mod error;

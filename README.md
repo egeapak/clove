@@ -1,21 +1,59 @@
 # clove
 
+[![CI](https://github.com/egeapak/clove/actions/workflows/ci.yml/badge.svg)](https://github.com/egeapak/clove/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](rust-toolchain.toml)
+
 A fast, git-native, **dependency-aware** work-item tracker for AI coding agents and humans.
 
-Plain Markdown + YAML-frontmatter files under `.clove/issues/` are the **single source
-of truth** — grep-able, diffable, and they travel with the repo. An optional SQLite
-index and an optional background daemon add speed and features but are never required:
-delete them and nothing is lost. Written in Rust as a single cross-platform binary.
+Plain Markdown + YAML-frontmatter files under `.clove/issues/` are the **single
+source of truth** — grep-able, diffable, and they travel with the repo. An
+optional SQLite index and an optional background daemon add speed and features
+but are never required: delete them and nothing is lost. Written in Rust as a
+single, dependency-light, cross-platform binary.
 
-## Status
+## Contents
 
-The full surface has landed and is gated in CI: the `clove` CLI and `cloved`
-daemon, the SQLite index, the exact-incremental index/daemon dependency graph,
-analytics (`clove stats` + history), the `clove tui` terminal browser + add/edit
-form, the **`clove serve` web UI** (Kanban / list / detail / timeline), two-way
-**GitHub sync** (`clove sync github`), the **`clove mcp`** server, and a **Claude
-Code plugin**. See `HANDOFF.md` for the current state and `docs/DESIGN.md` for the
-authoritative spec.
+- [Features](#features)
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Accelerators: index & daemon](#accelerators-index--daemon)
+- [Browse: terminal & web UI](#browse-terminal--web-ui)
+- [Interop & GitHub sync](#interop--github-sync)
+- [AI agents: MCP server & Claude Code plugin](#ai-agents-mcp-server--claude-code-plugin)
+- [Build & test](#build--test)
+- [Workspace layout](#workspace-layout)
+- [Documentation](#documentation)
+- [Contributing](#contributing)
+- [License](#license)
+
+## Features
+
+- **Git-native, plain-text store** — every item is a Markdown file with
+  YAML frontmatter under `.clove/issues/`. No database of record; it diffs,
+  greps, and merges like code, and a 3-way merge driver resolves conflicts.
+- **Dependency-aware** — a cycle-validated hard-dependency graph with
+  `ready` / `blocked` queries and a `cargo tree`-style `dep tree` view.
+- **One write path, many surfaces** — CLI, web, MCP, daemon, and the TUI form
+  all funnel through a single validated mutation path, so behavior never
+  diverges between them.
+- **Agent-first output** — every command speaks a stable
+  `{ v, ok, data, _meta }` JSON envelope with documented exit codes;
+  `clove agent-doc` describes the whole agent-facing surface.
+- **Optional accelerators, never required** — an FTS5 SQLite index for fast
+  search/staleness and a `cloved` daemon that keeps the index + graph hot and
+  serves reads over IPC. Delete them and nothing is lost.
+- **Analytics** — `clove stats` (counts, ready/blocked, epics, throughput) with
+  recorded history snapshots.
+- **Two UIs** — a `ratatui` terminal browser (`clove tui`) and an embedded
+  SvelteKit web UI (`clove serve`: Kanban / list / detail / timeline, live
+  file-watch updates, no Node needed at runtime).
+- **Two-way GitHub sync** — `clove sync github` reconciles issues *and* comments
+  in both directions in a single pass, with policy-based conflict resolution.
+- **AI-native** — a built-in MCP server (`clove mcp`) and a Claude Code plugin
+  expose items to agents as native tools.
+- **Cross-platform** — a single stripped, LTO'd binary for Linux, macOS
+  (arm64 + x86_64), and Windows.
 
 ## Install
 
@@ -23,28 +61,22 @@ authoritative spec.
 cargo install --locked --git https://github.com/egeapak/clove clove-cli cloved
 clove version   # the installed command is `clove` (crate: clove-cli)
 
-# ...or, to include GitHub sync (adds ~2.3 MB of TLS/HTTP per binary):
+# ...or, to include GitHub sync (adds ~3.5 MB of TLS/HTTP per binary):
 cargo install --locked --features full --git https://github.com/egeapak/clove clove-cli cloved
 ```
 
 This installs the `clove` CLI and the optional `cloved` daemon onto your `PATH`.
-A Rust toolchain compiles them; no Node is required (the web UI embeds a
-placeholder unless built with Node — see [`clove-web/web/README.md`](crates/clove-web/web/README.md)).
+A Rust (stable) toolchain compiles them; no Node is required (the web UI embeds a
+placeholder unless built with Node — see
+[`crates/clove-web/web/README.md`](crates/clove-web/web/README.md)).
 
-**GitHub sync is opt-in.** The default build is lean; `clove sync github`
-(and the daemon's periodic sync) live behind the `github` / `github-sync`
-features, bundled as `full`. A default binary prints a clean
-`built without github support` error on `clove sync github`. The **pre-built
-release binaries are built `--features full`**, so downloads keep sync.
-
-## Build & test
-
-```sh
-cargo build --release                    # lean binaries: clove (CLI), cloved (daemon)
-cargo build --release --features "clove-cli/full cloved/full"   # + GitHub sync
-cargo test --workspace --all-features    # unit + integration + doctests (incl. github)
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-```
+**GitHub sync is opt-out.** The default build is lean; `clove sync github` (and
+the daemon's periodic sync) live behind the `github` / `github-sync` features,
+bundled as `full`. A default binary prints a clean `built without github support`
+error on `clove sync github`. The **pre-built release binaries are built
+`--features full`**, so downloads keep sync. (For how the GitHub feature could be
+distributed as a *separately installed* plugin, see
+[`docs/PLUGIN_SYSTEM.md`](docs/PLUGIN_SYSTEM.md).)
 
 ## Quick start
 
@@ -60,10 +92,13 @@ clove stats                                  # analytics (counts, ready/blocked,
 clove search "login"                         # full-text search
 ```
 
-Every command supports `--format json|jsonl` with a stable `{ v, ok, data, _meta }`
-envelope and documented exit codes — see `clove agent-doc` for the agent-facing surface.
+Every command supports `--format json|jsonl` with a stable
+`{ v, ok, data, _meta }` envelope and documented exit codes — see
+`clove agent-doc` for the agent-facing surface.
 
-### Optional accelerators
+## Accelerators: index & daemon
+
+Both are optional. Reads work directly from the file store without them.
 
 ```sh
 clove reindex                 # build/refresh the SQLite index (.clove/index.db, gitignored)
@@ -72,7 +107,7 @@ clove stats --snapshot        # record an analytics history point
 clove stats --history         # replay recorded snapshots (a running daemon also auto-records)
 ```
 
-### Browse: terminal & web UI
+## Browse: terminal & web UI
 
 ```sh
 clove tui                     # terminal browser + add/edit form (master-detail, tabs, filters)
@@ -83,12 +118,12 @@ clove serve --open            # …and open it in the browser
 `clove serve` runs an HTTP/WebSocket server with a Kanban board, a filterable
 list, an item detail view (Markdown body, dependency tree, comments, inline
 edits), and a timeline — with live updates via a file-watcher. The SPA is built
-to a single binary (no Node needed to run). When a daemon is running it serves the
+into the binary (no Node needed to run). When a daemon is running it serves the
 web UI itself (port `7373` by default), and `clove serve` hands off to it instead
 of starting a second server. The web API mirrors the CLI under `/api/v1` with the
 same JSON envelope and exit-code semantics.
 
-### Interop
+## Interop & GitHub sync
 
 ```sh
 clove import tk|beads <src>             # import from a file-based tracker
@@ -109,7 +144,7 @@ daemon can run the sync on a timer (`[daemon] github_sync_interval_min` +
 with the `github` feature (`--features full`; see [Install](#install)) — the
 pre-built release binaries include it.
 
-### AI agents: MCP server & Claude Code plugin
+## AI agents: MCP server & Claude Code plugin
 
 `clove mcp` runs an MCP server (stdio) that exposes clove's items to AI agents as
 native tools — list/search/show, dependency tree and ready/blocked, stats, and
@@ -134,24 +169,71 @@ The plugin wires up the `clove mcp` server automatically (tools surface as
 `cloved`) on your `PATH` and an initialized repo (`clove init`). See
 [`.claude-plugin/README.md`](.claude-plugin/README.md) for details.
 
-## Layout
+## Build & test
+
+```sh
+cargo build --release                    # lean binaries: clove (CLI), cloved (daemon)
+cargo build --release --features "clove-cli/full cloved/full"   # + GitHub sync
+cargo test --workspace --all-features    # unit + integration + doctests (incl. github)
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo fmt --all --check
+```
+
+Frontend checks (only if you touch the web UI):
+
+```sh
+cd crates/clove-web/web && npm run check && npm run test   # svelte-check + vitest
+```
+
+## Workspace layout
 
 | Path | What |
 |------|------|
-| `crates/clove-core` | model, file store, dependency-graph engine, IDs (pure; no SQLite) |
+| `crates/clove-types` | pure shared data types (model/id/error/validation + the create/edit request types) |
+| `crates/clove-core` | file store, dependency-graph engine, high-level ops (pure; no SQLite) |
 | `crates/clove-index` | optional SQLite index (FTS5, staleness, incremental derived state, stats history) |
-| `crates/clove` | the `clove` CLI |
+| `crates/clove` | the `clove` CLI (crate `clove-cli`) |
 | `crates/cloved` | the optional `cloved` daemon (file-watch, IPC, optional git sync, web serving) |
-| `crates/clove-import` | import/export + merge driver |
-| `crates/clove-ipc` | CLI↔daemon wire protocol |
+| `crates/clove-import` | import/export, 3-way merge driver, and two-way GitHub sync (`github` feature) |
+| `crates/clove-ipc` | CLI ↔ daemon wire protocol (`tarpc`) |
+| `crates/clove-mcp` | the MCP server surface (`clove mcp`) |
 | `crates/clove-tui` | terminal browser + add/edit form (`clove tui`, ratatui) |
 | `crates/clove-web` | web UI server + embedded SvelteKit SPA (`clove serve`); see `web/README.md` |
-| `docs/DESIGN.md` | authoritative, implementation-ready spec |
-| `docs/IMPLEMENTATION_PLAN.md` | phased M0–M4 task plan (design history) |
-| `docs/M4_WEB_UI_PLAN.md` | web UI design notes; `docs/web-ui-mockups/` the themes (design history) |
-| `docs/*_ACCEPTANCE_GATES.md` | per-milestone acceptance gates (design history) |
-| `CHANGELOG.md` | release notes |
+
+## Documentation
+
+| Doc | What |
+|-----|------|
+| [`docs/DESIGN.md`](docs/DESIGN.md) | the authoritative, implementation-ready spec (read this first) |
+| [`docs/RELEASE.md`](docs/RELEASE.md) | the release runbook (crates.io + pre-built binaries) |
+| [`docs/PLUGIN_SYSTEM.md`](docs/PLUGIN_SYSTEM.md) | feasibility & design for distributing GitHub sync as a separable plugin |
+| [`docs/json-schema/`](docs/json-schema/) | JSON Schemas for the stable `--format json` output |
+| [`CHANGELOG.md`](CHANGELOG.md) | release notes |
+
+## Contributing
+
+Contributions are welcome. Before opening a PR, make sure the full quality gate
+is clean:
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+```
+
+When adding an editable field or a synced field, add it in **one** place (the
+unified write path / the GitHub mapping) rather than per surface — see
+[`CLAUDE.md`](CLAUDE.md) for the conventions the codebase relies on.
 
 ## License
 
-MIT OR Apache-2.0.
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
+dual-licensed as above, without any additional terms or conditions.

@@ -1,5 +1,5 @@
 //! Pure, process-free three-way merge logic for clove item frontmatter
-//! (DESIGN.md §9.2, M2_PLAN.md §3 Phase 2).
+//! (DESIGN.md §9.2).
 //!
 //! This module owns the *semantics* of the `clove merge-driver` command without
 //! touching the filesystem, spawning `git`, or knowing about conflict-marker

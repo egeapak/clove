@@ -8,8 +8,8 @@ of `clove-types`), `clove-tui` (the terminal browser + add/edit form),
 plus `clove` (CLI), `cloved`, `clove-index`, `clove-ipc`, `clove-import`,
 `clove-mcp`.
 
-See `HANDOFF.md` and `docs/IMPLEMENTATION_PLAN.md` for the full design/state, and
-`docs/M4_WEB_UI_PLAN.md` for the web UI.
+See `docs/DESIGN.md` for the authoritative, implementation-ready spec (the whole
+surface, including the web UI, is described there).
 
 ## Unified write path (all surfaces share it)
 

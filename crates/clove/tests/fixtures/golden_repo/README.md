@@ -2,7 +2,7 @@
 
 A committed, deterministic 7-item store used by the golden CLI snapshot tests
 (`crates/clove/tests/golden_cli.rs`) and referenced by the M0 acceptance gates
-(`docs/IMPLEMENTATION_PLAN.md` §"M0 Acceptance Gates").
+(see `docs/DESIGN.md`).
 
 All timestamps are fixed so JSON output is byte-stable across runs.
 

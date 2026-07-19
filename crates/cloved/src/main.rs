@@ -4,8 +4,7 @@
 //! IPC queries, and can opt in to git auto-sync. Never required — the CLI works
 //! identically without it.
 //!
-//! Implemented incrementally per `docs/M3_PLAN.md`: lifecycle/lock/signals (P1),
-//! IPC server (P2), file watcher (P3), git auto-sync (P5).
+//! Layered as: lifecycle/lock/signals, IPC server, file watcher, git auto-sync.
 
 use camino::Utf8PathBuf;
 use clap::{Parser, Subcommand};

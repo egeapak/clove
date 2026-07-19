@@ -1,5 +1,5 @@
-//! M1 performance-gate tests: the DESIGN §6 / IMPLEMENTATION_PLAN "M1
-//! Acceptance Gates" enforced as `#[test]`s (mirroring the M0 `perf_gates.rs`
+//! M1 performance-gate tests: the DESIGN §6 index performance targets
+//! enforced as `#[test]`s (mirroring the M0 `perf_gates.rs`
 //! pattern the project adopted). Wall-clock thresholds are asserted only for
 //! optimized builds — run with `cargo test --release` to enforce the gate; debug
 //! builds use a small corpus and skip the assertions (they would flake).
@@ -104,7 +104,7 @@ fn m1_index_perf_gates() {
     // removed). The 8 ms bound keeps ~2x headroom over the observed time so CI
     // catches a covering-scan regression (e.g. the index-only plan silently
     // reverting to a table scan) instead of hiding it under a loose budget.
-    // See docs/M1_ACCEPTANCE_GATES.md.
+    // See DESIGN.md §13.1.
     assert_within("ls_lean", ls_elapsed, Duration::from_millis(8));
 
     // ready gate: the lean projection in Ready mode.
