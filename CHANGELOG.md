@@ -6,8 +6,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-The initial feature set (milestones M0–M4) has landed and is gated in CI. The
-first tagged release will collect the entries below under a version heading.
+## [0.1.0] - 2026-07-20
+
+The initial feature set (milestones M0–M4). First tagged public release.
 
 ### Added
 
