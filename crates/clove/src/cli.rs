@@ -101,6 +101,8 @@ pub enum Commands {
     MergeDriver(MergeDriverArgs),
     /// Generate an agent-facing usage document.
     AgentDoc(AgentDocArgs),
+    /// Register clove's MCP server with Claude Code and write CLOVE.md directives.
+    Setup(SetupArgs),
     /// Check the store for problems (optionally repair safe ones).
     Doctor(DoctorArgs),
     /// Control the optional background daemon (`start|stop|status`).
@@ -417,6 +419,19 @@ pub struct AgentDocArgs {
     /// The file to check (with `--check`).
     #[arg(long, value_name = "PATH")]
     pub file: Option<Utf8PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct SetupArgs {
+    /// Write to `~/.claude/` instead of `<project>/.claude/`.
+    #[arg(long)]
+    pub global: bool,
+    /// Report what would change without writing anything.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Override the target `.claude` directory (testing).
+    #[arg(long, value_name = "PATH", hide = true)]
+    pub claude_dir: Option<Utf8PathBuf>,
 }
 
 #[derive(Debug, Args)]

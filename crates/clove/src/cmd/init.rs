@@ -63,6 +63,7 @@ pub fn run(
             if !quiet {
                 println!("Initialized clove repository in {clove_dir}");
                 println!("run 'clove agent-doc' to generate an AGENTS.md snippet");
+                println!("run 'clove setup' to register clove's MCP server with Claude Code");
             }
         }
     }

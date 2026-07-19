@@ -48,6 +48,17 @@ impl CloveServer {
         self.subscriptions.clone()
     }
 
+    /// Every tool name this server exposes, sourced from the generated tool
+    /// router (so it can never drift from the `#[tool]` set). `clove setup` pins
+    /// its Claude Code permission list to this.
+    pub fn tool_names() -> Vec<String> {
+        Self::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|tool| tool.name.into_owned())
+            .collect()
+    }
+
     /// Run a blocking engine call and map it to a tool result: `Ok` → structured
     /// JSON content; an engine error string → an `isError` tool result (not a
     /// protocol error); a task panic → a protocol-level internal error.

@@ -39,6 +39,10 @@ first tagged release will collect the entries below under a version heading.
   `/plugin install clove@clove`. The MCP server ships instructions that nudge
   agents to use clove as the source of truth for work items by default, and a
   root `CLOVE.md` provides `@CLOVE.md` standing directives for projects.
+- **`clove setup`** — one command to wire clove into Claude Code: registers the
+  `clove mcp` server (and its tool permissions) in `settings.json`, writes
+  `CLOVE.md`, and adds an `@CLOVE.md` import to `CLAUDE.md`. Supports `--global`
+  vs project scope and `--dry-run`; idempotent.
 - **GitHub sync** — `clove sync github <owner/repo>`, two-way (pull + push in one
   pass) with policy-based conflict resolution and bidirectional comments.
 - **Interop** — import from tk/beads, export to json/jsonl, and a 3-way git merge

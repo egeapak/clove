@@ -73,6 +73,22 @@ fn dispatch(cli: Cli) -> (OutputFormat, Result<ExitCode, CloveError>) {
             let f = resolve_format(flag, None);
             (f, cmd::agent_doc::run(f, args).map(|_| ExitCode::Success))
         }
+        // `setup` configures Claude Code (settings.json + CLOVE.md) and must run
+        // before `clove init`, so it does not require a `.clove/` repository.
+        Commands::Setup(args) => {
+            let f = resolve_format(flag, None);
+            (
+                f,
+                cmd::setup::run(
+                    f,
+                    args.global,
+                    args.dry_run,
+                    args.claude_dir.as_deref(),
+                    quiet,
+                )
+                .map(|_| ExitCode::Success),
+            )
+        }
         // The merge driver is invoked by git on arbitrary file paths; it does
         // not discover a `.clove/` repository.
         Commands::MergeDriver(args) => {
@@ -152,6 +168,7 @@ fn run_repo(
         Commands::Version
         | Commands::Init(_)
         | Commands::AgentDoc(_)
+        | Commands::Setup(_)
         | Commands::MergeDriver(_)
         | Commands::Mcp => Ok(ok),
     }

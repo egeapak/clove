@@ -78,6 +78,8 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
 ## Commands\n\
 \n\
 - `clove init [--prefix STR] [--merge-driver]` — create `.clove/`.\n\
+- `clove setup [--global] [--dry-run]` — register the `clove mcp` server (+ tool\n\
+  permissions) with Claude Code and write `CLOVE.md` agent directives.\n\
 - `clove new <title> [--type T] [-p N] [-l LABEL]... [--dep ID]... [--parent ID] [-a WHO] [-b TEXT]`\n\
 - `clove show <id> [--fields LIST] [-v]` — one item (`-v`/json compute `ready`/`blocked_by`).\n\
 - `clove edit <id> [--field KEY=VALUE]...` / `clove set <id> KEY=VALUE...`\n\

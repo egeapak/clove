@@ -80,17 +80,18 @@ items — check `clove_ready` before starting a task, search for existing items,
 and record progress with `clove_new` / `clove_status` / `clove_comment`. No
 setup is required for this nudge.
 
-To make it a **standing directive** in a project, drop a short `CLOVE.md`
-(see the copy shipped in this repo's root) alongside your `CLAUDE.md` and add a
-line importing it:
+To make it a **standing directive** in a project, run:
 
-```
-@CLOVE.md
+```bash
+clove setup            # writes <project>/.claude/, or --global for ~/.claude/
 ```
 
-Claude Code loads `@`-imported files into every session, so the agent reaches
-for clove by default rather than ad-hoc TODO lists. `clove agent-doc` prints the
-full command reference if you want a longer, versioned doc instead.
+`clove setup` registers the `clove mcp` server (and its tool permissions) in
+`settings.json`, writes a `CLOVE.md` directives file, and adds an `@CLOVE.md`
+import to `CLAUDE.md` (idempotent; `--dry-run` to preview). Claude Code loads
+`@`-imported files into every session, so the agent reaches for clove by default
+rather than ad-hoc TODO lists. `clove agent-doc` prints the full command
+reference if you want a longer, versioned doc instead.
 
 ## Notes
 
