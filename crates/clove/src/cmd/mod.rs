@@ -25,6 +25,7 @@ pub mod reindex;
 pub mod search;
 pub mod serve;
 pub mod set;
+pub mod setup;
 pub mod show;
 pub mod stats;
 pub mod status;

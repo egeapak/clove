@@ -48,6 +48,17 @@ impl CloveServer {
         self.subscriptions.clone()
     }
 
+    /// Every tool name this server exposes, sourced from the generated tool
+    /// router (so it can never drift from the `#[tool]` set). `clove setup` pins
+    /// its Claude Code permission list to this.
+    pub fn tool_names() -> Vec<String> {
+        Self::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|tool| tool.name.into_owned())
+            .collect()
+    }
+
     /// Run a blocking engine call and map it to a tool result: `Ok` → structured
     /// JSON content; an engine error string → an `isError` tool result (not a
     /// protocol error); a task panic → a protocol-level internal error.
@@ -244,15 +255,20 @@ impl ServerHandler for CloveServer {
         )
         .with_server_info(Implementation::new("clove", env!("CARGO_PKG_VERSION")))
         .with_instructions(
-            "clove is a fast, dependency-aware work-item tracker. Use clove_ready \
-             to find unblocked work, clove_show for detail, \
-             clove_list/clove_blocked/clove_search/clove_dep_tree to explore, \
-             clove_stats for an overview, and clove_new / clove_status / \
-             clove_edit / clove_comment / clove_dep_add / clove_dep_remove / \
-             clove_set_parent to record progress. Ids look like `proj-7af3q2k9`. \
-             Two live resources — clove://ready and clove://stats — mirror the \
-             ready queue and the repo overview; subscribe to be pushed \
-             resources/updated whenever the work graph changes."
+            "clove is a fast, dependency-aware work-item tracker and the source \
+             of truth for this repository's tasks, bugs, and features. Prefer it \
+             over ad-hoc TODO lists for any multi-step work: at the start of a \
+             task call clove_ready (unblocked work) and clove_search / clove_list \
+             to find existing items before creating new ones, then record \
+             progress as you go — clove_new to file work, clove_status to \
+             transition it (open/in_progress/closed), and clove_comment to note \
+             findings. Explore with clove_show (detail), clove_blocked, and \
+             clove_dep_tree; clove_stats for an overview; clove_dep_add / \
+             clove_dep_remove / clove_set_parent to wire the graph. Ids look like \
+             `proj-7af3q2k9`. Two live resources — clove://ready and \
+             clove://stats — mirror the ready queue and the repo overview; \
+             subscribe to be pushed resources/updated whenever the work graph \
+             changes."
                 .to_owned(),
         )
     }

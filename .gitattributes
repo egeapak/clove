@@ -1,0 +1,5 @@
+# CLOVE.md is embedded verbatim as an LF string constant in `clove setup`
+# (crates/clove/src/cmd/setup.rs) and pinned by a drift-guard test. Force LF on
+# checkout so the committed and shipped file matches that const on every
+# platform — a Windows CRLF checkout would otherwise fail the test.
+CLOVE.md text eol=lf

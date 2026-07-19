@@ -72,6 +72,27 @@ coordinator and stay coherent. If `cloved` isn't on your `PATH` or can't start,
 writes fall back to direct file access — nothing fails because of it, though
 installing `cloved` is recommended for concurrent use.
 
+## Making the agent use clove by default
+
+The MCP server ships **instructions** (loaded automatically when the plugin
+connects) that tell the agent to treat clove as the source of truth for work
+items — check `clove_ready` before starting a task, search for existing items,
+and record progress with `clove_new` / `clove_status` / `clove_comment`. No
+setup is required for this nudge.
+
+To make it a **standing directive** in a project, run:
+
+```bash
+clove setup            # writes <project>/.claude/, or --global for ~/.claude/
+```
+
+`clove setup` registers the `clove mcp` server (and its tool permissions) in
+`settings.json`, writes a `CLOVE.md` directives file, and adds an `@CLOVE.md`
+import to `CLAUDE.md` (idempotent; `--dry-run` to preview). Claude Code loads
+`@`-imported files into every session, so the agent reaches for clove by default
+rather than ad-hoc TODO lists. `clove agent-doc` prints the full command
+reference if you want a longer, versioned doc instead.
+
 ## Notes
 
 - **Scope:** each Claude Code session runs its own `clove mcp` process, scoped to
