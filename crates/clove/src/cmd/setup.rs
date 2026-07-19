@@ -728,7 +728,11 @@ mod tests {
         // CARGO_MANIFEST_DIR is `crates/clove`; the canonical file is at the
         // workspace root.
         let repo_file = concat!(env!("CARGO_MANIFEST_DIR"), "/../../CLOVE.md");
-        let on_disk = std::fs::read_to_string(repo_file).unwrap();
+        // Normalize line endings: on Windows CI git may check the file out with
+        // CRLF, while the embedded const is always LF.
+        let on_disk = std::fs::read_to_string(repo_file)
+            .unwrap()
+            .replace("\r\n", "\n");
         assert_eq!(
             on_disk, CLOVE_MD_CONTENT,
             "CLOVE.md drifted from the embedded CLOVE_MD_CONTENT; update the const"
