@@ -42,6 +42,13 @@ ignore = [
     # `paste` is unmaintained (not a vulnerability). Pulled transitively by
     # `ratatui` (the `clove tui` browser); revisit on a ratatui bump.
     "RUSTSEC-2024-0436",
+    # `ttf-parser` is unmaintained (not a vulnerability). Pulled only as a
+    # dev-dependency of `clove-tui` (via `ab_glyph`) by the `#[ignore]`d PNG
+    # screenshot generator — never in a shipped binary. The recommended
+    # successor (`skrifa`) is parse-only with no rasterizer, and the rasterizing
+    # alternatives (`fontdue`, `cosmic-text`) still pull `ttf-parser` themselves,
+    # so no swap actually clears this. Revisit if screenshotting moves to skrifa.
+    "RUSTSEC-2026-0192",
 ]
 
 [sources]
