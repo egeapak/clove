@@ -156,6 +156,5 @@ while !should_quit:
 ## Docs to update
 
 - `CLAUDE.md` — colour-test location (`ui.rs` → `ui/style.rs`).
-- `HANDOFF.md` / `docs/IMPLEMENTATION_PLAN.md` — note the new `clove-tui` module
-  layout and the tick-loop cadence; flag the deferred background-scan/concurrent
-  model as the next M4 step.
+- `docs/DESIGN.md` — note the new `clove-tui` module layout and the tick-loop
+  cadence; flag the deferred background-scan/concurrent model as the next step.

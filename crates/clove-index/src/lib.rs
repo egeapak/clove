@@ -13,7 +13,7 @@
 //!
 //! The CLI-facing wrappers (`clove reindex`/`search` commands, the read-path
 //! `with_index` guard, and the `doctor` divergence check) are layered on top once
-//! the M0 command surface exists (IMPLEMENTATION_PLAN T-S04/S05/S06/S08).
+//! the M0 command surface exists.
 
 pub mod db;
 pub mod derive;

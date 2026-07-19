@@ -9,7 +9,7 @@
 //!
 //! Keeping the shaping in `clove` and only the byte-level writers here avoids
 //! duplicating the item-JSON projection (and the graph/comment computation it
-//! depends on) inside `clove-import`. See `docs/M2_PLAN.md` §3 Phase 1.
+//! depends on) inside `clove-import`. See DESIGN.md §11.
 
 use std::io::{self, Write};
 

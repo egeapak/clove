@@ -107,7 +107,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # M3 gate M3-G03 (VERIFICATION_PLAN §9): compile the Windows named-event
+      # Windows daemon gate: compile the Windows named-event
       # shutdown path (cloved CreateEventW + `clove daemon stop` OpenEventW/SetEvent)
       # and run the platform-agnostic daemon unit tests. The Unix-only socket/
       # signal integration tests are `#![cfg(unix)]` and are exercised on the

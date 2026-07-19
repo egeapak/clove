@@ -10,7 +10,7 @@ repository.workspace = true
 # The CLI<->daemon seam. As of M4 this uses `tarpc` (typed RPC) over a local
 # socket (Unix domain socket / Windows named pipe via `interprocess` + tokio),
 # replacing the hand-rolled frame/protocol; tokio comes along with it (the
-# lean-CLI "no tokio" constraint was lifted deliberately — see HANDOFF).
+# lean-CLI "no tokio" constraint was lifted deliberately).
 [dependencies]
 clove-types.workspace = true
 clove-core.workspace = true   # graph::DepTreeNode on the wire (model types moved to clove-types)

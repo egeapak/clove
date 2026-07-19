@@ -6,7 +6,7 @@ all-features = true
 
 [licenses]
 # Permissive licenses only. The base policy is MIT / Apache-2.0 / BSD / ISC
-# (per IMPLEMENTATION_PLAN.md T-I02); the remaining entries are equally
+# (per DESIGN.md §1); the remaining entries are equally
 # permissive licenses that transitive dependencies in the tree carry.
 allow = [
     "MIT",

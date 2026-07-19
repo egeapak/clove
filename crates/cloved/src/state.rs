@@ -3,7 +3,7 @@
 //! This is the daemon's *operational* telemetry — uptime, indexed-item count,
 //! watcher state, last-event recency — surfaced by the `STATUS` IPC command and
 //! `clove daemon status`. It is not work-item analytics (that is the deferred M4
-//! `clove stats`, M3_PLAN §1.1). Shared across the accept loop and (from P3) the
+//! `clove stats`). Shared across the accept loop and the
 //! watcher behind an `Arc<Mutex<_>>`.
 
 use std::time::Instant;

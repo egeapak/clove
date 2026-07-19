@@ -575,7 +575,7 @@ impl GraphStore {
     /// id. Empty when the hard-dependency graph contains a cycle (ranks are then
     /// unknown). The SQLite index persists these as `topological_rank` so the
     /// index-path `ready`/`ls` queries can order by `(priority, topo rank)`
-    /// without rebuilding the graph (DESIGN.md §6.5, IMPLEMENTATION_PLAN T-S07).
+    /// without rebuilding the graph (DESIGN.md §6.5).
     pub fn topological_ranks(&self) -> HashMap<CloveId, usize> {
         self.topological_ranks_internal()
             .into_iter()

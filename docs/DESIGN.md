@@ -1,8 +1,9 @@
 # clove — Expanded Design Document
 
-> **Status:** Authoritative design. Supersedes all open-decision placeholders in PRD.md §6–§14.
-> All open decisions from the 10-expert review are resolved here. Cross-references to
-> IMPLEMENTATION_PLAN.md (tasks) and VERIFICATION_PLAN.md (tests) are noted inline.
+> **Status:** Authoritative design — the implementation-ready spec the shipped
+> code (M0–M4) tracks. This is the one canonical design document; the milestone
+> task plans and verification plans it originally cross-referenced have been
+> retired now that the surface they described has landed.
 
 ---
 
@@ -235,7 +236,7 @@ pub struct Priority(pub u8); // validated 0–4
 **Serialization contract:** `ItemFrontmatter` implements `Serialize` manually via
 `serde::ser::SerializeMap`, writing fields in the exact canonical order listed in §2.2. This
 is approximately 80 lines of boilerplate and is the only file that needs changing when fields
-are added or reordered. See IMPLEMENTATION_PLAN.md T-C02.
+are added or reordered.
 
 ### 2.4 Schema Versioning and Migration
 
@@ -418,7 +419,7 @@ dangling_deps: Vec<CloveId> }`. An item is blocked if it has any open `DependsOn
 OR any dangling dep.
 
 **Partition completeness invariant:** `ready ∪ blocked ∪ closed == all_items`. No item is in
-both `ready` and `blocked`. This is a tested invariant (see VERIFICATION_PLAN.md).
+both `ready` and `blocked`. This is a tested invariant.
 
 **Soft relations (Relates, Duplicates, Supersedes) do NOT participate in ready/blocked.**
 This is enforced by the `is_hard_dep()` filter. Tested with a dedicated correctness test.

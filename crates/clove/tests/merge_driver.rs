@@ -7,7 +7,7 @@
 //! `clove` might be on `$PATH`. The auto-resolution tests (V-I14/V-I15) prove the
 //! driver actually ran: without it those merges would conflict.
 //!
-//! Maps to VERIFICATION_PLAN.md V-I13–V-I16.
+//! Exercises the 3-way merge driver (DESIGN.md §9.2).
 
 use std::path::Path;
 use std::process::Command;

@@ -1,6 +1,6 @@
 //! Git auto-sync (T-D06, DESIGN §8.7). Compiled only under the default-on
 //! `git-sync` feature so a `--no-default-features` build is verifiably free of
-//! vendored libgit2 (M3_PLAN §1 / Phase 0 gate).
+//! vendored libgit2.
 //!
 //! Opt-in via `[daemon] git_sync = true`. After a watcher batch, each changed
 //! item file that (a) parses cleanly, (b) has uncommitted changes, and (c) is not
