@@ -36,7 +36,9 @@ first tagged release will collect the entries below under a version heading.
   auto-started `cloved` daemon and fall back to direct file access.
 - **Claude Code plugin** — this repo is a plugin marketplace
   (`.claude-plugin/`); install with `/plugin marketplace add egeapak/clove` and
-  `/plugin install clove@clove`.
+  `/plugin install clove@clove`. The MCP server ships instructions that nudge
+  agents to use clove as the source of truth for work items by default, and a
+  root `CLOVE.md` provides `@CLOVE.md` standing directives for projects.
 - **GitHub sync** — `clove sync github <owner/repo>`, two-way (pull + push in one
   pass) with policy-based conflict resolution and bidirectional comments.
 - **Interop** — import from tk/beads, export to json/jsonl, and a 3-way git merge

@@ -144,3 +144,13 @@ Details worth knowing:
 
 When a change affects what the TUI looks like, regenerate the screenshots and
 look at them before claiming the change works.
+
+## Dogfooding — track your own work in clove
+
+clove tracks its own development. Prefer clove over ad-hoc TODOs for any
+multi-step work in this repo: check `clove ready` before starting, file items
+with `clove new`, and record progress with `clove status` / `clove comment`. The
+agent-facing directives are in `@CLOVE.md`; the full command reference is
+`clove agent-doc`.
+
+@CLOVE.md
