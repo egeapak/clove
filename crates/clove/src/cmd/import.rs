@@ -7,59 +7,107 @@
 //! `plan` (pure, drives `--dry-run`) and, when not in dry-run, `apply` (writes
 //! through the file store).
 
+use camino::Utf8PathBuf;
 use chrono::Utc;
+use clap::error::ErrorKind;
+use clap::Parser;
 use clove_core::OutputFormat;
 use clove_import::{BeadsImporter, ImportCtx, Importer, TkImporter};
 use clove_types::CloveError;
 use serde_json::json;
 
-use crate::cli::{ImportArgs, ImportSource};
+use crate::cli::ImportArgs;
 use crate::context::Ctx;
+use crate::exit::ExitCode;
 use crate::output::print_json_success;
 
-pub fn run(ctx: &Ctx, format: OutputFormat, args: ImportArgs) -> Result<(), CloveError> {
-    match args.source {
-        ImportSource::Tk { src, dry_run } => {
+/// The built-in import providers (pure file formats). Any other provider falls
+/// through to a `clove-import-<provider>` plugin (handled in `main::run_repo`).
+pub fn is_builtin(provider: &str) -> bool {
+    matches!(provider, "tk" | "beads")
+}
+
+/// The flags a built-in import provider accepts, inner-parsed from `rest` so the
+/// `KEY=VALUE`-free surface (`clove import tk <src> [--dry-run]`) stays intact
+/// while the top-level parser forwards `rest` raw for the plugin fall-through.
+#[derive(Debug, Parser)]
+#[command(name = "clove import", no_binary_name = true)]
+struct ImportBuiltinArgs {
+    /// The source (a `.tickets/` directory for tk, an `issues.jsonl` for beads).
+    src: Utf8PathBuf,
+    /// Plan only: report what would happen without writing any files.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+/// Run a built-in import provider (`tk`/`beads`). `args.provider` is guaranteed a
+/// built-in by [`is_builtin`]; `args.rest` is inner-parsed into the source path
+/// and `--dry-run`. A parse failure prints clap's error and exits usage-class
+/// (mirroring `main`).
+pub fn run(ctx: &Ctx, format: OutputFormat, args: ImportArgs) -> Result<ExitCode, CloveError> {
+    let parsed = match ImportBuiltinArgs::try_parse_from(args.rest.iter().cloned()) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            let _ = err.print();
+            return Ok(match err.kind() {
+                ErrorKind::DisplayHelp
+                | ErrorKind::DisplayVersion
+                | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => ExitCode::Success,
+                _ => ExitCode::Usage,
+            });
+        }
+    };
+
+    let ImportBuiltinArgs { src, dry_run } = parsed;
+    let import_ctx = ImportCtx::new(&ctx.store, dry_run).map_err(import_err)?;
+
+    // The two built-ins share the same plan → (drain warnings) → apply/emit flow;
+    // only the importer differs. Warnings (tk's title-fallback, beads'
+    // comment_count, …) are drained *after* `plan` so they reach both stderr and
+    // the JSON envelope's `_meta.warnings`.
+    match args.provider.as_str() {
+        "tk" => {
             let importer = TkImporter::new(ctx.config.id_prefix.clone(), Utc::now());
-            let import_ctx = ImportCtx::new(&ctx.store, dry_run).map_err(import_err)?;
             let plan = importer.plan(&src, &import_ctx).map_err(import_err)?;
-
-            // Title-fallback (and any other) warnings go to stderr for humans and
-            // into the JSON envelope's `_meta.warnings` for machine consumers.
             let warnings = importer.take_warnings();
-            for warning in &warnings {
-                eprintln!("warning: {warning}");
-            }
-
-            if dry_run {
-                emit_plan(format, &plan, &warnings);
-            } else {
-                let report = importer.apply(plan, &ctx.store).map_err(import_err)?;
-                emit_report(format, &report, &warnings);
-            }
-            Ok(())
+            emit(format, dry_run, plan, warnings, |plan| {
+                importer.apply(plan, &ctx.store).map_err(import_err)
+            })?;
         }
-        ImportSource::Beads { src, dry_run } => {
+        "beads" => {
             let importer = BeadsImporter::new(ctx.config.id_prefix.clone(), Utc::now());
-            let import_ctx = ImportCtx::new(&ctx.store, dry_run).map_err(import_err)?;
             let plan = importer.plan(&src, &import_ctx).map_err(import_err)?;
-
-            // comment_count (and any other) warnings go to stderr for humans and
-            // into the JSON envelope's `_meta.warnings` for machine consumers.
             let warnings = importer.take_warnings();
-            for warning in &warnings {
-                eprintln!("warning: {warning}");
-            }
-
-            if dry_run {
-                emit_plan(format, &plan, &warnings);
-            } else {
-                let report = importer.apply(plan, &ctx.store).map_err(import_err)?;
-                emit_report(format, &report, &warnings);
-            }
-            Ok(())
+            emit(format, dry_run, plan, warnings, |plan| {
+                importer.apply(plan, &ctx.store).map_err(import_err)
+            })?;
         }
+        // `is_builtin` gates this call; any other provider is dispatched to a
+        // plugin before we get here.
+        other => unreachable!("non-built-in import provider `{other}` reached built-in run"),
     }
+    Ok(ExitCode::Success)
+}
+
+/// Shared tail for both built-ins: surface warnings, then either report the
+/// dry-run plan or apply and report the result.
+fn emit(
+    format: OutputFormat,
+    dry_run: bool,
+    plan: clove_import::ImportPlan,
+    warnings: Vec<String>,
+    apply: impl FnOnce(clove_import::ImportPlan) -> Result<clove_import::ImportReport, CloveError>,
+) -> Result<(), CloveError> {
+    for warning in &warnings {
+        eprintln!("warning: {warning}");
+    }
+    if dry_run {
+        emit_plan(format, &plan, &warnings);
+    } else {
+        let report = apply(plan)?;
+        emit_report(format, &report, &warnings);
+    }
+    Ok(())
 }
 
 /// Emit the `--dry-run` `{ would_create, would_skip, conflicts }` envelope

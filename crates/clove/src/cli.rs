@@ -466,45 +466,38 @@ pub struct DoctorArgs {
     pub strict: bool,
 }
 
+/// `clove import <provider> [args…]` (PLUGIN_SYSTEM.md §4.2).
+///
+/// A pure router: the built-in providers (`tk`, `beads`) parse `rest` themselves
+/// (see `cmd::import`), and any other provider falls through to a
+/// `clove-import-<provider>` plugin with `rest` forwarded verbatim. Global flags
+/// (e.g. `--format`) must precede the provider token, since everything after it
+/// is captured raw for the built-in inner-parse or plugin forwarding.
 #[derive(Debug, Args)]
 pub struct ImportArgs {
-    /// The source tracker to import from.
-    #[command(subcommand)]
-    pub source: ImportSource,
+    /// The source provider (built-in `tk`/`beads`, or a `clove-import-<provider>`
+    /// plugin).
+    pub provider: String,
+    /// Everything after the provider: the built-in flags (`<src> [--dry-run]`) or
+    /// the arguments forwarded to the plugin.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    pub rest: Vec<String>,
 }
 
-/// The import source kind plus its source path and shared flags.
+/// `clove export <provider> [args…]` (PLUGIN_SYSTEM.md §4.2).
 ///
-/// Each variant carries a `src` (a directory or file path) and a `--dry-run`
-/// flag (plan only, no writes). GitHub is handled by `clove sync github`.
-#[derive(Debug, Subcommand)]
-pub enum ImportSource {
-    /// Import a `tk` `.tickets/` directory (DESIGN §11.1).
-    Tk {
-        /// Path to the `.tickets/` directory.
-        src: Utf8PathBuf,
-        /// Plan only: report what would happen without writing any files.
-        #[arg(long)]
-        dry_run: bool,
-    },
-    /// Import a Beads `issues.jsonl` file (DESIGN §11.2).
-    Beads {
-        /// Path to the `issues.jsonl` file.
-        src: Utf8PathBuf,
-        /// Plan only: report what would happen without writing any files.
-        #[arg(long)]
-        dry_run: bool,
-    },
-}
-
+/// A pure router mirroring [`ImportArgs`]: the built-in formats (`json`, `jsonl`)
+/// parse `rest` themselves (see `cmd::export`), and any other provider falls
+/// through to a `clove-export-<provider>` plugin.
 #[derive(Debug, Args)]
 pub struct ExportArgs {
-    /// The export format.
-    #[arg(value_enum, value_name = "FORMAT")]
-    pub export_format: ExportFormat,
-    /// Write to a file instead of stdout.
-    #[arg(long, value_name = "FILE")]
-    pub out: Option<Utf8PathBuf>,
+    /// The export provider (built-in `json`/`jsonl`, or a
+    /// `clove-export-<provider>` plugin).
+    pub provider: String,
+    /// Everything after the provider: the built-in flags (`[--out FILE]`) or the
+    /// arguments forwarded to the plugin.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    pub rest: Vec<String>,
 }
 
 /// `clove sync <github> <owner/repo>` (T-M06). One reconciled pull+push pass.

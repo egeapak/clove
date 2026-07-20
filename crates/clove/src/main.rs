@@ -136,8 +136,40 @@ fn dispatch(cli: Cli) -> (OutputFormat, Result<ExitCode, CloveError>) {
                 Err(e) => return (resolve_format(flag, None), Err(e)),
             };
             let f = resolve_format(flag, Some(ctx.config.default_format));
-            (f, run_repo(command, &ctx, f, no_index, deep, quiet))
+            (f, run_repo(command, &ctx, f, no_index, deep, quiet, color))
         }
+    }
+}
+
+/// Route a multiplexer subcommand (`import`/`export`) whose provider is not a
+/// built-in to a `clove-<multiplexer>-<provider>` plugin (PLUGIN_SYSTEM.md §4.2).
+///
+/// A resolved plugin is exec'd with `rest` forwarded and the provider threaded
+/// into `$CLOVE_PROVIDER` (§6.2); a miss is a validation error (exit 4) scoped to
+/// the multiplexer — never a fall-back to a generic `clove-<provider>` (§4.3).
+fn dispatch_multiplexer(
+    multiplexer: &str,
+    provider: &str,
+    rest: &[String],
+    ctx: &Ctx,
+    globals: &plugin::PluginGlobals,
+) -> Result<ExitCode, CloveError> {
+    match plugin::resolve(&[multiplexer, provider]) {
+        Some(path) => plugin::run_plugin(
+            &path,
+            rest,
+            &[multiplexer, provider],
+            ctx,
+            globals,
+            multiplexer,
+            Some(provider),
+        ),
+        None => Err(CloveError::InvalidField {
+            field: "provider".to_owned(),
+            reason: format!(
+                "unknown {multiplexer} provider `{provider}`; install clove-{multiplexer}-{provider}"
+            ),
+        }),
     }
 }
 
@@ -204,6 +236,7 @@ fn run_repo(
     no_index: bool,
     deep: bool,
     quiet: bool,
+    color: cli::ColorChoice,
 ) -> Result<ExitCode, CloveError> {
     let ok = ExitCode::Success;
     match command {
@@ -238,8 +271,37 @@ fn run_repo(
         Commands::Daemon(a) => cmd::daemon::run(ctx, f, a.action),
         Commands::Tui => cmd::tui::run(ctx, f).map(|_| ok),
         Commands::Serve(a) => cmd::serve::run(ctx, a, quiet).map(|_| ok),
-        Commands::Import(a) => cmd::import::run(ctx, f, a).map(|_| ok),
-        Commands::Export(a) => cmd::export::run(ctx, f, a).map(|_| ok),
+        // `import`/`export` are pure routers: the built-in file formats parse
+        // their own `rest`; any other provider falls through to a
+        // `clove-<import|export>-<provider>` plugin (PLUGIN_SYSTEM.md §4.2).
+        Commands::Import(a) => {
+            if cmd::import::is_builtin(&a.provider) {
+                cmd::import::run(ctx, f, a)
+            } else {
+                let globals = plugin::PluginGlobals {
+                    format: f,
+                    color,
+                    quiet,
+                    no_index,
+                    deep,
+                };
+                dispatch_multiplexer("import", &a.provider, &a.rest, ctx, &globals)
+            }
+        }
+        Commands::Export(a) => {
+            if cmd::export::is_builtin(&a.provider) {
+                cmd::export::run(ctx, f, a)
+            } else {
+                let globals = plugin::PluginGlobals {
+                    format: f,
+                    color,
+                    quiet,
+                    no_index,
+                    deep,
+                };
+                dispatch_multiplexer("export", &a.provider, &a.rest, ctx, &globals)
+            }
+        }
         Commands::Sync(a) => cmd::sync::run(ctx, f, a).map(|_| ok),
         // Non-repo commands and external plugins are dispatched earlier.
         Commands::Version

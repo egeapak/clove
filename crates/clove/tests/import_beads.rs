@@ -186,10 +186,10 @@ fn duplicate_source_id_is_reported_not_collapsed() {
     let out = clove(repo.path())
         .args([
             "import",
-            "beads",
-            path.to_str().unwrap(),
             "--format",
             "json",
+            "beads",
+            path.to_str().unwrap(),
         ])
         .output()
         .unwrap();
@@ -218,11 +218,11 @@ fn malformed_line_is_skipped_and_reported() {
     let out = clove(repo.path())
         .args([
             "import",
+            "--format",
+            "json",
             "beads",
             path.to_str().unwrap(),
             "--dry-run",
-            "--format",
-            "json",
         ])
         .output()
         .unwrap();
@@ -261,11 +261,11 @@ fn re_import_with_changed_status_reports_conflict() {
     let out = clove(repo.path())
         .args([
             "import",
+            "--format",
+            "json",
             "beads",
             changed.to_str().unwrap(),
             "--dry-run",
-            "--format",
-            "json",
         ])
         .output()
         .unwrap();
@@ -281,11 +281,11 @@ fn re_import_with_changed_status_reports_conflict() {
     let out = clove(repo.path())
         .args([
             "import",
+            "--format",
+            "json",
             "beads",
             open.to_str().unwrap(),
             "--dry-run",
-            "--format",
-            "json",
         ])
         .output()
         .unwrap();
@@ -304,10 +304,10 @@ fn comment_count_warning_reaches_json_envelope() {
     let out = clove(repo.path())
         .args([
             "import",
-            "beads",
-            path.to_str().unwrap(),
             "--format",
             "json",
+            "beads",
+            path.to_str().unwrap(),
         ])
         .output()
         .unwrap();
@@ -346,11 +346,11 @@ fn dry_run_writes_zero_files_and_reports_would_create() {
     let out = clove(dir.path())
         .args([
             "import",
+            "--format",
+            "json",
             "beads",
             fixture_jsonl().to_str().unwrap(),
             "--dry-run",
-            "--format",
-            "json",
         ])
         .output()
         .unwrap();
@@ -383,11 +383,11 @@ fn re_import_is_idempotent() {
     let out = clove(dir.path())
         .args([
             "import",
+            "--format",
+            "json",
             "beads",
             src.to_str().unwrap(),
             "--dry-run",
-            "--format",
-            "json",
         ])
         .output()
         .unwrap();
@@ -398,7 +398,7 @@ fn re_import_is_idempotent() {
 
     // A real (non-dry-run) re-import also writes nothing new.
     let out = clove(dir.path())
-        .args(["import", "beads", src.to_str().unwrap(), "--format", "json"])
+        .args(["import", "--format", "json", "beads", src.to_str().unwrap()])
         .output()
         .unwrap();
     assert!(out.status.success());
@@ -462,10 +462,10 @@ fn jsonl_round_trip_is_lossless_and_idempotent() {
     let out = clove(dest.path())
         .args([
             "import",
-            "beads",
-            export_path.to_str().unwrap(),
             "--format",
             "json",
+            "beads",
+            export_path.to_str().unwrap(),
         ])
         .output()
         .unwrap();
@@ -497,10 +497,10 @@ fn jsonl_round_trip_is_lossless_and_idempotent() {
     let out = clove(dest.path())
         .args([
             "import",
-            "beads",
-            export_path.to_str().unwrap(),
             "--format",
             "json",
+            "beads",
+            export_path.to_str().unwrap(),
         ])
         .output()
         .unwrap();

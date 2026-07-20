@@ -128,10 +128,10 @@ fn import_beads_is_implemented() {
     let out = clove(dir.path())
         .args([
             "import",
-            "beads",
-            fixture.to_str().unwrap(),
             "--format",
             "json",
+            "beads",
+            fixture.to_str().unwrap(),
         ])
         .output()
         .unwrap();

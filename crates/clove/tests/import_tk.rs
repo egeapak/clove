@@ -180,11 +180,11 @@ fn dry_run_writes_zero_files_and_reports_would_create() {
     let out = clove(dir.path())
         .args([
             "import",
+            "--format",
+            "json",
             "tk",
             fixture_tickets().to_str().unwrap(),
             "--dry-run",
-            "--format",
-            "json",
         ])
         .output()
         .unwrap();
@@ -227,10 +227,10 @@ fn duplicate_source_id_is_reported_not_collapsed() {
     let out = clove(repo.path())
         .args([
             "import",
-            "tk",
-            tickets.to_str().unwrap(),
             "--format",
             "json",
+            "tk",
+            tickets.to_str().unwrap(),
         ])
         .output()
         .unwrap();
@@ -324,11 +324,11 @@ fn dangling_dep_emits_warning() {
     let out = clove(repo.path())
         .args([
             "import",
+            "--format",
+            "json",
             "tk",
             tickets.to_str().unwrap(),
             "--dry-run",
-            "--format",
-            "json",
         ])
         .output()
         .unwrap();
@@ -369,11 +369,11 @@ fn re_import_with_changed_status_reports_conflict() {
     let out = clove(repo.path())
         .args([
             "import",
+            "--format",
+            "json",
             "tk",
             changed.path().join(".tickets").to_str().unwrap(),
             "--dry-run",
-            "--format",
-            "json",
         ])
         .output()
         .unwrap();
@@ -389,11 +389,11 @@ fn re_import_with_changed_status_reports_conflict() {
     let out = clove(repo.path())
         .args([
             "import",
+            "--format",
+            "json",
             "tk",
             open.path().join(".tickets").to_str().unwrap(),
             "--dry-run",
-            "--format",
-            "json",
         ])
         .output()
         .unwrap();
@@ -420,11 +420,11 @@ fn re_import_is_idempotent() {
     let out = clove(dir.path())
         .args([
             "import",
+            "--format",
+            "json",
             "tk",
             src.to_str().unwrap(),
             "--dry-run",
-            "--format",
-            "json",
         ])
         .output()
         .unwrap();
@@ -435,7 +435,7 @@ fn re_import_is_idempotent() {
 
     // A real (non-dry-run) re-import also writes nothing new.
     let out = clove(dir.path())
-        .args(["import", "tk", src.to_str().unwrap(), "--format", "json"])
+        .args(["import", "--format", "json", "tk", src.to_str().unwrap()])
         .output()
         .unwrap();
     assert!(out.status.success());
