@@ -92,8 +92,20 @@ pub enum Commands {
     /// Rebuild the SQLite index from the files.
     Reindex,
     /// Import items from a file-based tracker (`tk|beads`).
+    #[command(after_help = "\
+Built-in providers: tk (a .tickets/ dir), beads (an issues.jsonl). Any other \
+provider runs a clove-import-<provider> plugin.\n\
+Note: clove global flags (--format, --color, --quiet, …) must come BEFORE the \
+provider — everything after it is the provider's own arguments. \
+e.g. `clove import --format json tk .tickets --dry-run`.")]
     Import(ImportArgs),
     /// Export items to `json` or `jsonl`.
+    #[command(after_help = "\
+Built-in providers: json, jsonl. Any other provider runs a \
+clove-export-<provider> plugin.\n\
+Note: clove global flags (--format, --color, --quiet, …) must come BEFORE the \
+provider — everything after it is the provider's own arguments. \
+e.g. `clove export --format json json --out items.json`.")]
     Export(ExportArgs),
     /// Two-way sync items with a tracker (`github`).
     Sync(SyncArgs),

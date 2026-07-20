@@ -731,8 +731,9 @@ clove stats [--top N] [--no-epics] [--snapshot]      # work-item analytics + dae
 clove comment <id> <message> [--format json]
 clove comments <id> [--limit N] [--format json]
 clove reindex [--force] [--format json]
-clove import <beads|tk|github> <src> [--dry-run] [--format json]
-clove export <json|jsonl|github> [--out FILE]
+clove import [--format json] <beads|tk> <src> [--dry-run]   # clove global flags precede the provider;
+clove export [--format json] <json|jsonl> [--out FILE]      # provider-owned flags (<src>/--out/--dry-run) follow it
+                                                            # (github is `clove sync github`, not import/export)
 clove agent-doc [--format markdown|json] [--out FILE]
 clove agent-doc --check [--file PATH]       # verify embedded doc vs binary
 clove migrate [--yes] [--dry-run]

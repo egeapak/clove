@@ -1,11 +1,11 @@
-//! `clove import <tk|beads|github> <src> [--dry-run]` (T-M01/T-M02/T-M03).
+//! `clove import <tk|beads> <src> [--dry-run]` (T-M01/T-M02).
 //!
-//! All three sources are implemented: tk (T-M01), Beads (T-M02), and GitHub
-//! (T-M03). The GitHub arm is built behind the `github` feature; without it the
-//! command is still recognized but returns a clean fallback error rather than a
-//! panic. The shared planning layer lives in `clove-import`: every source runs
-//! `plan` (pure, drives `--dry-run`) and, when not in dry-run, `apply` (writes
-//! through the file store).
+//! The two built-in, file-based providers: tk (T-M01) and Beads (T-M02). Any
+//! other provider falls through to a `clove-import-<provider>` plugin (routed in
+//! `main::run_repo`); GitHub is `clove sync github`, not an import provider. The
+//! shared planning layer lives in `clove-import`: every source runs `plan` (pure,
+//! drives `--dry-run`) and, when not in dry-run, `apply` (writes through the file
+//! store).
 
 use camino::Utf8PathBuf;
 use chrono::Utc;
@@ -27,11 +27,16 @@ pub fn is_builtin(provider: &str) -> bool {
     matches!(provider, "tk" | "beads")
 }
 
-/// The flags a built-in import provider accepts, inner-parsed from `rest` so the
-/// `KEY=VALUE`-free surface (`clove import tk <src> [--dry-run]`) stays intact
-/// while the top-level parser forwards `rest` raw for the plugin fall-through.
+// Inner-parsed from `rest` so `clove import <tk|beads> <src> [--dry-run]` keeps
+// its familiar surface while the top-level router forwards `rest` raw for the
+// plugin fall-through. The `about` is user-facing (shown on `--help`); this
+// comment is not.
 #[derive(Debug, Parser)]
-#[command(name = "clove import", no_binary_name = true)]
+#[command(
+    name = "clove import <tk|beads>",
+    no_binary_name = true,
+    about = "Arguments for a built-in import provider (tk/beads)"
+)]
 struct ImportBuiltinArgs {
     /// The source (a `.tickets/` directory for tk, an `issues.jsonl` for beads).
     src: Utf8PathBuf,
@@ -49,6 +54,16 @@ pub fn run(ctx: &Ctx, format: OutputFormat, args: ImportArgs) -> Result<ExitCode
         Ok(parsed) => parsed,
         Err(err) => {
             let _ = err.print();
+            // A global flag placed *after* the provider lands in `rest` and reads
+            // as an unknown argument here. clap's default tip (`-- --format`) is
+            // wrong for that case, so add the real fix: put globals first.
+            if err.kind() == ErrorKind::UnknownArgument {
+                eprintln!(
+                    "\nnote: clove global flags (--format, --color, --quiet, …) must come \
+                     before the provider, e.g. `clove import --format json {} …`",
+                    args.provider
+                );
+            }
             return Ok(match err.kind() {
                 ErrorKind::DisplayHelp
                 | ErrorKind::DisplayVersion

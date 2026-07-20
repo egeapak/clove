@@ -31,11 +31,16 @@ pub fn is_builtin(provider: &str) -> bool {
     matches!(provider, "json" | "jsonl")
 }
 
-/// The flags a built-in export provider accepts, inner-parsed from `rest` (the
-/// format itself comes from `provider`, not a positional) so the top-level
-/// parser can forward `rest` raw for the plugin fall-through.
+// Inner-parsed from `rest` (the format itself comes from `provider`, not a
+// positional) so the top-level router can forward `rest` raw for the plugin
+// fall-through. The `about` is user-facing (shown on `--help`); this comment is
+// not.
 #[derive(Debug, Parser)]
-#[command(name = "clove export", no_binary_name = true)]
+#[command(
+    name = "clove export <json|jsonl>",
+    no_binary_name = true,
+    about = "Arguments for a built-in export provider (json/jsonl)"
+)]
 struct ExportBuiltinArgs {
     /// Write to a file instead of stdout.
     #[arg(long, value_name = "FILE")]
@@ -89,6 +94,16 @@ pub fn run(ctx: &Ctx, format: OutputFormat, args: ExportArgs) -> Result<ExitCode
         Ok(parsed) => parsed,
         Err(err) => {
             let _ = err.print();
+            // A global flag placed *after* the provider lands in `rest` and reads
+            // as an unknown argument here; clap's default `-- --format` tip is
+            // wrong for that case, so point at the real fix.
+            if err.kind() == ErrorKind::UnknownArgument {
+                eprintln!(
+                    "\nnote: clove global flags (--format, --color, --quiet, …) must come \
+                     before the provider, e.g. `clove export --format json {} …`",
+                    args.provider
+                );
+            }
             return Ok(match err.kind() {
                 ErrorKind::DisplayHelp
                 | ErrorKind::DisplayVersion
