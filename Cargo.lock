@@ -695,6 +695,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "clove-plugin"
+version = "0.1.0"
+dependencies = [
+ "camino",
+ "clove-core",
+ "clove-types",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "clove-plugin-echo"
+version = "0.1.0"
+dependencies = [
+ "clove-plugin",
+ "serde_json",
+]
+
+[[package]]
 name = "clove-tui"
 version = "0.1.0"
 dependencies = [

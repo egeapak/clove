@@ -1,0 +1,21 @@
+# A fixture plugin: the smallest possible `clove-plugin` consumer. It echoes its
+# forwarded argv and a few `CLOVE_*` context values back through the standard
+# envelope, so an integration test can assert the host triggered the plugin with
+# the correct argv + environment (PLUGIN_SYSTEM.md §6.2/§6.3). Not published.
+[package]
+name = "clove-plugin-echo"
+description = "clove plugin fixture: echoes argv + PluginContext through the standard envelope (test-only)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "clove-echo"
+path = "src/main.rs"
+
+[dependencies]
+clove-plugin.workspace = true
+serde_json.workspace = true
