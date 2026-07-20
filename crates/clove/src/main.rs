@@ -11,6 +11,7 @@ mod context;
 mod exit;
 mod item_json;
 mod output;
+mod plugin;
 mod util;
 
 use clap::error::ErrorKind;
@@ -54,6 +55,7 @@ fn dispatch(cli: Cli) -> (OutputFormat, Result<ExitCode, CloveError>) {
     let no_index = cli.no_index;
     let deep = cli.deep;
     let quiet = cli.quiet;
+    let color = cli.color;
     let clove_dir = cli.clove_dir.clone();
 
     match cli.command {
@@ -108,6 +110,25 @@ fn dispatch(cli: Cli) -> (OutputFormat, Result<ExitCode, CloveError>) {
                 cmd::mcp::run(clove_dir.as_deref()).map(|_| ExitCode::Success),
             )
         }
+        // `plugin list` is a pure `stat` walk of the search path; it needs no
+        // repository (so `clove plugin list` works before `clove init`).
+        Commands::Plugin(_) => {
+            let f = resolve_format(flag, None);
+            (f, cmd::plugin::run(f).map(|_| ExitCode::Success))
+        }
+        // An external plugin (`clove-<name>`). Resolution runs *before* discovery:
+        // an unknown subcommand is a usage error (exit 1) that needs no repo, so
+        // `clove frobnicate` outside a repo still exits 1 rather than NoRepo. Only
+        // a plugin that actually resolves requires the repo context it will run in.
+        Commands::External(argv) => dispatch_external(
+            flag,
+            no_index,
+            deep,
+            quiet,
+            color,
+            clove_dir.as_deref(),
+            argv,
+        ),
         // Everything else operates on a discovered repository.
         command => {
             let ctx = match discover(clove_dir.as_deref()) {
@@ -118,6 +139,62 @@ fn dispatch(cli: Cli) -> (OutputFormat, Result<ExitCode, CloveError>) {
             (f, run_repo(command, &ctx, f, no_index, deep, quiet))
         }
     }
+}
+
+/// Dispatch a `Commands::External(argv)` plugin invocation (PLUGIN_SYSTEM.md
+/// §4.1). `argv[0]` is the subcommand name.
+///
+/// Resolution comes first: a `clove-<name>` that resolves nowhere is a usage
+/// error (exit 1) — named binary + installed-plugin list — and needs no
+/// repository. Only a plugin that *does* resolve requires the repo context (it
+/// reads/writes the store via `CLOVE_DIR` …), so discovery runs on the hit path
+/// and a missing `.clove/` surfaces as the standard `NoRepo` error there.
+fn dispatch_external(
+    flag: Option<OutputFormat>,
+    no_index: bool,
+    deep: bool,
+    quiet: bool,
+    color: cli::ColorChoice,
+    clove_dir: Option<&camino::Utf8Path>,
+    argv: Vec<String>,
+) -> (OutputFormat, Result<ExitCode, CloveError>) {
+    let Some(name) = argv.first().cloned() else {
+        // `external_subcommand` always yields at least the subcommand token, so
+        // this is unreachable in practice; treat an empty argv as a usage error.
+        let f = resolve_format(flag, None);
+        return (
+            f,
+            Ok(output::emit_unknown_subcommand(f, "", "clove-", &[], quiet)),
+        );
+    };
+
+    let Some(path) = plugin::resolve(&[name.as_str()]) else {
+        let f = resolve_format(flag, None);
+        let installed: Vec<String> = plugin::list().into_iter().map(|p| p.name).collect();
+        let binary = format!("clove-{name}{}", std::env::consts::EXE_SUFFIX);
+        return (
+            f,
+            Ok(output::emit_unknown_subcommand(
+                f, &name, &binary, &installed, quiet,
+            )),
+        );
+    };
+
+    let ctx = match discover(clove_dir) {
+        Ok(ctx) => ctx,
+        Err(e) => return (resolve_format(flag, None), Err(e)),
+    };
+    let f = resolve_format(flag, Some(ctx.config.default_format));
+    let globals = plugin::PluginGlobals {
+        format: f,
+        color,
+        quiet,
+        no_index,
+        deep,
+    };
+    let rest = argv[1..].to_vec();
+    let result = plugin::run_plugin(&path, &rest, &[name.as_str()], &ctx, &globals, &name, None);
+    (f, result)
 }
 
 fn run_repo(
@@ -164,12 +241,14 @@ fn run_repo(
         Commands::Import(a) => cmd::import::run(ctx, f, a).map(|_| ok),
         Commands::Export(a) => cmd::export::run(ctx, f, a).map(|_| ok),
         Commands::Sync(a) => cmd::sync::run(ctx, f, a).map(|_| ok),
-        // Non-repo commands are dispatched earlier.
+        // Non-repo commands and external plugins are dispatched earlier.
         Commands::Version
         | Commands::Init(_)
         | Commands::AgentDoc(_)
         | Commands::Setup(_)
         | Commands::MergeDriver(_)
+        | Commands::Plugin(_)
+        | Commands::External(_)
         | Commands::Mcp => Ok(ok),
     }
 }

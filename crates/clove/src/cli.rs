@@ -115,6 +115,28 @@ pub enum Commands {
     Serve(ServeArgs),
     /// Print version and schema information.
     Version,
+    /// Inspect installed subcommand plugins (`clove-*` on the search path).
+    Plugin(PluginArgs),
+    /// Run an external subcommand plugin (`clove-<name>` on the search path).
+    ///
+    /// This catch-all fires only when the leading token matches no built-in, so a
+    /// plugin can never shadow a real command (PLUGIN_SYSTEM.md §4.1). `argv[0]`
+    /// is the subcommand name; the rest is forwarded to the plugin verbatim.
+    #[command(external_subcommand)]
+    External(Vec<String>),
+}
+
+/// `clove plugin <list>` — inspect the installed subcommand plugins.
+#[derive(Debug, Args)]
+pub struct PluginArgs {
+    #[command(subcommand)]
+    pub action: PluginAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PluginAction {
+    /// List resolvable `clove-*` plugin binaries with their paths.
+    List,
 }
 
 /// `clove serve` (DESIGN web UI / M4). Starts an HTTP server that serves the
