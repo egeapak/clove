@@ -6,7 +6,27 @@ create/edit request types), `clove-core` (file store/graph/high-level ops on top
 of `clove-types`), `clove-tui` (the terminal browser + add/edit form),
 `clove-web` (the web UI server + embedded SvelteKit SPA, `clove serve`),
 plus `clove` (CLI), `cloved`, `clove-index`, `clove-ipc`, `clove-import`,
-`clove-mcp`.
+`clove-mcp`, `clove-plugin` (cargo-style subcommand-plugin support), and
+`clove-sync-github` (the installable GitHub-sync plugin).
+
+## Plugin system (cargo-style external subcommands)
+
+Integrations users may not want are **separately-installable binaries**, not
+compile-time features. `clove <x>` that matches no built-in resolves `clove-<x>`
+on the search path (current-exe dir → `$CLOVE_PLUGIN_PATH` → `$PATH`) and hands
+off, exactly like `cargo <x>` → `cargo-<x>`. The `sync`/`import`/`export`
+multiplexers extend this per-provider: `clove sync github` → `clove-sync-github`
+(sync has **no** built-in providers; `import`/`export` keep the pure `tk`/`beads`
+/`json`/`jsonl` built-ins and fall through only for unknown providers). Global
+flags (`--format`, …) must precede the provider. The host↔plugin contract (the
+`CLOVE_*` env, the shared `{v,ok,data,_meta}` envelope, exit codes) lives in
+`clove-plugin`: a plugin `main` calls `PluginContext::from_env()` /
+`clove_plugin::run_with_info`, and the host writes the env from
+`clove/src/plugin.rs::export_env` (the two are pinned by
+`clove/tests/plugin_dispatch.rs`). See `docs/PLUGIN_SYSTEM.md` for the full spec.
+GitHub sync is the first plugin: `clove-sync-github` reuses
+`clove-import`'s `github`-feature reconciliation, so the core `clove`/`cloved`
+carry no octocrab.
 
 See `docs/DESIGN.md` for the authoritative, implementation-ready spec (the whole
 surface, including the web UI, is described there).

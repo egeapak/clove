@@ -102,8 +102,10 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
   JSON envelope (`data` array) or one item per line (NDJSON, Beads-isomorphic).\n\
 - `clove sync github <owner/repo> [--dry-run] [--prefer P] [--no-comments]` —\n\
   two-way GitHub sync (pull + push + comments in one pass; conflict policy\n\
-  `newer|local|remote|manual`). Needs the `github` build feature + a token via\n\
-  `GITHUB_TOKEN` or `gh auth token`. The single GitHub path (replaces the old\n\
+  `newer|local|remote|manual`). Needs the `clove-sync-github` plugin\n\
+  (`cargo install clove-sync-github`) + a token via `GITHUB_TOKEN` or\n\
+  `gh auth token`; without the plugin it exits 4 with an install hint. The\n\
+  single GitHub path (replaces the old\n\
   one-way `import github` / `export github`).\n\
 - File imports are idempotent on `external_ref`: re-running skips already-imported\n\
   items. `--dry-run` reports `{{ would_create, would_skip, conflicts }}` and\n\

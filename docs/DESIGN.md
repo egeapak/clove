@@ -15,8 +15,10 @@ clove/                          (workspace root)
   crates/
     clove-core/                 lib — item model, file store, DAG engine, ID gen
     clove-index/                lib — SQLite index, FTS5, staleness, reindex
-    clove-import/               lib — beads / tk / github importers
-    clove/                      bin — CLI, JSON envelopes, exit codes
+    clove-import/               lib — beads / tk importers + pure GitHub mapping/reconciliation
+    clove-plugin/               lib — cargo-style plugin support (PluginContext + envelope harness)
+    clove-sync-github/          bin — the `clove-sync-github` plugin (two-way GitHub sync, octocrab)
+    clove/                      bin — CLI, JSON envelopes, exit codes, plugin dispatch
     cloved/                     bin — daemon, file-watcher, IPC server
   benches/                      criterion benchmarks (shared fixture crate)
   fuzz/                         cargo-fuzz targets

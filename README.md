@@ -61,8 +61,8 @@ single, dependency-light, cross-platform binary.
 cargo install --locked --git https://github.com/egeapak/clove clove-cli cloved
 clove version   # the installed command is `clove` (crate: clove-cli)
 
-# ...or, to include GitHub sync (adds ~3.5 MB of TLS/HTTP per binary):
-cargo install --locked --features full --git https://github.com/egeapak/clove clove-cli cloved
+# ...then add GitHub sync as a plugin (only if you want it; ~3.5 MB of TLS/HTTP):
+cargo install --locked --git https://github.com/egeapak/clove clove-sync-github
 ```
 
 This installs the `clove` CLI and the optional `cloved` daemon onto your `PATH`.
@@ -70,13 +70,15 @@ A Rust (stable) toolchain compiles them; no Node is required (the web UI embeds 
 placeholder unless built with Node — see
 [`crates/clove-web/web/README.md`](crates/clove-web/web/README.md)).
 
-**GitHub sync is opt-out.** The default build is lean; `clove sync github` (and
-the daemon's periodic sync) live behind the `github` / `github-sync` features,
-bundled as `full`. A default binary prints a clean `built without github support`
-error on `clove sync github`. The **pre-built release binaries are built
-`--features full`**, so downloads keep sync. (For how the GitHub feature could be
-distributed as a *separately installed* plugin, see
-[`docs/PLUGIN_SYSTEM.md`](docs/PLUGIN_SYSTEM.md).)
+**Integrations are cargo-style plugins.** The core `clove` binary carries no
+network-integration weight; `clove sync github <owner/repo>` resolves and runs a
+separately-installed **`clove-sync-github`** binary on your `PATH` (or next to
+`clove`), exactly as `cargo nextest` runs `cargo-nextest`. Without the plugin,
+`clove sync github` prints a clean `unknown sync provider; install
+clove-sync-github` error (exit 4); installing it lights the command up with no
+core rebuild. The daemon's periodic sync spawns the same `clove sync github`, so
+it needs the plugin too. See [`docs/PLUGIN_SYSTEM.md`](docs/PLUGIN_SYSTEM.md) for
+the dispatch/discovery/env contract.
 
 ## Quick start
 
@@ -140,9 +142,9 @@ resolves the conflict by policy (`--prefer newer|local|remote|manual`; default
 too (`--no-comments` to skip). `--dry-run` plans without touching either side. A
 per-repo last-sync clock lives under `.clove/sync/` (git-ignored), and a running
 daemon can run the sync on a timer (`[daemon] github_sync_interval_min` +
-`github_sync_repo`). Auth via `GITHUB_TOKEN` or the `gh` CLI. Requires a build
-with the `github` feature (`--features full`; see [Install](#install)) — the
-pre-built release binaries include it.
+`github_sync_repo`). Auth via `GITHUB_TOKEN` or the `gh` CLI. Requires the
+**`clove-sync-github` plugin** (`cargo install clove-sync-github`; see
+[Install](#install)) — the pre-built release bundle includes it.
 
 ## AI agents: MCP server & Claude Code plugin
 
@@ -173,8 +175,8 @@ The plugin wires up the `clove mcp` server automatically (tools surface as
 
 ```sh
 cargo build --release                    # lean binaries: clove (CLI), cloved (daemon)
-cargo build --release --features "clove-cli/full cloved/full"   # + GitHub sync
-cargo test --workspace --all-features    # unit + integration + doctests (incl. github)
+cargo build --release -p clove-sync-github   # the GitHub sync plugin (adds octocrab/TLS)
+cargo test --workspace --all-features    # unit + integration + doctests (incl. github sync)
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all --check
 ```
@@ -194,7 +196,9 @@ cd crates/clove-web/web && npm run check && npm run test   # svelte-check + vite
 | `crates/clove-index` | optional SQLite index (FTS5, staleness, incremental derived state, stats history) |
 | `crates/clove` | the `clove` CLI (crate `clove-cli`) |
 | `crates/cloved` | the optional `cloved` daemon (file-watch, IPC, optional git sync, web serving) |
-| `crates/clove-import` | import/export, 3-way merge driver, and two-way GitHub sync (`github` feature) |
+| `crates/clove-import` | import/export, 3-way merge driver, and the pure GitHub field-mapping + reconciliation (its `github` feature — the octocrab network layer — is enabled only by the `clove-sync-github` plugin) |
+| `crates/clove-plugin` | support crate for cargo-style subcommand plugins (typed `PluginContext` from the `CLOVE_*` env contract + envelope/exit-code harness) |
+| `crates/clove-sync-github` | the `clove-sync-github` plugin: two-way GitHub Issues sync, installed separately (`cargo install clove-sync-github`) so the core carries no octocrab weight — `clove sync github <owner/repo>` resolves it |
 | `crates/clove-ipc` | CLI ↔ daemon wire protocol (`tarpc`) |
 | `crates/clove-mcp` | the MCP server surface (`clove mcp`) |
 | `crates/clove-tui` | terminal browser + add/edit form (`clove tui`, ratatui) |

@@ -1,11 +1,14 @@
 # Plugin system — cargo-style external subcommands & pluggable integrations
 
-> **Status:** Design — implementation-ready. No plugin mechanism is implemented
-> yet. This specifies a **cargo-style external-subcommand** dispatch seam for
-> `clove`, so integrations users don't want (GitHub, and future GitLab / Jira /
-> Linear) are **separately installable binaries** rather than compile-time
-> features baked into one monolithic release artifact. It supersedes the earlier
-> feasibility note (the options table in §9 is kept from it).
+> **Status:** Implemented. The **cargo-style external-subcommand** dispatch seam
+> described here is live: `clove <x>` resolves `clove-<x>`, the
+> `sync`/`import`/`export` multiplexers dispatch per-provider, and GitHub sync
+> ships as the first plugin (`clove-sync-github`) so the core `clove`/`cloved`
+> carry no octocrab. Integrations users don't want (GitHub, and future GitLab /
+> Jira / Linear) are **separately installable binaries** rather than compile-time
+> features baked into one monolithic artifact. It supersedes the earlier
+> feasibility note (the options table in §9 is kept from it). One implementation
+> refinement vs. the original §8 plan is noted inline there.
 
 ## 1. Goal
 
@@ -387,16 +390,26 @@ reflects the context back → the dispatch test asserts it, including the
 
 The github integration is the proving ground and directly serves the motivation.
 
-1. **Extract `crates/clove-sync-github/`** — a new binary crate = today's
-   `clove_import::{github::net, sync_net}` + a `clove-plugin` `main`. It depends
-   on `clove-core`, `clove-types`, `clove-import` (for the *pure* `map`/`sync`
-   planning + `github` field codec), and the `github`-only deps (octocrab, tokio,
-   rustls, fd-lock) unconditionally — no feature gate; the whole crate *is* the
-   opt-in unit now.
-2. **`clove-import`** keeps its pure layers (`github` field mapping/codec,
-   `sync.rs` planning, `plan_comments`) always-compiled and **drops the `github`
-   feature** (the `dep:octocrab/tokio/rustls/fd-lock` gate and `sync_net.rs` move
-   to the new crate).
+> **Implementation refinement (as shipped).** Steps 1–2 below originally proposed
+> *moving* `sync_net.rs` + `github::net` into the new crate and deleting the
+> `github` feature from `clove-import`. The shipped version took the **lower-risk
+> reuse** path instead: `sync_net.rs`/`github::net` **stay in `clove-import`
+> behind its existing `github` feature**, and `crates/clove-sync-github` depends
+> on `clove-import` with `features = ["github"]` and calls
+> `clove_import::sync_net::sync_github`. No file moves, no `pub(crate)→pub`
+> visibility surgery. The lean-core outcome is identical — `clove-cli` and
+> `cloved` simply stop enabling `clove-import/github`, so only the plugin pulls
+> octocrab. Read steps 1–2 with that substitution.
+
+1. **Add `crates/clove-sync-github/`** — a new binary crate: a `clove-plugin`
+   `main` that reuses `clove-import`'s reconciliation. It depends on `clove-core`,
+   `clove-types`, `clove-plugin`, and `clove-import` **with `features = ["github"]`**
+   (which pulls octocrab/tokio/rustls/fd-lock transitively). The whole crate *is*
+   the opt-in unit; nothing here is feature-gated.
+2. **`clove-import`** is **unchanged**: its pure layers (`github` field
+   mapping/codec, `sync.rs` planning, `plan_comments`) stay always-compiled, and
+   its `github` feature (the octocrab `net`/`sync_net` layer) stays — now enabled
+   *only* by the plugin crate, never by the core binaries.
 3. **`clove-cli`** drops its `github` feature; `cmd/sync.rs` becomes the generic
    provider-dispatch shim (§4.2). The `full` feature loses `github`.
 4. **The daemon coupling** (`crates/cloved/src/github_sync.rs` calls
