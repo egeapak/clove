@@ -43,17 +43,28 @@ fn clove_binary() -> Utf8PathBuf {
         .unwrap_or_else(|| Utf8PathBuf::from("clove"))
 }
 
-/// Run one sync of `repo_root` against `repo_spec` by spawning
-/// `clove sync github <repo_spec>` in `repo_root` (which resolves the
+/// Run one sync of the repository at `clove_dir` against `repo_spec` by spawning
+/// `clove --clove-dir <clove_dir> sync github <repo_spec>` (which resolves the
 /// `clove-sync-github` plugin). Best-effort: returns `false` (after logging) on a
 /// spawn failure or a non-zero exit rather than propagating. The child inherits
 /// this process's environment (so a `GITHUB_TOKEN` set for the daemon is passed
 /// through) and streams its own stdout/stderr.
-pub fn github_sync_once(repo_root: &Utf8Path, repo_spec: &str) -> bool {
+///
+/// `--clove-dir` pins the child to the *exact* directory the daemon manages —
+/// the daemon may have been started with a non-standard `--clove-dir` (a CLI
+/// flag, not inherited into the child's env), so relying on cwd rediscovery could
+/// aim the child at a different repository. Global flags precede the subcommand,
+/// per the `clove` CLI contract.
+pub fn github_sync_once(clove_dir: &Utf8Path, repo_spec: &str) -> bool {
     let clove = clove_binary();
     let status = Command::new(clove.as_std_path())
-        .args(["sync", "github", repo_spec])
-        .current_dir(repo_root.as_std_path())
+        .args([
+            "--clove-dir",
+            clove_dir.as_str(),
+            "sync",
+            "github",
+            repo_spec,
+        ])
         .status();
     match status {
         Ok(status) if status.success() => true,
@@ -74,7 +85,7 @@ pub fn github_sync_once(repo_root: &Utf8Path, repo_spec: &str) -> bool {
 /// wait for the `clove` subprocess runs on a blocking thread, so it never stalls
 /// this async worker.
 pub async fn github_sync_loop(
-    repo_root: Utf8PathBuf,
+    clove_dir: Utf8PathBuf,
     repo_spec: Option<String>,
     interval: Option<Duration>,
 ) {
@@ -86,9 +97,9 @@ pub async fn github_sync_loop(
     ticker.tick().await; // skip the immediate t=0 tick
     loop {
         ticker.tick().await;
-        let repo_root = repo_root.clone();
+        let clove_dir = clove_dir.clone();
         let repo_spec = repo_spec.clone();
-        let _ = tokio::task::spawn_blocking(move || github_sync_once(&repo_root, &repo_spec)).await;
+        let _ = tokio::task::spawn_blocking(move || github_sync_once(&clove_dir, &repo_spec)).await;
     }
 }
 

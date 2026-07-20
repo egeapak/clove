@@ -633,6 +633,14 @@ fn make_issue(
 /// directory that contains it, to be placed on `CLOVE_PLUGIN_PATH` so that
 /// `clove sync github` resolves the plugin. Built via escargot into the workspace
 /// target dir (the binary persists there for the process lifetime).
+///
+/// Note the co-location assumption: plugin resolution searches the running
+/// `clove`'s own directory *before* `CLOVE_PLUGIN_PATH` (see `plugin.rs`).
+/// escargot builds this plugin into the same workspace `target/<profile>/` that
+/// holds the test's `cargo_bin("clove")`, so the current-exe-dir hit and the
+/// `CLOVE_PLUGIN_PATH` hit are the identical, freshly-rebuilt file — no stale
+/// sibling can win. If escargot's output dir ever diverged from the test binary's
+/// dir, a stale sibling could take precedence.
 fn plugin_dir() -> &'static Path {
     static DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
