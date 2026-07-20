@@ -20,17 +20,17 @@ default = ["git-sync"]
 # artifacts build `--features full` so the daemon retains it.
 full = ["git-sync", "github-sync"]
 git-sync = ["dep:git2"]
-# Periodic two-way GitHub sync (T-M06). **Opt-out** (not in `default`) so a lean
-# build stays free of octocrab/tokio-net weight; enable with `--features
-# github-sync` (or `--features full`). Without it the daemon's sync loop is a
-# no-op and `clove sync github` still works from the CLI when clove is built
-# with its own `github` feature.
-github-sync = ["dep:clove-import", "clove-import/github"]
+# Periodic two-way GitHub sync (T-M06). Now a **dependency-free** gate (like
+# `git-sync`): the daemon no longer links octocrab/clove-import — it shells out to
+# `clove sync github <repo>`, which resolves the external `clove-sync-github`
+# plugin (PLUGIN_SYSTEM.md §8). The feature only decides whether the daemon
+# *spawns* that subprocess on its interval. **Opt-out** (not in `default`);
+# enable with `--features github-sync` (or `--features full`).
+github-sync = []
 
 [dependencies]
 clove-types.workspace = true
 clove-core.workspace = true
-clove-import = { workspace = true, optional = true }
 clove-index.workspace = true
 clove-ipc.workspace = true
 clove-web.workspace = true       # M4: daemon serves the web UI by default

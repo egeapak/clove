@@ -108,6 +108,14 @@ provider — everything after it is the provider's own arguments. \
 e.g. `clove export --format json json --out items.json`.")]
     Export(ExportArgs),
     /// Two-way sync items with a tracker (`github`).
+    #[command(after_help = "\
+github requires the clove-sync-github plugin (cargo install clove-sync-github). \
+There are no built-in sync providers — every provider is an external \
+clove-sync-<provider> plugin.\n\
+Form: clove sync [--format json] github <owner/repo> [--dry-run] [--prefer P] \
+[--no-comments].\n\
+Note: clove global flags (--format, --color, --quiet, …) must come BEFORE the \
+provider — everything after it is the provider's own arguments.")]
     Sync(SyncArgs),
     /// Git 3-way merge driver for item files (`clove merge-driver %O %A %B %L`).
     MergeDriver(MergeDriverArgs),
@@ -512,32 +520,22 @@ pub struct ExportArgs {
     pub rest: Vec<String>,
 }
 
-/// `clove sync <github> <owner/repo>` (T-M06). One reconciled pull+push pass.
+/// `clove sync <provider> [args…]` (PLUGIN_SYSTEM.md §4.2).
+///
+/// A pure router mirroring [`ImportArgs`]/[`ExportArgs`]: `sync` has **no**
+/// built-in providers — every provider (including `github`) resolves to a
+/// `clove-sync-<provider>` plugin, with `rest` forwarded verbatim. Global flags
+/// (e.g. `--format`) must precede the provider token, since everything after it
+/// is captured raw for plugin forwarding.
 #[derive(Debug, Args)]
 pub struct SyncArgs {
-    /// The tracker to sync with. Only `github` is supported today.
-    #[arg(value_enum, value_name = "TRACKER")]
-    pub tracker: SyncTracker,
-    /// The `owner/repo` to sync with.
-    #[arg(value_name = "OWNER/REPO")]
-    pub target: String,
-    /// Plan only: report what would happen on both sides without writing anything.
-    #[arg(long)]
-    pub dry_run: bool,
-    /// Conflict policy for issues changed on both sides since the last sync:
-    /// `newer` (default), `local`, `remote`, or `manual`.
-    #[arg(long, value_name = "POLICY")]
-    pub prefer: Option<String>,
-    /// Skip syncing issue comments (faster: avoids one API call per issue).
-    #[arg(long)]
-    pub no_comments: bool,
-}
-
-/// The tracker a `clove sync` targets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum SyncTracker {
-    /// GitHub Issues.
-    Github,
+    /// The provider to sync with (a `clove-sync-<provider>` plugin, e.g.
+    /// `github`).
+    pub provider: String,
+    /// Everything after the provider — the `owner/repo` and any provider flags
+    /// (`--dry-run`, `--prefer`, `--no-comments`) — forwarded to the plugin.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    pub rest: Vec<String>,
 }
 
 /// The `clove export` output format. GitHub is handled by `clove sync github`.

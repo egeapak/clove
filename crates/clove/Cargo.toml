@@ -15,16 +15,13 @@ default-run = "clove"
 name = "clove"
 path = "src/main.rs"
 
-# `github` wires `clove sync github` (and `import/export github`) through to
-# clove-import's GitHub (octocrab/tokio) layer — ~3.5 MB of vendored TLS/HTTP.
-# It is **opt-out**: NOT in `default`, so a plain `cargo build` / `cargo install`
-# is lean and the sync arm returns a clean "built without github support" error.
-# Build with `--features github` (or `--features full`) to enable it; the
-# pre-built release artifacts are built `--features full` so they retain sync.
+# The host carries **zero** network dependencies: `clove sync github` resolves
+# the external `clove-sync-github` plugin (PLUGIN_SYSTEM.md §4.2/§8), so there is
+# no in-process `github` feature and `clove-import` is used only for its pure
+# file-format layers (tk/beads/json/jsonl/merge-driver).
 [features]
 default = ["mcp"]
-full = ["github", "mcp"]
-github = ["clove-import/github"]
+full = ["mcp"]
 # `mcp` wires the `clove mcp` subcommand to the clove-mcp (rmcp) server. Kept in
 # `default` (it is small); `--no-default-features` drops it (the subcommand then
 # errors cleanly) for the leanest cross builds.
@@ -34,7 +31,7 @@ mcp = ["dep:clove-mcp"]
 clove-types.workspace = true
 clove-core.workspace = true
 clove-index.workspace = true
-clove-import = { workspace = true, default-features = false }   # M2 import/export/merge-driver; `github` via this crate's `github` feature
+clove-import = { workspace = true, default-features = false }   # M2 import/export/merge-driver (pure file formats only; no github)
 clove-ipc.workspace = true       # M3: daemon liveness probe + QUERY routing
 clove-mcp = { workspace = true, optional = true }   # M4: `clove mcp` server (rmcp), behind the `mcp` feature
 clove-tui.workspace = true       # M4: `clove tui` terminal browser + add/edit form

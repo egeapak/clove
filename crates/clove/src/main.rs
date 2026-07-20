@@ -141,8 +141,9 @@ fn dispatch(cli: Cli) -> (OutputFormat, Result<ExitCode, CloveError>) {
     }
 }
 
-/// Route a multiplexer subcommand (`import`/`export`) whose provider is not a
-/// built-in to a `clove-<multiplexer>-<provider>` plugin (PLUGIN_SYSTEM.md §4.2).
+/// Route a multiplexer subcommand (`import`/`export`/`sync`) whose provider is
+/// not a built-in to a `clove-<multiplexer>-<provider>` plugin (PLUGIN_SYSTEM.md
+/// §4.2). `sync` has no built-in providers, so every `clove sync` reaches here.
 ///
 /// A resolved plugin is exec'd with `rest` forwarded and the provider threaded
 /// into `$CLOVE_PROVIDER` (§6.2); a miss is a validation error (exit 4) scoped to
@@ -302,7 +303,19 @@ fn run_repo(
                 dispatch_multiplexer("export", &a.provider, &a.rest, ctx, &globals)
             }
         }
-        Commands::Sync(a) => cmd::sync::run(ctx, f, a).map(|_| ok),
+        // `sync` is a pure router with no built-in providers: every provider
+        // (including `github`) falls through to a `clove-sync-<provider>` plugin
+        // (PLUGIN_SYSTEM.md §4.2).
+        Commands::Sync(a) => {
+            let globals = plugin::PluginGlobals {
+                format: f,
+                color,
+                quiet,
+                no_index,
+                deep,
+            };
+            dispatch_multiplexer("sync", &a.provider, &a.rest, ctx, &globals)
+        }
         // Non-repo commands and external plugins are dispatched earlier.
         Commands::Version
         | Commands::Init(_)

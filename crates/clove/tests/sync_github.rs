@@ -14,14 +14,19 @@
 //! clock for `updated_at`), so every scenario below is reproducible with no
 //! network and no token.
 //!
-//! Gated on the `github` feature (the default build), matching the sync command.
-#![cfg(feature = "github")]
+//! Since Phase 4b there is no in-process `github` feature: `clove sync github`
+//! resolves the external `clove-sync-github` plugin (PLUGIN_SYSTEM.md §4.2/§8).
+//! This suite therefore exercises the **full dispatch path** — the real `clove`
+//! binary routes to the plugin, which runs octocrab against the mock. The plugin
+//! is built once (via escargot) and its directory placed on `CLOVE_PLUGIN_PATH`
+//! (see the `clove()` harness); the plugin emits byte-identical JSON to the old
+//! built-in, so every assertion below holds unchanged.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use assert_cmd::prelude::*;
@@ -624,14 +629,37 @@ fn make_issue(
 // CLI harness
 // ---------------------------------------------------------------------------
 
+/// Build the `clove-sync-github` plugin once (across all tests) and return the
+/// directory that contains it, to be placed on `CLOVE_PLUGIN_PATH` so that
+/// `clove sync github` resolves the plugin. Built via escargot into the workspace
+/// target dir (the binary persists there for the process lifetime).
+fn plugin_dir() -> &'static Path {
+    static DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let run = escargot::CargoBuild::new()
+            .package("clove-sync-github")
+            .bin("clove-sync-github")
+            .run()
+            .expect("build clove-sync-github plugin");
+        run.path()
+            .parent()
+            .expect("plugin binary has a parent dir")
+            .to_owned()
+    })
+}
+
 fn clove(dir: &Path, addr: SocketAddr) -> Command {
     let mut cmd = Command::cargo_bin("clove").unwrap();
     cmd.current_dir(dir);
     cmd.env_remove("CLOVE_FORMAT");
     cmd.env_remove("EDITOR");
     cmd.env("CLOVE_AUTHOR", "tester@example.com");
+    // `clove sync github` dispatches to the external `clove-sync-github` plugin;
+    // point the plugin search path at the escargot-built binary's dir.
+    cmd.env("CLOVE_PLUGIN_PATH", plugin_dir());
     // A dummy token (the mock ignores it) and the API-base override that aims
-    // octocrab at our server instead of github.com.
+    // octocrab at our server instead of github.com — inherited by the plugin the
+    // host exec's, which is what actually talks to the mock.
     cmd.env("GITHUB_TOKEN", "test-token");
     cmd.env("CLOVE_GITHUB_API_URL", format!("http://{addr}"));
     // Keep any retry backoff effectively instant.
@@ -651,7 +679,7 @@ fn init_repo() -> TempDir {
 
 /// Run `clove sync github <repo> [extra…]` and return the parsed JSON envelope.
 fn sync(dir: &Path, addr: SocketAddr, extra: &[&str]) -> Value {
-    let mut args = vec!["sync", "github", "owner/repo", "--format", "json"];
+    let mut args = vec!["sync", "--format", "json", "github", "owner/repo"];
     args.extend_from_slice(extra);
     let out = clove(dir, addr).args(&args).output().unwrap();
     assert!(out.status.success(), "sync failed: {out:?}");
@@ -660,7 +688,7 @@ fn sync(dir: &Path, addr: SocketAddr, extra: &[&str]) -> Value {
 
 /// Run `clove sync github <repo>` allowing failure; returns the raw process output.
 fn sync_raw(dir: &Path, addr: SocketAddr, extra: &[&str]) -> std::process::Output {
-    let mut args = vec!["sync", "github", "owner/repo", "--format", "json"];
+    let mut args = vec!["sync", "--format", "json", "github", "owner/repo"];
     args.extend_from_slice(extra);
     clove(dir, addr).args(&args).output().unwrap()
 }
