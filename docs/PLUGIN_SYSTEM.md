@@ -470,6 +470,23 @@ because the boundary is a subprocess.
   cargo's rule: only the **first** unknown token names the binary for the generic
   case; the multiplexer case (§4.2) is the only place a second segment joins the
   name.
+- **Deferred follow-ups** (from the implementation reviews — none blocking):
+  1. **`clove plugin list` descriptions** — it currently prints only name+path; it
+     could invoke each plugin's `--clove-plugin-info` (§7) to show the one-line
+     `about`. Likewise `clove --list` could grow an "external subcommands" heading.
+  2. **`clove_plugin::run_raw`** — `clove-sync-github` hand-rolls the
+     `--clove-plugin-info` probe + `from_env`-failure enveloping because it needs
+     bespoke human rendering that `run`/`run_with_info` can't do. A lower-level
+     `run_raw(info, |cx, args| -> ExitCode)` that owns the probe + `from_env` and
+     hands the plugin full rendering control would remove that duplication and keep
+     the contract in one crate.
+  3. **`_meta` shape** — `clove_plugin::emit_success` emits `_meta: {}` while the
+     built-in `import`/`export` emit `_meta: {"warnings": []}`. No consumer keys on
+     it (the JSON schemas don't constrain `_meta`), but `emit_success` could take an
+     optional meta to normalize the two.
+  4. **Windows `PATHEXT`** (§5) — plugin discovery matches only `EXE_SUFFIX`
+     (`.exe`), not `.cmd`/`.bat`/`.ps1`. Unix-only CI; revisit for a Windows plugin
+     shipped as a script.
 
 ## 11. Phased implementation plan
 
