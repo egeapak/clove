@@ -18,6 +18,7 @@
 
 use std::process::ExitCode;
 
+use clap::error::ErrorKind;
 use clap::Parser;
 use clove_core::OutputFormat;
 use clove_plugin::{emit_error, emit_success, PluginArgs, PluginContext};
@@ -52,6 +53,29 @@ struct Cli {
     /// Skip syncing issue comments (faster: avoids one API call per issue).
     #[arg(long)]
     no_comments: bool,
+    /// Output format override. Also arrives via `$CLOVE_FORMAT`; accepted here
+    /// (per PLUGIN_SYSTEM.md §6.3) so `clove sync github <repo> --format json`
+    /// works even with the flag after the provider.
+    #[arg(long, value_name = "FORMAT", value_parser = parse_format)]
+    format: Option<OutputFormat>,
+}
+
+/// clap value-parser for `--format` (mirrors the host's).
+fn parse_format(raw: &str) -> Result<OutputFormat, String> {
+    OutputFormat::parse(raw)
+        .ok_or_else(|| format!("invalid format `{raw}` (expected human|json|jsonl)"))
+}
+
+/// Map a clap parse error to a clove exit code (DESIGN §7.6): `0` for
+/// help/version, `1` (Usage) otherwise — never clap's native `2`, which is
+/// `NotFound` in clove's table.
+fn clap_exit_code(err: &clap::Error) -> u8 {
+    match err.kind() {
+        ErrorKind::DisplayHelp
+        | ErrorKind::DisplayVersion
+        | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => 0,
+        _ => 1,
+    }
 }
 
 fn main() -> ExitCode {
@@ -92,17 +116,20 @@ fn main() -> ExitCode {
     let cli = match Cli::try_parse_from(&tail.args) {
         Ok(cli) => cli,
         Err(err) => {
-            // clap already renders usage/help; propagate its exit code (0 for
-            // --help/--version, 2 for a usage error).
+            // clap already renders usage/help; map its kind to clove's exit
+            // table (0 for --help/--version, 1 for a usage error — not clap's
+            // native 2, which means NotFound in clove).
             let _ = err.print();
-            return ExitCode::from(err.exit_code().clamp(0, 255) as u8);
+            return ExitCode::from(clap_exit_code(&err));
         }
     };
 
-    // 4. Run and render. On error, classify through the shared error_code table.
-    match run(&cx, cli) {
+    // 4. Run and render. A `--format` after the provider overrides the
+    //    env-provided one (§6.3), for both success and error output.
+    let format = cli.format.unwrap_or(cx.format);
+    match run(&cx, cli, format) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(err) => ExitCode::from(emit_error(cx.format, &err, cx.quiet)),
+        Err(err) => ExitCode::from(emit_error(format, &err, cx.quiet)),
     }
 }
 
@@ -110,7 +137,7 @@ fn main() -> ExitCode {
 ///
 /// Emits the success envelope / human summary itself and returns `Ok(())`; any
 /// `Err` (a bad `--prefer` value or a sync failure) is rendered by the caller.
-fn run(cx: &PluginContext, cli: Cli) -> Result<(), CloveError> {
+fn run(cx: &PluginContext, cli: Cli, format: OutputFormat) -> Result<(), CloveError> {
     use clove_import::ConflictPolicy;
 
     let policy = match &cli.prefer {
@@ -131,10 +158,10 @@ fn run(cx: &PluginContext, cli: Cli) -> Result<(), CloveError> {
     )
     .map_err(sync_err)?;
 
-    match (cx.format, report) {
+    match (format, report) {
         // Applied: emit the action counts (and any conflicts) the run produced.
         (OutputFormat::Json | OutputFormat::Jsonl, Some(report)) => emit_success(
-            cx.format,
+            format,
             json!({
                 "pulled_created": report.pulled_created,
                 "pulled_updated": report.pulled_updated,
@@ -150,7 +177,7 @@ fn run(cx: &PluginContext, cli: Cli) -> Result<(), CloveError> {
         ),
         // Dry run: emit the full write-free plan.
         (OutputFormat::Json | OutputFormat::Jsonl, None) => emit_success(
-            cx.format,
+            format,
             serde_json::to_value(&summary).unwrap_or_else(|_| json!({})),
         ),
         (OutputFormat::Human, Some(report)) => {
@@ -254,11 +281,28 @@ mod tests {
         assert!(cli.no_comments);
     }
 
-    /// A missing target is a clap usage error (exit 2), never a panic.
+    /// A missing target is a usage error. clap's native code is 2, but we map it
+    /// to clove's exit 1 (Usage) — clap's 2 is `NotFound` in clove's table.
     #[test]
-    fn missing_target_is_usage_error() {
+    fn missing_target_maps_to_usage_exit_1() {
         let err = Cli::try_parse_from(Vec::<String>::new()).unwrap_err();
-        assert_eq!(err.exit_code(), 2);
+        assert_eq!(err.exit_code(), 2, "clap's native code");
+        assert_eq!(clap_exit_code(&err), 1, "mapped to clove Usage");
+    }
+
+    /// `--help` maps to a clean exit 0, not a usage error.
+    #[test]
+    fn help_maps_to_exit_0() {
+        let err = Cli::try_parse_from(["--help"]).unwrap_err();
+        assert_eq!(clap_exit_code(&err), 0);
+    }
+
+    /// `--format` after the provider is accepted (§6.3), not a hard error.
+    #[test]
+    fn accepts_format_after_provider() {
+        let cli = Cli::try_parse_from(["egeapak/clove", "--format", "json"])
+            .expect("--format after target parses");
+        assert_eq!(cli.format, Some(OutputFormat::Json));
     }
 
     /// The leading `sync github` echo is stripped for the host invocation and left

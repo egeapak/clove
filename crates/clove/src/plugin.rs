@@ -262,9 +262,13 @@ pub fn export_env(
     );
     cmd.env("CLOVE_PLUGIN_API", PLUGIN_API_VERSION.to_string());
     cmd.env("CLOVE_COMMAND", command);
-    if let Some(provider) = provider {
-        cmd.env("CLOVE_PROVIDER", provider);
-    }
+    match provider {
+        Some(provider) => cmd.env("CLOVE_PROVIDER", provider),
+        // Explicitly clear it so a stray ambient CLOVE_PROVIDER can't leak into a
+        // generic plugin (every other CLOVE_* var is unconditionally set, so only
+        // this conditional one needs the guard) — §6.2 "absent → omitted".
+        None => cmd.env_remove("CLOVE_PROVIDER"),
+    };
 
     // Repository location (all derived once from the host's `discover()`).
     cmd.env("CLOVE_DIR", ctx.clove_dir.as_str());

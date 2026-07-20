@@ -1251,7 +1251,10 @@ missing comment data.
 
 GitHub is reached through **one** command — `clove sync github <owner/repo>`, a
 two-way reconcile (the earlier one-way `import github` / `export github` were
-removed in favour of it). It uses the `octocrab` crate behind the `github` feature.
+removed in favour of it). It is a **cargo-style plugin**: `clove sync github`
+resolves and runs the separately-installed `clove-sync-github` binary (which
+carries `octocrab` behind `clove-import`'s `github` feature), so the core
+`clove`/`cloved` are octocrab-free. See `docs/PLUGIN_SYSTEM.md`.
 
 **Field mapping.** `number` ↔ `external_ref = "gh-<number>"` (the durable link;
 clove mints a fresh `CloveId` on pull-create), `title` ↔ `title`, `state`

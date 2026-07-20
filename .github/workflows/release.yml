@@ -62,10 +62,12 @@ jobs:
       - name: Build release binaries
         env:
           CLOVE_SKIP_WEB_BUILD: "1"   # embed the dist built above; never run npm
-        # `--features full`: github/github-sync are opt-out, but the SHIPPED binary
-        # keeps `clove sync github` + the daemon sync loop. Drop `--features full`
-        # to publish the ~2.3 MB-smaller lean binary (no sync) instead.
-        run: cargo build --release --target ${{ matrix.target }} -p clove-cli -p cloved --features "clove-cli/full cloved/full"
+        # The bundle ships the lean core (`clove` + `cloved`) AND the
+        # `clove-sync-github` plugin, so `clove sync github` works out of the box
+        # (the CLI resolves the sibling plugin binary). `cloved/full` enables the
+        # daemon's dependency-free periodic-sync spawn gate. Drop
+        # `-p clove-sync-github` to publish a sync-free bundle instead.
+        run: cargo build --release --target ${{ matrix.target }} -p clove-cli -p cloved -p clove-sync-github --features "cloved/full"
 
       - name: Package
         shell: bash
@@ -76,9 +78,11 @@ jobs:
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
             cp "target/${{ matrix.target }}/release/clove.exe" "$stage/"
             cp "target/${{ matrix.target }}/release/cloved.exe" "$stage/"
+            cp "target/${{ matrix.target }}/release/clove-sync-github.exe" "$stage/"
           else
             cp "target/${{ matrix.target }}/release/clove" "$stage/"
             cp "target/${{ matrix.target }}/release/cloved" "$stage/"
+            cp "target/${{ matrix.target }}/release/clove-sync-github" "$stage/"
           fi
           cp README.md LICENSE-MIT LICENSE-APACHE "$stage/"
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
