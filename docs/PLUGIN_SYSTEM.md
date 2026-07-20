@@ -117,15 +117,17 @@ pub struct SyncArgs {
 
 Dispatch for `sync`:
 
-1. If `provider` is a **compiled-in** provider (see §8 on whether any remain),
-   run it in-process as today.
-2. Otherwise resolve `clove-sync-<provider>` (§5) and exec it with `rest`
-   forwarded (§6). The `sync`-level conventions (`--dry-run`, `--prefer`,
-   `--no-comments`) are passed through in `rest` and are a **documented contract**
-   every sync plugin must honor (§6.3), so the host need not know each provider's
-   flags.
-3. If neither resolves: exit 4 (`ValidationError`) — "unknown sync provider
+1. Resolve `clove-sync-<provider>` (§5) and exec it with `rest` forwarded (§6).
+   The `sync`-level conventions (`--dry-run`, `--prefer`, `--no-comments`) are
+   passed through in `rest` and are a **documented contract** every sync plugin
+   must honor (§6.3), so the host need not know each provider's flags.
+2. If it does not resolve: exit 4 (`ValidationError`) — "unknown sync provider
    `<p>`; install `clove-sync-<p>`".
+
+**The multiplexer provider set is always external — nothing is compiled in, not
+even GitHub.** The host therefore carries zero network dependencies and has
+exactly one dispatch path for every provider (no built-in vs. plugin fork to
+maintain, test, or document). `clove sync`/`import`/`export` are pure routers.
 
 `import` and `export` get the identical treatment (`clove-import-<p>` /
 `clove-export-<p>`). This is what produces the exact behavior asked for:
@@ -190,17 +192,50 @@ leading `sync github` as optional. (This matches cargo passing `foo` as argv[1].
 
 ### 6.2 Environment handed to the plugin
 
+The host passes an **extensive, fully-resolved** context so a plugin never has to
+re-derive anything the host already computed (repo discovery, config load, format
+precedence) and can never disagree with the host about the answer. Every value is
+the *resolved* one (flag > env > config already collapsed). All vars are UTF-8;
+paths are absolute. The plugin inherits the rest of the environment too, so
+`GITHUB_TOKEN` / `HTTPS_PROXY` / etc. flow through unchanged.
+
+**Identity & contract**
+
 | Var | Meaning |
 |-----|---------|
-| `CLOVE` | Absolute path to the host `clove` binary, for callback (see §6.4). Mirrors cargo's `CARGO`. |
-| `CLOVE_DIR` | The **resolved** `.clove/` directory, so the plugin skips its own discovery and can never disagree with the host about which repo it's in. |
-| `CLOVE_ROOT` | The repo root (parent of `.clove/`). |
-| `CLOVE_FORMAT` | `human` \| `json` \| `jsonl` — the resolved output format (flag > env > config), so the plugin emits the same envelope the user asked for. |
-| `CLOVE_COLOR`, `CLOVE_QUIET` | Forwarded global UX flags. |
-| `CLOVE_PLUGIN_API` | Contract version (integer, starts at `1`) so a plugin can refuse a host it's too old/new for. |
+| `CLOVE` | Absolute path to the host `clove` binary, for callback (§6.4). Mirrors cargo's `CARGO`. |
+| `CLOVE_VERSION` | Host semver (e.g. `0.1.0`). |
+| `CLOVE_SCHEMA` | Item on-disk schema version the host writes (`DESIGN.md` §2.4). A plugin refuses/warns on a schema it can't handle. |
+| `CLOVE_PLUGIN_API` | Contract version (integer, starts at `1`), bumped only on a breaking env/argv/envelope change. |
+| `CLOVE_COMMAND` | The dispatch path that reached the plugin: `sync` / `import` / `export` for a multiplexer, or the bare subcommand name for a generic plugin. |
+| `CLOVE_PROVIDER` | The provider token for a multiplexer plugin (`github`, `gitlab`, …); unset for generic plugins. |
 
-The plugin inherits the rest of the environment (so `GITHUB_TOKEN` etc. flow
-through unchanged).
+**Repository location** (all derived once by the host's `discover()`)
+
+| Var | Meaning |
+|-----|---------|
+| `CLOVE_DIR` | The resolved `.clove/` directory. Authoritative — the plugin does **not** run its own discovery. |
+| `CLOVE_ROOT` | Repo root (parent of `.clove/`). |
+| `CLOVE_ISSUES_DIR` | `.clove/issues/`. |
+| `CLOVE_DB_PATH` | `.clove/index.db` (may not exist; presence is not guaranteed). |
+| `CLOVE_SYNC_DIR` | `.clove/sync/` — per-repo sync fingerprints (relevant to sync plugins). |
+| `CLOVE_CONFIG_PATH` | Path to `.clove/config.toml`. |
+
+**Resolved config & output**
+
+| Var | Meaning |
+|-----|---------|
+| `CLOVE_ID_PREFIX` | The repo's id prefix (needed to mint new ids, e.g. from remote issues). |
+| `CLOVE_FORMAT` | `human` \| `json` \| `jsonl` — so the plugin emits the envelope the user asked for. |
+| `CLOVE_COLOR` | `auto` \| `always` \| `never`. |
+| `CLOVE_QUIET` | `0` \| `1` — suppress informational stderr. |
+| `CLOVE_NO_INDEX` | `0` \| `1` — the `--no-index` global flag. |
+| `CLOVE_DEEP` | `0` \| `1` — the `--deep` staleness flag. |
+
+Rules: booleans are exactly `0`/`1`; enums are the lowercase wire spelling; a var
+whose value is logically absent (e.g. `CLOVE_PROVIDER` for a generic plugin) is
+**omitted**, never set to empty. New context is added by *appending* vars, never
+repurposing one — plugins must ignore unknown `CLOVE_*` vars.
 
 ### 6.3 Output & exit codes — plugins are first-class clove citizens
 
@@ -261,6 +296,77 @@ process boundary between them. More work, deferred (§10).
 Recommendation: **ship (A)**; keep (B) as a future hardening step if untrusted
 third-party plugins ever become a goal (a fat plugin runs arbitrary code with the
 host's store access — see §7).
+
+### 6.5 `PluginContext` — materializing the env into a typed struct
+
+Reading a dozen `CLOVE_*` vars by hand in every plugin is exactly the boilerplate
+that drifts. The `clove-plugin` support crate (§6.3) provides a single
+`PluginContext` that **materializes the §6.2 env into a typed struct once**, so a
+plugin author touches `std::env` never. It is the plugin-side mirror of the host's
+`context::Ctx` (`crates/clove/src/context.rs`) — same fields, sourced from env
+instead of from `discover()`.
+
+```rust
+// clove-plugin/src/context.rs
+pub struct PluginContext {
+    // identity & contract
+    pub clove_bin: Utf8PathBuf,     // $CLOVE
+    pub host_version: String,       // $CLOVE_VERSION
+    pub schema: u32,                // $CLOVE_SCHEMA
+    pub api: u32,                   // $CLOVE_PLUGIN_API
+    pub command: String,            // $CLOVE_COMMAND  (e.g. "sync")
+    pub provider: Option<String>,   // $CLOVE_PROVIDER (e.g. "github")
+    // repository location
+    pub clove_dir: Utf8PathBuf,     // $CLOVE_DIR
+    pub root: Utf8PathBuf,          // $CLOVE_ROOT
+    pub issues_dir: Utf8PathBuf,    // $CLOVE_ISSUES_DIR
+    pub db_path: Utf8PathBuf,       // $CLOVE_DB_PATH
+    pub sync_dir: Utf8PathBuf,      // $CLOVE_SYNC_DIR
+    pub config_path: Utf8PathBuf,   // $CLOVE_CONFIG_PATH
+    // resolved config & output
+    pub id_prefix: String,          // $CLOVE_ID_PREFIX
+    pub format: OutputFormat,       // $CLOVE_FORMAT
+    pub color: ColorChoice,         // $CLOVE_COLOR
+    pub quiet: bool,                // $CLOVE_QUIET
+    pub no_index: bool,             // $CLOVE_NO_INDEX
+    pub deep: bool,                 // $CLOVE_DEEP
+}
+
+impl PluginContext {
+    /// Read every CLOVE_* var. Missing-required / bad-enum / non-int → a typed
+    /// error that maps onto the standard error envelope + exit code, so a plugin
+    /// launched outside `clove` fails loudly and legibly.
+    pub fn from_env() -> Result<Self, PluginEnvError>;
+
+    /// Open the file store the fat-plugin way (§6.4A): `ItemStore::new(root)`.
+    /// Keeps the plugin on the unified write path with one call.
+    pub fn open_store(&self) -> ItemStore;
+    /// Load `config.toml` (the host already validated it; this re-reads it).
+    pub fn load_config(&self) -> Result<CloveConfig, CloveError>;
+}
+```
+
+Ergonomics: the crate also re-exports the §6.3 envelope helpers so a whole plugin
+`main` is roughly:
+
+```rust
+fn main() -> std::process::ExitCode {
+    clove_plugin::run(|cx: &PluginContext, args: PluginArgs| {
+        let store = cx.open_store();
+        // …do the provider work through clove_core::apply_edit…
+        Ok(json!({ "pulled_created": n /* … */ }))   // wrapped into the {v,ok,data} envelope
+    })
+}
+```
+
+`clove_plugin::run` calls `PluginContext::from_env`, parses argv, invokes the
+closure, and renders the result (or a `CloveError`) as the correct envelope +
+exit code for `cx.format`. Conformance to the DESIGN's output contract is then
+automatic, and the host writes these vars from **one** place — a
+`plugin::export_env(&ctx, cmd, provider)` helper next to the resolver (§5) — so
+the producer and consumer of the contract live in the two crates and are pinned
+together by a round-trip test (`export_env` → `from_env` → assert equal), the same
+way the JSON schemas are guarded today.
 
 ## 7. Listing, help, and errors
 
@@ -340,11 +446,12 @@ because the boundary is a subprocess.
 - **Windows exec.** No `execvp`; spawn-and-wait propagating the child exit code,
   and forward Ctrl-C. Interactive plugins get the real console since the host
   isn't holding the pipes.
-- **Open questions:** (1) Do any providers stay compiled-in, or is the multiplexer
-  provider-set *always* external? (Recommendation: always external — even github —
-  so the host has zero network deps and one dispatch path.) (2) Should
-  `clove plugin list` cache `--clove-plugin-info` results in the index? (Probably
-  not for v1.) (3) Naming for multi-word generic subcommands (`clove foo bar` →
+- **Decided:** the multiplexer provider-set is **always external** — even github
+  (§4.2). The host carries zero network deps and has one dispatch path per
+  provider.
+- **Open questions:** (1) Should `clove plugin list` cache `--clove-plugin-info`
+  results in the index? (Probably not for v1.) (2) Naming for multi-word generic
+  subcommands (`clove foo bar` →
   `clove-foo` with `bar` as an arg, cargo-style, vs. `clove-foo-bar`) — adopt
   cargo's rule: only the **first** unknown token names the binary for the generic
   case; the multiplexer case (§4.2) is the only place a second segment joins the
@@ -357,8 +464,10 @@ because the boundary is a subprocess.
    subcommand error. GitHub stays a feature. Ships the cargo-style generic path
    and `clove plugin list` / `clove --list`. Fully testable with a fixture
    `clove-echo` plugin — no network.
-2. **`clove-plugin` support crate.** Extract the envelope + exit-code harness so
-   plugins conform trivially; add the `--clove-plugin-info` metadata protocol.
+2. **`clove-plugin` support crate.** The `PluginContext` env-materializer (§6.5)
+   + `plugin::export_env` on the host, pinned by a round-trip test; the envelope +
+   exit-code harness (`clove_plugin::run`) so plugins conform trivially; and the
+   `--clove-plugin-info` metadata protocol.
 3. **Provider fall-through.** Reshape `SyncArgs`/`ImportArgs`/`ExportArgs` to
    `provider: String + trailing rest`, and dispatch to `clove-sync-<p>` etc.
 4. **Extract `clove-sync-github`** (§8 steps 1–3), drop the `github` feature from
