@@ -16,5 +16,4 @@ repository.workspace = true
 clove-types.workspace = true
 clove-core.workspace = true
 camino.workspace = true
-serde.workspace = true
 serde_json.workspace = true

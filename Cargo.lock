@@ -701,7 +701,6 @@ dependencies = [
  "camino",
  "clove-core",
  "clove-types",
- "serde",
  "serde_json",
 ]
 

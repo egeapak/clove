@@ -111,13 +111,35 @@ fn is_executable(path: &Utf8Path) -> bool {
     }
     #[cfg(not(unix))]
     {
+        // Known gap (PLUGIN_SYSTEM.md §5): Windows should also match `PATHEXT`
+        // (`.cmd`/`.bat`/`.ps1`), not just `EXE_SUFFIX`. Deferred — the CI target
+        // is Unix; a plugin shipped as a non-`.exe` script is not yet discovered.
         true
     }
 }
 
+/// A dispatch segment must be a single, non-empty path component — no separators
+/// and no `..`. This stops a subcommand token like `foo/../../bin/sh` from
+/// resolving to an arbitrary path via traversal (git and cargo likewise forbid
+/// path separators in subcommand names). Rejected here so *every* caller (the
+/// generic and the provider path) is protected centrally.
+fn is_valid_segment(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment != ".."
+        && !segment.contains('/')
+        && !segment.contains('\\')
+        && !segment.contains(std::path::MAIN_SEPARATOR)
+}
+
 /// Resolve a plugin binary for a dispatch path, returning the first existing
 /// executable found along the §5 search path (no exec, no spawn — pure `stat`).
+///
+/// Returns `None` for a segment that is not a single path component (§5), so a
+/// traversal token can never name a binary outside a search dir.
 pub fn resolve(segments: &[&str]) -> Option<Utf8PathBuf> {
+    if !segments.iter().all(|s| is_valid_segment(s)) {
+        return None;
+    }
     let name = binary_name(segments);
     for dir in search_dirs() {
         let candidate = dir.join(&name);
@@ -209,7 +231,9 @@ fn bool_wire(value: bool) -> &'static str {
 /// config load, format precedence), so the plugin re-derives nothing and can
 /// never disagree with the host. This is the producer side of the contract read
 /// back by `clove_plugin::PluginContext::from_env`; the two are pinned together
-/// by the round-trip test. `provider` is omitted (never set empty) when `None`.
+/// end-to-end by `tests/plugin_dispatch.rs` (the `clove-echo` fixture reflects the
+/// materialized context back and the test asserts it, including the `--clove-dir`
+/// override path). `provider` is omitted (never set empty) when `None`.
 pub fn export_env(
     cmd: &mut Command,
     ctx: &Ctx,
@@ -217,9 +241,10 @@ pub fn export_env(
     command: &str,
     provider: Option<&str>,
 ) {
-    let clove_dir = ctx.root.join(".clove");
-    let sync_dir = clove_dir.join("sync");
-    let config_path = clove_dir.join("config.toml");
+    // Use the authoritative resolved `.clove/` dir (honors `--clove-dir`), never
+    // `root.join(".clove")` — under the override those disagree (§6.2).
+    let sync_dir = ctx.clove_dir.join("sync");
+    let config_path = ctx.clove_dir.join("config.toml");
 
     // The path to the running host binary, for the plugin's `$CLOVE` callback.
     let clove_bin = std::env::current_exe()
@@ -242,7 +267,7 @@ pub fn export_env(
     }
 
     // Repository location (all derived once from the host's `discover()`).
-    cmd.env("CLOVE_DIR", clove_dir.as_str());
+    cmd.env("CLOVE_DIR", ctx.clove_dir.as_str());
     cmd.env("CLOVE_ROOT", ctx.root.as_str());
     cmd.env("CLOVE_ISSUES_DIR", ctx.issues_dir.as_str());
     cmd.env("CLOVE_DB_PATH", ctx.db_path.as_str());
@@ -318,6 +343,18 @@ mod tests {
             binary_name(&["echo"]),
             format!("clove-echo{}", std::env::consts::EXE_SUFFIX)
         );
+    }
+
+    #[test]
+    fn rejects_traversal_segments() {
+        assert!(is_valid_segment("sync"));
+        assert!(is_valid_segment("sync-github"));
+        assert!(!is_valid_segment(""));
+        assert!(!is_valid_segment(".."));
+        assert!(!is_valid_segment("foo/../bin/sh"));
+        assert!(!is_valid_segment("a\\b"));
+        // A traversal token never resolves to a path outside a search dir.
+        assert_eq!(resolve(&["foo/../../bin/sh"]), None);
     }
 
     #[test]

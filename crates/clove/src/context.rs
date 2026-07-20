@@ -10,6 +10,11 @@ use clove_types::CloveError;
 pub struct Ctx {
     /// The repository root (the directory containing `.clove/`).
     pub root: Utf8PathBuf,
+    /// The resolved `.clove/` directory. Normally `root/.clove`, but honors the
+    /// `--clove-dir PATH` override — so it is the authoritative source for
+    /// `CLOVE_DIR` / `CLOVE_SYNC_DIR` / `CLOVE_CONFIG_PATH` exported to plugins
+    /// (never re-derive it as `root.join(".clove")`).
+    pub clove_dir: Utf8PathBuf,
     /// The `.clove/issues/` directory.
     pub issues_dir: Utf8PathBuf,
     /// The (possibly absent) `.clove/index.db` path.
@@ -61,6 +66,7 @@ pub fn discover(clove_dir_override: Option<&Utf8Path>) -> Result<Ctx, CloveError
 
     Ok(Ctx {
         root,
+        clove_dir,
         issues_dir,
         db_path,
         store,

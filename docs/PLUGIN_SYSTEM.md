@@ -365,8 +365,9 @@ exit code for `cx.format`. Conformance to the DESIGN's output contract is then
 automatic, and the host writes these vars from **one** place — a
 `plugin::export_env(&ctx, cmd, provider)` helper next to the resolver (§5) — so
 the producer and consumer of the contract live in the two crates and are pinned
-together by a round-trip test (`export_env` → `from_env` → assert equal), the same
-way the JSON schemas are guarded today.
+together end-to-end (`export_env` → real subprocess → `from_env` → the fixture
+reflects the context back → the dispatch test asserts it, including the
+`--clove-dir` override path), the same way the JSON schemas are guarded today.
 
 ## 7. Listing, help, and errors
 

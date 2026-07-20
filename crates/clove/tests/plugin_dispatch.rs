@@ -86,6 +86,47 @@ fn external_plugin_is_dispatched_with_argv_and_env() {
     assert!(clove_dir.ends_with(".clove"), "clove_dir: {clove_dir}");
 }
 
+/// The `--clove-dir` override must propagate to `CLOVE_DIR` / `CLOVE_SYNC_DIR` /
+/// `CLOVE_CONFIG_PATH` (they come from the resolved clove dir, not
+/// `root.join(".clove")`). Uses a differently-named symlink to the real `.clove`
+/// so the resolved dir and `root/.clove` genuinely differ — a regression that
+/// re-derived the dir from `root` would echo `.clove`, not `link-clove`.
+#[cfg(unix)]
+#[test]
+fn clove_dir_override_propagates_to_exported_env() {
+    let (plugin_dir, _echo) = install_echo();
+    let repo = init_repo("proj");
+    let link = repo.path().join("link-clove");
+    std::os::unix::fs::symlink(repo.path().join(".clove"), &link).unwrap();
+
+    let assert = clove(repo.path())
+        .env("CLOVE_PLUGIN_PATH", plugin_dir.path())
+        .args([
+            "--clove-dir",
+            link.to_str().unwrap(),
+            "--format",
+            "json",
+            "echo",
+        ])
+        .assert()
+        .success();
+    let v: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(v["ok"], true, "envelope: {v}");
+
+    let clove_dir = v["data"]["clove_dir"].as_str().unwrap();
+    let sync_dir = v["data"]["sync_dir"].as_str().unwrap();
+    let config_path = v["data"]["config_path"].as_str().unwrap();
+    assert!(clove_dir.ends_with("link-clove"), "clove_dir: {clove_dir}");
+    assert!(
+        sync_dir.ends_with("link-clove/sync"),
+        "sync_dir: {sync_dir}"
+    );
+    assert!(
+        config_path.ends_with("link-clove/config.toml"),
+        "config_path: {config_path}"
+    );
+}
+
 #[test]
 fn unknown_subcommand_is_a_usage_error() {
     // No CLOVE_PLUGIN_PATH → `clove-nope` resolves nowhere → exit 1 (usage).

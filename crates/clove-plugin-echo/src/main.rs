@@ -23,6 +23,8 @@ fn main() -> std::process::ExitCode {
             "provider": cx.provider,
             "command": cx.command,
             "clove_dir": cx.clove_dir.as_str(),
+            "sync_dir": cx.sync_dir.as_str(),
+            "config_path": cx.config_path.as_str(),
             "format": format!("{:?}", cx.format),
             "id_prefix": cx.id_prefix,
         }))
