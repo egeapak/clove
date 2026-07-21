@@ -12,6 +12,8 @@ members = [
     "crates/clove-plugin",
     "crates/clove-plugin-echo",
     "crates/clove-sync-github",
+    "crates/clove-import-tk",
+    "crates/clove-import-beads",
     "crates/clove",
     "crates/cloved",
     "xtask",

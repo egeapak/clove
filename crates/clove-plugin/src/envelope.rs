@@ -21,14 +21,28 @@ pub const ENVELOPE_VERSION: u32 = 1;
 /// JSON / JSONL emit `{ v, ok: true, data, _meta }` on stdout (with an empty
 /// `_meta` object — a plugin has no host-level meta to add). Human mode prints a
 /// concise pretty-printed rendering of `data` on stdout.
+///
+/// A thin wrapper over [`emit_success_with_meta`] with an empty `_meta`.
 pub fn emit_success(format: OutputFormat, data: Value) {
+    emit_success_with_meta(format, data, json!({}));
+}
+
+/// Print a successful envelope for `data` with an explicit `_meta`, honoring
+/// `format`.
+///
+/// JSON / JSONL emit `{ v, ok: true, data, _meta }` on stdout with the given
+/// `meta` (e.g. `{ "warnings": [...] }` for the import plugins, matching the
+/// host's `output::print_json_success`). Human mode prints a concise
+/// pretty-printed rendering of `data` on stdout (the meta is a machine-envelope
+/// concern; human warnings go to stderr).
+pub fn emit_success_with_meta(format: OutputFormat, data: Value, meta: Value) {
     match format {
         OutputFormat::Json | OutputFormat::Jsonl => {
             let envelope = json!({
                 "v": ENVELOPE_VERSION,
                 "ok": true,
                 "data": data,
-                "_meta": json!({}),
+                "_meta": meta,
             });
             println!("{envelope}");
         }

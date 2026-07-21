@@ -640,6 +640,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "clove-import-beads"
+version = "0.1.0"
+dependencies = [
+ "camino",
+ "chrono",
+ "clap",
+ "clove-core",
+ "clove-import",
+ "clove-plugin",
+ "clove-types",
+ "serde_json",
+]
+
+[[package]]
+name = "clove-import-tk"
+version = "0.1.0"
+dependencies = [
+ "camino",
+ "chrono",
+ "clap",
+ "clove-core",
+ "clove-import",
+ "clove-plugin",
+ "clove-types",
+ "serde_json",
+]
+
+[[package]]
 name = "clove-index"
 version = "0.1.0"
 dependencies = [

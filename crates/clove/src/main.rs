@@ -272,23 +272,22 @@ fn run_repo(
         Commands::Daemon(a) => cmd::daemon::run(ctx, f, a.action),
         Commands::Tui => cmd::tui::run(ctx, f).map(|_| ok),
         Commands::Serve(a) => cmd::serve::run(ctx, a, quiet).map(|_| ok),
-        // `import`/`export` are pure routers: the built-in file formats parse
-        // their own `rest`; any other provider falls through to a
-        // `clove-<import|export>-<provider>` plugin (PLUGIN_SYSTEM.md §4.2).
+        // `import` is a pure router with no built-in providers: every provider
+        // (`tk`, `beads`, …) falls through to a `clove-import-<provider>` plugin
+        // (PLUGIN_SYSTEM.md §4.2), exactly like `sync`.
         Commands::Import(a) => {
-            if cmd::import::is_builtin(&a.provider) {
-                cmd::import::run(ctx, f, a)
-            } else {
-                let globals = plugin::PluginGlobals {
-                    format: f,
-                    color,
-                    quiet,
-                    no_index,
-                    deep,
-                };
-                dispatch_multiplexer("import", &a.provider, &a.rest, ctx, &globals)
-            }
+            let globals = plugin::PluginGlobals {
+                format: f,
+                color,
+                quiet,
+                no_index,
+                deep,
+            };
+            dispatch_multiplexer("import", &a.provider, &a.rest, ctx, &globals)
         }
+        // `export` is a pure router: the built-in file formats (`json`/`jsonl`)
+        // parse their own `rest`; any other provider falls through to a
+        // `clove-export-<provider>` plugin (PLUGIN_SYSTEM.md §4.2).
         Commands::Export(a) => {
             if cmd::export::is_builtin(&a.provider) {
                 cmd::export::run(ctx, f, a)

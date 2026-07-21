@@ -14,6 +14,7 @@ pub mod github;
 pub mod map;
 pub mod merge;
 pub mod plan;
+pub mod render;
 pub mod sync;
 #[cfg(feature = "github")]
 pub mod sync_net;

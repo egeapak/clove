@@ -93,8 +93,10 @@ pub enum Commands {
     Reindex,
     /// Import items from a file-based tracker (`tk|beads`).
     #[command(after_help = "\
-Built-in providers: tk (a .tickets/ dir), beads (an issues.jsonl). Any other \
-provider runs a clove-import-<provider> plugin.\n\
+There are no built-in import providers — every provider is an external \
+clove-import-<provider> plugin. tk (a .tickets/ dir) needs clove-import-tk \
+(cargo install clove-import-tk); beads (an issues.jsonl) needs \
+clove-import-beads.\n\
 Note: clove global flags (--format, --color, --quiet, …) must come BEFORE the \
 provider — everything after it is the provider's own arguments. \
 e.g. `clove import --format json tk .tickets --dry-run`.")]
@@ -488,18 +490,18 @@ pub struct DoctorArgs {
 
 /// `clove import <provider> [args…]` (PLUGIN_SYSTEM.md §4.2).
 ///
-/// A pure router: the built-in providers (`tk`, `beads`) parse `rest` themselves
-/// (see `cmd::import`), and any other provider falls through to a
-/// `clove-import-<provider>` plugin with `rest` forwarded verbatim. Global flags
-/// (e.g. `--format`) must precede the provider token, since everything after it
-/// is captured raw for the built-in inner-parse or plugin forwarding.
+/// A pure router with **no** built-in providers (mirroring [`SyncArgs`]): every
+/// provider (`tk`, `beads`, …) resolves to a `clove-import-<provider>` plugin,
+/// with `rest` forwarded verbatim. Global flags (e.g. `--format`) must precede
+/// the provider token, since everything after it is captured raw for plugin
+/// forwarding.
 #[derive(Debug, Args)]
 pub struct ImportArgs {
-    /// The source provider (built-in `tk`/`beads`, or a `clove-import-<provider>`
-    /// plugin).
+    /// The source provider (a `clove-import-<provider>` plugin, e.g. `tk` or
+    /// `beads`).
     pub provider: String,
-    /// Everything after the provider: the built-in flags (`<src> [--dry-run]`) or
-    /// the arguments forwarded to the plugin.
+    /// Everything after the provider — the `<src>` and any provider flags
+    /// (`--dry-run`) — forwarded to the plugin.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub rest: Vec<String>,
 }

@@ -23,7 +23,7 @@ mod envelope;
 mod run;
 
 pub use context::{PluginColor, PluginContext, PluginEnvError};
-pub use envelope::{emit_error, emit_success, ENVELOPE_VERSION};
+pub use envelope::{emit_error, emit_success, emit_success_with_meta, ENVELOPE_VERSION};
 pub use run::{run, run_with_info, PluginArgs, PluginInfo};
 
 // Re-exported so a plugin's closure signature can name them without adding
