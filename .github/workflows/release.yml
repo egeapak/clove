@@ -62,12 +62,13 @@ jobs:
       - name: Build release binaries
         env:
           CLOVE_SKIP_WEB_BUILD: "1"   # embed the dist built above; never run npm
-        # The bundle ships the lean core (`clove` + `cloved`) AND the
-        # `clove-sync-github` plugin, so `clove sync github` works out of the box
-        # (the CLI resolves the sibling plugin binary). `cloved/full` enables the
-        # daemon's dependency-free periodic-sync spawn gate. Drop
-        # `-p clove-sync-github` to publish a sync-free bundle instead.
-        run: cargo build --release --target ${{ matrix.target }} -p clove-cli -p cloved -p clove-sync-github --features "cloved/full"
+        # The bundle ships the lean core (`clove` + `cloved`) AND the integration
+        # plugins (`clove-sync-github`, `clove-import-tk`, `clove-import-beads`), so
+        # `clove sync github` / `clove import tk|beads` work out of the box (the CLI
+        # resolves the sibling plugin binaries). `cloved/full` enables the daemon's
+        # dependency-free periodic-sync spawn gate. Drop the plugin packages to
+        # publish a lean, integration-free bundle instead.
+        run: cargo build --release --target ${{ matrix.target }} -p clove-cli -p cloved -p clove-sync-github -p clove-import-tk -p clove-import-beads --features "cloved/full"
 
       - name: Package
         shell: bash
@@ -76,13 +77,13 @@ jobs:
           stage="clove-${GITHUB_REF_NAME}-${{ matrix.suffix }}"
           mkdir "$stage"
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            cp "target/${{ matrix.target }}/release/clove.exe" "$stage/"
-            cp "target/${{ matrix.target }}/release/cloved.exe" "$stage/"
-            cp "target/${{ matrix.target }}/release/clove-sync-github.exe" "$stage/"
+            for b in clove cloved clove-sync-github clove-import-tk clove-import-beads; do
+              cp "target/${{ matrix.target }}/release/$b.exe" "$stage/"
+            done
           else
-            cp "target/${{ matrix.target }}/release/clove" "$stage/"
-            cp "target/${{ matrix.target }}/release/cloved" "$stage/"
-            cp "target/${{ matrix.target }}/release/clove-sync-github" "$stage/"
+            for b in clove cloved clove-sync-github clove-import-tk clove-import-beads; do
+              cp "target/${{ matrix.target }}/release/$b" "$stage/"
+            done
           fi
           cp README.md LICENSE-MIT LICENSE-APACHE "$stage/"
           if [ "${{ matrix.os }}" = "windows-latest" ]; then

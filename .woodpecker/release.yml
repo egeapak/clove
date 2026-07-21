@@ -30,15 +30,16 @@ steps:
       CLOVE_SKIP_WEB_BUILD: '1'   # embed the dist from build-spa; do not run npm
     commands:
       - rustup target add aarch64-apple-darwin x86_64-apple-darwin
-      # Ship the lean core plus the `clove-sync-github` plugin so `clove sync
-      # github` works out of the box (the CLI resolves the sibling plugin).
+      # Ship the lean core plus the integration plugins (clove-sync-github,
+      # clove-import-tk, clove-import-beads) so `clove sync github` / `clove import
+      # tk|beads` work out of the box (the CLI resolves the sibling plugins).
       # `cloved/full` enables the daemon's dependency-free periodic-sync spawn
-      # gate. Drop `-p clove-sync-github` for a ~3.5 MB-smaller sync-free bundle.
-      - cargo zigbuild --release --target universal2-apple-darwin -p clove-cli -p cloved -p clove-sync-github --features "cloved/full"
+      # gate. Drop the plugin packages for a smaller integration-free bundle.
+      - cargo zigbuild --release --target universal2-apple-darwin -p clove-cli -p cloved -p clove-sync-github -p clove-import-tk -p clove-import-beads --features "cloved/full"
       - file target/universal2-apple-darwin/release/clove
       # Informational size trend (release profile: fat LTO + cgu=1 + panic=abort + strip).
-      - ls -lh target/universal2-apple-darwin/release/clove target/universal2-apple-darwin/release/cloved target/universal2-apple-darwin/release/clove-sync-github
-      # Artifacts: target/universal2-apple-darwin/release/{clove,cloved,clove-sync-github}
+      - ls -lh target/universal2-apple-darwin/release/clove target/universal2-apple-darwin/release/cloved target/universal2-apple-darwin/release/clove-sync-github target/universal2-apple-darwin/release/clove-import-tk target/universal2-apple-darwin/release/clove-import-beads
+      # Artifacts: target/universal2-apple-darwin/release/{clove,cloved,clove-sync-github,clove-import-tk,clove-import-beads}
       # They are unsigned; ad-hoc `codesign --sign -` or notarise on a Mac before
       # distributing to other machines (Gatekeeper will block an unsigned download).
 
@@ -49,12 +50,12 @@ steps:
       CLOVE_SKIP_WEB_BUILD: '1'   # embed the dist from build-spa; do not run npm
     commands:
       - rustup target add x86_64-pc-windows-gnu
-      # See the macOS step: ship the core + the clove-sync-github plugin.
-      - cargo zigbuild --release --target x86_64-pc-windows-gnu -p clove-cli -p cloved -p clove-sync-github --features "cloved/full"
+      # See the macOS step: ship the core + the integration plugins.
+      - cargo zigbuild --release --target x86_64-pc-windows-gnu -p clove-cli -p cloved -p clove-sync-github -p clove-import-tk -p clove-import-beads --features "cloved/full"
       - file target/x86_64-pc-windows-gnu/release/clove.exe
       # Informational size trend (release profile: fat LTO + cgu=1 + panic=abort + strip).
-      - ls -lh target/x86_64-pc-windows-gnu/release/clove.exe target/x86_64-pc-windows-gnu/release/cloved.exe target/x86_64-pc-windows-gnu/release/clove-sync-github.exe
-      # Artifacts: target/x86_64-pc-windows-gnu/release/{clove,cloved,clove-sync-github}.exe
+      - ls -lh target/x86_64-pc-windows-gnu/release/clove.exe target/x86_64-pc-windows-gnu/release/cloved.exe target/x86_64-pc-windows-gnu/release/clove-sync-github.exe target/x86_64-pc-windows-gnu/release/clove-import-tk.exe target/x86_64-pc-windows-gnu/release/clove-import-beads.exe
+      # Artifacts: target/x86_64-pc-windows-gnu/release/{clove,cloved,clove-sync-github,clove-import-tk,clove-import-beads}.exe
 
   # PUBLISH — uncomment and adapt to your forge once a token secret exists:
   # - name: publish
@@ -64,9 +65,13 @@ steps:
   #       - target/universal2-apple-darwin/release/clove
   #       - target/universal2-apple-darwin/release/cloved
   #       - target/universal2-apple-darwin/release/clove-sync-github
+  #       - target/universal2-apple-darwin/release/clove-import-tk
+  #       - target/universal2-apple-darwin/release/clove-import-beads
   #       - target/x86_64-pc-windows-gnu/release/clove.exe
   #       - target/x86_64-pc-windows-gnu/release/cloved.exe
   #       - target/x86_64-pc-windows-gnu/release/clove-sync-github.exe
+  #       - target/x86_64-pc-windows-gnu/release/clove-import-tk.exe
+  #       - target/x86_64-pc-windows-gnu/release/clove-import-beads.exe
   #     title: ${CI_COMMIT_TAG}
   #     api_key:
   #       from_secret: release_token

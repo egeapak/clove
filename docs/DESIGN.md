@@ -15,9 +15,11 @@ clove/                          (workspace root)
   crates/
     clove-core/                 lib — item model, file store, DAG engine, ID gen
     clove-index/                lib — SQLite index, FTS5, staleness, reindex
-    clove-import/               lib — beads / tk importers + pure GitHub mapping/reconciliation
+    clove-import/               lib — json/jsonl export, merge driver, tk/beads importer logic, pure GitHub mapping
     clove-plugin/               lib — cargo-style plugin support (PluginContext + envelope harness)
     clove-sync-github/          bin — the `clove-sync-github` plugin (two-way GitHub sync, octocrab)
+    clove-import-tk/            bin — the `clove-import-tk` plugin (import a tk `.tickets/` dir)
+    clove-import-beads/         bin — the `clove-import-beads` plugin (import a Beads `issues.jsonl`)
     clove/                      bin — CLI, JSON envelopes, exit codes, plugin dispatch
     cloved/                     bin — daemon, file-watcher, IPC server
   benches/                      criterion benchmarks (shared fixture crate)
@@ -733,9 +735,9 @@ clove stats [--top N] [--no-epics] [--snapshot]      # work-item analytics + dae
 clove comment <id> <message> [--format json]
 clove comments <id> [--limit N] [--format json]
 clove reindex [--force] [--format json]
-clove import [--format json] <beads|tk> <src> [--dry-run]   # clove global flags precede the provider;
-clove export [--format json] <json|jsonl> [--out FILE]      # provider-owned flags (<src>/--out/--dry-run) follow it
-                                                            # (github is `clove sync github`, not import/export)
+clove import [--format json] <beads|tk> <src> [--dry-run]   # tk/beads are clove-import-<p> plugins (import is fully external);
+clove export [--format json] <json|jsonl> [--out FILE]      # export json/jsonl are built-in; clove global flags precede the
+                                                            # provider, provider-owned flags (<src>/--out/--dry-run) follow it
 clove agent-doc [--format markdown|json] [--out FILE]
 clove agent-doc --check [--file PATH]       # verify embedded doc vs binary
 clove migrate [--yes] [--dry-run]

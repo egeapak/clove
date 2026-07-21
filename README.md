@@ -61,8 +61,9 @@ single, dependency-light, cross-platform binary.
 cargo install --locked --git https://github.com/egeapak/clove clove-cli cloved
 clove version   # the installed command is `clove` (crate: clove-cli)
 
-# ...then add GitHub sync as a plugin (only if you want it; ~3.5 MB of TLS/HTTP):
-cargo install --locked --git https://github.com/egeapak/clove clove-sync-github
+# ...then add integrations as plugins, only the ones you want:
+cargo install --locked --git https://github.com/egeapak/clove clove-sync-github   # GitHub sync (~3.5 MB of TLS/HTTP)
+cargo install --locked --git https://github.com/egeapak/clove clove-import-tk clove-import-beads   # import from tk / Beads
 ```
 
 This installs the `clove` CLI and the optional `cloved` daemon onto your `PATH`.
@@ -70,14 +71,17 @@ A Rust (stable) toolchain compiles them; no Node is required (the web UI embeds 
 placeholder unless built with Node — see
 [`crates/clove-web/web/README.md`](crates/clove-web/web/README.md)).
 
-**Integrations are cargo-style plugins.** The core `clove` binary carries no
-network-integration weight; `clove sync github <owner/repo>` resolves and runs a
-separately-installed **`clove-sync-github`** binary on your `PATH` (or next to
-`clove`), exactly as `cargo nextest` runs `cargo-nextest`. Without the plugin,
-`clove sync github` prints a clean `unknown sync provider; install
-clove-sync-github` error (exit 4); installing it lights the command up with no
-core rebuild. The daemon's periodic sync spawns the same `clove sync github`, so
-it needs the plugin too. See [`docs/PLUGIN_SYSTEM.md`](docs/PLUGIN_SYSTEM.md) for
+**Integrations are cargo-style plugins.** The core `clove` binary carries only
+its own native surface; every foreign-tracker integration is a
+separately-installed binary resolved on your `PATH` (or next to `clove`), exactly
+as `cargo nextest` runs `cargo-nextest`: `clove sync github` →
+**`clove-sync-github`**, `clove import tk`/`beads` →
+**`clove-import-tk`**/**`clove-import-beads`**. (`clove export json`/`jsonl` stays
+built-in — that's clove's own serialization, not a foreign integration.) Without
+the plugin, the command prints a clean `unknown <mux> provider; install
+clove-<mux>-<provider>` error (exit 4); installing it lights the command up with
+no core rebuild. The daemon's periodic sync spawns the same `clove sync github`,
+so it needs the plugin too. See [`docs/PLUGIN_SYSTEM.md`](docs/PLUGIN_SYSTEM.md) for
 the dispatch/discovery/env contract.
 
 ## Quick start
@@ -128,9 +132,9 @@ same JSON envelope and exit-code semantics.
 ## Interop & GitHub sync
 
 ```sh
-clove import tk|beads <src>             # import from a file-based tracker
-clove export json|jsonl                 # export to a file / stdout
-clove sync github <owner/repo>          # two-way GitHub sync (pull + push, one pass)
+clove import tk|beads <src>             # import from a file-based tracker (clove-import-tk/beads plugin)
+clove export json|jsonl                 # export to a file / stdout (built-in)
+clove sync github <owner/repo>          # two-way GitHub sync (clove-sync-github plugin)
 clove init --merge-driver               # install the 3-way git merge driver for item files
 ```
 
@@ -196,9 +200,10 @@ cd crates/clove-web/web && npm run check && npm run test   # svelte-check + vite
 | `crates/clove-index` | optional SQLite index (FTS5, staleness, incremental derived state, stats history) |
 | `crates/clove` | the `clove` CLI (crate `clove-cli`) |
 | `crates/cloved` | the optional `cloved` daemon (file-watch, IPC, optional git sync, web serving) |
-| `crates/clove-import` | import/export, 3-way merge driver, and the pure GitHub field-mapping + reconciliation (its `github` feature — the octocrab network layer — is enabled only by the `clove-sync-github` plugin) |
+| `crates/clove-import` | built-in `json`/`jsonl` export, the 3-way merge driver, the `tk`/`beads` importer logic (reused by the import plugins), and the pure GitHub field-mapping + reconciliation (its `github` feature — the octocrab network layer — is enabled only by the `clove-sync-github` plugin) |
 | `crates/clove-plugin` | support crate for cargo-style subcommand plugins (typed `PluginContext` from the `CLOVE_*` env contract + envelope/exit-code harness) |
 | `crates/clove-sync-github` | the `clove-sync-github` plugin: two-way GitHub Issues sync, installed separately (`cargo install clove-sync-github`) so the core carries no octocrab weight — `clove sync github <owner/repo>` resolves it |
+| `crates/clove-import-tk` / `crates/clove-import-beads` | the `clove-import-tk` / `clove-import-beads` plugins: import from a `tk` `.tickets/` dir or a Beads `issues.jsonl`, installed separately (`cargo install clove-import-tk`) — `clove import tk\|beads` resolves them |
 | `crates/clove-ipc` | CLI ↔ daemon wire protocol (`tarpc`) |
 | `crates/clove-mcp` | the MCP server surface (`clove mcp`) |
 | `crates/clove-tui` | terminal browser + add/edit form (`clove tui`, ratatui) |

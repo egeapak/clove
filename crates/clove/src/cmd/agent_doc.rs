@@ -96,8 +96,10 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
 \n\
 ## Interop (import / export / merge)\n\
 \n\
-- `clove import tk <.tickets-dir> [--dry-run]` — import tk tickets.\n\
-- `clove import beads <issues.jsonl> [--dry-run]` — import a Beads JSONL export.\n\
+- `clove import tk <.tickets-dir> [--dry-run]` — import tk tickets (needs the\n\
+  `clove-import-tk` plugin; `cargo install clove-import-tk`).\n\
+- `clove import beads <issues.jsonl> [--dry-run]` — import a Beads JSONL export\n\
+  (needs the `clove-import-beads` plugin).\n\
 - `clove export json` / `clove export jsonl [--out FILE]` — dump all items as a\n\
   JSON envelope (`data` array) or one item per line (NDJSON, Beads-isomorphic).\n\
 - `clove sync github <owner/repo> [--dry-run] [--prefer P] [--no-comments]` —\n\

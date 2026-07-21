@@ -127,14 +127,22 @@ Dispatch for `sync`:
 2. If it does not resolve: exit 4 (`ValidationError`) — "unknown sync provider
    `<p>`; install `clove-sync-<p>`".
 
-**The multiplexer provider set is always external — nothing is compiled in, not
-even GitHub.** The host therefore carries zero network dependencies and has
-exactly one dispatch path for every provider (no built-in vs. plugin fork to
-maintain, test, or document). `clove sync`/`import`/`export` are pure routers.
+**`sync` and `import` have no compiled-in providers** — every provider is an
+external plugin, so the core carries zero integration weight and has one dispatch
+path per provider. `clove sync github` → `clove-sync-github`; `clove import
+tk`/`beads` → `clove-import-tk`/`clove-import-beads`.
 
-`import` and `export` get the identical treatment (`clove-import-<p>` /
-`clove-export-<p>`). This is what produces the exact behavior asked for:
-`clove sync github egeapak/clove` → `clove-sync-github egeapak/clove`.
+**`export` keeps clove's *own* native serialization built-in** (`json`, `jsonl`)
+and falls through to `clove-export-<p>` only for an unknown provider. The rule
+that settled the split: a **foreign-tracker integration** (GitHub Issues, tk
+tickets, Beads JSONL) is a plugin — you shouldn't carry code for a tracker you
+don't use — whereas **clove's own item serialization** is core. So `import` (only
+ever *from* foreign formats) is fully external, while `export json`/`jsonl` (clove
+dumping its own items) stays built-in.
+
+This is what produces the exact behavior asked for: `clove sync github
+egeapak/clove` → `clove-sync-github egeapak/clove`, `clove import tk .tickets` →
+`clove-import-tk .tickets`.
 
 ### 4.3 Resolution precedence
 
@@ -460,9 +468,11 @@ because the boundary is a subprocess.
 - **Windows exec.** No `execvp`; spawn-and-wait propagating the child exit code,
   and forward Ctrl-C. Interactive plugins get the real console since the host
   isn't holding the pipes.
-- **Decided:** the multiplexer provider-set is **always external** — even github
-  (§4.2). The host carries zero network deps and has one dispatch path per
-  provider.
+- **Decided:** foreign-tracker providers are **always external** — `sync`
+  (github) and `import` (tk/beads) have no compiled-in providers, so the core
+  carries zero integration weight and has one dispatch path per provider.
+  `export`'s `json`/`jsonl` stay built-in as clove's own native serialization
+  (§4.2).
 - **Open questions:** (1) Should `clove plugin list` cache `--clove-plugin-info`
   results in the index? (Probably not for v1.) (2) Naming for multi-word generic
   subcommands (`clove foo bar` →
@@ -480,10 +490,11 @@ because the boundary is a subprocess.
      `run_raw(info, |cx, args| -> ExitCode)` that owns the probe + `from_env` and
      hands the plugin full rendering control would remove that duplication and keep
      the contract in one crate.
-  3. **`_meta` shape** — `clove_plugin::emit_success` emits `_meta: {}` while the
-     built-in `import`/`export` emit `_meta: {"warnings": []}`. No consumer keys on
-     it (the JSON schemas don't constrain `_meta`), but `emit_success` could take an
-     optional meta to normalize the two.
+  3. **`_meta` shape** — `clove_plugin::emit_success` emits `_meta: {}`, while the
+     built-in `export` and the import plugins (via `emit_success_with_meta`) emit
+     `_meta: {"warnings": []}`. `emit_success_with_meta` (added for the import
+     plugins) is the escape hatch; the two shapes could be normalized further, but
+     no consumer keys on `_meta` (the JSON schemas don't constrain it).
   4. **Windows `PATHEXT`** (§5) — plugin discovery matches only `EXE_SUFFIX`
      (`.exe`), not `.cmd`/`.bat`/`.ps1`. Unix-only CI; revisit for a Windows plugin
      shipped as a script.

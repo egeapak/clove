@@ -15,9 +15,11 @@ Integrations users may not want are **separately-installable binaries**, not
 compile-time features. `clove <x>` that matches no built-in resolves `clove-<x>`
 on the search path (current-exe dir → `$CLOVE_PLUGIN_PATH` → `$PATH`) and hands
 off, exactly like `cargo <x>` → `cargo-<x>`. The `sync`/`import`/`export`
-multiplexers extend this per-provider: `clove sync github` → `clove-sync-github`
-(sync has **no** built-in providers; `import`/`export` keep the pure `tk`/`beads`
-/`json`/`jsonl` built-ins and fall through only for unknown providers). Global
+multiplexers extend this per-provider: `clove sync github` → `clove-sync-github`,
+`clove import tk` → `clove-import-tk`. `sync` and `import` have **no** built-in
+providers — every provider is an external plugin (`tk`/`beads` are the
+`clove-import-tk`/`clove-import-beads` plugins). `export` keeps the pure native
+`json`/`jsonl` built-ins and falls through only for unknown providers. Global
 flags (`--format`, …) must precede the provider. The host↔plugin contract (the
 `CLOVE_*` env, the shared `{v,ok,data,_meta}` envelope, exit codes) lives in
 `clove-plugin`: a plugin `main` calls `PluginContext::from_env()` /
