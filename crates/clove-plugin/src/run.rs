@@ -106,6 +106,25 @@ impl PluginInfo {
     }
 }
 
+/// If argv carries `--clove-plugin-info`, print the canonical metadata JSON and
+/// return `true` — the caller should then exit `0`.
+///
+/// This is the **single place** the `--clove-plugin-info` response is produced
+/// (the authored `{name,version,about,provides}` plus the §2 compat fields,
+/// auto-filled from compile-time constants). [`run_with_info`] uses it, and a
+/// plugin that hand-rolls its `main` (for custom human rendering) calls it at the
+/// top of `main` instead of re-authoring the JSON — so no plugin ever hand-writes
+/// the info shape or drifts on the compat fields. The check runs before any env
+/// materialization, so `clove plugin list` can probe without a repo context.
+pub fn info_requested(info: &PluginInfo) -> bool {
+    if std::env::args().skip(1).any(|arg| arg == INFO_FLAG) {
+        println!("{}", info.to_json());
+        true
+    } else {
+        false
+    }
+}
+
 /// Run a plugin without metadata (no `--clove-plugin-info` support).
 ///
 /// See [`run_with_info`] for the full behavior; this is the same harness with an
@@ -133,12 +152,11 @@ pub fn run_with_info<F>(info: PluginInfo, f: F) -> ExitCode
 where
     F: FnOnce(&PluginContext, PluginArgs) -> Result<serde_json::Value, CloveError>,
 {
-    let argv: Vec<String> = std::env::args().skip(1).collect();
-
-    if argv.iter().any(|arg| arg == INFO_FLAG) {
-        println!("{}", info.to_json());
+    if info_requested(&info) {
         return ExitCode::SUCCESS;
     }
+
+    let argv: Vec<String> = std::env::args().skip(1).collect();
 
     let cx = match PluginContext::from_env() {
         Ok(cx) => cx,

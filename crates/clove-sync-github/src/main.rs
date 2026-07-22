@@ -21,18 +21,20 @@ use std::process::ExitCode;
 use clap::error::ErrorKind;
 use clap::Parser;
 use clove_core::OutputFormat;
-use clove_plugin::{emit_error, emit_success, PluginArgs, PluginContext};
+use clove_plugin::{emit_error, emit_success, PluginArgs, PluginContext, PluginInfo};
 use clove_types::CloveError;
 use serde_json::json;
 
-/// The `--clove-plugin-info` metadata probe token (§7).
-const INFO_FLAG: &str = "--clove-plugin-info";
-
-/// The plugin binary name (also the `--clove-plugin-info` `name`).
-const NAME: &str = "clove-sync-github";
-
-/// The one-line description surfaced by `clove plugin list`.
-const ABOUT: &str = "Two-way GitHub Issues sync (clove sync github)";
+/// The metadata `clove plugin list` / `--clove-plugin-info` reports. Emitted via
+/// the shared `clove_plugin::info_requested` so the JSON shape (incl. the §2
+/// compat fields) is authored in exactly one place — this plugin hand-rolls only
+/// its *human* rendering, never the info blob.
+const INFO: PluginInfo = PluginInfo {
+    name: "clove-sync-github",
+    version: env!("CARGO_PKG_VERSION"),
+    about: "Two-way GitHub Issues sync (clove sync github)",
+    provides: &["sync:github"],
+};
 
 /// The forwarded-tail args after the cargo-style `sync github` leading echo is
 /// stripped. Mirrors the host's `SyncArgs` (minus the `tracker` selector, which
@@ -79,20 +81,13 @@ fn clap_exit_code(err: &clap::Error) -> u8 {
 }
 
 fn main() -> ExitCode {
-    let argv: Vec<String> = std::env::args().skip(1).collect();
-
     // 1. Answer the §7 metadata probe *before* env materialization so `clove
     //    plugin list` can describe the plugin with no repo context.
-    if argv.iter().any(|arg| arg == INFO_FLAG) {
-        let info = json!({
-            "name": NAME,
-            "version": env!("CARGO_PKG_VERSION"),
-            "about": ABOUT,
-            "provides": ["sync:github"],
-        });
-        println!("{info}");
+    if clove_plugin::info_requested(&INFO) {
         return ExitCode::SUCCESS;
     }
+
+    let argv: Vec<String> = std::env::args().skip(1).collect();
 
     // 2. Materialize the typed §6.2 context. On failure the typed context is
     //    unavailable, so read the format/quiet hints directly (§6.5) and render

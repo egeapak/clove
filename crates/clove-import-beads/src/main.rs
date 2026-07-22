@@ -21,18 +21,19 @@ use clap::error::ErrorKind;
 use clap::Parser;
 use clove_core::OutputFormat;
 use clove_import::{render, BeadsImporter, ImportCtx, Importer};
-use clove_plugin::{emit_error, emit_success_with_meta, PluginArgs, PluginContext};
+use clove_plugin::{emit_error, emit_success_with_meta, PluginArgs, PluginContext, PluginInfo};
 use clove_types::CloveError;
 use serde_json::json;
 
-/// The `--clove-plugin-info` metadata probe token (§7).
-const INFO_FLAG: &str = "--clove-plugin-info";
-
-/// The plugin binary name (also the `--clove-plugin-info` `name`).
-const NAME: &str = "clove-import-beads";
-
-/// The one-line description surfaced by `clove plugin list`.
-const ABOUT: &str = "Import items from a Beads issues.jsonl (clove import beads)";
+/// The metadata `clove plugin list` / `--clove-plugin-info` reports, emitted via
+/// the shared `clove_plugin::info_requested` so the JSON shape (incl. the §2
+/// compat fields) is authored in exactly one place.
+const INFO: PluginInfo = PluginInfo {
+    name: "clove-import-beads",
+    version: env!("CARGO_PKG_VERSION"),
+    about: "Import items from a Beads issues.jsonl (clove import beads)",
+    provides: &["import:beads"],
+};
 
 /// The forwarded-tail args after the cargo-style `import beads` leading echo is
 /// stripped. Mirrors the former built-in `ImportBuiltinArgs`.
@@ -70,20 +71,13 @@ fn clap_exit_code(err: &clap::Error) -> u8 {
 }
 
 fn main() -> ExitCode {
-    let argv: Vec<String> = std::env::args().skip(1).collect();
-
     // 1. Answer the §7 metadata probe *before* env materialization so `clove
     //    plugin list` can describe the plugin with no repo context.
-    if argv.iter().any(|arg| arg == INFO_FLAG) {
-        let info = json!({
-            "name": NAME,
-            "version": env!("CARGO_PKG_VERSION"),
-            "about": ABOUT,
-            "provides": ["import:beads"],
-        });
-        println!("{info}");
+    if clove_plugin::info_requested(&INFO) {
         return ExitCode::SUCCESS;
     }
+
+    let argv: Vec<String> = std::env::args().skip(1).collect();
 
     // 2. Materialize the typed §6.2 context. On failure the typed context is
     //    unavailable, so read the format/quiet hints directly (§6.5) and render
