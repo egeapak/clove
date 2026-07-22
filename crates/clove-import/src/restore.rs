@@ -16,7 +16,6 @@
 
 use std::cmp::Ordering;
 
-use chrono::{DateTime, Utc};
 use clove_core::{ItemStore, RestoreOutcome};
 use clove_types::{Item, ItemFrontmatter, CURRENT_SCHEMA_VERSION};
 use serde::Serialize;
@@ -33,10 +32,12 @@ use crate::plan::{PlanItem, SkipItem};
 /// change to the export shape can be detected and refused (or migrated) here.
 pub const EXPORT_FORMAT_VERSION: u32 = 1;
 
-/// Keys the exporter *adds* to the stored frontmatter (DESIGN §7.4 / the
-/// `clove` crate's `item_json::export_object`). They are computed at export
-/// time, never stored, and must be removed before deserializing back into an
-/// [`ItemFrontmatter`] (whose `deny_unknown_fields` would otherwise reject them).
+/// Computed/augmented keys to strip before deserializing an export object back
+/// into an [`ItemFrontmatter`] (whose `deny_unknown_fields` would otherwise
+/// reject them). The first four are what the `clove` crate's
+/// `item_json::export_object` actually adds today (DESIGN §7.4); `children_summary`
+/// and `warnings` are stripped **defensively** — a projected/augmented export from
+/// another surface may carry them, and forward-compatibility is cheap here.
 const COMPUTED_KEYS: &[&str] = &[
     "comment_count",
     "ready",
@@ -45,6 +46,28 @@ const COMPUTED_KEYS: &[&str] = &[
     "children_summary",
     "warnings",
 ];
+
+/// Whether an export entry recorded any comments (`comment_count > 0`). Used to
+/// warn that a restore does not recreate comments (the export carries only the
+/// count, not the bodies — comments are append-only sidecar files, DESIGN §2.5).
+fn had_comments(entry: &Value) -> bool {
+    entry
+        .get("comment_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        > 0
+}
+
+/// Append the "comments were not restored" warning when any restored item had
+/// comments in the source export.
+fn note_dropped_comments(warnings: &mut Vec<String>, count: usize) {
+    if count > 0 {
+        warnings.push(format!(
+            "{count} restored item(s) had comments in the source export; comments are \
+             not part of a clove export and were not restored"
+        ));
+    }
+}
 
 /// Parse a `clove export json` document: the standard `{ v, ok, data, _meta }`
 /// envelope whose `data` is the array of export item objects.
@@ -85,12 +108,20 @@ pub fn parse_export_json(bytes: &str) -> Result<(Vec<Item>, Vec<String>), Import
 
     let mut items = Vec::new();
     let mut warnings = Vec::new();
+    let mut with_comments = 0usize;
     for (index, entry) in data.iter().enumerate() {
+        let commented = had_comments(entry);
         match item_from_object(entry.clone()) {
-            Ok(item) => items.push(item),
+            Ok(item) => {
+                if commented {
+                    with_comments += 1;
+                }
+                items.push(item);
+            }
             Err(err) => warnings.push(format!("data[{index}]: {err}")),
         }
     }
+    note_dropped_comments(&mut warnings, with_comments);
     Ok((items, warnings))
 }
 
@@ -103,19 +134,29 @@ pub fn parse_export_json(bytes: &str) -> Result<(Vec<Item>, Vec<String>), Import
 pub fn parse_export_jsonl(bytes: &str) -> Result<(Vec<Item>, Vec<String>), ImportError> {
     let mut items = Vec::new();
     let mut warnings = Vec::new();
+    let mut with_comments = 0usize;
     for (index, line) in bytes.lines().enumerate() {
         let lineno = index + 1;
         if line.trim().is_empty() {
             continue;
         }
         match serde_json::from_str::<Value>(line) {
-            Ok(value) => match item_from_object(value) {
-                Ok(item) => items.push(item),
-                Err(err) => warnings.push(format!("line {lineno}: {err}")),
-            },
+            Ok(value) => {
+                let commented = had_comments(&value);
+                match item_from_object(value) {
+                    Ok(item) => {
+                        if commented {
+                            with_comments += 1;
+                        }
+                        items.push(item);
+                    }
+                    Err(err) => warnings.push(format!("line {lineno}: {err}")),
+                }
+            }
             Err(source) => warnings.push(format!("line {lineno}: invalid JSON: {source}")),
         }
     }
+    note_dropped_comments(&mut warnings, with_comments);
     Ok((items, warnings))
 }
 
@@ -241,11 +282,10 @@ pub fn apply_restore(
     items: &[Item],
     store: &ItemStore,
     overwrite: bool,
-    now: DateTime<Utc>,
 ) -> Result<RestoreReport, ImportError> {
     let mut report = RestoreReport::default();
     for item in items {
-        match store.restore_item(item, overwrite, now)? {
+        match store.restore_item(item, overwrite)? {
             RestoreOutcome::Created => report.created += 1,
             RestoreOutcome::Skipped => report.skipped += 1,
             RestoreOutcome::Overwritten => report.overwritten += 1,
@@ -257,6 +297,7 @@ pub fn apply_restore(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{DateTime, Utc};
     use clove_core::view::item_object;
     use clove_types::{CloveId, ItemStatus, ItemType, Priority};
     use serde_json::{json, Map, Value};
@@ -345,7 +386,10 @@ mod tests {
         let mut obj = item_object(item);
         obj.insert("body".to_owned(), json!(item.body));
         // Computed/augmented fields the exporter adds (must be stripped on read).
-        obj.insert("comment_count".to_owned(), json!(2));
+        // `comment_count` is 0 here so the shared fixture doesn't incidentally
+        // trip the "comments were not restored" warning; a dedicated test below
+        // exercises the >0 case.
+        obj.insert("comment_count".to_owned(), json!(0));
         obj.insert("ready".to_owned(), json!(true));
         obj.insert("blocked_by".to_owned(), json!(["proj-ZZZZZZZZ"]));
         obj.insert("dangling_deps".to_owned(), json!([]));
@@ -436,6 +480,21 @@ mod tests {
     }
 
     #[test]
+    fn restore_warns_when_export_had_comments() {
+        // An item exported with comments (comment_count > 0) still restores (the
+        // item roundtrips), but a warning tells the user comments aren't restored.
+        let good = &sample_items()[0];
+        let mut obj = export_object(good);
+        obj.insert("comment_count".to_owned(), json!(3));
+        let text = serde_json::to_string(&Value::Object(obj)).unwrap();
+
+        let (parsed, warnings) = parse_export_jsonl(&text).unwrap();
+        assert_eq!(parsed.len(), 1, "the item still restores");
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("were not restored"), "{warnings:?}");
+    }
+
+    #[test]
     fn plan_and_apply_restore_into_a_store() {
         let tmp = tempfile::tempdir().unwrap();
         let root = camino::Utf8Path::from_path(tmp.path()).unwrap().to_owned();
@@ -443,7 +502,6 @@ mod tests {
         let store = ItemStore::new(root);
 
         let items = sample_items();
-        let now = ts("2026-07-01T00:00:00Z");
 
         // Dry-run: all three would be created.
         let plan = plan_restore(&items, &store, false).unwrap();
@@ -452,7 +510,7 @@ mod tests {
         assert!(plan.would_overwrite.is_empty());
 
         // Apply: all created.
-        let report = apply_restore(&items, &store, false, now).unwrap();
+        let report = apply_restore(&items, &store, false).unwrap();
         assert_eq!(report.created, 3);
         assert_eq!(report.skipped, 0);
         assert_eq!(report.overwritten, 0);
@@ -462,9 +520,9 @@ mod tests {
         assert_eq!(reread, items[1]);
 
         // Second apply without overwrite skips all; with overwrite, replaces all.
-        let report = apply_restore(&items, &store, false, now).unwrap();
+        let report = apply_restore(&items, &store, false).unwrap();
         assert_eq!(report.skipped, 3);
-        let report = apply_restore(&items, &store, true, now).unwrap();
+        let report = apply_restore(&items, &store, true).unwrap();
         assert_eq!(report.overwritten, 3);
 
         // Plan with overwrite routes existing ids to would_overwrite.

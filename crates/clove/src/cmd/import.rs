@@ -10,7 +10,6 @@
 //! standard envelope with any warnings threaded into `_meta.warnings`.
 
 use camino::{Utf8Path, Utf8PathBuf};
-use chrono::Utc;
 use clap::error::ErrorKind;
 use clap::Parser;
 use clove_core::OutputFormat;
@@ -111,7 +110,7 @@ pub fn run(ctx: &Ctx, format: OutputFormat, args: ImportArgs) -> Result<ExitCode
             .map_err(|err| import_err(err, &parsed.src))?;
         emit_plan(format, &plan, meta);
     } else {
-        let report = apply_restore(&items, &ctx.store, parsed.overwrite, Utc::now())
+        let report = apply_restore(&items, &ctx.store, parsed.overwrite)
             .map_err(|err| import_err(err, &parsed.src))?;
         emit_report(format, &report, meta);
     }

@@ -96,7 +96,9 @@ pub enum Commands {
 Built-in providers: json, jsonl — clove's native restore, the inverse of \
 `clove export json|jsonl`. `import json|jsonl <file> [--dry-run] [--overwrite]` \
 restores items preserving their ids (an export → import round-trip is a \
-backup/restore). Any other provider is an external clove-import-<provider> \
+backup/restore); existing ids are skipped unless --overwrite. Comments are not \
+part of a clove export, so they are not restored. Any other provider is an \
+external clove-import-<provider> \
 plugin: tk (a .tickets/ dir) needs clove-import-tk (cargo install \
 clove-import-tk); beads (an issues.jsonl) needs clove-import-beads.\n\
 Note: clove global flags (--format, --color, --quiet, …) must come BEFORE the \
