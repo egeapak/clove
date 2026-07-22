@@ -263,6 +263,13 @@ impl PluginStatus {
     }
 
     /// Classify a probed plugin's `[min, max]` range against the host contract.
+    ///
+    /// Phase 1 gates only on the `clove_plugin_api` range. `probed.max_schema`
+    /// (the highest on-disk item schema the plugin can read) is parsed and carried
+    /// for the registry/`plugin list` surface but is intentionally *not* a compat
+    /// gate yet — schema-version gating is deferred to the registry phase, where
+    /// install-time verification owns it. Wiring it here would change dispatch
+    /// behavior in the all-v1 Phase 1 with no plugin able to exercise it.
     fn classify(probed: &ProbedInfo) -> PluginStatus {
         let host = PLUGIN_API_VERSION;
         if host > probed.max_clove_plugin_api {
@@ -354,6 +361,13 @@ pub fn probe_info(path: &Utf8Path) -> Option<ProbedInfo> {
 /// spawning a process.
 fn parse_probe_json(stdout: &str) -> Option<ProbedInfo> {
     let value: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
+    // The probe payload must be a JSON *object*. A bare scalar/array is valid JSON
+    // but every `value[key]` below would silently resolve to `Null` and default,
+    // listing a misbehaving plugin as a healthy one with blank metadata. Reject it
+    // so it collapses to `no_info` like any other unparseable output.
+    if !value.is_object() {
+        return None;
+    }
 
     let version = value["version"].as_str().unwrap_or_default().to_owned();
     let about = value["about"].as_str().unwrap_or_default().to_owned();
@@ -683,6 +697,17 @@ mod tests {
     fn parse_probe_json_rejects_garbage() {
         assert!(parse_probe_json("not json").is_none());
         assert!(parse_probe_json("").is_none());
+    }
+
+    #[test]
+    fn parse_probe_json_rejects_non_object() {
+        // Valid JSON that isn't an object must be rejected — otherwise every
+        // `value[key]` resolves to `Null`/default and a misbehaving plugin would
+        // list as a healthy one with blank metadata instead of `no_info`.
+        assert!(parse_probe_json("42").is_none());
+        assert!(parse_probe_json("\"hi\"").is_none());
+        assert!(parse_probe_json("[1, 2, 3]").is_none());
+        assert!(parse_probe_json("null").is_none());
     }
 
     #[test]

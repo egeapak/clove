@@ -34,6 +34,17 @@ fn flag_name(token: &str) -> &str {
     token.split_once('=').map(|(name, _)| name).unwrap_or(token)
 }
 
+/// True if `token` is a global **short** value flag with its value attached in
+/// the same token, e.g. `-fjson` for `-f`. clap accepts this spelling, so
+/// [`detect`] must treat the whole token as a self-contained value flag (it does
+/// *not* consume a following token). Only the two-char short entries in
+/// [`GLOBAL_VALUE_FLAGS`] (`-f`) qualify; long flags carry their value via `=`.
+fn is_attached_short_value(token: &str) -> bool {
+    GLOBAL_VALUE_FLAGS.iter().any(|flag| {
+        flag.len() == 2 && !flag.starts_with("--") && token.len() > 2 && token.starts_with(flag)
+    })
+}
+
 /// Detect a `<mux> --help` invocation to intercept (`PLUGIN_REGISTRY.md` §6).
 ///
 /// `argv` is the full process argv (argv[0] is the program name). Skips the
@@ -56,6 +67,11 @@ pub fn detect(argv: &[String]) -> Option<&'static str> {
             if !token.contains('=') {
                 iter.next();
             }
+            continue;
+        }
+        // Attached short-value form (`-fjson`): a self-contained value flag —
+        // don't misread it as the first positional.
+        if is_attached_short_value(token) {
             continue;
         }
         if GLOBAL_BOOL_FLAGS.contains(&name) {
@@ -201,6 +217,9 @@ mod tests {
             detect(&s(&["--format=json", "export", "--help"])),
             Some("export")
         );
+        // The attached short-value form (`-fjson`) is self-contained — clap accepts
+        // it, so `detect` must not misread it as the first positional.
+        assert_eq!(detect(&s(&["-fjson", "import", "--help"])), Some("import"));
     }
 
     #[test]
@@ -220,7 +239,12 @@ mod tests {
         use std::collections::BTreeSet;
 
         let cmd = Cli::command();
-        let mut actual: BTreeSet<String> = BTreeSet::new();
+        // Split clap's globals by whether the flag *takes a value*, so the guard
+        // catches a flag placed in the wrong const list — not just a missing/extra
+        // one. A mis-categorized value flag would make `detect` fail to consume its
+        // value token and shift the positional scan by one (MINOR).
+        let mut actual_value: BTreeSet<String> = BTreeSet::new();
+        let mut actual_bool: BTreeSet<String> = BTreeSet::new();
         for arg in cmd.get_arguments() {
             if !arg.is_global_set() {
                 continue;
@@ -231,23 +255,31 @@ mod tests {
             if id == "help" || id == "version" {
                 continue;
             }
+            let bucket = if arg.get_action().takes_values() {
+                &mut actual_value
+            } else {
+                &mut actual_bool
+            };
             if let Some(short) = arg.get_short() {
-                actual.insert(format!("-{short}"));
+                bucket.insert(format!("-{short}"));
             }
             if let Some(long) = arg.get_long() {
-                actual.insert(format!("--{long}"));
+                bucket.insert(format!("--{long}"));
             }
         }
 
-        let declared: BTreeSet<String> = GLOBAL_VALUE_FLAGS
-            .iter()
-            .chain(GLOBAL_BOOL_FLAGS)
-            .map(|s| (*s).to_owned())
-            .collect();
+        let declared_value: BTreeSet<String> =
+            GLOBAL_VALUE_FLAGS.iter().map(|s| (*s).to_owned()).collect();
+        let declared_bool: BTreeSet<String> =
+            GLOBAL_BOOL_FLAGS.iter().map(|s| (*s).to_owned()).collect();
 
         assert_eq!(
-            actual, declared,
-            "GLOBAL_*_FLAGS drifted from the Cli global flags"
+            actual_value, declared_value,
+            "GLOBAL_VALUE_FLAGS drifted from the Cli value-taking global flags"
+        );
+        assert_eq!(
+            actual_bool, declared_bool,
+            "GLOBAL_BOOL_FLAGS drifted from the Cli boolean global flags"
         );
     }
 }
