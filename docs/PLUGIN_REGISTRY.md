@@ -63,7 +63,10 @@ min_plugin_api = 1                         # must be <= host CLOVE_PLUGIN_API
   [[plugin.binary]]
   bin      = "clove-sync-github"           # binary resolve() must find
   crate    = "clove-sync-github"           # cargo package (crates.io / --git)
-  provides = ["sync:github"]               # dispatch tokens (cross-checked vs --clove-plugin-info)
+  # One binary, several capabilities: this single binary serves the two-way
+  # `sync github` AND its one-way views `import github` / `export github` (the
+  # umbrella fallback, PLUGIN_SYSTEM.md §4.2), so `provides` is a multi-token array.
+  provides = ["sync:github", "import:github", "export:github"]  # dispatch tokens (cross-checked vs --clove-plugin-info)
   # future prebuilt download (Phase 3):
   # [plugin.binary.download]
   # url    = ".../releases/download/v{version}/clove-sync-github-{target}{ext}"
@@ -80,12 +83,13 @@ min_plugin_api = 1
 
 [[plugin]]
 name = "beads"
-description = "Import from a Beads issues.jsonl"
+description = "Import/export a Beads issues.jsonl"
 min_plugin_api = 1
   [[plugin.binary]]
   bin = "clove-import-beads"
   crate = "clove-import-beads"
-  provides = ["import:beads"]
+  # Bidirectional beads in one binary: import AND the inverse export (§4.2).
+  provides = ["import:beads", "export:beads"]
 
 # A future multi-binary entry: one friendly name → several binaries.
 # [[plugin]]
@@ -98,6 +102,22 @@ min_plugin_api = 1
 TOML matches the house style (`config.toml`; the parse-only `toml` crate is
 already a dependency). A friendly `name` maps to an array of binaries; install
 iterates them and reports per-binary status (no silent half-install).
+
+**One binary, many capabilities vs. a multi-binary bundle** — two distinct axes:
+
+- A single `[[plugin.binary]]` may carry a **multi-token `provides` array**
+  because one executable serves several `<mux>:<provider>` capabilities from one
+  reconcile/round-trip planner (github → `["sync:github", "import:github",
+  "export:github"]`; beads → `["import:beads", "export:beads"]`). This is the
+  umbrella-fallback model (`PLUGIN_SYSTEM.md` §4.2): the host dispatches to the
+  binary structurally and it branches on `$CLOVE_COMMAND`.
+- A **multi-binary bundle** is the orthogonal case: one friendly `name` maps to
+  *several* `[[plugin.binary]]` entries, each a separate executable (the
+  commented `gitlab` example above — distinct `clove-sync-gitlab` /
+  `clove-import-gitlab` / `clove-export-gitlab` crates). `install` iterates them.
+
+The two compose: a bundle's individual binaries may each advertise multiple
+`provides` tokens.
 
 ## 2. Host↔plugin compat fields (`--clove-plugin-info`)
 
@@ -124,22 +144,28 @@ enrichment layer probes each `clove-*` binary with `--clove-plugin-info`
 command). A plugin that doesn't answer is still listed (name/binary/path,
 `status:"no_info"`, `commands` derived from the name heuristic).
 
-Human:
+**One row per binary**, listing *all* the `clove …` commands it provides (a
+multi-capability binary is one row with several `RUN AS` entries — not one row per
+capability). Human:
 
 ```
-NAME          VERSION  RUN AS               ABOUT
-sync-github   0.1.0    clove sync github    Two-way GitHub sync
-import-tk     0.1.0    clove import tk      Import from a .tickets/ dir
-frobnicate    —        clove frobnicate     (no metadata)
+NAME          VERSION  RUN AS                                                    ABOUT
+sync-github   0.1.0    clove sync github, clove import github, clove export github  GitHub Issues sync/import/export
+import-beads  0.1.0    clove import beads, clove export beads                     Import/export Beads issues.jsonl
+import-tk     0.1.0    clove import tk                                            Import from a .tickets/ dir
+frobnicate    —        clove frobnicate                                          (no metadata)
 ```
 
-JSON (additive over today's `{name,path}`, one object per plugin; `provides`
-→ `commands` via `sync:github` ⇒ `clove sync github`):
+JSON (additive over today's `{name,path}`, one object per plugin; each `provides`
+token → a `commands` entry via `sync:github` ⇒ `clove sync github`, so a
+multi-capability binary carries a multi-element `provides`/`commands`):
 
 ```json
 { "name":"sync-github", "binary":"clove-sync-github", "path":"…",
-  "version":"0.1.0", "about":"Two-way GitHub sync", "provides":["sync:github"],
-  "commands":["clove sync github"], "installed":true, "status":"ok" }
+  "version":"0.1.0", "about":"GitHub Issues sync/import/export",
+  "provides":["sync:github","import:github","export:github"],
+  "commands":["clove sync github","clove import github","clove export github"],
+  "installed":true, "status":"ok" }
 ```
 
 ## 4. `clove plugin list --all`

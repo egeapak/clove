@@ -98,17 +98,20 @@ Built-in providers: json, jsonl — clove's native restore, the inverse of \
 restores items preserving their ids (an export → import round-trip is a \
 backup/restore); existing ids are skipped unless --overwrite. Comments are not \
 part of a clove export, so they are not restored. Any other provider is an \
-external clove-import-<provider> \
-plugin: tk (a .tickets/ dir) needs clove-import-tk (cargo install \
-clove-import-tk); beads (an issues.jsonl) needs clove-import-beads.\n\
+external plugin: tk (a .tickets/ dir) needs clove-import-tk (cargo install \
+clove-import-tk); beads (an issues.jsonl) needs clove-import-beads. A bidirectional \
+plugin can also serve import: `import github` is served by clove-sync-github \
+(pull-only view of the two-way sync).\n\
 Note: clove global flags (--format, --color, --quiet, …) must come BEFORE the \
 provider — everything after it is the provider's own arguments. \
 e.g. `clove import --format json json a.json --overwrite`.")]
     Import(ImportArgs),
-    /// Export items to `json` or `jsonl`.
+    /// Export items to `json` or `jsonl` (or via a tracker plugin).
     #[command(after_help = "\
-Built-in providers: json, jsonl. Any other provider runs a \
-clove-export-<provider> plugin.\n\
+Built-in providers: json, jsonl (clove's native item schema). Any other provider \
+runs an external plugin — including a bidirectional one serving export: \
+`export beads` is served by clove-import-beads (a beads-native issues.jsonl) and \
+`export github` by clove-sync-github (push-only view of the two-way sync).\n\
 Note: clove global flags (--format, --color, --quiet, …) must come BEFORE the \
 provider — everything after it is the provider's own arguments. \
 e.g. `clove export --format json json --out items.json`.")]
@@ -117,7 +120,8 @@ e.g. `clove export --format json json --out items.json`.")]
     #[command(after_help = "\
 github requires the clove-sync-github plugin (cargo install clove-sync-github). \
 There are no built-in sync providers — every provider is an external \
-clove-sync-<provider> plugin.\n\
+clove-sync-<provider> plugin. The same clove-sync-github binary also serves the \
+one-way `clove import github` (pull) and `clove export github` (push).\n\
 Form: clove sync [--format json] github <owner/repo> [--dry-run] [--prefer P] \
 [--no-comments].\n\
 Note: clove global flags (--format, --color, --quiet, …) must come BEFORE the \

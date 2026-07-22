@@ -18,8 +18,16 @@ const INFO: PluginInfo = PluginInfo {
 
 fn main() -> std::process::ExitCode {
     run_with_info(INFO, |cx, args| {
+        // The file name this binary was invoked as (e.g. `clove-sync-echo` when the
+        // same fixture is installed under a second name), so a dispatch test can
+        // observe *which* binary the umbrella fallback resolved.
+        let binary = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .unwrap_or_default();
         Ok(json!({
             "argv": args.args,
+            "binary": binary,
             "provider": cx.provider,
             "command": cx.command,
             "clove_dir": cx.clove_dir.as_str(),

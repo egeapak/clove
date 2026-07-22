@@ -1250,14 +1250,28 @@ with `comment_count > 0` emit a warning to stderr listing the IDs and suggesting
 `bd show --json <id>` to extract comment bodies. The importer must NOT silently succeed with
 missing comment data.
 
+The inverse — `clove export beads`, a beads-native `issues.jsonl` dump that
+round-trips back through this importer — is served by the *same*
+`clove-import-beads` binary (bidirectional beads in one binary; see §11.4 and
+`PLUGIN_SYSTEM.md` §4.2).
+
 ### 11.3 GitHub Sync
 
-GitHub is reached through **one** command — `clove sync github <owner/repo>`, a
-two-way reconcile (the earlier one-way `import github` / `export github` were
-removed in favour of it). It is a **cargo-style plugin**: `clove sync github`
-resolves and runs the separately-installed `clove-sync-github` binary (which
-carries `octocrab` behind `clove-import`'s `github` feature), so the core
-`clove`/`cloved` are octocrab-free. See `docs/PLUGIN_SYSTEM.md`.
+GitHub's canonical command is `clove sync github <owner/repo>`, a two-way
+reconcile. It is a **cargo-style plugin**: `clove sync github` resolves and runs
+the separately-installed `clove-sync-github` binary (which carries `octocrab`
+behind `clove-import`'s `github` feature), so the core `clove`/`cloved` are
+octocrab-free. See `docs/PLUGIN_SYSTEM.md`.
+
+**One-way views (`import github` / `export github`).** These are available again,
+served by the *same* `clove-sync-github` binary as directional projections of the
+one reconcile (`PLUGIN_SYSTEM.md` §4.2, the umbrella fallback): `import github`
+runs it **pull-only** (remote → local), `export github` **push-only** (local →
+remote), and the full `sync github` is both. Issue **comments only sync under the
+full `sync github`** — a one-way `import`/`export github` reconciles items only.
+The plugin picks the direction from `$CLOVE_COMMAND`, so all three share one
+reconcile planner and one code path; there is no separate one-way importer to
+drift.
 
 **Field mapping.** `number` ↔ `external_ref = "gh-<number>"` (the durable link;
 clove mints a fresh `CloveId` on pull-create), `title` ↔ `title`, `state`
@@ -1309,15 +1323,29 @@ of the same repo and mint duplicate issues; a second concurrent sync fails clean
 ### 11.4 Export
 
 ```
-clove export json         → single JSON envelope with all items
-clove export jsonl        → one item per line (NDJSON), clove's native item schema
+clove export json         → single JSON envelope with all items         (built-in)
+clove export jsonl        → one item per line (NDJSON), clove's native item schema (built-in)
+clove export beads        → beads-native issues.jsonl                    (clove-import-beads plugin)
+clove export github       → push-only view of the GitHub reconcile       (clove-sync-github plugin, §11.3)
 clove sync   github       → two-way GitHub reconcile (pull + push + comments, §11.3)
 ```
 
 Both `json` and `jsonl` export in clove's **native item schema** — the exact inverse
-of `import json`/`jsonl` (§11.5), for backup/restore and cross-repo copy. A
-Beads-native export (isomorphic with `.beads/issues.jsonl`) is the `beads` *plugin*
-(`clove export beads`), not this built-in.
+of `import json`/`jsonl` (§11.5), for backup/restore and cross-repo copy.
+
+A **Beads-native export** (isomorphic with `.beads/issues.jsonl`) is the `beads`
+*plugin*, not a built-in — foreign trackers stay out of the core. It is served by
+the **same `clove-import-beads` binary** as `import beads` (bidirectional beads in
+one binary, reached via the umbrella fallback, `PLUGIN_SYSTEM.md` §4.2): `clove
+export beads [--out FILE]` dumps a beads-native `issues.jsonl` (`chore`→`task`,
+body→`description`, `deps`/`parent`/`relates` as structured `dependencies[]`,
+`duplicates`/`supersedes` as flat arrays, a `deferred` label→`status:"deferred"`,
+`external_ref` preserved) that **round-trips** back through `clove import beads`
+(§11.2). Like the built-in `export json/jsonl`, the dump is raw NDJSON on stdout
+(or `--out`), not wrapped in the plugin envelope.
+
+A **GitHub export** (`clove export github`) is the push-only view of the two-way
+reconcile, served by `clove-sync-github` (§11.3) — not a built-in.
 
 ### 11.5 Native round-trip (`import json`/`jsonl`) and format versioning
 

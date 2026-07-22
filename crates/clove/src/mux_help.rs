@@ -104,11 +104,20 @@ pub fn render(mux: &str) {
 }
 
 /// Build the dynamic provider trailer for `mux`'s help (`PLUGIN_REGISTRY.md` §6):
-/// the built-in providers, then an `Installed providers:` list of the
-/// `clove-<mux>-*` plugins on the search path (each `--clove-plugin-info`-probed,
-/// or `(no metadata)` when the probe fails), then the "globals precede the
-/// provider" note.
+/// the built-in providers, then an `Installed providers:` list, then the "globals
+/// precede the provider" note.
+///
+/// Installed providers are bucketed by the **`<mux>:<provider>` capability token**
+/// each plugin advertises (`--clove-plugin-info`-probed), not by binary name — so a
+/// multi-capability binary like `clove-sync-github` (`provides: sync/import/export
+/// :github`) lists under all three of `import`/`export`/`sync --help` from one
+/// install (`PLUGIN_SYSTEM.md` §4.2). A legacy plugin that answers no probe falls
+/// back to its name (`clove-<mux>-<provider>` ⇒ it serves `<mux>:<provider>`), so
+/// it still lists under its home mux. When two binaries serve the same provider, a
+/// dedicated `clove-<mux>-<provider>` is preferred in the row (it wins dispatch).
 fn render_provider_section(mux: &str) -> String {
+    use std::collections::BTreeMap;
+
     let mut out = String::new();
 
     match mux {
@@ -125,27 +134,57 @@ fn render_provider_section(mux: &str) -> String {
         _ => {}
     }
 
-    // Only this multiplexer's plugins (`clove-<mux>-<provider>`) are probed.
-    let prefix = format!("{mux}-");
-    let installed: Vec<plugin::PluginInfo> = plugin::list()
-        .into_iter()
-        .filter(|p| p.name.starts_with(&prefix) && p.name.len() > prefix.len())
-        .collect();
+    // provider → (row text, is-dedicated). Dedup by provider; a dedicated
+    // `clove-<mux>-<provider>` binary's row replaces an umbrella binary's.
+    let want = format!("{mux}:");
+    let dedicated_name = |provider: &str| format!("{mux}-{provider}");
+    let mut rows: BTreeMap<String, (String, bool)> = BTreeMap::new();
 
-    if !installed.is_empty() {
-        out.push_str("\nInstalled providers:\n");
-        for p in &installed {
-            let provider = &p.name[prefix.len()..];
-            let binary = format!("clove-{}", p.name);
-            match plugin::probe_info(&p.path) {
-                Some(info) => out.push_str(&format!(
-                    "  {provider}  {binary} {} — {}   (clove {mux} {provider})\n",
-                    info.version, info.about
-                )),
-                None => out.push_str(&format!(
-                    "  {provider}  {binary} (no metadata)   (clove {mux} {provider})\n"
-                )),
+    for plugin in plugin::list_enriched() {
+        // Capability tokens = the UNION of the probed `provides` and the token the
+        // binary's *name* implies. The name token is always included because
+        // dispatch is name-based (`resolve_mux` would route `<mux> <provider>` to a
+        // `clove-<mux>-<provider>` binary regardless of what it advertises), so it
+        // is genuinely reachable; the probed `provides` add the extra capabilities a
+        // multi-capability binary serves via the umbrella (e.g. clove-sync-github
+        // under import/export). A no-probe plugin contributes only its name token.
+        let mut tokens: Vec<String> = plugin
+            .probed
+            .as_ref()
+            .map(|p| p.provides.clone())
+            .unwrap_or_default();
+        if let Some(name_token) = name_capability_token(&plugin.info.name) {
+            if !tokens.contains(&name_token) {
+                tokens.push(name_token);
             }
+        }
+
+        for token in tokens {
+            let Some(provider) = token.strip_prefix(&want) else {
+                continue;
+            };
+            let binary = format!("clove-{}", plugin.info.name);
+            let descr = match &plugin.probed {
+                Some(info) => format!("{binary} {} — {}", info.version, info.about),
+                None => format!("{binary} (no metadata)"),
+            };
+            let row = format!("  {provider}  {descr}   (clove {mux} {provider})\n");
+            let is_dedicated = plugin.info.name == dedicated_name(provider);
+            rows.entry(provider.to_owned())
+                .and_modify(|existing| {
+                    // A dedicated binary's row wins over an umbrella's.
+                    if is_dedicated && !existing.1 {
+                        *existing = (row.clone(), true);
+                    }
+                })
+                .or_insert((row, is_dedicated));
+        }
+    }
+
+    if !rows.is_empty() {
+        out.push_str("\nInstalled providers:\n");
+        for (row, _) in rows.values() {
+            out.push_str(row);
         }
     }
 
@@ -154,6 +193,19 @@ fn render_provider_section(mux: &str) -> String {
 provider — everything after it is the provider's own arguments.",
     );
     out
+}
+
+/// The single `<mux>:<provider>` capability token implied by a plugin's *name*
+/// (`clove-<mux>-<provider>` ⇒ `<mux>:<provider>`), used only as the fallback when
+/// a plugin answers no `--clove-plugin-info` probe. Returns `None` for a name that
+/// is not `<one-of import|export|sync>-<provider>`.
+fn name_capability_token(name: &str) -> Option<String> {
+    MULTIPLEXERS.iter().find_map(|mux| {
+        let prefix = format!("{mux}-");
+        name.strip_prefix(&prefix)
+            .filter(|provider| !provider.is_empty())
+            .map(|provider| format!("{mux}:{provider}"))
+    })
 }
 
 #[cfg(test)]
@@ -187,6 +239,26 @@ mod tests {
         assert_eq!(detect(&s(&["--help"])), None);
         assert_eq!(detect(&s(&["-h"])), None);
         assert_eq!(detect(&s(&[])), None);
+    }
+
+    #[test]
+    fn name_capability_token_infers_home_mux() {
+        // The no-probe fallback: a `clove-<mux>-<provider>` name implies it serves
+        // `<mux>:<provider>` (used only when a plugin answers no probe).
+        assert_eq!(
+            name_capability_token("sync-github"),
+            Some("sync:github".to_owned())
+        );
+        assert_eq!(
+            name_capability_token("import-tk"),
+            Some("import:tk".to_owned())
+        );
+        assert_eq!(
+            name_capability_token("export-csv"),
+            Some("export:csv".to_owned())
+        );
+        // A non-mux name (generic plugin) implies no provider capability.
+        assert_eq!(name_capability_token("frobnicate"), None);
     }
 
     #[test]

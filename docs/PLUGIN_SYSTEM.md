@@ -144,6 +144,42 @@ This is what produces the exact behavior asked for: `clove sync github
 egeapak/clove` → `clove-sync-github egeapak/clove`, `clove import tk .tickets` →
 `clove-import-tk .tickets` — while `clove import json a.json` stays in-process.
 
+#### Umbrella fallback: `sync = import + export`, one binary
+
+A provider that offers two-way reconcile and its one-way views is naturally
+**one binary, several capabilities** — `clove-sync-github` serves `sync github`
+(the full reconcile) *and* `import github` (pull-only) *and* `export github`
+(push-only) from the same reconcile planner; `clove-import-beads` serves both
+`import beads` and `export beads`. So a `<mux> <provider>` miss on the dedicated
+binary does not stop at the dedicated name: it **falls back** to a sibling
+multiplexer's binary that also serves this provider. `plugin::resolve_mux(mux,
+provider)` walks an ordered list of *home multiplexers* (`mux_candidates`) and
+returns the first that resolves:
+
+| requested `mux` | candidate home muxes, in order | rationale |
+|---|---|---|
+| `import` | `import` → `sync` → `export` | dedicated importer, else a two-way `sync` binary (pull is one view of it), else the cross-sibling exporter (which may also import) |
+| `export` | `export` → `sync` → `import` | dedicated exporter, else a two-way `sync` binary (push is one view), else the cross-sibling importer |
+| `sync`   | `sync` | **no fallback** — a one-way import/export binary cannot serve a two-way reconcile |
+
+The order is **load-bearing**: because dispatch `exec`s the first *existing*
+binary and cannot fall through to a later candidate once one is found (§6.1,
+exec-no-retry), the most-correct binary must come first — the dedicated
+`clove-<mux>-<provider>` always leads, so an explicitly-installed one wins over
+the umbrella (this preserves the §4.3 precedence rule). Resolution is purely
+**structural / probe-free** on the hot path: `resolve_mux` is the same cheap
+`stat`-for-executable walk as `resolve` (no `--clove-plugin-info` probe, no exec
+to decide), so dispatch stays fast and dependency-free.
+
+Because the host picks the binary by *name* without probing, it hands the plugin
+the **requested** capability, not the resolved binary's home mux: the argv echo,
+`$CLOVE_COMMAND`, and `$CLOVE_PROVIDER` are always the mux/provider the user
+typed (`import`/`github`, not `sync`/`github`). A multi-capability binary
+therefore branches on `$CLOVE_COMMAND` to pick its behavior — `clove-sync-github`
+maps `sync`→two-way, `import`→pull-only, `export`→push-only. A binary reached for
+a capability it does *not* implement rejects the request itself (the
+clean-failure contract, §7).
+
 ### 4.3 Resolution precedence
 
 For a bare `clove <x>`:
@@ -152,10 +188,15 @@ For a bare `clove <x>`:
 2. `clove-<x>` on the plugin search path (§5).
 3. Otherwise usage error.
 
-For `clove sync <p>` the analogous order is: built-in provider → `clove-sync-<p>`
-→ generic `clove-<p>`? **No** — do *not* fall back to a generic `clove-<p>` for a
-provider miss; that would make `clove sync typo` silently run an unrelated
-`clove-typo`. A provider miss is an error scoped to the multiplexer.
+For `clove <mux> <p>` the order is: built-in provider (json/jsonl for
+import/export) → the ordered umbrella candidates of §4.2 (`mux_candidates`, e.g.
+`import` tries `clove-import-<p>`, then `clove-sync-<p>`, then `clove-export-<p>`)
+→ error. The fallback stays **inside the multiplexer family**: it never reaches a
+bare generic `clove-<p>`. That would make `clove sync typo` silently run an
+unrelated `clove-typo`; a provider miss is an error scoped to the multiplexer.
+Within the candidate list, the dedicated `clove-<mux>-<p>` is always first, so an
+explicitly-installed one wins over a sibling that serves the provider as a view
+(§4.2).
 
 ## 5. Plugin discovery & search path
 
@@ -385,7 +426,7 @@ reflects the context back → the dispatch test asserts it, including the
 - **`clove plugin list`** (new built-in): enumerate resolvable `clove-*` binaries
   with their path and, if the plugin supports it, a one-line description. A plugin
   advertises metadata by responding to `clove-foo --clove-plugin-info` with a
-  small JSON blob (`{ name, version, provides: ["sync:github"], about }`); this is
+  small JSON blob (`{ name, version, provides: [...], about }`); this is
   optional and cached nowhere (cheap enough on demand). This also lets
   `clove sync --help` list *installed* providers, not just built-in ones.
 - **`clove --list`** appends discovered external subcommands under an "external
@@ -393,6 +434,42 @@ reflects the context back → the dispatch test asserts it, including the
 - **Unknown subcommand / provider** errors name the expected binary and suggest
   installation, e.g. `unknown sync provider 'gitlab'; install it with 'cargo
   install clove-sync-gitlab' (or drop clove-sync-gitlab on PATH)`.
+
+### 7.1 `provides` — one binary, many capabilities
+
+`provides` is a **list**, and an umbrella-fallback binary (§4.2) advertises every
+capability it serves, one `<mux>:<provider>` token each:
+
+| binary | `provides` |
+|---|---|
+| `clove-sync-github` | `["sync:github", "import:github", "export:github"]` |
+| `clove-import-beads` | `["import:beads", "export:beads"]` |
+| `clove-import-tk` | `["import:tk"]` |
+
+Both `clove plugin list` and the dynamic `<mux> --help` (`PLUGIN_REGISTRY.md` §3/§6)
+**bucket installed plugins by their `provides` tokens**, not by binary name — so a
+multi-capability binary lists under *every* mux it serves (`clove-sync-github`
+appears under `import`, `export`, and `sync --help` from one install). A plugin
+that answers no probe falls back to a single token inferred from its
+`clove-<mux>-<provider>` name, so a legacy binary still lists under its home mux.
+
+### 7.2 Clean-failure contract (`UNSUPPORTED_CAPABILITY`)
+
+Because the host dispatches umbrella-fallback binaries **structurally** — by name,
+probe-free, on the hot path (§4.2) — it can hand a binary a capability outside its
+`provides` set (e.g. an import-only `clove-import-tk` reached for `export tk`
+before any exporter exists, via the cross-sibling candidate). The binary is
+responsible for rejecting that request itself: its `main` matches on
+`$CLOVE_COMMAND` and, in the default arm, returns
+`clove_plugin::unsupported_capability(&INFO, &cx)` — a
+`CloveError::UnsupportedCapability { plugin, capability }` that maps to the wire
+code `UNSUPPORTED_CAPABILITY` and **exit 2** (`NotFound`'s exit, but a distinct
+code so tooling can tell a capability miss from an unknown item). The plugin-side
+helpers are `PluginInfo::provides_capability(cap)` and
+`PluginContext::capability()` (which renders the reached capability as
+`"<command>:<provider>"`, or bare `"<command>"` for a generic plugin). So a
+structurally-reached-but-unimplemented capability fails cleanly and specifically,
+never as a panic or a misleading success.
 
 ## 8. Migration: GitHub becomes the first plugin
 

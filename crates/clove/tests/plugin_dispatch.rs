@@ -18,15 +18,35 @@ use tempfile::TempDir;
 /// `clove-echo`, returning `(dir, path)`. The temp dir is the value handed to
 /// `CLOVE_PLUGIN_PATH` so the search path is deterministic.
 fn install_echo() -> (TempDir, PathBuf) {
-    let built = escargot::CargoBuild::new()
-        .package("clove-plugin-echo")
-        .bin("clove-echo")
-        .run()
-        .expect("build clove-echo fixture");
     let dir = tempfile::tempdir().unwrap();
-    let dest = dir.path().join("clove-echo");
-    std::fs::copy(built.path(), &dest).expect("copy clove-echo into the plugin dir");
+    let dest = install_echo_as(dir.path(), "clove-echo");
     (dir, dest)
+}
+
+/// Copy the built `clove-echo` fixture into `dir` under an arbitrary `name` (so the
+/// same reflect-everything binary can stand in for `clove-sync-echo`,
+/// `clove-import-echo`, … to exercise the umbrella fallback). Returns the dest path.
+fn install_echo_as(dir: &Path, name: &str) -> PathBuf {
+    static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    let built = BUILT.get_or_init(|| {
+        escargot::CargoBuild::new()
+            .package("clove-plugin-echo")
+            .bin("clove-echo")
+            .run()
+            .expect("build clove-echo fixture")
+            .path()
+            .to_path_buf()
+    });
+    let dest = dir.join(name);
+    std::fs::copy(built, &dest).expect("copy clove-echo fixture into the plugin dir");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&dest).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&dest, perms).unwrap();
+    }
+    dest
 }
 
 /// A `clove` invocation rooted at `dir` with a hermetic environment.
@@ -141,6 +161,87 @@ fn unknown_subcommand_is_a_usage_error() {
     assert_eq!(v["ok"], false);
     assert_eq!(v["error"]["code"], "UNKNOWN_SUBCOMMAND");
     assert_eq!(v["error"]["exit"], 1);
+}
+
+/// The umbrella fallback (PLUGIN_SYSTEM.md §4.2): with only a `clove-sync-echo`
+/// installed, `clove import echo` and `clove export echo` both resolve to it, and
+/// the plugin sees the *requested* mux in `$CLOVE_COMMAND` (so a real
+/// multi-capability binary would branch on it).
+#[test]
+fn umbrella_fallback_routes_import_and_export_to_sync_binary() {
+    let plugin_dir = tempfile::tempdir().unwrap();
+    install_echo_as(plugin_dir.path(), "clove-sync-echo");
+    let repo = init_repo("proj");
+
+    for (mux, expect) in [("import", "import"), ("export", "export"), ("sync", "sync")] {
+        let assert = clove(repo.path())
+            .env("CLOVE_PLUGIN_PATH", plugin_dir.path())
+            .args(["--format", "json", mux, "echo", "arg1"])
+            .assert()
+            .success();
+        let v: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+        assert_eq!(v["ok"], true, "envelope: {v}");
+        assert_eq!(v["data"]["command"], expect, "mux {mux}: {v}");
+        assert_eq!(v["data"]["provider"], "echo", "mux {mux}: {v}");
+        assert_eq!(v["data"]["binary"], "clove-sync-echo", "mux {mux}: {v}");
+        let argv = v["data"]["argv"].as_array().unwrap();
+        assert!(argv.iter().any(|a| a == "arg1"), "argv {argv:?}");
+    }
+}
+
+/// Precedence (PLUGIN_SYSTEM.md §4.2/§4.3): a dedicated `clove-import-echo` wins
+/// over the `clove-sync-echo` umbrella for `import echo`, while `export echo`
+/// (which has no dedicated binary) still falls back to the sync umbrella.
+#[test]
+fn dedicated_binary_wins_over_umbrella() {
+    let plugin_dir = tempfile::tempdir().unwrap();
+    install_echo_as(plugin_dir.path(), "clove-sync-echo");
+    install_echo_as(plugin_dir.path(), "clove-import-echo");
+    let repo = init_repo("proj");
+
+    let reach = |mux: &str| -> String {
+        let assert = clove(repo.path())
+            .env("CLOVE_PLUGIN_PATH", plugin_dir.path())
+            .args(["--format", "json", mux, "echo"])
+            .assert()
+            .success();
+        let v: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+        v["data"]["binary"].as_str().unwrap().to_owned()
+    };
+
+    // Dedicated import binary wins; export has no dedicated binary → sync umbrella.
+    assert_eq!(reach("import"), "clove-import-echo");
+    assert_eq!(reach("export"), "clove-sync-echo");
+}
+
+/// A plugin reached via the umbrella fallback for a capability outside its
+/// `provides` set rejects it with the standard exit-2 `UNSUPPORTED_CAPABILITY`
+/// envelope (PLUGIN_SYSTEM.md §4.2). `clove-import-tk` is import-only, so an
+/// `export tk` cross-sibling dispatch must be refused cleanly.
+#[test]
+fn unsupported_capability_is_exit_2() {
+    let built = escargot::CargoBuild::new()
+        .package("clove-import-tk")
+        .bin("clove-import-tk")
+        .run()
+        .expect("build clove-import-tk");
+    let plugin_dir = tempfile::tempdir().unwrap();
+    let dest = plugin_dir.path().join("clove-import-tk");
+    std::fs::copy(built.path(), &dest).unwrap();
+    let repo = init_repo("proj");
+
+    let assert = clove(repo.path())
+        .env("CLOVE_PLUGIN_PATH", plugin_dir.path())
+        // export → no clove-export-tk, no clove-sync-tk, but clove-import-tk exists
+        // (cross-sibling). tk is import-only, so it refuses `export tk`.
+        .args(["--format", "json", "export", "tk", "some-dir"])
+        .assert()
+        .failure()
+        .code(2);
+    let v: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(v["ok"], false, "envelope: {v}");
+    assert_eq!(v["error"]["code"], "UNSUPPORTED_CAPABILITY", "{v}");
+    assert_eq!(v["error"]["exit"], 2, "{v}");
 }
 
 #[test]
