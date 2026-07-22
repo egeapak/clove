@@ -701,6 +701,27 @@ fn sync_raw(dir: &Path, addr: SocketAddr, extra: &[&str]) -> std::process::Outpu
     clove(dir, addr).args(&args).output().unwrap()
 }
 
+/// Run a directional view `clove <mux> github <repo>` (`import` = pull-only,
+/// `export` = push-only) and return the parsed JSON envelope. Dispatches to the
+/// same `clove-sync-github` plugin as `sync` via the umbrella fallback (§4.2).
+fn run_mux(dir: &Path, addr: SocketAddr, mux: &str, extra: &[&str]) -> Value {
+    let mut args = vec![mux, "--format", "json", "github", "owner/repo"];
+    args.extend_from_slice(extra);
+    let out = clove(dir, addr).args(&args).output().unwrap();
+    assert!(out.status.success(), "{mux} github failed: {out:?}");
+    serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("bad json: {e}\n{out:?}"))
+}
+
+/// The number of local items in the store.
+fn local_item_count(dir: &Path, addr: SocketAddr) -> usize {
+    let out = clove(dir, addr)
+        .args(["ls", "--format", "json"])
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    v["data"].as_array().map(|a| a.len()).unwrap_or(0)
+}
+
 /// The single local item's id (assumes exactly one).
 fn only_item_id(dir: &Path, addr: SocketAddr) -> String {
     let out = clove(dir, addr)
@@ -751,6 +772,72 @@ fn push_create_writes_back_ref_and_is_idempotent() {
     assert_eq!(v2["data"]["pushed_created"], 0, "{v2}");
     assert_eq!(v2["data"]["in_sync"], 1, "{v2}");
     assert_eq!(mock.issue_count(), 1, "no duplicate issue");
+}
+
+#[test]
+fn import_github_is_pull_only() {
+    // `clove import github` = the pull-only view of the reconcile (§4.2). A remote
+    // issue is pulled; a local-only item that a full `sync` would push must NOT be
+    // pushed to GitHub.
+    let mock = MockGitHub::start();
+    mock.seed(5, "From GitHub", "Remote body.", "open");
+    let dir = init_repo();
+    clove(dir.path(), mock.addr)
+        .args(["new", "Local only", "--type", "bug"])
+        .assert()
+        .success();
+
+    let v = run_mux(dir.path(), mock.addr, "import", &[]);
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(
+        v["data"]["pulled_created"], 1,
+        "the remote issue is pulled: {v}"
+    );
+    assert_eq!(v["data"]["pushed_created"], 0, "import must not push: {v}");
+    // The remote issue became a local item; the local-only item stayed local.
+    assert_eq!(
+        local_item_count(dir.path(), mock.addr),
+        2,
+        "pulled + local-only"
+    );
+    assert_eq!(
+        mock.issue_count(),
+        1,
+        "import must not create remote issues"
+    );
+}
+
+#[test]
+fn export_github_is_push_only() {
+    // `clove export github` = the push-only view. A local-only item is pushed; a
+    // remote issue that a full `sync` would pull must NOT be pulled locally.
+    let mock = MockGitHub::start();
+    mock.seed(5, "From GitHub", "Remote body.", "open");
+    let dir = init_repo();
+    clove(dir.path(), mock.addr)
+        .args(["new", "Local only", "--type", "bug"])
+        .assert()
+        .success();
+
+    let v = run_mux(dir.path(), mock.addr, "export", &[]);
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(
+        v["data"]["pushed_created"], 1,
+        "the local item is pushed: {v}"
+    );
+    assert_eq!(v["data"]["pulled_created"], 0, "export must not pull: {v}");
+    // The remote gh-5 was NOT pulled: only the one local-only item exists locally.
+    assert_eq!(
+        local_item_count(dir.path(), mock.addr),
+        1,
+        "export must not pull remote issues into the store"
+    );
+    // The pushed local item exists on GitHub now (gh-5 seeded + the new push).
+    assert_eq!(
+        mock.issue_count(),
+        2,
+        "export created the local item on GitHub"
+    );
 }
 
 #[test]
