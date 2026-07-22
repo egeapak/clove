@@ -735,7 +735,8 @@ clove stats [--top N] [--no-epics] [--snapshot]      # work-item analytics + dae
 clove comment <id> <message> [--format json]
 clove comments <id> [--limit N] [--format json]
 clove reindex [--force] [--format json]
-clove import [--format json] <beads|tk> <src> [--dry-run]   # tk/beads are clove-import-<p> plugins (import is fully external);
+clove import [--format json] <json|jsonl> <file> [--dry-run] [--overwrite]  # BUILT-IN native restore (inverse of export);
+clove import [--format json] <beads|tk> <src> [--dry-run]   # tk/beads are clove-import-<p> plugins;
 clove export [--format json] <json|jsonl> [--out FILE]      # export json/jsonl are built-in; clove global flags precede the
                                                             # provider, provider-owned flags (<src>/--out/--dry-run) follow it
 clove agent-doc [--format markdown|json] [--out FILE]
@@ -1315,6 +1316,46 @@ clove sync   github       → two-way GitHub reconcile (pull + push + comments, 
 
 JSONL export format is isomorphic with Beads' `.beads/issues.jsonl` format, enabling
 bidirectional migration scripts.
+
+### 11.5 Native round-trip (`import json`/`jsonl`) and format versioning
+
+`import json` / `import jsonl` are **built-in** (like their export counterparts —
+clove's own serialization is core; only *foreign* trackers, §11.1–11.3, are
+plugins). They are the exact inverse of `export json`/`jsonl`: a **verbatim,
+id-preserving restore**. `clove export json > a.json` then `clove import json
+a.json` into another repo reproduces every item exactly — same ids, status
+(incl. the `closed` timestamp), type, priority, labels, deps/relations,
+`parent`, `source_system`/`external_ref`, `created`/`updated`, and body. This is
+a backup/restore and cross-repo copy path (repo→repo transfer of the *files*
+still happens via git; this is the serialized-snapshot path).
+
+- **Preserve, don't re-mint.** Unlike the foreign importers (which mint new clove
+  ids and set `external_ref` to the source id), the native importer writes each
+  item under its existing id via `ItemStore::restore_item` — the same atomic-write
+  + validation path as `create`/`update`, but no id minting and no re-stamping.
+- **Idempotent.** An id already present is **skipped** by default; `--overwrite`
+  restores over it; `--dry-run` plans without writing. The report is
+  `{ created, skipped, overwritten }`.
+- **Comments are not included.** The export carries `comment_count` only, not
+  comment bodies (comments are append-only sidecar files, §2.5), so the native
+  round-trip is item-level; comments travel via git.
+
+**Format versioning (for migrations).** The export is self-describing on two axes
+so a future data-model change stays readable:
+
+1. **Per-item `schema`** — every exported item carries its frontmatter schema
+   version (§2.4). Present in both `json` and `jsonl`.
+2. **Container format** — `export json` stamps
+   `_meta.clove_export = { format: <EXPORT_FORMAT_VERSION>, item_schema:
+   <CURRENT_SCHEMA_VERSION> }`.
+
+On import: a **container `format` newer** than this binary is a hard reject (exit
+4, "produced by a newer clove — upgrade"); a **per-item `schema` newer** than
+`CURRENT_SCHEMA_VERSION` is a per-item warning-and-skip (so one future item never
+aborts a batch, and `jsonl` — which has no container header — still guards each
+line). An **older** per-item schema is where a future `v(N-1)→vN` migration
+hooks in (identity today, since the only version is `1`). Adding a schema version
+therefore only ever *extends* the migration seam; old exports stay importable.
 
 ---
 

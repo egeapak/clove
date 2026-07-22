@@ -127,22 +127,22 @@ Dispatch for `sync`:
 2. If it does not resolve: exit 4 (`ValidationError`) — "unknown sync provider
    `<p>`; install `clove-sync-<p>`".
 
-**`sync` and `import` have no compiled-in providers** — every provider is an
-external plugin, so the core carries zero integration weight and has one dispatch
-path per provider. `clove sync github` → `clove-sync-github`; `clove import
-tk`/`beads` → `clove-import-tk`/`clove-import-beads`.
+The rule that settled the split: **clove's own item serialization is core;
+foreign-tracker integrations are plugins** (you shouldn't carry code for a tracker
+you don't use).
 
-**`export` keeps clove's *own* native serialization built-in** (`json`, `jsonl`)
-and falls through to `clove-export-<p>` only for an unknown provider. The rule
-that settled the split: a **foreign-tracker integration** (GitHub Issues, tk
-tickets, Beads JSONL) is a plugin — you shouldn't carry code for a tracker you
-don't use — whereas **clove's own item serialization** is core. So `import` (only
-ever *from* foreign formats) is fully external, while `export json`/`jsonl` (clove
-dumping its own items) stays built-in.
+- **`import` and `export` keep the native `json`/`jsonl` built-in** and fall
+  through to `clove-<mux>-<p>` only for an unknown provider. `export json|jsonl`
+  and `import json|jsonl` are inverse built-ins (the native round-trip, §11.5 of
+  `DESIGN.md`).
+- **`sync` has no compiled-in providers** (GitHub is the only integration and it's
+  network-heavy), and the *foreign* import/export providers are plugins: `clove
+  sync github` → `clove-sync-github`, `clove import tk`/`beads` →
+  `clove-import-tk`/`clove-import-beads`.
 
 This is what produces the exact behavior asked for: `clove sync github
 egeapak/clove` → `clove-sync-github egeapak/clove`, `clove import tk .tickets` →
-`clove-import-tk .tickets`.
+`clove-import-tk .tickets` — while `clove import json a.json` stays in-process.
 
 ### 4.3 Resolution precedence
 
@@ -468,11 +468,10 @@ because the boundary is a subprocess.
 - **Windows exec.** No `execvp`; spawn-and-wait propagating the child exit code,
   and forward Ctrl-C. Interactive plugins get the real console since the host
   isn't holding the pipes.
-- **Decided:** foreign-tracker providers are **always external** — `sync`
-  (github) and `import` (tk/beads) have no compiled-in providers, so the core
-  carries zero integration weight and has one dispatch path per provider.
-  `export`'s `json`/`jsonl` stay built-in as clove's own native serialization
-  (§4.2).
+- **Decided:** clove's own serialization is built-in; foreign-tracker providers
+  are external plugins (§4.2). `import`/`export` both keep native `json`/`jsonl`
+  built-in (inverse round-trip); `sync` (github) and the foreign import providers
+  (`tk`/`beads`) are plugins, so the core carries no foreign-integration weight.
 - **Open questions:** (1) Should `clove plugin list` cache `--clove-plugin-info`
   results in the index? (Probably not for v1.) (2) Naming for multi-word generic
   subcommands (`clove foo bar` →

@@ -132,11 +132,23 @@ same JSON envelope and exit-code semantics.
 ## Interop & GitHub sync
 
 ```sh
-clove import tk|beads <src>             # import from a file-based tracker (clove-import-tk/beads plugin)
-clove export json|jsonl                 # export to a file / stdout (built-in)
+clove export json|jsonl                 # export all items to a file / stdout (built-in)
+clove import json|jsonl <file>          # restore that export, preserving ids (built-in round-trip)
+clove import tk|beads <src>             # import from a foreign tracker (clove-import-tk/beads plugin)
 clove sync github <owner/repo>          # two-way GitHub sync (clove-sync-github plugin)
 clove init --merge-driver               # install the 3-way git merge driver for item files
 ```
+
+**Native round-trip.** `clove export json` (or `jsonl`) and `clove import json`
+(or `jsonl`) are inverse **built-ins** — clove's own serialization is core, only
+foreign trackers are plugins. `import json|jsonl <file> [--dry-run] [--overwrite]`
+restores items **verbatim, preserving their ids**, so `export → import` into
+another repo reproduces them exactly (a backup/restore + snapshot-transfer path;
+existing ids are skipped unless `--overwrite`). The export is versioned for future
+migrations — each item carries its `schema`, and `export json` stamps
+`_meta.clove_export = { format, item_schema }`; importing an export from a *newer*
+clove is rejected with an upgrade hint. (Comments aren't part of the export — they
+travel as git-tracked sidecar files.)
 
 **Two-way GitHub sync.** `clove sync github <owner/repo>` reconciles both
 directions in a single pass: it pulls remote issue changes *and* pushes local

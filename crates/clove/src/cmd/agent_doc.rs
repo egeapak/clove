@@ -96,12 +96,16 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
 \n\
 ## Interop (import / export / merge)\n\
 \n\
+- `clove export json` / `clove export jsonl [--out FILE]` — dump all items as a\n\
+  JSON envelope (`data` array) or one item per line (NDJSON, Beads-isomorphic).\n\
+- `clove import json <file>` / `clove import jsonl <file> [--dry-run]\n\
+  [--overwrite]` — built-in native restore, the inverse of `export json|jsonl`:\n\
+  recreates items preserving their ids (existing ids skipped unless\n\
+  `--overwrite`). A full `export → import` round-trip.\n\
 - `clove import tk <.tickets-dir> [--dry-run]` — import tk tickets (needs the\n\
   `clove-import-tk` plugin; `cargo install clove-import-tk`).\n\
 - `clove import beads <issues.jsonl> [--dry-run]` — import a Beads JSONL export\n\
   (needs the `clove-import-beads` plugin).\n\
-- `clove export json` / `clove export jsonl [--out FILE]` — dump all items as a\n\
-  JSON envelope (`data` array) or one item per line (NDJSON, Beads-isomorphic).\n\
 - `clove sync github <owner/repo> [--dry-run] [--prefer P] [--no-comments]` —\n\
   two-way GitHub sync (pull + push + comments in one pass; conflict policy\n\
   `newer|local|remote|manual`). Needs the `clove-sync-github` plugin\n\
