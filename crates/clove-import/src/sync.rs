@@ -434,10 +434,16 @@ impl SyncPlan {
     /// (`PLUGIN_SYSTEM.md` §4.2). [`Direction::PullOnly`] clears the push side and
     /// [`Direction::PushOnly`] the pull side; [`Direction::Both`] is a no-op.
     ///
-    /// `in_sync`, `conflicts`, `remote_missing`, and `foreign` are left intact —
-    /// they record no writes (they are informational or re-record a fingerprint),
-    /// so surfacing them in either direction is harmless and more useful than
-    /// hiding them.
+    /// `in_sync`, `remote_missing`, and `foreign` are left intact — they record no
+    /// writes (informational, or re-record a fingerprint), so surfacing them in
+    /// either direction is harmless and more useful than hiding them.
+    ///
+    /// `conflicts` are also kept (both sides genuinely changed — worth reporting),
+    /// but a conflict whose *winning side is the one this direction does not apply*
+    /// gets its `resolution` suffixed `" (deferred)"`. Such a conflict is neither
+    /// applied nor fingerprinted here (it re-detects on the next full `sync`), so
+    /// the un-suffixed `"local_wins"`/`"remote_wins"` would otherwise imply an
+    /// action a one-way run never performs.
     pub fn restrict_to(&mut self, direction: Direction) {
         if !direction.pulls() {
             self.pull_create.clear();
@@ -446,6 +452,18 @@ impl SyncPlan {
         if !direction.pushes() {
             self.push_create.clear();
             self.push_update.clear();
+        }
+        for conflict in &mut self.conflicts {
+            // `local_wins` resolves by pushing; `remote_wins` by pulling. If that
+            // side is inactive this run, the resolution won't happen — mark it.
+            let deferred = match conflict.resolution.as_str() {
+                "local_wins" => !direction.pushes(),
+                "remote_wins" => !direction.pulls(),
+                _ => false,
+            };
+            if deferred {
+                conflict.resolution.push_str(" (deferred)");
+            }
         }
     }
 
@@ -1178,6 +1196,49 @@ mod tests {
         push.restrict_to(Direction::PushOnly);
         assert!(push.pull_create.is_empty(), "pull side dropped");
         assert_eq!(push.push_create.len(), 1, "push side kept");
+    }
+
+    #[test]
+    fn restrict_to_defers_conflicts_resolving_to_the_dropped_side() {
+        // A both-changed conflict resolved `local_wins` (push) is deferred under
+        // PullOnly (import) but applied under PushOnly (export); `remote_wins`
+        // (pull) is the mirror. Under Both nothing is deferred.
+        let conflict = |resolution: &str| SyncConflict {
+            external_ref: "gh-1".to_owned(),
+            clove_id: "proj-AAAA1111".to_owned(),
+            title: "T".to_owned(),
+            resolution: resolution.to_owned(),
+            remote_updated: None,
+            local_updated: ts("2026-06-01T00:00:00Z"),
+        };
+        let plan = |resolution: &str| SyncPlan {
+            conflicts: vec![conflict(resolution)],
+            ..SyncPlan::default()
+        };
+
+        let mut p = plan("local_wins");
+        p.restrict_to(Direction::PullOnly);
+        assert_eq!(p.conflicts[0].resolution, "local_wins (deferred)");
+
+        let mut p = plan("local_wins");
+        p.restrict_to(Direction::PushOnly);
+        assert_eq!(p.conflicts[0].resolution, "local_wins", "push applies it");
+
+        let mut p = plan("remote_wins");
+        p.restrict_to(Direction::PushOnly);
+        assert_eq!(p.conflicts[0].resolution, "remote_wins (deferred)");
+
+        let mut p = plan("remote_wins");
+        p.restrict_to(Direction::Both);
+        assert_eq!(
+            p.conflicts[0].resolution, "remote_wins",
+            "Both defers nothing"
+        );
+
+        // A manual `skipped` conflict is never re-tagged (already not applied).
+        let mut p = plan("skipped");
+        p.restrict_to(Direction::PullOnly);
+        assert_eq!(p.conflicts[0].resolution, "skipped");
     }
 
     #[test]

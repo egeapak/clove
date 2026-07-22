@@ -538,3 +538,112 @@ fn jsonl_round_trip_is_lossless_and_idempotent() {
     assert_eq!(v["data"]["skipped"], 2, "re-import skips both");
     assert_eq!(item_file_count(dest.path()), 2, "no new files on re-import");
 }
+
+/// `clove export beads` emits a beads-NATIVE `issues.jsonl` (issue_type, description,
+/// structured `dependencies[]`, `deferred` status) that re-imports losslessly via
+/// `clove import beads`. Exercises the composition model's `export beads` capability
+/// (served by the same `clove-import-beads` binary via the umbrella fallback) and the
+/// BeadsExporter's inverse mapping end-to-end.
+#[test]
+fn export_beads_round_trips_native_shape() {
+    let src_dir = init_repo();
+    let new_id = |args: &[&str]| -> String {
+        let out = clove(src_dir.path()).args(args).output().unwrap();
+        assert!(out.status.success(), "new failed: {out:?}");
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+        v["data"]["id"].as_str().unwrap().to_owned()
+    };
+
+    // Base chore + a bug that blocks-depends on it + a deferred-labelled feature.
+    let a = new_id(&["new", "Base", "--type", "chore", "--format", "json"]);
+    let b = new_id(&[
+        "new",
+        "Blocked bug",
+        "--type",
+        "bug",
+        "--priority",
+        "1",
+        "--dep",
+        &a,
+        "--label",
+        "area:core",
+        "--format",
+        "json",
+    ]);
+    let c = new_id(&[
+        "new",
+        "Deferred one",
+        "--type",
+        "feature",
+        "--label",
+        "deferred",
+        "--format",
+        "json",
+    ]);
+
+    // Export beads (umbrella: export beads → clove-import-beads with $CLOVE_COMMAND=export).
+    let export_path = src_dir.path().join("beads.jsonl");
+    clove(src_dir.path())
+        .args(["export", "beads", "--out", export_path.to_str().unwrap()])
+        .assert()
+        .success();
+    let text = std::fs::read_to_string(&export_path).unwrap();
+    let lines: Vec<Value> = text
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 3, "one NDJSON line per item");
+
+    // The output is beads-NATIVE: `issue_type`/`description` (not clove's `type`/`body`),
+    // structured `dependencies[]`, and the deferred item carries `status:"deferred"`
+    // with the synthetic label dropped.
+    let bug_line = lines.iter().find(|l| l["id"] == b).unwrap();
+    assert_eq!(bug_line["issue_type"], "bug");
+    assert_eq!(bug_line["description"], "");
+    assert!(bug_line.get("type").is_none(), "beads-native has no `type`");
+    let deps = bug_line["dependencies"].as_array().unwrap();
+    assert!(
+        deps.iter()
+            .any(|d| d["id"] == a.as_str() && d["type"] == "blocks"),
+        "structured blocks edge: {deps:?}"
+    );
+    let deferred_line = lines.iter().find(|l| l["title"] == "Deferred one").unwrap();
+    assert_eq!(
+        deferred_line["status"], "deferred",
+        "deferred label → status"
+    );
+    assert_eq!(
+        deferred_line["labels"],
+        serde_json::json!([]),
+        "synthetic label dropped"
+    );
+
+    // Re-import into a FRESH repo; assert the round-trip restored every mapped field.
+    let dest = init_repo();
+    clove(dest.path())
+        .args(["import", "beads", export_path.to_str().unwrap()])
+        .assert()
+        .success();
+    assert_eq!(item_file_count(dest.path()), 3);
+    let items = list_items(dest.path());
+
+    let bug = show(
+        dest.path(),
+        find_by_beads_id(&items, &b)["id"].as_str().unwrap(),
+    );
+    assert_eq!(bug["title"], "Blocked bug");
+    assert_eq!(bug["type"], "bug");
+    assert_eq!(bug["priority"], 1);
+    assert_eq!(bug["labels"], serde_json::json!(["area:core"]));
+    assert_eq!(bug["deps"], serde_json::json!([a]), "blocks edge → deps");
+
+    // The deferred inverse round-trips: status back to open + the `deferred` label.
+    let deferred = find_by_beads_id(&items, &c);
+    let deferred = show(dest.path(), deferred["id"].as_str().unwrap());
+    assert_eq!(deferred["status"], "open");
+    assert!(
+        str_array(&deferred["labels"]).contains(&"deferred".to_owned()),
+        "deferred status → open + label: {}",
+        deferred["labels"]
+    );
+}

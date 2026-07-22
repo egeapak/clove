@@ -471,6 +471,17 @@ helpers are `PluginInfo::provides_capability(cap)` and
 structurally-reached-but-unimplemented capability fails cleanly and specifically,
 never as a panic or a misleading success.
 
+> **Hard contract for every multiplexer plugin.** Because dispatch is
+> probe-free and structural, a `clove-<mux>-<provider>` (or any binary a
+> cross-sibling candidate can reach) **MUST** branch on `$CLOVE_COMMAND` and
+> reject a command it does not implement with `unsupported_capability`. A plugin
+> that ignores `$CLOVE_COMMAND` and runs its one behavior unconditionally would
+> silently perform the *wrong* operation when reached via the fallback (e.g. an
+> importer running an "import" for an `export <provider>` request). Single-
+> capability plugins are not exempt: `clove-import-tk` guards even though it only
+> ever intends to import. Honoring `$CLOVE_COMMAND` is the price of being
+> reachable through the umbrella.
+
 ## 8. Migration: GitHub becomes the first plugin
 
 The github integration is the proving ground and directly serves the motivation.
