@@ -23,4 +23,9 @@ pub enum ImportError {
     /// A single source record was malformed (line/entry-level).
     #[error("malformed source record: {message}")]
     Record { message: String },
+
+    /// The import source was produced by a newer clove than this build can read
+    /// (the export container `format` or a per-item `schema` is too new).
+    #[error("{message}")]
+    Incompatible { message: String },
 }

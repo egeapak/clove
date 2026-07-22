@@ -15,6 +15,7 @@ pub mod map;
 pub mod merge;
 pub mod plan;
 pub mod render;
+pub mod restore;
 pub mod sync;
 #[cfg(feature = "github")]
 pub mod sync_net;
@@ -30,6 +31,10 @@ pub use beads::BeadsImporter;
 pub use error::ImportError;
 pub use map::{build_external_ref_index, build_store_id_set, ExistingItem};
 pub use plan::{ConflictItem, ImportPlan, ImportReport, PlanItem, SkipItem};
+pub use restore::{
+    apply_restore, parse_export_json, parse_export_jsonl, plan_restore, RestorePlan, RestoreReport,
+    EXPORT_FORMAT_VERSION,
+};
 pub use sync::{
     plan_sync, ConflictPolicy, SyncConflict, SyncPlan, SyncReport, SyncState, SyncSummary,
 };
