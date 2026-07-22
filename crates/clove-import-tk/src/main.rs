@@ -21,7 +21,10 @@ use clap::error::ErrorKind;
 use clap::Parser;
 use clove_core::OutputFormat;
 use clove_import::{render, ImportCtx, Importer, TkImporter};
-use clove_plugin::{emit_error, emit_success_with_meta, PluginArgs, PluginContext, PluginInfo};
+use clove_plugin::{
+    emit_error, emit_success_with_meta, unsupported_capability, PluginArgs, PluginContext,
+    PluginInfo,
+};
 use clove_types::CloveError;
 use serde_json::json;
 
@@ -95,7 +98,16 @@ fn main() -> ExitCode {
         }
     };
 
-    // 3. Strip the cargo-style leading `import tk` echo (absent when invoked
+    // 3. tk is import-only. The umbrella fallback for `export tk` would route to
+    //    this binary (export → clove-export-tk miss → clove-sync-tk miss →
+    //    clove-import-tk), so reject any non-`import` capability up front with the
+    //    standard exit-2 envelope rather than silently running the importer (§4.2).
+    if cx.command != "import" {
+        let err = unsupported_capability(&INFO, &cx);
+        return ExitCode::from(emit_error(cx.format, &err, cx.quiet));
+    }
+
+    // 4. Strip the cargo-style leading `import tk` echo (absent when invoked
     //    directly as `clove-import-tk <src>`) then parse the tail.
     let tail = PluginArgs::from_argv(&argv, &cx.command, cx.provider.as_deref());
     let cli = match Cli::try_parse_from(&tail.args) {
@@ -106,7 +118,7 @@ fn main() -> ExitCode {
         }
     };
 
-    // 4. Run and render. A `--format` after the provider overrides the
+    // 5. Run and render. A `--format` after the provider overrides the
     //    env-provided one (§6.3), for both success and error output.
     let format = cli.format.unwrap_or(cx.format);
     match run(&cx, cli, format) {

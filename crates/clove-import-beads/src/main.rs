@@ -1,27 +1,35 @@
-//! `clove-import-beads` — the Beads (`issues.jsonl`) importer plugin
+//! `clove-import-beads` — the Beads (`issues.jsonl`) import/export plugin
 //! (`PLUGIN_SYSTEM.md` §4.2/§6).
 //!
-//! It is the extraction of the former built-in `clove import beads`: a
-//! `clove-plugin` `main` that materializes the host-exported [`PluginContext`],
-//! parses the forwarded `<src> [--dry-run]` args, and drives `clove_import`'s
-//! pure `BeadsImporter` + planning layer. Its stdout/stderr and exit codes are
-//! kept byte-for-byte identical to that built-in (dry-run plan envelope, applied
-//! report, `_meta.warnings`, and the human summary lines) so scripts, agents, and
-//! the existing test suite cannot tell the difference.
+//! One binary, two capabilities (§4.2): `clove import beads <src>` drives
+//! `clove_import`'s pure `BeadsImporter`, and `clove export beads [--out FILE]`
+//! drives the pure `export_beads` writer (the inverse mapping). The host reaches
+//! the exporter through the umbrella fallback (`export beads` → `clove-export-beads`
+//! miss → this `clove-import-beads`), branching on `$CLOVE_COMMAND`.
+//!
+//! The import path's stdout/stderr and exit codes are byte-for-byte identical to
+//! the former built-in `clove import beads` (dry-run plan envelope, applied report,
+//! `_meta.warnings`, human summary). The export path mirrors the built-in
+//! `clove export json/jsonl`: a raw beads-native NDJSON dump to stdout (or `--out`),
+//! never wrapped in the plugin envelope.
 //!
 //! Unlike `clove-plugin`'s `run_with_info` harness (which renders *human* output
 //! by pretty-printing the data JSON), import needs the host's bespoke human
 //! summary and `_meta.warnings`, so this `main` uses the lower-level
 //! [`emit_success_with_meta`]/[`emit_error`] directly.
 
+use std::io::Write;
 use std::process::ExitCode;
 
 use camino::Utf8PathBuf;
 use clap::error::ErrorKind;
 use clap::Parser;
 use clove_core::OutputFormat;
-use clove_import::{render, BeadsImporter, ImportCtx, Importer};
-use clove_plugin::{emit_error, emit_success_with_meta, PluginArgs, PluginContext, PluginInfo};
+use clove_import::{export_beads, render, BeadsImporter, ImportCtx, Importer};
+use clove_plugin::{
+    emit_error, emit_success_with_meta, unsupported_capability, PluginArgs, PluginContext,
+    PluginInfo,
+};
 use clove_types::CloveError;
 use serde_json::json;
 
@@ -31,12 +39,14 @@ use serde_json::json;
 const INFO: PluginInfo = PluginInfo {
     name: "clove-import-beads",
     version: env!("CARGO_PKG_VERSION"),
-    about: "Import items from a Beads issues.jsonl (clove import beads)",
-    provides: &["import:beads"],
+    about: "Import/export Beads issues.jsonl (clove import|export beads)",
+    // Bidirectional beads in one binary: the importer plus the inverse exporter,
+    // reached via the umbrella fallback for `export beads`.
+    provides: &["import:beads", "export:beads"],
 };
 
-/// The forwarded-tail args after the cargo-style `import beads` leading echo is
-/// stripped. Mirrors the former built-in `ImportBuiltinArgs`.
+/// The forwarded-tail args for `import beads` after the cargo-style `import beads`
+/// leading echo is stripped. Mirrors the former built-in `ImportBuiltinArgs`.
 #[derive(Debug, Parser)]
 #[command(name = "clove-import-beads", no_binary_name = true)]
 struct Cli {
@@ -48,6 +58,20 @@ struct Cli {
     /// Output format override. Also arrives via `$CLOVE_FORMAT`; accepted here
     /// (per PLUGIN_SYSTEM.md §6.3) so `clove import beads <src> --format json`
     /// works even with the flag after the provider.
+    #[arg(long, value_name = "FORMAT", value_parser = parse_format)]
+    format: Option<OutputFormat>,
+}
+
+/// The forwarded-tail args for `export beads`. Mirrors the built-in
+/// `clove export json/jsonl` shape: an optional `--out FILE` sink (else stdout).
+#[derive(Debug, Parser)]
+#[command(name = "clove-export-beads", no_binary_name = true)]
+struct ExportCli {
+    /// Write to this file instead of stdout.
+    #[arg(long, value_name = "FILE")]
+    out: Option<Utf8PathBuf>,
+    /// Output format override (accepted for symmetry; the beads dump is always
+    /// NDJSON regardless — only the human file-write confirmation honors it).
     #[arg(long, value_name = "FORMAT", value_parser = parse_format)]
     format: Option<OutputFormat>,
 }
@@ -95,9 +119,23 @@ fn main() -> ExitCode {
         }
     };
 
-    // 3. Strip the cargo-style leading `import beads` echo (absent when invoked
-    //    directly as `clove-import-beads <src>`) then parse the tail.
+    // 3. Strip the cargo-style leading `<mux> beads` echo (absent when invoked
+    //    directly), then branch on the capability the host dispatched us for
+    //    (§4.2): `import` drives the importer, `export` the inverse exporter.
+    //    Anything else is a structural umbrella miss → exit-2 envelope.
     let tail = PluginArgs::from_argv(&argv, &cx.command, cx.provider.as_deref());
+    match cx.command.as_str() {
+        "import" => dispatch_import(&cx, &tail),
+        "export" => dispatch_export(&cx, &tail),
+        _ => {
+            let err = unsupported_capability(&INFO, &cx);
+            ExitCode::from(emit_error(cx.format, &err, cx.quiet))
+        }
+    }
+}
+
+/// Parse the `import beads` tail and drive the importer.
+fn dispatch_import(cx: &PluginContext, tail: &PluginArgs) -> ExitCode {
     let cli = match Cli::try_parse_from(&tail.args) {
         Ok(cli) => cli,
         Err(err) => {
@@ -105,11 +143,26 @@ fn main() -> ExitCode {
             return ExitCode::from(clap_exit_code(&err));
         }
     };
-
-    // 4. Run and render. A `--format` after the provider overrides the
-    //    env-provided one (§6.3), for both success and error output.
+    // A `--format` after the provider overrides the env-provided one (§6.3).
     let format = cli.format.unwrap_or(cx.format);
-    match run(&cx, cli, format) {
+    match run(cx, cli, format) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => ExitCode::from(emit_error(format, &err, cx.quiet)),
+    }
+}
+
+/// Parse the `export beads` tail and dump beads-native NDJSON (stdout or `--out`),
+/// mirroring the built-in `clove export json/jsonl`: a raw dump, not an envelope.
+fn dispatch_export(cx: &PluginContext, tail: &PluginArgs) -> ExitCode {
+    let cli = match ExportCli::try_parse_from(&tail.args) {
+        Ok(cli) => cli,
+        Err(err) => {
+            let _ = err.print();
+            return ExitCode::from(clap_exit_code(&err));
+        }
+    };
+    let format = cli.format.unwrap_or(cx.format);
+    match run_export(cx, cli, format) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => ExitCode::from(emit_error(format, &err, cx.quiet)),
     }
@@ -137,6 +190,46 @@ fn run(cx: &PluginContext, cli: Cli, format: OutputFormat) -> Result<(), CloveEr
     } else {
         let report = importer.apply(plan, &store).map_err(import_err)?;
         emit_report(format, &report, &warnings);
+    }
+    Ok(())
+}
+
+/// Drive the beads export: scan the store and write a beads-native NDJSON dump to
+/// stdout (or `--out FILE`), mirroring the built-in `clove export json/jsonl`.
+///
+/// Like the built-in export, per-file parse failures are dropped (consistent with
+/// `ls`/`export`) rather than aborting the dump. The NDJSON is written raw — no
+/// plugin envelope — so `clove export beads > issues.jsonl` yields a clean file.
+fn run_export(cx: &PluginContext, cli: ExportCli, format: OutputFormat) -> Result<(), CloveError> {
+    let store = cx.open_store();
+    let (items, _errors) = store.scan()?;
+
+    match &cli.out {
+        Some(path) => {
+            let mut buf = Vec::new();
+            export_beads(&mut buf, &items).map_err(|source| CloveError::Io {
+                path: path.clone(),
+                source,
+            })?;
+            std::fs::write(path, &buf).map_err(|source| CloveError::Io {
+                path: path.clone(),
+                source,
+            })?;
+            // A short confirmation goes to stderr only (human format), leaving
+            // stdout empty so a redirect of the path is uncluttered.
+            if matches!(format, OutputFormat::Human) {
+                eprintln!("wrote {} items to {path}", items.len());
+            }
+        }
+        None => {
+            let stdout = std::io::stdout();
+            let mut handle = stdout.lock();
+            export_beads(&mut handle, &items).map_err(|source| CloveError::Io {
+                path: Utf8PathBuf::from("<stdout>"),
+                source,
+            })?;
+            let _ = handle.flush();
+        }
     }
     Ok(())
 }
@@ -228,6 +321,39 @@ mod tests {
     fn help_maps_to_exit_0() {
         let err = Cli::try_parse_from(["--help"]).unwrap_err();
         assert_eq!(clap_exit_code(&err), 0);
+    }
+
+    /// The plugin serves both beads directions from one binary.
+    #[test]
+    fn provides_both_directions() {
+        assert!(INFO.provides_capability("import:beads"));
+        assert!(INFO.provides_capability("export:beads"));
+    }
+
+    /// The `export beads` tail parses the optional `--out`/`--format` (no src).
+    #[test]
+    fn export_cli_parses_out_and_format() {
+        let cli = ExportCli::try_parse_from(Vec::<String>::new()).expect("bare export parses");
+        assert!(cli.out.is_none());
+        assert!(cli.format.is_none());
+
+        let cli = ExportCli::try_parse_from(["--out", "issues.jsonl", "--format", "json"])
+            .expect("flagged export parses");
+        assert_eq!(cli.out, Some(Utf8PathBuf::from("issues.jsonl")));
+        assert_eq!(cli.format, Some(OutputFormat::Json));
+    }
+
+    /// The leading `export beads` echo is stripped just like `import beads`.
+    #[test]
+    fn strips_leading_export_beads_echo() {
+        let host = vec![
+            "export".to_owned(),
+            "beads".to_owned(),
+            "--out".to_owned(),
+            "issues.jsonl".to_owned(),
+        ];
+        let tail = PluginArgs::from_argv(&host, "export", Some("beads"));
+        assert_eq!(tail.args, vec!["--out", "issues.jsonl"]);
     }
 
     /// The leading `import beads` echo is stripped for the host invocation and

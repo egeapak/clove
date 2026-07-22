@@ -5,11 +5,17 @@
 //! `main` that materializes the host-exported [`PluginContext`], parses the
 //! forwarded `OWNER/REPO [--dry-run] [--prefer POLICY] [--no-comments]` args, and
 //! drives `clove_import::sync_net::sync_github` — the *same* entry point the
-//! in-process `cmd/sync.rs` used. Its stdout/stderr and exit codes are kept
-//! byte-for-byte identical to that built-in so scripts, agents, and the existing
-//! mock suite cannot tell the difference (only the JSON `_meta` differs: an empty
-//! object here, as every plugin emits, vs the host's `{ "warnings": [] }` — no
-//! consumer keys on it).
+//! in-process `cmd/sync.rs` used. Its `sync github` stdout/stderr and exit codes
+//! are kept byte-for-byte identical to that built-in so scripts, agents, and the
+//! existing mock suite cannot tell the difference (only the JSON `_meta` differs:
+//! an empty object here, as every plugin emits, vs the host's `{ "warnings": [] }`
+//! — no consumer keys on it).
+//!
+//! One binary, three capabilities (`PLUGIN_SYSTEM.md` §4.2): the same reconcile
+//! planner serves the full two-way `sync github` (`Direction::Both`) and the
+//! one-way views `import github` (`PullOnly`) and `export github` (`PushOnly`),
+//! reached via the host's umbrella fallback. `main` picks the [`Direction`] from
+//! `$CLOVE_COMMAND`.
 //!
 //! Unlike `clove-plugin`'s [`run_with_info`](clove_plugin::run_with_info) harness
 //! (which renders *human* output by pretty-printing the data JSON), sync needs the
@@ -32,8 +38,11 @@ use serde_json::json;
 const INFO: PluginInfo = PluginInfo {
     name: "clove-sync-github",
     version: env!("CARGO_PKG_VERSION"),
-    about: "Two-way GitHub Issues sync (clove sync github)",
-    provides: &["sync:github"],
+    about: "GitHub Issues sync/import/export (clove sync|import|export github)",
+    // One binary, three capabilities (PLUGIN_SYSTEM.md §4.2): the full two-way
+    // `sync github`, plus the one-way views `import github` (pull) and
+    // `export github` (push), reached via the umbrella fallback.
+    provides: &["sync:github", "import:github", "export:github"],
 };
 
 /// The forwarded-tail args after the cargo-style `sync github` leading echo is
@@ -119,20 +128,40 @@ fn main() -> ExitCode {
         }
     };
 
-    // 4. Run and render. A `--format` after the provider overrides the
-    //    env-provided one (§6.3), for both success and error output.
+    // 4. Pick the reconcile direction from the capability the host dispatched us
+    //    for (§4.2): `sync` is two-way, `import` pulls, `export` pushes. Anything
+    //    else means a structural umbrella dispatch reached us for a capability we
+    //    do not implement — reject it with the standard exit-2 envelope.
     let format = cli.format.unwrap_or(cx.format);
-    match run(&cx, cli, format) {
+    let direction = match cx.command.as_str() {
+        "sync" => clove_import::Direction::Both,
+        "import" => clove_import::Direction::PullOnly,
+        "export" => clove_import::Direction::PushOnly,
+        _ => {
+            let err = clove_plugin::unsupported_capability(&INFO, &cx);
+            return ExitCode::from(emit_error(format, &err, cx.quiet));
+        }
+    };
+
+    // 5. Run and render. A `--format` after the provider overrides the
+    //    env-provided one (§6.3), for both success and error output.
+    match run(&cx, cli, format, direction) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => ExitCode::from(emit_error(format, &err, cx.quiet)),
     }
 }
 
-/// Drive the sync and render its result exactly as the host's `cmd/sync.rs` did.
+/// Drive the reconcile in `direction` and render its result exactly as the host's
+/// `cmd/sync.rs` did (`sync`), or as a one-way pull/push (`import`/`export`).
 ///
 /// Emits the success envelope / human summary itself and returns `Ok(())`; any
 /// `Err` (a bad `--prefer` value or a sync failure) is rendered by the caller.
-fn run(cx: &PluginContext, cli: Cli, format: OutputFormat) -> Result<(), CloveError> {
+fn run(
+    cx: &PluginContext,
+    cli: Cli,
+    format: OutputFormat,
+    direction: clove_import::Direction,
+) -> Result<(), CloveError> {
     use clove_import::ConflictPolicy;
 
     let policy = match &cli.prefer {
@@ -150,7 +179,7 @@ fn run(cx: &PluginContext, cli: Cli, format: OutputFormat) -> Result<(), CloveEr
         policy,
         !cli.no_comments,
         cli.dry_run,
-        clove_import::Direction::Both,
+        direction,
     )
     .map_err(sync_err)?;
 
@@ -178,8 +207,8 @@ fn run(cx: &PluginContext, cli: Cli, format: OutputFormat) -> Result<(), CloveEr
         ),
         (OutputFormat::Human, Some(report)) => {
             println!(
-                "synced {}: pulled {} new / {} updated, pushed {} new / {} updated, comments +{}/-{}, {} in sync, {} conflicts",
-                cli.target,
+                "{}: pulled {} new / {} updated, pushed {} new / {} updated, comments +{}/-{}, {} in sync, {} conflicts",
+                applied_label(direction, &cli.target),
                 report.pulled_created,
                 report.pulled_updated,
                 report.pushed_created,
@@ -194,8 +223,8 @@ fn run(cx: &PluginContext, cli: Cli, format: OutputFormat) -> Result<(), CloveEr
         }
         (OutputFormat::Human, None) => {
             println!(
-                "dry-run {}: pull {} new / {} updated, push {} new / {} updated, {} in sync, {} conflicts",
-                cli.target,
+                "{}: pull {} new / {} updated, push {} new / {} updated, {} in sync, {} conflicts",
+                dry_run_label(direction, &cli.target),
                 summary.pull_create.len(),
                 summary.pull_update.len(),
                 summary.push_create.len(),
@@ -208,6 +237,28 @@ fn run(cx: &PluginContext, cli: Cli, format: OutputFormat) -> Result<(), CloveEr
         }
     }
     Ok(())
+}
+
+/// The human summary prefix for an applied run. `Both` reproduces the former
+/// built-in's `synced <target>` byte-for-byte (the mock suite pins it); the
+/// one-way views read `imported`/`exported`.
+fn applied_label(direction: clove_import::Direction, target: &str) -> String {
+    match direction {
+        clove_import::Direction::Both => format!("synced {target}"),
+        clove_import::Direction::PullOnly => format!("imported {target}"),
+        clove_import::Direction::PushOnly => format!("exported {target}"),
+    }
+}
+
+/// The human summary prefix for a `--dry-run`. `Both` reproduces the former
+/// built-in's `dry-run <target>` byte-for-byte; the one-way views name the
+/// direction (`dry-run import`/`dry-run export`).
+fn dry_run_label(direction: clove_import::Direction, target: &str) -> String {
+    match direction {
+        clove_import::Direction::Both => format!("dry-run {target}"),
+        clove_import::Direction::PullOnly => format!("dry-run import {target}"),
+        clove_import::Direction::PushOnly => format!("dry-run export {target}"),
+    }
 }
 
 /// Print the per-conflict resolution lines (human output).
@@ -317,6 +368,33 @@ mod tests {
         let direct = vec!["egeapak/clove".to_owned()];
         let tail = PluginArgs::from_argv(&direct, "sync", Some("github"));
         assert_eq!(tail.args, vec!["egeapak/clove"]);
+    }
+
+    /// `Both` reproduces the former built-in's human prefixes byte-for-byte (the
+    /// mock suite pins `sync github`); the one-way views read differently.
+    #[test]
+    fn direction_labels() {
+        use clove_import::Direction;
+        assert_eq!(applied_label(Direction::Both, "o/r"), "synced o/r");
+        assert_eq!(applied_label(Direction::PullOnly, "o/r"), "imported o/r");
+        assert_eq!(applied_label(Direction::PushOnly, "o/r"), "exported o/r");
+        assert_eq!(dry_run_label(Direction::Both, "o/r"), "dry-run o/r");
+        assert_eq!(
+            dry_run_label(Direction::PullOnly, "o/r"),
+            "dry-run import o/r"
+        );
+        assert_eq!(
+            dry_run_label(Direction::PushOnly, "o/r"),
+            "dry-run export o/r"
+        );
+    }
+
+    /// The plugin advertises all three capabilities it serves from one binary.
+    #[test]
+    fn provides_all_three_capabilities() {
+        assert!(INFO.provides_capability("sync:github"));
+        assert!(INFO.provides_capability("import:github"));
+        assert!(INFO.provides_capability("export:github"));
     }
 
     /// A bad `--prefer` value would map to InvalidField (validation class, exit 4),
