@@ -85,6 +85,41 @@ impl ConflictPolicy {
     }
 }
 
+/// Which side(s) of a reconcile to apply (`PLUGIN_SYSTEM.md` §4.2 composition
+/// model). The full two-way `clove sync github` uses [`Direction::Both`]; the
+/// one-way views expose the same reconcile planner through a single binary:
+/// `clove import github` is [`Direction::PullOnly`] and `clove export github` is
+/// [`Direction::PushOnly`].
+///
+/// A direction gates only the *apply* of the item plan (via
+/// [`SyncPlan::restrict_to`]): the plan is computed identically, then the
+/// irrelevant side is dropped. Item fingerprints stay accurate because each side
+/// is recorded only when its action is applied. Comment sync is bidirectional and
+/// its fingerprints are coupled to the skip optimization, so it runs only under
+/// [`Direction::Both`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Direction {
+    /// Two-way reconcile (pull + push). `clove sync`.
+    #[default]
+    Both,
+    /// Remote → local only (create/update local items). `clove import`.
+    PullOnly,
+    /// Local → remote only (create/update GitHub issues). `clove export`.
+    PushOnly,
+}
+
+impl Direction {
+    /// Whether this direction applies the pull (remote → local) side.
+    pub fn pulls(self) -> bool {
+        matches!(self, Direction::Both | Direction::PullOnly)
+    }
+
+    /// Whether this direction applies the push (local → remote) side.
+    pub fn pushes(self) -> bool {
+        matches!(self, Direction::Both | Direction::PushOnly)
+    }
+}
+
 /// The last-synced fingerprint of one linked issue.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncEntry {
@@ -394,6 +429,26 @@ pub struct SyncPlan {
 }
 
 impl SyncPlan {
+    /// Drop the action lists this [`Direction`] does not apply, so both the
+    /// dry-run summary and the apply pass reflect the requested one-way view
+    /// (`PLUGIN_SYSTEM.md` §4.2). [`Direction::PullOnly`] clears the push side and
+    /// [`Direction::PushOnly`] the pull side; [`Direction::Both`] is a no-op.
+    ///
+    /// `in_sync`, `conflicts`, `remote_missing`, and `foreign` are left intact —
+    /// they record no writes (they are informational or re-record a fingerprint),
+    /// so surfacing them in either direction is harmless and more useful than
+    /// hiding them.
+    pub fn restrict_to(&mut self, direction: Direction) {
+        if !direction.pulls() {
+            self.pull_create.clear();
+            self.pull_update.clear();
+        }
+        if !direction.pushes() {
+            self.push_create.clear();
+            self.push_update.clear();
+        }
+    }
+
     /// Whether the plan would change nothing on either side.
     pub fn is_noop(&self) -> bool {
         self.pull_create.is_empty()
@@ -1079,6 +1134,50 @@ mod tests {
         assert_eq!(plan.push_create.len(), 1);
         assert_eq!(plan.push_create[0].clove_id, "proj-AAAA1111");
         assert!(plan.pull_create.is_empty());
+    }
+
+    #[test]
+    fn direction_predicates() {
+        assert!(Direction::Both.pulls() && Direction::Both.pushes());
+        assert!(Direction::PullOnly.pulls() && !Direction::PullOnly.pushes());
+        assert!(!Direction::PushOnly.pulls() && Direction::PushOnly.pushes());
+        assert_eq!(Direction::default(), Direction::Both);
+    }
+
+    #[test]
+    fn restrict_to_drops_the_other_side() {
+        // A plan carrying both a pull-create (new remote issue) and a push-create
+        // (new local item) — restrict_to keeps only the requested direction's side.
+        let build = || {
+            plan_sync(
+                &[issue(7, "Remote", "open", "2026-06-01T00:00:00Z")],
+                &[local(
+                    "proj-AAAA1111",
+                    "New",
+                    "open",
+                    None,
+                    "2026-06-01T00:00:00Z",
+                )],
+                &SyncState::default(),
+                ConflictPolicy::Newer,
+            )
+            .unwrap()
+        };
+
+        let mut both = build();
+        both.restrict_to(Direction::Both);
+        assert_eq!(both.pull_create.len(), 1);
+        assert_eq!(both.push_create.len(), 1);
+
+        let mut pull = build();
+        pull.restrict_to(Direction::PullOnly);
+        assert_eq!(pull.pull_create.len(), 1, "pull side kept");
+        assert!(pull.push_create.is_empty(), "push side dropped");
+
+        let mut push = build();
+        push.restrict_to(Direction::PushOnly);
+        assert!(push.pull_create.is_empty(), "pull side dropped");
+        assert_eq!(push.push_create.len(), 1, "push side kept");
     }
 
     #[test]

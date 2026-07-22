@@ -150,6 +150,7 @@ fn run(cx: &PluginContext, cli: Cli, format: OutputFormat) -> Result<(), CloveEr
         policy,
         !cli.no_comments,
         cli.dry_run,
+        clove_import::Direction::Both,
     )
     .map_err(sync_err)?;
 

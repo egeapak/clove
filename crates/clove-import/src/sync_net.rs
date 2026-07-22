@@ -34,8 +34,8 @@ use crate::github::net::{build_client, fetch_all, net_err, parse_repo_spec};
 use crate::github::{parse_gh_number, StagedIssue};
 use crate::map::build_external_ref_index;
 use crate::sync::{
-    body_hash, plan_comments, plan_sync, ConflictPolicy, GhComment, LocalComment, PullUpdate,
-    PushCreate, PushUpdate, SyncPlan, SyncReport, SyncState, SyncSummary,
+    body_hash, plan_comments, plan_sync, ConflictPolicy, Direction, GhComment, LocalComment,
+    PullUpdate, PushCreate, PushUpdate, SyncPlan, SyncReport, SyncState, SyncSummary,
 };
 
 /// The marker `source_system` value stamped on synced items.
@@ -53,6 +53,7 @@ pub fn sync_github(
     policy: ConflictPolicy,
     sync_comments: bool,
     dry_run: bool,
+    direction: Direction,
 ) -> Result<(SyncSummary, Option<SyncReport>), ImportError> {
     let (owner, repo) = parse_repo_spec(spec)?;
 
@@ -92,8 +93,12 @@ pub fn sync_github(
         fetch_all(&crab, &owner, &repo).await
     })?;
 
-    let plan: SyncPlan = plan_sync(&issues, &local, &state, policy)
+    let mut plan: SyncPlan = plan_sync(&issues, &local, &state, policy)
         .map_err(|message| ImportError::Record { message })?;
+    // Restrict the plan to the requested direction (§4.2): `import github` applies
+    // only pulls, `export github` only pushes, `sync github` both. Done before
+    // `summary()` so a directional `--dry-run` reports only its own side.
+    plan.restrict_to(direction);
     let summary = plan.summary();
 
     if dry_run {
@@ -116,7 +121,11 @@ pub fn sync_github(
         let crab = build_client()?;
         let outcome = apply_plan(&crab, &owner, &repo, plan, store, prefix, &mut state).await?;
         let mut report = outcome.report;
-        if sync_comments {
+        // Comment sync is inherently two-way and its per-issue fingerprints are
+        // coupled to the skip optimization, so it runs only for a full `Both`
+        // reconcile. A one-way `import`/`export github` syncs items only (documented
+        // in PLUGIN_SYSTEM.md §4.2); use `clove sync github` for comments.
+        if sync_comments && direction == Direction::Both {
             let (pulled, pushed) = sync_all_comments(
                 &crab,
                 &owner,

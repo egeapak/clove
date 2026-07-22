@@ -8,6 +8,7 @@
 //! importer reuses. See DESIGN.md §11.
 
 pub mod beads;
+pub mod beads_export;
 pub mod error;
 pub mod export;
 pub mod github;
@@ -28,6 +29,7 @@ use clove_core::ItemStore;
 use clove_types::{CloveId, ItemStatus, Priority};
 
 pub use beads::BeadsImporter;
+pub use beads_export::{build_beads_object, export_beads};
 pub use error::ImportError;
 pub use map::{build_external_ref_index, build_store_id_set, ExistingItem};
 pub use plan::{ConflictItem, ImportPlan, ImportReport, PlanItem, SkipItem};
@@ -36,7 +38,8 @@ pub use restore::{
     EXPORT_FORMAT_VERSION,
 };
 pub use sync::{
-    plan_sync, ConflictPolicy, SyncConflict, SyncPlan, SyncReport, SyncState, SyncSummary,
+    plan_sync, ConflictPolicy, Direction, SyncConflict, SyncPlan, SyncReport, SyncState,
+    SyncSummary,
 };
 pub use tk::TkImporter;
 
