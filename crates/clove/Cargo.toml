@@ -32,6 +32,7 @@ clove-types.workspace = true
 clove-core.workspace = true
 clove-index.workspace = true
 clove-import = { workspace = true, default-features = false }   # M2 import/export/merge-driver (pure file formats only; no github)
+clove-plugin.workspace = true    # single source of truth for CLOVE_PLUGIN_API (host↔plugin compat, PLUGIN_REGISTRY.md §2)
 clove-ipc.workspace = true       # M3: daemon liveness probe + QUERY routing
 clove-mcp = { workspace = true, optional = true }   # M4: `clove mcp` server (rmcp), behind the `mcp` feature
 clove-tui.workspace = true       # M4: `clove tui` terminal browser + add/edit form

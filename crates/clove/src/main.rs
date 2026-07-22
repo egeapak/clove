@@ -10,6 +10,7 @@ mod cmd;
 mod context;
 mod exit;
 mod item_json;
+mod mux_help;
 mod output;
 mod plugin;
 mod util;
@@ -25,6 +26,16 @@ use exit::ExitCode;
 use output::{emit_error, resolve_format};
 
 fn main() -> std::process::ExitCode {
+    // Intercept a bare `<mux> --help` (`import`/`export`/`sync`) before clap parses
+    // (PLUGIN_REGISTRY.md §6): its help trailer lists the installed provider
+    // plugins, which clap's compile-time `after_help` cannot. Every other argv is
+    // untouched and falls through to the normal parser below.
+    let argv: Vec<String> = std::env::args().collect();
+    if let Some(mux) = mux_help::detect(&argv) {
+        mux_help::render(mux);
+        return std::process::ExitCode::SUCCESS;
+    }
+
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(err) => {

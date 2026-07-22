@@ -24,7 +24,7 @@ mod run;
 
 pub use context::{PluginColor, PluginContext, PluginEnvError};
 pub use envelope::{emit_error, emit_success, emit_success_with_meta, ENVELOPE_VERSION};
-pub use run::{run, run_with_info, PluginArgs, PluginInfo};
+pub use run::{run, run_with_info, PluginArgs, PluginInfo, CLOVE_PLUGIN_API};
 
 // Re-exported so a plugin's closure signature can name them without adding
 // clove-core/clove-types to its own dependency list for the common case.

@@ -20,6 +20,13 @@ use crate::envelope::{emit_error, emit_success};
 /// a small JSON blob so `clove plugin list` can describe it without a full run.
 const INFO_FLAG: &str = "--clove-plugin-info";
 
+/// The host↔plugin contract version (`PLUGIN_REGISTRY.md` §2) — the single source
+/// of truth for the plugin API version, shared by the host (which threads it into
+/// `$CLOVE_PLUGIN_API` and compares it against a probed plugin's range) and every
+/// plugin (which advertises it via `--clove-plugin-info`). Bumped only on a
+/// breaking change to the env/argv/envelope contract; starts at `1`.
+pub const CLOVE_PLUGIN_API: u32 = 1;
+
 /// The forwarded tail args — everything after the cargo-style leading
 /// command/provider echo (`PLUGIN_SYSTEM.md` §6.1).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,13 +83,25 @@ impl PluginInfo {
         provides: &[],
     };
 
-    /// The `{ name, version, about, provides }` JSON blob emitted for the probe.
+    /// The JSON blob emitted for the `--clove-plugin-info` probe.
+    ///
+    /// The authored `{ name, version, about, provides }` keys, plus the compat
+    /// fields (`PLUGIN_REGISTRY.md` §2) auto-filled from compile-time constants so
+    /// a plugin never has to hand-write (or drift on) them: `clove_plugin_api` /
+    /// `min_clove_plugin_api` / `max_clove_plugin_api` all default to the
+    /// [`CLOVE_PLUGIN_API`] the plugin was built against (v1: exact match; a plugin
+    /// may widen the range in a later contract), and `max_schema` is the highest
+    /// on-disk item schema this build understands.
     fn to_json(self) -> serde_json::Value {
         json!({
             "name": self.name,
             "version": self.version,
             "about": self.about,
             "provides": self.provides,
+            "clove_plugin_api": CLOVE_PLUGIN_API,
+            "min_clove_plugin_api": CLOVE_PLUGIN_API,
+            "max_clove_plugin_api": CLOVE_PLUGIN_API,
+            "max_schema": clove_types::CURRENT_SCHEMA_VERSION,
         })
     }
 }
@@ -198,5 +217,11 @@ mod tests {
         assert_eq!(value["version"], "0.1.0");
         assert_eq!(value["about"], "Two-way GitHub sync");
         assert_eq!(value["provides"][0], "sync:github");
+        // The compat fields (§2) are auto-filled from compile-time constants —
+        // the plugin main never authors them.
+        assert_eq!(value["clove_plugin_api"], CLOVE_PLUGIN_API);
+        assert_eq!(value["min_clove_plugin_api"], CLOVE_PLUGIN_API);
+        assert_eq!(value["max_clove_plugin_api"], CLOVE_PLUGIN_API);
+        assert_eq!(value["max_schema"], clove_types::CURRENT_SCHEMA_VERSION);
     }
 }

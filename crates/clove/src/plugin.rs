@@ -25,9 +25,11 @@ use crate::cli::ColorChoice;
 use crate::context::Ctx;
 use crate::exit::ExitCode;
 
-/// The host↔plugin contract version (`$CLOVE_PLUGIN_API`, §6.2). Bumped only on a
-/// breaking change to the env/argv/envelope contract; starts at `1`.
-const PLUGIN_API_VERSION: u32 = 1;
+/// The host↔plugin contract version (`$CLOVE_PLUGIN_API`, §6.2). Single-sourced
+/// from `clove-plugin` so the host and every plugin can never drift: the same
+/// constant is threaded into the plugin's env here and advertised back by the
+/// plugin's `--clove-plugin-info`, and the enriched `plugin list` compares them.
+use clove_plugin::CLOVE_PLUGIN_API as PLUGIN_API_VERSION;
 
 /// The already-resolved global behavior flags the host threads into a plugin's
 /// environment (§6.2). These are the collapsed *effective* values (flag > env >
@@ -207,6 +209,244 @@ pub fn list() -> Vec<PluginInfo> {
     plugins
 }
 
+/// The metadata a plugin advertises via `--clove-plugin-info`
+/// (`PLUGIN_REGISTRY.md` §2/§3), as parsed by the host from its JSON reply.
+///
+/// The compat fields (`clove_plugin_api` / `min_clove_plugin_api` /
+/// `max_clove_plugin_api`) are auto-filled by the `clove-plugin` harness from the
+/// build's [`clove_plugin::CLOVE_PLUGIN_API`]; a legacy plugin that answers the
+/// probe but omits them is treated as declaring the host's own contract version
+/// (Phase 1 is entirely API v1), so it lists as compatible rather than unknown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbedInfo {
+    /// The plugin semver (`version`).
+    pub version: String,
+    /// The one-line description (`about`).
+    pub about: String,
+    /// The dispatch tokens the plugin provides, e.g. `["sync:github"]`.
+    pub provides: Vec<String>,
+    /// The contract version the plugin was built against.
+    pub clove_plugin_api: u32,
+    /// The lowest host contract version the plugin tolerates.
+    pub min_clove_plugin_api: u32,
+    /// The highest host contract version the plugin tolerates.
+    pub max_clove_plugin_api: u32,
+    /// The highest on-disk item schema the plugin understands.
+    pub max_schema: u32,
+}
+
+/// The host↔plugin compatibility verdict for the enriched `plugin list`
+/// (`PLUGIN_REGISTRY.md` §2). Computed by comparing the host's
+/// [`clove_plugin::CLOVE_PLUGIN_API`] to the plugin's advertised `[min, max]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginStatus {
+    /// `min ≤ host ≤ max` — compatible.
+    Ok,
+    /// `host > max` — the plugin predates this clove; it still runs, with a warning.
+    Outdated,
+    /// `host < min` — the plugin needs a newer clove; dispatch would refuse.
+    NeedsNewerClove,
+    /// The probe failed (spawn error, non-zero exit, unparseable, or timeout) —
+    /// a legacy/opaque plugin, still listed and run from the name heuristic.
+    NoInfo,
+}
+
+impl PluginStatus {
+    /// The wire spelling used in the JSON `status` field (§3).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PluginStatus::Ok => "ok",
+            PluginStatus::Outdated => "outdated",
+            PluginStatus::NeedsNewerClove => "needs_newer_clove",
+            PluginStatus::NoInfo => "no_info",
+        }
+    }
+
+    /// Classify a probed plugin's `[min, max]` range against the host contract.
+    fn classify(probed: &ProbedInfo) -> PluginStatus {
+        let host = PLUGIN_API_VERSION;
+        if host > probed.max_clove_plugin_api {
+            PluginStatus::Outdated
+        } else if host < probed.min_clove_plugin_api {
+            PluginStatus::NeedsNewerClove
+        } else {
+            PluginStatus::Ok
+        }
+    }
+}
+
+/// An installed plugin enriched with the result of its `--clove-plugin-info` probe
+/// (`PLUGIN_REGISTRY.md` §3): the resolvable [`PluginInfo`], the parsed metadata
+/// (when the probe answered), the compat [`PluginStatus`], and the human-readable
+/// `clove …` command(s) it provides.
+#[derive(Debug, Clone)]
+pub struct EnrichedPlugin {
+    /// The resolvable binary (name + path) from the pure `stat` walk.
+    pub info: PluginInfo,
+    /// The parsed `--clove-plugin-info` metadata, or `None` when the probe failed.
+    pub probed: Option<ProbedInfo>,
+    /// The host↔plugin compatibility verdict.
+    pub status: PluginStatus,
+    /// The `clove …` invocation(s) this plugin answers, e.g.
+    /// `["clove sync github"]` (from `provides`, or a name heuristic).
+    pub commands: Vec<String>,
+}
+
+/// How long the host waits for a plugin to answer `--clove-plugin-info` before
+/// giving up (killing the child and reporting `no_info`). Kept short so a hung or
+/// misbehaving plugin can never wedge `plugin list` / `<mux> --help`.
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The poll interval while waiting for the probe child to exit.
+const PROBE_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Probe a plugin binary for its `--clove-plugin-info` metadata (§3).
+///
+/// Spawns `<path> --clove-plugin-info`, captures stdout, and parses the JSON.
+/// Bounded by a dependency-free timeout: the child is polled with `try_wait()`
+/// and, if it has not exited within [`PROBE_TIMEOUT`], killed. Returns `None` on
+/// spawn error, non-zero exit, unparseable output, or timeout — every failure
+/// path collapses to "no metadata" so the caller lists the plugin from its name.
+pub fn probe_info(path: &Utf8Path) -> Option<ProbedInfo> {
+    use std::io::Read;
+    use std::process::Stdio;
+
+    let mut child = Command::new(path.as_std_path())
+        .arg("--clove-plugin-info")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+
+    let start = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if start.elapsed() >= PROBE_TIMEOUT {
+                    // Hung/slow plugin: kill it and give up (treat as no_info).
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(PROBE_POLL);
+            }
+            Err(_) => return None,
+        }
+    };
+
+    if !status.success() {
+        return None;
+    }
+
+    let mut stdout = String::new();
+    child.stdout.take()?.read_to_string(&mut stdout).ok()?;
+
+    parse_probe_json(&stdout)
+}
+
+/// Parse a plugin's `--clove-plugin-info` JSON into a [`ProbedInfo`] (§2).
+///
+/// A missing compat field defaults to the host contract version (a legacy plugin
+/// that answers the probe but predates §2 is treated as API-compatible in the
+/// all-v1 Phase 1). Split out from [`probe_info`] so it is unit-testable without
+/// spawning a process.
+fn parse_probe_json(stdout: &str) -> Option<ProbedInfo> {
+    let value: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
+
+    let version = value["version"].as_str().unwrap_or_default().to_owned();
+    let about = value["about"].as_str().unwrap_or_default().to_owned();
+    let provides = value["provides"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let api = value["clove_plugin_api"]
+        .as_u64()
+        .map(|v| v as u32)
+        .unwrap_or(PLUGIN_API_VERSION);
+    let min = value["min_clove_plugin_api"]
+        .as_u64()
+        .map(|v| v as u32)
+        .unwrap_or(api);
+    let max = value["max_clove_plugin_api"]
+        .as_u64()
+        .map(|v| v as u32)
+        .unwrap_or(api);
+    let max_schema = value["max_schema"]
+        .as_u64()
+        .map(|v| v as u32)
+        .unwrap_or(clove_types::CURRENT_SCHEMA_VERSION);
+
+    Some(ProbedInfo {
+        version,
+        about,
+        provides,
+        clove_plugin_api: api,
+        min_clove_plugin_api: min,
+        max_clove_plugin_api: max,
+        max_schema,
+    })
+}
+
+/// Enumerate installed plugins ([`list`]) and enrich each with its
+/// `--clove-plugin-info` probe (§3): the parsed metadata, the compat status, and
+/// the `clove …` command(s) it provides. Needs no repository.
+pub fn list_enriched() -> Vec<EnrichedPlugin> {
+    list()
+        .into_iter()
+        .map(|info| {
+            let probed = probe_info(&info.path);
+            let status = match &probed {
+                Some(p) => PluginStatus::classify(p),
+                None => PluginStatus::NoInfo,
+            };
+            let provides = probed
+                .as_ref()
+                .map(|p| p.provides.clone())
+                .unwrap_or_default();
+            let commands = run_as(&provides, &info.name);
+            EnrichedPlugin {
+                info,
+                probed,
+                status,
+                commands,
+            }
+        })
+        .collect()
+}
+
+/// Map a plugin's `provides` tokens to the `clove …` command line(s) that reach it
+/// (§3). A `"<mux>:<provider>"` token becomes `"clove <mux> <provider>"`. With no
+/// `provides` (a legacy plugin), fall back to the binary-name heuristic: a
+/// `sync-`/`import-`/`export-` prefix splits into `"clove <mux> <rest>"`, anything
+/// else is a generic `"clove <name>"`.
+pub fn run_as(provides: &[String], name: &str) -> Vec<String> {
+    if !provides.is_empty() {
+        return provides
+            .iter()
+            .map(|token| match token.split_once(':') {
+                Some((mux, provider)) => format!("clove {mux} {provider}"),
+                None => format!("clove {token}"),
+            })
+            .collect();
+    }
+
+    for mux in ["sync", "import", "export"] {
+        if let Some(rest) = name.strip_prefix(&format!("{mux}-")) {
+            if !rest.is_empty() {
+                return vec![format!("clove {mux} {rest}")];
+            }
+        }
+    }
+    vec![format!("clove {name}")]
+}
+
 /// The wire spelling of a [`ColorChoice`] (`$CLOVE_COLOR`, §6.2).
 fn color_wire(color: ColorChoice) -> &'static str {
     match color {
@@ -368,5 +608,114 @@ mod tests {
         assert_eq!(color_wire(ColorChoice::Never), "never");
         assert_eq!(bool_wire(true), "1");
         assert_eq!(bool_wire(false), "0");
+    }
+
+    #[test]
+    fn host_plugin_api_is_single_sourced_from_clove_plugin() {
+        // The host constant is the re-exported `clove-plugin` one, so the value
+        // the host threads into the env and compares against a probe can never
+        // drift from what a plugin advertises.
+        assert_eq!(PLUGIN_API_VERSION, clove_plugin::CLOVE_PLUGIN_API);
+    }
+
+    #[test]
+    fn run_as_maps_provides_tokens() {
+        assert_eq!(
+            run_as(&["sync:github".to_owned()], "sync-github"),
+            vec!["clove sync github"]
+        );
+        assert_eq!(
+            run_as(&["import:tk".to_owned()], "import-tk"),
+            vec!["clove import tk"]
+        );
+        // A bare token (no `:`) becomes `clove <token>`.
+        assert_eq!(run_as(&["echo".to_owned()], "echo"), vec!["clove echo"]);
+        // Multiple tokens → multiple command lines.
+        assert_eq!(
+            run_as(
+                &["sync:gitlab".to_owned(), "import:gitlab".to_owned()],
+                "gitlab"
+            ),
+            vec!["clove sync gitlab", "clove import gitlab"]
+        );
+    }
+
+    #[test]
+    fn run_as_falls_back_to_name_heuristic() {
+        // No `provides` → split a mux prefix off the binary name.
+        assert_eq!(run_as(&[], "sync-github"), vec!["clove sync github"]);
+        assert_eq!(run_as(&[], "import-tk"), vec!["clove import tk"]);
+        assert_eq!(run_as(&[], "export-csv"), vec!["clove export csv"]);
+        // A non-mux name is a generic subcommand.
+        assert_eq!(run_as(&[], "frobnicate"), vec!["clove frobnicate"]);
+    }
+
+    #[test]
+    fn parse_probe_json_reads_all_fields() {
+        let json = r#"{
+            "name":"clove-sync-github","version":"0.2.0",
+            "about":"Two-way GitHub sync","provides":["sync:github"],
+            "clove_plugin_api":1,"min_clove_plugin_api":1,"max_clove_plugin_api":1,
+            "max_schema":1
+        }"#;
+        let probed = parse_probe_json(json).expect("parses");
+        assert_eq!(probed.version, "0.2.0");
+        assert_eq!(probed.about, "Two-way GitHub sync");
+        assert_eq!(probed.provides, vec!["sync:github"]);
+        assert_eq!(probed.clove_plugin_api, 1);
+        assert_eq!(probed.min_clove_plugin_api, 1);
+        assert_eq!(probed.max_clove_plugin_api, 1);
+        assert_eq!(PluginStatus::classify(&probed), PluginStatus::Ok);
+    }
+
+    #[test]
+    fn parse_probe_json_defaults_missing_compat_to_host() {
+        // A legacy plugin that answers with only the original keys is treated as
+        // declaring the host contract version (all-v1 Phase 1) → ok, not no_info.
+        let json = r#"{"name":"clove-echo","version":"0.1.0","about":"x","provides":["echo"]}"#;
+        let probed = parse_probe_json(json).expect("parses");
+        assert_eq!(probed.min_clove_plugin_api, PLUGIN_API_VERSION);
+        assert_eq!(probed.max_clove_plugin_api, PLUGIN_API_VERSION);
+        assert_eq!(PluginStatus::classify(&probed), PluginStatus::Ok);
+    }
+
+    #[test]
+    fn parse_probe_json_rejects_garbage() {
+        assert!(parse_probe_json("not json").is_none());
+        assert!(parse_probe_json("").is_none());
+    }
+
+    #[test]
+    fn status_classification_matches_the_range_rule() {
+        let probe = |min, max| ProbedInfo {
+            version: String::new(),
+            about: String::new(),
+            provides: vec![],
+            clove_plugin_api: min,
+            min_clove_plugin_api: min,
+            max_clove_plugin_api: max,
+            max_schema: 1,
+        };
+        let host = PLUGIN_API_VERSION;
+        // min ≤ host ≤ max → ok.
+        assert_eq!(PluginStatus::classify(&probe(host, host)), PluginStatus::Ok);
+        // host > max → outdated.
+        assert_eq!(
+            PluginStatus::classify(&probe(host, host - 1)),
+            PluginStatus::Outdated
+        );
+        // host < min → needs newer clove.
+        assert_eq!(
+            PluginStatus::classify(&probe(host + 1, host + 1)),
+            PluginStatus::NeedsNewerClove
+        );
+    }
+
+    #[test]
+    fn status_wire_spellings() {
+        assert_eq!(PluginStatus::Ok.as_str(), "ok");
+        assert_eq!(PluginStatus::Outdated.as_str(), "outdated");
+        assert_eq!(PluginStatus::NeedsNewerClove.as_str(), "needs_newer_clove");
+        assert_eq!(PluginStatus::NoInfo.as_str(), "no_info");
     }
 }

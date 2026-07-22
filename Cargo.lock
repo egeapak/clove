@@ -577,6 +577,7 @@ dependencies = [
  "clove-index",
  "clove-ipc",
  "clove-mcp",
+ "clove-plugin",
  "clove-tui",
  "clove-types",
  "clove-web",
