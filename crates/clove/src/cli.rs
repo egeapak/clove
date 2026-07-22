@@ -91,15 +91,17 @@ pub enum Commands {
     Stats(StatsArgs),
     /// Rebuild the SQLite index from the files.
     Reindex,
-    /// Import items from a file-based tracker (`tk|beads`).
+    /// Import items from a clove export (`json|jsonl`) or a tracker plugin.
     #[command(after_help = "\
-There are no built-in import providers — every provider is an external \
-clove-import-<provider> plugin. tk (a .tickets/ dir) needs clove-import-tk \
-(cargo install clove-import-tk); beads (an issues.jsonl) needs \
-clove-import-beads.\n\
+Built-in providers: json, jsonl — clove's native restore, the inverse of \
+`clove export json|jsonl`. `import json|jsonl <file> [--dry-run] [--overwrite]` \
+restores items preserving their ids (an export → import round-trip is a \
+backup/restore). Any other provider is an external clove-import-<provider> \
+plugin: tk (a .tickets/ dir) needs clove-import-tk (cargo install \
+clove-import-tk); beads (an issues.jsonl) needs clove-import-beads.\n\
 Note: clove global flags (--format, --color, --quiet, …) must come BEFORE the \
 provider — everything after it is the provider's own arguments. \
-e.g. `clove import --format json tk .tickets --dry-run`.")]
+e.g. `clove import --format json json a.json --overwrite`.")]
     Import(ImportArgs),
     /// Export items to `json` or `jsonl`.
     #[command(after_help = "\
@@ -490,15 +492,16 @@ pub struct DoctorArgs {
 
 /// `clove import <provider> [args…]` (PLUGIN_SYSTEM.md §4.2).
 ///
-/// A pure router with **no** built-in providers (mirroring [`SyncArgs`]): every
-/// provider (`tk`, `beads`, …) resolves to a `clove-import-<provider>` plugin,
-/// with `rest` forwarded verbatim. Global flags (e.g. `--format`) must precede
-/// the provider token, since everything after it is captured raw for plugin
-/// forwarding.
+/// A router mirroring [`ExportArgs`]: the built-in native formats (`json`,
+/// `jsonl`, clove's own restore) parse `rest` themselves (see `cmd::import`), and
+/// any other provider (`tk`, `beads`, …) falls through to a
+/// `clove-import-<provider>` plugin, with `rest` forwarded verbatim. Global flags
+/// (e.g. `--format`) must precede the provider token, since everything after it
+/// is captured raw for plugin forwarding.
 #[derive(Debug, Args)]
 pub struct ImportArgs {
-    /// The source provider (a `clove-import-<provider>` plugin, e.g. `tk` or
-    /// `beads`).
+    /// The source provider (built-in `json`/`jsonl`, or a
+    /// `clove-import-<provider>` plugin, e.g. `tk` or `beads`).
     pub provider: String,
     /// Everything after the provider — the `<src>` and any provider flags
     /// (`--dry-run`) — forwarded to the plugin.
