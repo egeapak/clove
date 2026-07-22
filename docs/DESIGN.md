@@ -1310,12 +1310,14 @@ of the same repo and mint duplicate issues; a second concurrent sync fails clean
 
 ```
 clove export json         → single JSON envelope with all items
-clove export jsonl        → one item per line (NDJSON)
+clove export jsonl        → one item per line (NDJSON), clove's native item schema
 clove sync   github       → two-way GitHub reconcile (pull + push + comments, §11.3)
 ```
 
-JSONL export format is isomorphic with Beads' `.beads/issues.jsonl` format, enabling
-bidirectional migration scripts.
+Both `json` and `jsonl` export in clove's **native item schema** — the exact inverse
+of `import json`/`jsonl` (§11.5), for backup/restore and cross-repo copy. A
+Beads-native export (isomorphic with `.beads/issues.jsonl`) is the `beads` *plugin*
+(`clove export beads`), not this built-in.
 
 ### 11.5 Native round-trip (`import json`/`jsonl`) and format versioning
 

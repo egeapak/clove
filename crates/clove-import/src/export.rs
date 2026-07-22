@@ -57,8 +57,9 @@ fn with_export_provenance(mut meta: Value) -> Value {
 }
 
 /// Write `items` as NDJSON: one bare item object per line, each terminated by a
-/// single `\n` (including the final line). No envelope wrapper — this is the
-/// Beads-isomorphic `issues.jsonl` shape that `clove import beads` re-reads.
+/// single `\n` (including the final line). No envelope wrapper — this is clove's
+/// native item schema, the exact inverse of `clove import jsonl` (a Beads-native
+/// `issues.jsonl` is the separate `beads` plugin, not this built-in).
 ///
 /// An empty `items` slice writes nothing (zero lines).
 pub fn export_jsonl<W: Write>(writer: &mut W, items: &[Value]) -> io::Result<()> {

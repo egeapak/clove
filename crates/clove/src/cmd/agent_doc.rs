@@ -97,7 +97,9 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
 ## Interop (import / export / merge)\n\
 \n\
 - `clove export json` / `clove export jsonl [--out FILE]` — dump all items as a\n\
-  JSON envelope (`data` array) or one item per line (NDJSON, Beads-isomorphic).\n\
+  JSON envelope (`data` array) or one item per line (NDJSON), in clove's native\n\
+  item schema — the exact inverse of `import json|jsonl`. (A Beads-native export\n\
+  is the `beads` plugin, `clove export beads`, not this built-in.)\n\
 - `clove import json <file>` / `clove import jsonl <file> [--dry-run]\n\
   [--overwrite]` — built-in native restore, the inverse of `export json|jsonl`:\n\
   recreates items preserving their ids (existing ids skipped unless\n\

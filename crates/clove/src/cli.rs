@@ -550,7 +550,9 @@ pub struct SyncArgs {
 pub enum ExportFormat {
     /// A single JSON envelope with a `data` array of all items.
     Json,
-    /// One item per line (NDJSON), Beads-isomorphic.
+    /// One item per line (NDJSON) in clove's native item schema — the exact
+    /// inverse of `clove import jsonl`. (A Beads-*native* export is the `beads`
+    /// plugin, `clove export beads`, not this built-in.)
     Jsonl,
 }
 
