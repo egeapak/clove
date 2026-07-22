@@ -83,6 +83,15 @@ impl PluginInfo {
         provides: &[],
     };
 
+    /// True if this plugin advertises `capability` (a `"<mux>:<provider>"` or bare
+    /// `"<command>"` token) in its [`provides`](Self::provides) set. A
+    /// multi-capability plugin's `main` uses it (via [`unsupported_capability`]) to
+    /// reject a probe-free structural dispatch (`PLUGIN_SYSTEM.md` §4.2) for a
+    /// capability it does not implement.
+    pub fn provides_capability(&self, capability: &str) -> bool {
+        self.provides.contains(&capability)
+    }
+
     /// The JSON blob emitted for the `--clove-plugin-info` probe.
     ///
     /// The authored `{ name, version, about, provides }` keys, plus the compat
@@ -122,6 +131,24 @@ pub fn info_requested(info: &PluginInfo) -> bool {
         true
     } else {
         false
+    }
+}
+
+/// The standard clean-failure error for a multi-capability plugin handed a
+/// capability it does not implement (`PLUGIN_SYSTEM.md` §4.2).
+///
+/// Because the host dispatches umbrella-fallback binaries *structurally* — by name,
+/// probe-free, on the hot path — a binary reached via a fallback (e.g. an
+/// import-only `clove-import-beads` reached for `clove export beads` before it
+/// grew an exporter) must reject the request itself. Its `main` matches on
+/// [`PluginContext::command`] and, in the default arm, returns this error:
+/// `UnsupportedCapability` maps to exit 2 with a distinct `UNSUPPORTED_CAPABILITY`
+/// wire code, so the caller sees a clean, specific failure rather than a panic or a
+/// misleading success.
+pub fn unsupported_capability(info: &PluginInfo, cx: &PluginContext) -> CloveError {
+    CloveError::UnsupportedCapability {
+        plugin: info.name.to_owned(),
+        capability: cx.capability(),
     }
 }
 
@@ -220,6 +247,21 @@ mod tests {
         let argv = s(&["github", "egeapak/clove"]);
         let args = PluginArgs::from_argv(&argv, "sync", Some("github"));
         assert_eq!(args.args, s(&["github", "egeapak/clove"]));
+    }
+
+    #[test]
+    fn provides_capability_matches_the_token_set() {
+        let info = PluginInfo {
+            name: "clove-sync-github",
+            version: "0.1.0",
+            about: "Two-way GitHub sync",
+            provides: &["sync:github", "import:github", "export:github"],
+        };
+        assert!(info.provides_capability("import:github"));
+        assert!(info.provides_capability("export:github"));
+        assert!(info.provides_capability("sync:github"));
+        assert!(!info.provides_capability("import:beads"));
+        assert!(!info.provides_capability("sync"));
     }
 
     #[test]

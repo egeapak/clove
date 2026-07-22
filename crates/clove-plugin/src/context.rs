@@ -178,6 +178,18 @@ impl PluginContext {
         })
     }
 
+    /// The capability this dispatch reached the plugin for, as a `provides` token:
+    /// `"<command>:<provider>"` for a multiplexer plugin, or bare `"<command>"` for
+    /// a generic one. A multi-capability plugin compares this against its own
+    /// [`PluginInfo::provides`](crate::PluginInfo) set to decide whether it was
+    /// handed a capability it implements (`PLUGIN_SYSTEM.md` §4.2).
+    pub fn capability(&self) -> String {
+        match &self.provider {
+            Some(provider) => format!("{}:{}", self.command, provider),
+            None => self.command.clone(),
+        }
+    }
+
     /// Open the file store the fat-plugin way (§6.4A): `ItemStore::new(root)`.
     ///
     /// Keeps the plugin on the unified write path (mutating through
@@ -334,6 +346,18 @@ mod tests {
         assert!(cx.quiet);
         assert!(!cx.no_index);
         assert!(cx.deep);
+        clear_all();
+    }
+
+    #[test]
+    fn capability_token_reflects_command_and_provider() {
+        let _guard = env_lock();
+        install(FULL_ENV);
+        let cx = PluginContext::from_env().expect("full env should materialize");
+        assert_eq!(cx.capability(), "sync:github");
+        std::env::remove_var("CLOVE_PROVIDER");
+        let cx = PluginContext::from_env().expect("provider is optional");
+        assert_eq!(cx.capability(), "sync");
         clear_all();
     }
 

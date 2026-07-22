@@ -166,7 +166,13 @@ fn dispatch_multiplexer(
     ctx: &Ctx,
     globals: &plugin::PluginGlobals,
 ) -> Result<ExitCode, CloveError> {
-    match plugin::resolve(&[multiplexer, provider]) {
+    // Umbrella-fallback resolution (§4.2): a dedicated `clove-<mux>-<provider>`
+    // first, then a bidirectional `clove-sync-<provider>` (or cross-sibling) that
+    // serves this mux from one binary. The echo, `$CLOVE_COMMAND`, and
+    // `$CLOVE_PROVIDER` handed to the plugin are always the *requested* mux/provider
+    // (never the resolved binary's home mux), so the plugin branches on the
+    // capability the user asked for.
+    match plugin::resolve_mux(multiplexer, provider) {
         Some(path) => plugin::run_plugin(
             &path,
             rest,

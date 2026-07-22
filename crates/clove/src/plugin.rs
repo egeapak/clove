@@ -152,6 +152,38 @@ pub fn resolve(segments: &[&str]) -> Option<Utf8PathBuf> {
     None
 }
 
+/// The ordered umbrella candidate *home multiplexers* to try for a `<mux>
+/// <provider>` request (`PLUGIN_SYSTEM.md` §4.2). The dedicated home mux is always
+/// first, so an explicitly-installed `clove-<mux>-<provider>` wins; then the
+/// bidirectional `sync` umbrella (a sync plugin serves import/export from one
+/// binary); then the cross-sibling one-way binary, which may itself be
+/// multi-capability (e.g. `clove-import-beads` also providing `export:beads`).
+/// `sync` has no fallback — a one-way binary cannot serve a two-way reconcile.
+fn mux_candidates(mux: &str) -> &'static [&'static str] {
+    match mux {
+        "import" => &["import", "sync", "export"],
+        "export" => &["export", "sync", "import"],
+        "sync" => &["sync"],
+        _ => &[],
+    }
+}
+
+/// Resolve the plugin binary for `clove <mux> <provider>` (`PLUGIN_SYSTEM.md`
+/// §4.2), walking the umbrella candidates ([`mux_candidates`]) and returning the
+/// first existing executable. Purely structural — no `--clove-plugin-info` probe,
+/// no exec — so it stays on the same cheap `stat`-only hot path as [`resolve`].
+///
+/// The candidate order is load-bearing: because dispatch `exec`s the first
+/// *existing* binary (it cannot fall through to a later candidate once one is
+/// found), the order must put the most-correct binary first. A binary reached for
+/// a capability it does not implement is expected to reject the request itself
+/// (`clove_plugin::unsupported_capability`, exit 2).
+pub fn resolve_mux(mux: &str, provider: &str) -> Option<Utf8PathBuf> {
+    mux_candidates(mux)
+        .iter()
+        .find_map(|home| resolve(&[home, provider]))
+}
+
 /// Enumerate every resolvable `clove-<x>` plugin along the §5 search path.
 ///
 /// Files are matched on the `clove-<x>` name shape and executability, deduped by
@@ -613,6 +645,16 @@ mod tests {
         assert!(!is_valid_segment("a\\b"));
         // A traversal token never resolves to a path outside a search dir.
         assert_eq!(resolve(&["foo/../../bin/sh"]), None);
+    }
+
+    #[test]
+    fn mux_candidates_order_puts_dedicated_first_then_sync() {
+        // Dedicated home mux first (so an installed clove-<mux>-<p> wins), then the
+        // bidirectional sync umbrella, then the cross-sibling. `sync` never falls back.
+        assert_eq!(mux_candidates("import"), &["import", "sync", "export"]);
+        assert_eq!(mux_candidates("export"), &["export", "sync", "import"]);
+        assert_eq!(mux_candidates("sync"), &["sync"]);
+        assert_eq!(mux_candidates("bogus"), &[] as &[&str]);
     }
 
     #[test]

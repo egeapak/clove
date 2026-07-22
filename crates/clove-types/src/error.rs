@@ -137,6 +137,14 @@ pub enum CloveError {
     /// merge-driver) until each phase lands.
     #[error("not yet implemented: {feature}")]
     NotYetImplemented { feature: String },
+
+    /// A plugin binary was dispatched (structurally, probe-free — PLUGIN_SYSTEM.md
+    /// §4.2) for a capability it does not implement. Raised by a multi-capability
+    /// plugin's own `main` when it is handed a `<mux> <provider>` outside its
+    /// `provides` set (e.g. an import-only binary reached via the export
+    /// cross-sibling fallback). Maps to NotFound's exit code (2).
+    #[error("{plugin} does not provide `{capability}`")]
+    UnsupportedCapability { plugin: String, capability: String },
 }
 
 /// The stable string error code and numeric exit code for a [`CloveError`]
@@ -149,6 +157,9 @@ pub enum CloveError {
 pub fn error_code(error: &CloveError) -> (&'static str, u8) {
     match error {
         CloveError::NotFound { .. } => ("ITEM_NOT_FOUND", 2),
+        // A capability miss is a "not found" at the plugin boundary — same exit (2)
+        // as an unknown item, but a distinct wire code so tooling can tell them apart.
+        CloveError::UnsupportedCapability { .. } => ("UNSUPPORTED_CAPABILITY", 2),
 
         CloveError::IdConflict { .. } | CloveError::CommentConflict { .. } => ("ID_CONFLICT", 4),
         CloveError::InvalidId { .. } | CloveError::PathTraversal { .. } => ("INVALID_ID", 4),
