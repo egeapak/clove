@@ -6,8 +6,9 @@ create/edit request types), `clove-core` (file store/graph/high-level ops on top
 of `clove-types`), `clove-tui` (the terminal browser + add/edit form),
 `clove-web` (the web UI server + embedded SvelteKit SPA, `clove serve`),
 plus `clove` (CLI), `cloved`, `clove-index`, `clove-ipc`, `clove-import`,
-`clove-mcp`, `clove-plugin` (cargo-style subcommand-plugin support), and
-`clove-sync-github` (the installable GitHub-sync plugin).
+`clove-mcp`, `clove-plugin` (cargo-style subcommand-plugin support), the
+installable plugins `clove-sync-github` / `clove-import-tk` / `clove-import-beads`,
+and the `clove-plugin-echo` test fixture.
 
 ## Plugin system (cargo-style external subcommands)
 

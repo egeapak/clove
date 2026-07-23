@@ -91,50 +91,54 @@ pub fn detect(argv: &[String]) -> Option<&'static str> {
 }
 
 /// Render the dynamic `--help` for `mux` and print it to stdout
-/// (`PLUGIN_REGISTRY.md` §6). Rebuilds clap's help for that subcommand with a
-/// runtime `after_help` = [`render_provider_section`], so clap stays the single
-/// source for usage/args and only the provider trailer is dynamic.
+/// (`PLUGIN_REGISTRY.md` §6). Keeps clap as the single source for usage/args **and**
+/// the static prose trailer (`cli.rs` `after_help`: built-in providers, install
+/// hints, the globals-precede-provider note), and *appends* the one thing clap
+/// cannot know at compile time — the [`render_installed_section`] list of installed
+/// provider plugins. So `clove <mux> --help` is a strict superset of `clove help
+/// <mux>`: same prose, plus the live plugin list. (`clove help <mux>`, clap's own
+/// built-in, shows the static prose alone — it is never *wrong*, only missing the
+/// runtime list, which clap fundamentally cannot render.)
 pub fn render(mux: &str) {
-    let section = render_provider_section(mux);
-    let mut cmd = Cli::command().mut_subcommand(mux, move |c| c.after_help(section));
+    let base = Cli::command();
+    let static_after = base
+        .find_subcommand(mux)
+        .and_then(|sub| sub.get_after_help())
+        .map(|help| help.to_string())
+        .unwrap_or_default();
+    let installed = render_installed_section(mux);
+
+    let combined = match (static_after.trim().is_empty(), installed.is_empty()) {
+        (false, false) => format!("{static_after}\n\n{installed}"),
+        (false, true) => static_after,
+        (true, false) => installed,
+        (true, true) => String::new(),
+    };
+
+    let mut cmd = base.mut_subcommand(mux, move |c| c.after_help(combined));
     cmd.build();
     if let Some(sub) = cmd.find_subcommand_mut(mux) {
         let _ = sub.print_long_help();
     }
 }
 
-/// Build the dynamic provider trailer for `mux`'s help (`PLUGIN_REGISTRY.md` §6):
-/// the built-in providers, then an `Installed providers:` list, then the "globals
-/// precede the provider" note.
+/// Build the `Installed providers:` block for `mux`'s help — the dynamic complement
+/// to clap's static `after_help` prose (`PLUGIN_REGISTRY.md` §6). Returns `""` when
+/// no plugin serves `mux` (the caller then shows the static prose alone).
 ///
-/// Installed providers are bucketed by the **`<mux>:<provider>` capability token**
-/// each plugin advertises (`--clove-plugin-info`-probed), not by binary name — so a
-/// multi-capability binary like `clove-sync-github` (`provides: sync/import/export
-/// :github`) lists under all three of `import`/`export`/`sync --help` from one
-/// install (`PLUGIN_SYSTEM.md` §4.2). A legacy plugin that answers no probe falls
-/// back to its name (`clove-<mux>-<provider>` ⇒ it serves `<mux>:<provider>`), so
-/// it still lists under its home mux. When two binaries serve the same provider, a
+/// Providers are bucketed by the **`<mux>:<provider>` capability token** each plugin
+/// advertises (`--clove-plugin-info`-probed), unioned with the token its *name*
+/// implies — so a multi-capability binary like `clove-sync-github` (`provides:
+/// sync/import/export:github`) lists under all three of `import`/`export`/`sync
+/// --help` from one install (`PLUGIN_SYSTEM.md` §4.2), while a name-based
+/// `clove-<mux>-<provider>` still lists even with no probe (dispatch is name-based,
+/// so it is genuinely reachable). When two binaries serve the same provider, a
 /// dedicated `clove-<mux>-<provider>` is preferred in the row (it wins dispatch).
-fn render_provider_section(mux: &str) -> String {
+/// Rows are column-aligned on the provider name.
+fn render_installed_section(mux: &str) -> String {
     use std::collections::BTreeMap;
 
-    let mut out = String::new();
-
-    match mux {
-        "import" | "export" => {
-            out.push_str("Built-in providers:\n");
-            out.push_str(
-                "  json   clove's native restore/dump — a single JSON envelope of all items\n",
-            );
-            out.push_str("  jsonl  one item per line (NDJSON)\n");
-        }
-        "sync" => {
-            out.push_str("Built-in providers: none (every provider is a plugin)\n");
-        }
-        _ => {}
-    }
-
-    // provider → (row text, is-dedicated). Dedup by provider; a dedicated
+    // provider → (description, is-dedicated). Dedup by provider; a dedicated
     // `clove-<mux>-<provider>` binary's row replaces an umbrella binary's.
     let want = format!("{mux}:");
     let dedicated_name = |provider: &str| format!("{mux}-{provider}");
@@ -142,12 +146,8 @@ fn render_provider_section(mux: &str) -> String {
 
     for plugin in plugin::list_enriched() {
         // Capability tokens = the UNION of the probed `provides` and the token the
-        // binary's *name* implies. The name token is always included because
-        // dispatch is name-based (`resolve_mux` would route `<mux> <provider>` to a
-        // `clove-<mux>-<provider>` binary regardless of what it advertises), so it
-        // is genuinely reachable; the probed `provides` add the extra capabilities a
-        // multi-capability binary serves via the umbrella (e.g. clove-sync-github
-        // under import/export). A no-probe plugin contributes only its name token.
+        // binary's *name* implies (see the doc comment above for why the name token
+        // is always reachable). A no-probe plugin contributes only its name token.
         let mut tokens: Vec<String> = plugin
             .probed
             .as_ref()
@@ -168,30 +168,30 @@ fn render_provider_section(mux: &str) -> String {
                 Some(info) => format!("{binary} {} — {}", info.version, info.about),
                 None => format!("{binary} (no metadata)"),
             };
-            let row = format!("  {provider}  {descr}   (clove {mux} {provider})\n");
             let is_dedicated = plugin.info.name == dedicated_name(provider);
             rows.entry(provider.to_owned())
                 .and_modify(|existing| {
                     // A dedicated binary's row wins over an umbrella's.
                     if is_dedicated && !existing.1 {
-                        *existing = (row.clone(), true);
+                        *existing = (descr.clone(), true);
                     }
                 })
-                .or_insert((row, is_dedicated));
+                .or_insert((descr, is_dedicated));
         }
     }
 
-    if !rows.is_empty() {
-        out.push_str("\nInstalled providers:\n");
-        for (row, _) in rows.values() {
-            out.push_str(row);
-        }
+    if rows.is_empty() {
+        return String::new();
     }
 
-    out.push_str(
-        "\nNote: clove global flags (--format, --color, --quiet, …) must come BEFORE the \
-provider — everything after it is the provider's own arguments.",
-    );
+    // Align the `descr` column on the widest provider name for a clean table.
+    let width = rows.keys().map(|p| p.chars().count()).max().unwrap_or(0);
+    let mut out = String::from("Installed providers:\n");
+    for (provider, (descr, _)) in &rows {
+        out.push_str(&format!(
+            "  {provider:<width$}  {descr}   (clove {mux} {provider})\n"
+        ));
+    }
     out
 }
 

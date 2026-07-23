@@ -21,13 +21,15 @@
 //! | `relates` | `dependencies[{type:"related"}]` |
 //! | `duplicates` / `supersedes` | flat `duplicates` / `supersedes` arrays |
 //! | `external_ref` | `external_ref` (preserved verbatim → idempotent re-import) |
-//! | `source_system` | `source_system` |
+//! | `source_system` | `source_system` (emitted for `bd` compatibility; **not** read back — `import beads` re-stamps `"beads"`) |
 //! | `created` / `updated` / `closed` | same (informational; the importer re-stamps) |
 //!
 //! ## Round-trip
 //!
 //! `clove export beads > issues.jsonl` then `clove import beads issues.jsonl`
-//! reproduces every mapped field. `deps`/`parent`/`relates` ride beads' structured
+//! reproduces every mapped field *except the provenance stamps* (`source_system`
+//! and the timestamps, which `import beads` re-derives). `deps`/`parent`/`relates`
+//! ride beads' structured
 //! `dependencies[]` (so `bd` understands them); `duplicates`/`supersedes` — which
 //! have no beads-native edge kind — ride the top-level flat arrays the importer
 //! always reads, so they are not lost. `external_ref` is preserved verbatim, so a

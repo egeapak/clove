@@ -206,7 +206,10 @@ fn migrate_frontmatter_value(obj: &mut Value) -> Result<(), ImportError> {
     let schema = obj
         .get("schema")
         .and_then(Value::as_u64)
-        .map(|n| n as u32)
+        // Saturate rather than truncate: an out-of-range `schema` (a malformed or
+        // far-future export) must read as *newer* and be rejected, not wrap to a
+        // small value that slips past the gate (e.g. 2^32+1 truncating to 1).
+        .map(|n| u32::try_from(n).unwrap_or(u32::MAX))
         .unwrap_or(CURRENT_SCHEMA_VERSION);
 
     match schema.cmp(&CURRENT_SCHEMA_VERSION) {

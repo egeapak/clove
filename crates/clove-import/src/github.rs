@@ -1,7 +1,8 @@
 //! GitHub field mapping + `clove-meta` codec (T-M03, DESIGN.md §11.3).
 //!
-//! This module is the shared, mostly-pure GitHub layer used by the two-way sync
-//! ([`crate::sync`] / [`crate::sync_net`], the single GitHub path). It owns the
+//! This module is the shared, mostly-pure GitHub layer behind the single GitHub
+//! reconcile path ([`crate::sync`] / [`crate::sync_net`]) — the two-way `sync` and
+//! the directional `import` (pull-only) / `export` (push-only) views alike. It owns the
 //! `GitHubIssue ↔ clove` field mapping, the `<!-- clove-meta: {…} -->` codec that
 //! round-trips clove-only fields through an issue body, and the small octocrab
 //! client/fetch helpers in the [`net`] submodule.
@@ -337,6 +338,7 @@ pub fn parse_gh_number(external_ref: &str) -> Option<u64> {
 /// - body ← `body` with `<!-- clove-meta: {id,priority,type,deps} -->` appended
 /// - `labels` ← `labels`
 /// - `assignee` ← `assignee`
+/// - `closed` ← `status == "closed"` (drives the issue's open/closed state)
 /// - `gh_number` ← parsed from `external_ref` (`Some` → update, `None` → create)
 pub fn build_export_item(obj: &serde_json::Map<String, serde_json::Value>) -> ExportItem {
     let s = |k: &str| obj.get(k).and_then(|v| v.as_str()).map(str::to_owned);

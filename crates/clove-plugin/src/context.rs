@@ -362,6 +362,25 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_capability_maps_to_wire_code_and_exit_2() {
+        // Locks the contract every multiplexer main's guard arm relies on: a
+        // structurally-reached-but-unimplemented capability fails as exit 2 with the
+        // distinct `UNSUPPORTED_CAPABILITY` code (§7.2), not a panic or exit 4.
+        let _guard = env_lock();
+        install(FULL_ENV);
+        let cx = PluginContext::from_env().expect("full env should materialize");
+        let info = crate::PluginInfo {
+            name: "clove-import-tk",
+            version: "0.1.0",
+            about: "tk importer",
+            provides: &["import:tk"],
+        };
+        let err = crate::unsupported_capability(&info, &cx);
+        assert_eq!(clove_types::error_code(&err), ("UNSUPPORTED_CAPABILITY", 2));
+        clear_all();
+    }
+
+    #[test]
     fn optional_provider_absent_is_none() {
         let _guard = env_lock();
         install(FULL_ENV);

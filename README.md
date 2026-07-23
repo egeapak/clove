@@ -227,7 +227,8 @@ cd crates/clove-web/web && npm run check && npm run test   # svelte-check + vite
 |-----|------|
 | [`docs/DESIGN.md`](docs/DESIGN.md) | the authoritative, implementation-ready spec (read this first) |
 | [`docs/RELEASE.md`](docs/RELEASE.md) | the release runbook (crates.io + pre-built binaries) |
-| [`docs/PLUGIN_SYSTEM.md`](docs/PLUGIN_SYSTEM.md) | feasibility & design for distributing GitHub sync as a separable plugin |
+| [`docs/PLUGIN_SYSTEM.md`](docs/PLUGIN_SYSTEM.md) | the cargo-style plugin system: dispatch, discovery, and the host↔plugin contract |
+| [`docs/PLUGIN_REGISTRY.md`](docs/PLUGIN_REGISTRY.md) | plugin list/install/`--help` discovery and the registry manifest schema |
 | [`docs/json-schema/`](docs/json-schema/) | JSON Schemas for the stable `--format json` output |
 | [`CHANGELOG.md`](CHANGELOG.md) | release notes |
 

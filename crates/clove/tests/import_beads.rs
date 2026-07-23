@@ -554,8 +554,10 @@ fn export_beads_round_trips_native_shape() {
         v["data"]["id"].as_str().unwrap().to_owned()
     };
 
-    // Base chore + a bug that blocks-depends on it + a deferred-labelled feature.
+    // Base chore + a parent epic + a bug that blocks-depends on the base, is a
+    // child of the epic, and has an assignee + a deferred-labelled feature.
     let a = new_id(&["new", "Base", "--type", "chore", "--format", "json"]);
+    let p = new_id(&["new", "Parent epic", "--type", "epic", "--format", "json"]);
     let b = new_id(&[
         "new",
         "Blocked bug",
@@ -565,6 +567,10 @@ fn export_beads_round_trips_native_shape() {
         "1",
         "--dep",
         &a,
+        "--parent",
+        &p,
+        "--assignee",
+        "ege",
         "--label",
         "area:core",
         "--format",
@@ -592,7 +598,7 @@ fn export_beads_round_trips_native_shape() {
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
-    assert_eq!(lines.len(), 3, "one NDJSON line per item");
+    assert_eq!(lines.len(), 4, "one NDJSON line per item");
 
     // The output is beads-NATIVE: `issue_type`/`description` (not clove's `type`/`body`),
     // structured `dependencies[]`, and the deferred item carries `status:"deferred"`
@@ -600,12 +606,18 @@ fn export_beads_round_trips_native_shape() {
     let bug_line = lines.iter().find(|l| l["id"] == b).unwrap();
     assert_eq!(bug_line["issue_type"], "bug");
     assert_eq!(bug_line["description"], "");
+    assert_eq!(bug_line["assignee"], "ege", "assignee emitted");
     assert!(bug_line.get("type").is_none(), "beads-native has no `type`");
     let deps = bug_line["dependencies"].as_array().unwrap();
     assert!(
         deps.iter()
             .any(|d| d["id"] == a.as_str() && d["type"] == "blocks"),
         "structured blocks edge: {deps:?}"
+    );
+    assert!(
+        deps.iter()
+            .any(|d| d["id"] == p.as_str() && d["type"] == "parent-child"),
+        "structured parent-child edge: {deps:?}"
     );
     let deferred_line = lines.iter().find(|l| l["title"] == "Deferred one").unwrap();
     assert_eq!(
@@ -624,7 +636,7 @@ fn export_beads_round_trips_native_shape() {
         .args(["import", "beads", export_path.to_str().unwrap()])
         .assert()
         .success();
-    assert_eq!(item_file_count(dest.path()), 3);
+    assert_eq!(item_file_count(dest.path()), 4);
     let items = list_items(dest.path());
 
     let bug = show(
@@ -634,8 +646,10 @@ fn export_beads_round_trips_native_shape() {
     assert_eq!(bug["title"], "Blocked bug");
     assert_eq!(bug["type"], "bug");
     assert_eq!(bug["priority"], 1);
+    assert_eq!(bug["assignee"], "ege", "assignee round-trips");
     assert_eq!(bug["labels"], serde_json::json!(["area:core"]));
     assert_eq!(bug["deps"], serde_json::json!([a]), "blocks edge → deps");
+    assert_eq!(bug["parent"], p, "parent-child edge → parent");
 
     // The deferred inverse round-trips: status back to open + the `deferred` label.
     let deferred = find_by_beads_id(&items, &c);
@@ -646,4 +660,67 @@ fn export_beads_round_trips_native_shape() {
         "deferred status → open + label: {}",
         deferred["labels"]
     );
+}
+
+/// The remaining edge kinds — `related` and the flat `duplicates`/`supersedes`
+/// arrays (none creatable via the CLI) — survive `import beads → export beads →
+/// import beads`. This pins the `build_beads_object`↔`map_line` branches CLAUDE.md
+/// warns live in two lists: `related` rides the structured `dependencies[]`, while
+/// `duplicates`/`supersedes` (no beads-native edge) ride the top-level flat arrays
+/// the importer always reads. Ids are dangling (their targets aren't imported) but
+/// preserved verbatim through the codec.
+#[test]
+fn export_beads_preserves_relates_and_flat_edges() {
+    let src = init_repo();
+    // A beads item carrying a `related` + `parent-child` structured edge and flat
+    // `duplicates`/`supersedes` arrays. Targets reuse known-valid clove ids.
+    let fixture = src.path().join("in.jsonl");
+    std::fs::write(
+        &fixture,
+        r#"{"id":"bd-200","title":"Rich edges","issue_type":"task","status":"open","priority":2,"dependencies":[{"id":"proj-CCCC3333","type":"related"},{"id":"proj-EEEE5555","type":"parent-child"}],"duplicates":["proj-AAAA1111"],"supersedes":["proj-BBBB2222"]}
+"#,
+    )
+    .unwrap();
+    clove(src.path())
+        .args(["import", "beads", fixture.to_str().unwrap()])
+        .assert()
+        .success();
+
+    // Export beads and check the emitted NDJSON carries every edge kind.
+    let out_path = src.path().join("out.jsonl");
+    clove(src.path())
+        .args(["export", "beads", "--out", out_path.to_str().unwrap()])
+        .assert()
+        .success();
+    let line: Value =
+        serde_json::from_str(std::fs::read_to_string(&out_path).unwrap().trim()).unwrap();
+    let deps = line["dependencies"].as_array().unwrap();
+    assert!(
+        deps.iter()
+            .any(|d| d["id"] == "proj-CCCC3333" && d["type"] == "related"),
+        "related edge emitted: {deps:?}"
+    );
+    assert!(
+        deps.iter()
+            .any(|d| d["id"] == "proj-EEEE5555" && d["type"] == "parent-child"),
+        "parent-child edge emitted: {deps:?}"
+    );
+    assert_eq!(line["duplicates"], serde_json::json!(["proj-AAAA1111"]));
+    assert_eq!(line["supersedes"], serde_json::json!(["proj-BBBB2222"]));
+
+    // Re-import into a fresh repo; every edge reappears with its id intact.
+    let dest = init_repo();
+    clove(dest.path())
+        .args(["import", "beads", out_path.to_str().unwrap()])
+        .assert()
+        .success();
+    let items = list_items(dest.path());
+    let item = show(
+        dest.path(),
+        find_by_beads_id(&items, "bd-200")["id"].as_str().unwrap(),
+    );
+    assert_eq!(item["relates"], serde_json::json!(["proj-CCCC3333"]));
+    assert_eq!(item["parent"], "proj-EEEE5555");
+    assert_eq!(item["duplicates"], serde_json::json!(["proj-AAAA1111"]));
+    assert_eq!(item["supersedes"], serde_json::json!(["proj-BBBB2222"]));
 }

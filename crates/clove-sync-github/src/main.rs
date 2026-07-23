@@ -114,7 +114,24 @@ fn main() -> ExitCode {
         }
     };
 
-    // 3. Strip the cargo-style leading `sync github` echo (absent when invoked
+    // 3. Pick the reconcile direction from the capability the host dispatched us
+    //    for (§4.2): `sync` is two-way, `import` pulls, `export` pushes. Anything
+    //    else means a structural umbrella dispatch reached us for a capability we
+    //    do not implement — reject it with the standard exit-2 envelope *before*
+    //    parsing, so an unsupported dispatch fails as UNSUPPORTED_CAPABILITY rather
+    //    than a clap usage error over the (irrelevant) missing target. This mirrors
+    //    the guard-before-parse order in clove-import-{tk,beads}.
+    let direction = match cx.command.as_str() {
+        "sync" => clove_import::Direction::Both,
+        "import" => clove_import::Direction::PullOnly,
+        "export" => clove_import::Direction::PushOnly,
+        _ => {
+            let err = clove_plugin::unsupported_capability(&INFO, &cx);
+            return ExitCode::from(emit_error(cx.format, &err, cx.quiet));
+        }
+    };
+
+    // 4. Strip the cargo-style leading `sync github` echo (absent when invoked
     //    directly as `clove-sync-github OWNER/REPO`) then parse the tail.
     let tail = PluginArgs::from_argv(&argv, &cx.command, cx.provider.as_deref());
     let cli = match Cli::try_parse_from(&tail.args) {
@@ -128,23 +145,9 @@ fn main() -> ExitCode {
         }
     };
 
-    // 4. Pick the reconcile direction from the capability the host dispatched us
-    //    for (§4.2): `sync` is two-way, `import` pulls, `export` pushes. Anything
-    //    else means a structural umbrella dispatch reached us for a capability we
-    //    do not implement — reject it with the standard exit-2 envelope.
-    let format = cli.format.unwrap_or(cx.format);
-    let direction = match cx.command.as_str() {
-        "sync" => clove_import::Direction::Both,
-        "import" => clove_import::Direction::PullOnly,
-        "export" => clove_import::Direction::PushOnly,
-        _ => {
-            let err = clove_plugin::unsupported_capability(&INFO, &cx);
-            return ExitCode::from(emit_error(format, &err, cx.quiet));
-        }
-    };
-
     // 5. Run and render. A `--format` after the provider overrides the
     //    env-provided one (§6.3), for both success and error output.
+    let format = cli.format.unwrap_or(cx.format);
     match run(&cx, cli, format, direction) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => ExitCode::from(emit_error(format, &err, cx.quiet)),

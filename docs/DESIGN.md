@@ -739,6 +739,10 @@ clove import [--format json] <json|jsonl> <file> [--dry-run] [--overwrite]  # BU
 clove import [--format json] <beads|tk> <src> [--dry-run]   # tk/beads are clove-import-<p> plugins;
 clove export [--format json] <json|jsonl> [--out FILE]      # export json/jsonl are built-in; clove global flags precede the
                                                             # provider, provider-owned flags (<src>/--out/--dry-run) follow it
+clove export [--format json] beads [--out FILE]             # export beads → clove-import-beads plugin (inverse of import beads)
+clove sync   [--format json] github <owner/repo> [--dry-run]        # two-way; clove-sync-github plugin
+clove import [--format json] github <owner/repo> [--dry-run]        # pull-only view of the sync (same plugin)
+clove export [--format json] github <owner/repo> [--dry-run]        # push-only view of the sync (same plugin)
 clove agent-doc [--format markdown|json] [--out FILE]
 clove agent-doc --check [--file PATH]       # verify embedded doc vs binary
 clove migrate [--yes] [--dry-run]

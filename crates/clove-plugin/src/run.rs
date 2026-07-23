@@ -138,9 +138,9 @@ pub fn info_requested(info: &PluginInfo) -> bool {
 /// capability it does not implement (`PLUGIN_SYSTEM.md` §4.2).
 ///
 /// Because the host dispatches umbrella-fallback binaries *structurally* — by name,
-/// probe-free, on the hot path — a binary reached via a fallback (e.g. an
-/// import-only `clove-import-beads` reached for `clove export beads` before it
-/// grew an exporter) must reject the request itself. Its `main` matches on
+/// probe-free, on the hot path — a binary reached via a fallback (e.g. the
+/// import-only `clove-import-tk` reached for `clove export tk` via the cross-sibling
+/// candidate) must reject the request itself. Its `main` matches on
 /// [`PluginContext::command`] and, in the default arm, returns this error:
 /// `UnsupportedCapability` maps to exit 2 with a distinct `UNSUPPORTED_CAPABILITY`
 /// wire code, so the caller sees a clean, specific failure rather than a panic or a

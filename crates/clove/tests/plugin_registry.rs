@@ -113,6 +113,10 @@ fn import_help_lists_builtins_and_installed_providers() {
     // Built-in native formats.
     assert!(out.contains("json"), "json missing: {out}");
     assert!(out.contains("jsonl"), "jsonl missing: {out}");
+    // The static clap prose is preserved (not replaced) by the dynamic renderer:
+    // `clove <mux> --help` is a superset of `clove help <mux>`, so a static-only
+    // token like `--overwrite` still appears alongside the dynamic provider list.
+    assert!(out.contains("--overwrite"), "static prose dropped: {out}");
     // The installed provider line: provider name, the binary, and the run-as.
     assert!(
         out.contains("Installed providers:"),
@@ -138,8 +142,10 @@ fn sync_help_reports_no_builtin_providers() {
         .success();
     let out = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
 
+    // The static prose (clap `after_help`, now shown by the dynamic renderer too)
+    // states there are no built-in sync providers.
     assert!(
-        out.contains("none (every provider is a plugin)"),
+        out.contains("no built-in sync providers"),
         "sync builtin note missing: {out}"
     );
 }
