@@ -84,6 +84,51 @@ pub fn emit_error(format: OutputFormat, error: &CloveError, quiet: bool) -> Exit
     exit
 }
 
+/// Emit an "unknown subcommand" usage error (exit 1, PLUGIN_SYSTEM.md §4.1/§7):
+/// a bare `clove <x>` matched no built-in and no `clove-<x>` plugin resolved.
+///
+/// The message names the binary the host looked for and lists what *is*
+/// installed, so the fix (install the plugin) is obvious. JSON/JSONL emit the
+/// standard `{ ok:false, error }` envelope with a `UNKNOWN_SUBCOMMAND` code;
+/// human mode prints to stderr unless `quiet`. Returns [`ExitCode::Usage`].
+pub fn emit_unknown_subcommand(
+    format: OutputFormat,
+    subcommand: &str,
+    binary: &str,
+    installed: &[String],
+    quiet: bool,
+) -> ExitCode {
+    let mut message = format!(
+        "unknown subcommand `{subcommand}`: no built-in command and no plugin `{binary}` found on the search path"
+    );
+    if installed.is_empty() {
+        message.push_str(" (no plugins installed)");
+    } else {
+        message.push_str(&format!(" (installed plugins: {})", installed.join(", ")));
+    }
+
+    match format {
+        OutputFormat::Json | OutputFormat::Jsonl => {
+            let envelope = json!({
+                "v": ENVELOPE_VERSION,
+                "ok": false,
+                "error": {
+                    "code": "UNKNOWN_SUBCOMMAND",
+                    "message": message,
+                    "exit": ExitCode::Usage.code(),
+                },
+            });
+            println!("{envelope}");
+        }
+        OutputFormat::Human => {
+            if !quiet {
+                eprintln!("error: {message}");
+            }
+        }
+    }
+    ExitCode::Usage
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

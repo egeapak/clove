@@ -1,0 +1,30 @@
+# `clove-import-beads` — the Beads (`issues.jsonl`) importer, extracted as a
+# separately-installable cargo-style subcommand plugin (`PLUGIN_SYSTEM.md`
+# §4.2/§6). `clove import beads <src>` resolves this binary on the search path
+# and hands off. It is a `clove-plugin` consumer that reuses `clove-import`'s
+# pure `BeadsImporter` + planning layer (no `github` feature — beads is
+# file-only), so the core `clove` binary carries no importer-specific code.
+[package]
+name = "clove-import-beads"
+description = "clove plugin: import items from a Beads issues.jsonl (clove import beads)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = true
+
+[[bin]]
+name = "clove-import-beads"
+path = "src/main.rs"
+
+[dependencies]
+clove-plugin = { workspace = true, features = ["clap"] }
+clove-core.workspace = true
+clove-types.workspace = true
+# Pure file-format layer only (no `github` feature): the beads importer + render.
+clove-import = { workspace = true, default-features = false }
+clap.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+camino.workspace = true

@@ -1,0 +1,27 @@
+# The support crate every first-party clove plugin (and, in a later phase, the
+# host) depends on: it materializes the host↔plugin env contract (DESIGN
+# PLUGIN_SYSTEM.md §6.2/§6.5) into a typed `PluginContext` and renders the
+# standard `{ v, ok, data, _meta }` envelope + exit codes so a plugin `main` is a
+# thin wrapper around its provider logic.
+[package]
+name = "clove-plugin"
+description = "clove plugin support: typed PluginContext + envelope/exit-code harness for clove-* subcommand plugins"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+clove-types.workspace = true
+clove-core.workspace = true
+camino.workspace = true
+serde_json.workspace = true
+# Optional: only the `clap`-based plugin mains (almost all of them) enable this to
+# reuse the shared `clap_exit_code`/`parse_format` helpers. Gated so the contract
+# crate stays clap-free for a host or a hand-parsed plugin that does not need it.
+clap = { workspace = true, optional = true }
+
+[features]
+# Enables the shared clap helpers (`clove_plugin::{clap_exit_code, parse_format}`).
+clap = ["dep:clap"]

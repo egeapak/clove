@@ -91,11 +91,41 @@ pub enum Commands {
     Stats(StatsArgs),
     /// Rebuild the SQLite index from the files.
     Reindex,
-    /// Import items from a file-based tracker (`tk|beads`).
+    /// Import items from a clove export (`json|jsonl`) or a tracker plugin.
+    #[command(after_help = "\
+Built-in providers: json, jsonl — clove's native restore, the inverse of \
+`clove export json|jsonl`. `import json|jsonl <file> [--dry-run] [--overwrite]` \
+restores items preserving their ids (an export → import round-trip is a \
+backup/restore); existing ids are skipped unless --overwrite. Comments are not \
+part of a clove export, so they are not restored. Any other provider is an \
+external plugin: tk (a .tickets/ dir) needs clove-import-tk (cargo install \
+clove-import-tk); beads (an issues.jsonl) needs clove-import-beads. A bidirectional \
+plugin can also serve import: `import github` is served by clove-sync-github \
+(pull-only view of the two-way sync).\n\
+Note: clove global flags (--format, --color, --quiet, …) must come BEFORE the \
+provider — everything after it is the provider's own arguments. \
+e.g. `clove import --format json json a.json --overwrite`.")]
     Import(ImportArgs),
-    /// Export items to `json` or `jsonl`.
+    /// Export items to `json` or `jsonl` (or via a tracker plugin).
+    #[command(after_help = "\
+Built-in providers: json, jsonl (clove's native item schema). Any other provider \
+runs an external plugin — including a bidirectional one serving export: \
+`export beads` is served by clove-import-beads (a beads-native issues.jsonl) and \
+`export github` by clove-sync-github (push-only view of the two-way sync).\n\
+Note: clove global flags (--format, --color, --quiet, …) must come BEFORE the \
+provider — everything after it is the provider's own arguments. \
+e.g. `clove export --format json json --out items.json`.")]
     Export(ExportArgs),
     /// Two-way sync items with a tracker (`github`).
+    #[command(after_help = "\
+github requires the clove-sync-github plugin (cargo install clove-sync-github). \
+There are no built-in sync providers — every provider is an external \
+clove-sync-<provider> plugin. The same clove-sync-github binary also serves the \
+one-way `clove import github` (pull) and `clove export github` (push).\n\
+Form: clove sync [--format json] github <owner/repo> [--dry-run] [--prefer P] \
+[--no-comments].\n\
+Note: clove global flags (--format, --color, --quiet, …) must come BEFORE the \
+provider — everything after it is the provider's own arguments.")]
     Sync(SyncArgs),
     /// Git 3-way merge driver for item files (`clove merge-driver %O %A %B %L`).
     MergeDriver(MergeDriverArgs),
@@ -115,6 +145,28 @@ pub enum Commands {
     Serve(ServeArgs),
     /// Print version and schema information.
     Version,
+    /// Inspect installed subcommand plugins (`clove-*` on the search path).
+    Plugin(PluginArgs),
+    /// Run an external subcommand plugin (`clove-<name>` on the search path).
+    ///
+    /// This catch-all fires only when the leading token matches no built-in, so a
+    /// plugin can never shadow a real command (PLUGIN_SYSTEM.md §4.1). `argv[0]`
+    /// is the subcommand name; the rest is forwarded to the plugin verbatim.
+    #[command(external_subcommand)]
+    External(Vec<String>),
+}
+
+/// `clove plugin <list>` — inspect the installed subcommand plugins.
+#[derive(Debug, Args)]
+pub struct PluginArgs {
+    #[command(subcommand)]
+    pub action: PluginAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PluginAction {
+    /// List resolvable `clove-*` plugin binaries with their paths.
+    List,
 }
 
 /// `clove serve` (DESIGN web UI / M4). Starts an HTTP server that serves the
@@ -444,73 +496,57 @@ pub struct DoctorArgs {
     pub strict: bool,
 }
 
+/// `clove import <provider> [args…]` (PLUGIN_SYSTEM.md §4.2).
+///
+/// A router mirroring [`ExportArgs`]: the built-in native formats (`json`,
+/// `jsonl`, clove's own restore) parse `rest` themselves (see `cmd::import`), and
+/// any other provider (`tk`, `beads`, …) falls through to a
+/// `clove-import-<provider>` plugin, with `rest` forwarded verbatim. Global flags
+/// (e.g. `--format`) must precede the provider token, since everything after it
+/// is captured raw for plugin forwarding.
 #[derive(Debug, Args)]
 pub struct ImportArgs {
-    /// The source tracker to import from.
-    #[command(subcommand)]
-    pub source: ImportSource,
+    /// The source provider (built-in `json`/`jsonl`, or a
+    /// `clove-import-<provider>` plugin, e.g. `tk` or `beads`).
+    pub provider: String,
+    /// Everything after the provider — the `<src>` and any provider flags
+    /// (`--dry-run`) — forwarded to the plugin.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    pub rest: Vec<String>,
 }
 
-/// The import source kind plus its source path and shared flags.
+/// `clove export <provider> [args…]` (PLUGIN_SYSTEM.md §4.2).
 ///
-/// Each variant carries a `src` (a directory or file path) and a `--dry-run`
-/// flag (plan only, no writes). GitHub is handled by `clove sync github`.
-#[derive(Debug, Subcommand)]
-pub enum ImportSource {
-    /// Import a `tk` `.tickets/` directory (DESIGN §11.1).
-    Tk {
-        /// Path to the `.tickets/` directory.
-        src: Utf8PathBuf,
-        /// Plan only: report what would happen without writing any files.
-        #[arg(long)]
-        dry_run: bool,
-    },
-    /// Import a Beads `issues.jsonl` file (DESIGN §11.2).
-    Beads {
-        /// Path to the `issues.jsonl` file.
-        src: Utf8PathBuf,
-        /// Plan only: report what would happen without writing any files.
-        #[arg(long)]
-        dry_run: bool,
-    },
-}
-
+/// A pure router mirroring [`ImportArgs`]: the built-in formats (`json`, `jsonl`)
+/// parse `rest` themselves (see `cmd::export`), and any other provider falls
+/// through to a `clove-export-<provider>` plugin.
 #[derive(Debug, Args)]
 pub struct ExportArgs {
-    /// The export format.
-    #[arg(value_enum, value_name = "FORMAT")]
-    pub export_format: ExportFormat,
-    /// Write to a file instead of stdout.
-    #[arg(long, value_name = "FILE")]
-    pub out: Option<Utf8PathBuf>,
+    /// The export provider (built-in `json`/`jsonl`, or a
+    /// `clove-export-<provider>` plugin).
+    pub provider: String,
+    /// Everything after the provider: the built-in flags (`[--out FILE]`) or the
+    /// arguments forwarded to the plugin.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    pub rest: Vec<String>,
 }
 
-/// `clove sync <github> <owner/repo>` (T-M06). One reconciled pull+push pass.
+/// `clove sync <provider> [args…]` (PLUGIN_SYSTEM.md §4.2).
+///
+/// A pure router mirroring [`ImportArgs`]/[`ExportArgs`]: `sync` has **no**
+/// built-in providers — every provider (including `github`) resolves to a
+/// `clove-sync-<provider>` plugin, with `rest` forwarded verbatim. Global flags
+/// (e.g. `--format`) must precede the provider token, since everything after it
+/// is captured raw for plugin forwarding.
 #[derive(Debug, Args)]
 pub struct SyncArgs {
-    /// The tracker to sync with. Only `github` is supported today.
-    #[arg(value_enum, value_name = "TRACKER")]
-    pub tracker: SyncTracker,
-    /// The `owner/repo` to sync with.
-    #[arg(value_name = "OWNER/REPO")]
-    pub target: String,
-    /// Plan only: report what would happen on both sides without writing anything.
-    #[arg(long)]
-    pub dry_run: bool,
-    /// Conflict policy for issues changed on both sides since the last sync:
-    /// `newer` (default), `local`, `remote`, or `manual`.
-    #[arg(long, value_name = "POLICY")]
-    pub prefer: Option<String>,
-    /// Skip syncing issue comments (faster: avoids one API call per issue).
-    #[arg(long)]
-    pub no_comments: bool,
-}
-
-/// The tracker a `clove sync` targets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum SyncTracker {
-    /// GitHub Issues.
-    Github,
+    /// The provider to sync with (a `clove-sync-<provider>` plugin, e.g.
+    /// `github`).
+    pub provider: String,
+    /// Everything after the provider — the `owner/repo` and any provider flags
+    /// (`--dry-run`, `--prefer`, `--no-comments`) — forwarded to the plugin.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    pub rest: Vec<String>,
 }
 
 /// The `clove export` output format. GitHub is handled by `clove sync github`.
@@ -518,7 +554,9 @@ pub enum SyncTracker {
 pub enum ExportFormat {
     /// A single JSON envelope with a `data` array of all items.
     Json,
-    /// One item per line (NDJSON), Beads-isomorphic.
+    /// One item per line (NDJSON) in clove's native item schema — the exact
+    /// inverse of `clove import jsonl`. (A Beads-*native* export is the `beads`
+    /// plugin, `clove export beads`, not this built-in.)
     Jsonl,
 }
 

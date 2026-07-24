@@ -41,9 +41,9 @@ steps:
     image: *rust_image
     environment: *cargo_env
     commands:
-      # github/github-sync are now opt-out (see the feature notes below), so lint
-      # both arms: the full arm (--all-features) covers the GitHub code, and the
-      # default/lean arm is what `cargo install` / from-source builds produce.
+      # --all-features covers clove-import's `github` network layer (used by the
+      # clove-sync-github plugin); the default/lean arm is what `cargo install` /
+      # from-source builds produce. The plugin crate lints on both arms.
       - cargo clippy --workspace --all-targets --all-features -- -D warnings
       - cargo clippy --workspace --all-targets -- -D warnings
 
@@ -51,8 +51,9 @@ steps:
     image: *rust_image
     environment: *cargo_env
     commands:
-      # --all-features so the github-gated tests (sync_github mock server,
-      # clove-import mapping) still run now that `github` is opt-out.
+      # --all-features exercises clove-import's github mapping/network tests; the
+      # sync_github mock suite (in clove-cli) builds the clove-sync-github plugin
+      # via escargot and runs regardless, proving end-to-end plugin dispatch.
       - cargo test --workspace --all-features
 
   - name: bench-compile
@@ -61,31 +62,30 @@ steps:
     commands:
       - cargo bench --workspace --no-run
 
-  # FEATURE TRIMS: `github`/`github-sync` are opt-out (not in default) so the
-  # default build is lean; `full` re-enables them. Guard that both the default
-  # (lean CLI: mcp, no github; daemon: git-sync, no github-sync) and the leanest
-  # `--no-default-features` arm (no github/mcp; daemon no git-sync/github-sync)
-  # keep compiling — these are first-class shipping configs. cargo check is
-  # enough; the opt-out arms only need to resolve.
+  # FEATURE TRIMS: guard that both the default build (lean CLI: mcp; daemon:
+  # git-sync) and the leanest `--no-default-features` arm (CLI: no mcp; daemon: no
+  # git-sync/github-sync) keep compiling — these are first-class shipping configs.
+  # GitHub sync is no longer a feature of these crates; it is the separately-built
+  # clove-sync-github plugin. cargo check is enough; the opt-out arms only resolve.
   - name: feature-combos
     image: *rust_image
     environment: *cargo_env
     commands:
-      - cargo check -p clove-cli                       # default (lean: mcp, no github)
-      - cargo check -p clove-cli --no-default-features   # leanest (no github, no mcp)
-      - cargo check -p cloved                        # default (git-sync, no github-sync)
+      - cargo check -p clove-cli                       # default (lean: mcp)
+      - cargo check -p clove-cli --no-default-features   # leanest (no mcp)
+      - cargo check -p cloved                        # default (git-sync)
       - cargo check -p cloved --no-default-features   # leanest (no git-sync/github-sync)
 
   # Informational native (linux x86_64) size trend for the shipped binaries.
   # Release profile is fat LTO + cgu=1 + panic=abort + strip (root Cargo.toml).
-  # Build BOTH the default lean binary and the `--features full` binary so the
-  # GitHub-feature size cost is visible (this is the authoritative native number;
-  # cross-build.yml reports the darwin/windows-gnu cross-compiled sizes).
+  # Build the lean core AND the clove-sync-github plugin so the GitHub-sync size
+  # cost is visible — it now lives entirely in the plugin (this is the
+  # authoritative native number; cross-build.yml reports the cross sizes).
   - name: release-size
     image: *rust_image
     environment: *cargo_env
     commands:
       - cargo build --release -p clove-cli -p cloved
-      - echo "== lean (default) =="; ls -lh target/release/clove target/release/cloved
-      - cargo build --release -p clove-cli -p cloved --features "clove-cli/full cloved/full"
-      - echo "== full (--features full) =="; ls -lh target/release/clove target/release/cloved
+      - echo "== lean core =="; ls -lh target/release/clove target/release/cloved
+      - cargo build --release -p clove-sync-github
+      - echo "== clove-sync-github plugin =="; ls -lh target/release/clove-sync-github

@@ -6,7 +6,33 @@ create/edit request types), `clove-core` (file store/graph/high-level ops on top
 of `clove-types`), `clove-tui` (the terminal browser + add/edit form),
 `clove-web` (the web UI server + embedded SvelteKit SPA, `clove serve`),
 plus `clove` (CLI), `cloved`, `clove-index`, `clove-ipc`, `clove-import`,
-`clove-mcp`.
+`clove-mcp`, `clove-plugin` (cargo-style subcommand-plugin support), the
+installable plugins `clove-sync-github` / `clove-import-tk` / `clove-import-beads`,
+and the `clove-plugin-echo` test fixture.
+
+## Plugin system (cargo-style external subcommands)
+
+Integrations users may not want are **separately-installable binaries**, not
+compile-time features. `clove <x>` that matches no built-in resolves `clove-<x>`
+on the search path (current-exe dir → `$CLOVE_PLUGIN_PATH` → `$PATH`) and hands
+off, exactly like `cargo <x>` → `cargo-<x>`. The `sync`/`import`/`export`
+multiplexers extend this per-provider: `clove sync github` → `clove-sync-github`,
+`clove import tk` → `clove-import-tk`. `import` and `export` keep the pure native
+`json`/`jsonl` built-ins — inverse round-trip (`import json|jsonl` restores an
+`export json|jsonl`, preserving ids; the format is versioned via
+`_meta.clove_export` + per-item `schema` for migrations) — and fall through to a
+`clove-<mux>-<provider>` plugin only for a foreign provider (`tk`/`beads` are the
+`clove-import-tk`/`clove-import-beads` plugins). `sync` has **no** built-in
+providers (github is the `clove-sync-github` plugin). Global flags (`--format`,
+…) must precede the provider. The host↔plugin contract (the
+`CLOVE_*` env, the shared `{v,ok,data,_meta}` envelope, exit codes) lives in
+`clove-plugin`: a plugin `main` calls `PluginContext::from_env()` /
+`clove_plugin::run_with_info`, and the host writes the env from
+`clove/src/plugin.rs::export_env` (the two are pinned by
+`clove/tests/plugin_dispatch.rs`). See `docs/PLUGIN_SYSTEM.md` for the full spec.
+GitHub sync is the first plugin: `clove-sync-github` reuses
+`clove-import`'s `github`-feature reconciliation, so the core `clove`/`cloved`
+carry no octocrab.
 
 See `docs/DESIGN.md` for the authoritative, implementation-ready spec (the whole
 surface, including the web UI, is described there).

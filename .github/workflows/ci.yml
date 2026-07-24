@@ -27,15 +27,18 @@ jobs:
       - name: Format check
         run: cargo fmt --all --check
       - name: Clippy
-        # github/github-sync are now opt-out; lint both the full arm (--all-features,
-        # covers the GitHub code) and the default/lean arm (what `cargo install` builds).
+        # --all-features covers clove-import's `github` network layer (enabled by
+        # the clove-sync-github plugin); the second, default arm is the lean core
+        # that `cargo install clove-cli` builds. The clove-sync-github plugin crate
+        # is in the workspace, so both arms lint it too.
         run: |
           cargo clippy --workspace --all-targets --all-features -- -D warnings
           cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
-        # --all-features so the github-gated tests (sync_github mock, clove-import
-        # mapping) still run; plus a default/lean run so the lean-only tests (e.g.
-        # the `built without github support` error path) actually execute in CI.
+        # --all-features exercises clove-import's github mapping/network tests. The
+        # sync_github mock suite lives in clove-cli and builds the clove-sync-github
+        # plugin via escargot, so it runs on both arms (proving clove sync github
+        # dispatches to the plugin end-to-end).
         run: |
           cargo test --workspace --all-features
           cargo test -p clove-cli
@@ -126,12 +129,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # Default-on features (github, mcp, git-sync) are trimmed aggressively for
-      # binary size, and several deps now opt out of their own default features.
-      # The opt-out build paths are first-class shipping configs (a lean CLI with
-      # no GitHub/MCP, a daemon with no vendored libgit2), so guard that they keep
-      # compiling — the `--no-default-features` arms must still resolve cleanly.
-      - name: clove without github + mcp (lean CLI)
+      # Default-on features (mcp, git-sync) are trimmed aggressively for binary
+      # size, and several deps now opt out of their own default features. The
+      # opt-out build paths are first-class shipping configs (a lean CLI with no
+      # MCP, a daemon with no vendored libgit2), so guard that they keep compiling
+      # — the `--no-default-features` arms must still resolve cleanly. (GitHub sync
+      # is no longer a feature of these crates; it is the clove-sync-github plugin.)
+      - name: clove without mcp (lean CLI)
         run: cargo check -p clove-cli --no-default-features
       - name: cloved without git-sync
         run: cargo check -p cloved --no-default-features
@@ -140,13 +144,14 @@ jobs:
       # forces the test/bench harness back to unwind, so `cargo test --release`
       # and `cargo bench --no-run` are unaffected by panic=abort.
       - name: Release binary size
-        # Build BOTH the default lean binary and the `--features full` binary so the
-        # GitHub-feature size cost is visible (github/github-sync are opt-out).
+        # Build the lean core AND the clove-sync-github plugin so the GitHub-sync
+        # size cost is visible — it now lives entirely in the separately-installed
+        # plugin, not in `clove`/`cloved`.
         run: |
           cargo build --release -p clove-cli -p cloved
-          echo "== lean (default) =="; ls -l target/release/clove target/release/cloved
-          cargo build --release -p clove-cli -p cloved --features "clove-cli/full cloved/full"
-          echo "== full (--features full) =="; ls -l target/release/clove target/release/cloved
+          echo "== lean core =="; ls -l target/release/clove target/release/cloved
+          cargo build --release -p clove-sync-github
+          echo "== clove-sync-github plugin =="; ls -l target/release/clove-sync-github
 
   deny:
     name: cargo-deny

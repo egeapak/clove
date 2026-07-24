@@ -10,7 +10,9 @@ mod cmd;
 mod context;
 mod exit;
 mod item_json;
+mod mux_help;
 mod output;
+mod plugin;
 mod util;
 
 use clap::error::ErrorKind;
@@ -24,6 +26,16 @@ use exit::ExitCode;
 use output::{emit_error, resolve_format};
 
 fn main() -> std::process::ExitCode {
+    // Intercept a bare `<mux> --help` (`import`/`export`/`sync`) before clap parses
+    // (PLUGIN_REGISTRY.md §6): its help trailer lists the installed provider
+    // plugins, which clap's compile-time `after_help` cannot. Every other argv is
+    // untouched and falls through to the normal parser below.
+    let argv: Vec<String> = std::env::args().collect();
+    if let Some(mux) = mux_help::detect(&argv) {
+        mux_help::render(mux);
+        return std::process::ExitCode::SUCCESS;
+    }
+
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(err) => {
@@ -54,6 +66,7 @@ fn dispatch(cli: Cli) -> (OutputFormat, Result<ExitCode, CloveError>) {
     let no_index = cli.no_index;
     let deep = cli.deep;
     let quiet = cli.quiet;
+    let color = cli.color;
     let clove_dir = cli.clove_dir.clone();
 
     match cli.command {
@@ -108,6 +121,25 @@ fn dispatch(cli: Cli) -> (OutputFormat, Result<ExitCode, CloveError>) {
                 cmd::mcp::run(clove_dir.as_deref()).map(|_| ExitCode::Success),
             )
         }
+        // `plugin list` is a pure `stat` walk of the search path; it needs no
+        // repository (so `clove plugin list` works before `clove init`).
+        Commands::Plugin(_) => {
+            let f = resolve_format(flag, None);
+            (f, cmd::plugin::run(f).map(|_| ExitCode::Success))
+        }
+        // An external plugin (`clove-<name>`). Resolution runs *before* discovery:
+        // an unknown subcommand is a usage error (exit 1) that needs no repo, so
+        // `clove frobnicate` outside a repo still exits 1 rather than NoRepo. Only
+        // a plugin that actually resolves requires the repo context it will run in.
+        Commands::External(argv) => dispatch_external(
+            flag,
+            no_index,
+            deep,
+            quiet,
+            color,
+            clove_dir.as_deref(),
+            argv,
+        ),
         // Everything else operates on a discovered repository.
         command => {
             let ctx = match discover(clove_dir.as_deref()) {
@@ -115,9 +147,104 @@ fn dispatch(cli: Cli) -> (OutputFormat, Result<ExitCode, CloveError>) {
                 Err(e) => return (resolve_format(flag, None), Err(e)),
             };
             let f = resolve_format(flag, Some(ctx.config.default_format));
-            (f, run_repo(command, &ctx, f, no_index, deep, quiet))
+            (f, run_repo(command, &ctx, f, no_index, deep, quiet, color))
         }
     }
+}
+
+/// Route a multiplexer subcommand (`import`/`export`/`sync`) whose provider is
+/// not a built-in to a `clove-<multiplexer>-<provider>` plugin (PLUGIN_SYSTEM.md
+/// §4.2). `sync` has no built-in providers, so every `clove sync` reaches here.
+///
+/// A resolved plugin is exec'd with `rest` forwarded and the provider threaded
+/// into `$CLOVE_PROVIDER` (§6.2); a miss is a validation error (exit 4) scoped to
+/// the multiplexer — never a fall-back to a generic `clove-<provider>` (§4.3).
+fn dispatch_multiplexer(
+    multiplexer: &str,
+    provider: &str,
+    rest: &[String],
+    ctx: &Ctx,
+    globals: &plugin::PluginGlobals,
+) -> Result<ExitCode, CloveError> {
+    // Umbrella-fallback resolution (§4.2): a dedicated `clove-<mux>-<provider>`
+    // first, then a bidirectional `clove-sync-<provider>` (or cross-sibling) that
+    // serves this mux from one binary. The echo, `$CLOVE_COMMAND`, and
+    // `$CLOVE_PROVIDER` handed to the plugin are always the *requested* mux/provider
+    // (never the resolved binary's home mux), so the plugin branches on the
+    // capability the user asked for.
+    match plugin::resolve_mux(multiplexer, provider) {
+        Some(path) => plugin::run_plugin(
+            &path,
+            rest,
+            &[multiplexer, provider],
+            ctx,
+            globals,
+            multiplexer,
+            Some(provider),
+        ),
+        None => Err(CloveError::InvalidField {
+            field: "provider".to_owned(),
+            reason: format!(
+                "unknown {multiplexer} provider `{provider}`; install clove-{multiplexer}-{provider}"
+            ),
+        }),
+    }
+}
+
+/// Dispatch a `Commands::External(argv)` plugin invocation (PLUGIN_SYSTEM.md
+/// §4.1). `argv[0]` is the subcommand name.
+///
+/// Resolution comes first: a `clove-<name>` that resolves nowhere is a usage
+/// error (exit 1) — named binary + installed-plugin list — and needs no
+/// repository. Only a plugin that *does* resolve requires the repo context (it
+/// reads/writes the store via `CLOVE_DIR` …), so discovery runs on the hit path
+/// and a missing `.clove/` surfaces as the standard `NoRepo` error there.
+fn dispatch_external(
+    flag: Option<OutputFormat>,
+    no_index: bool,
+    deep: bool,
+    quiet: bool,
+    color: cli::ColorChoice,
+    clove_dir: Option<&camino::Utf8Path>,
+    argv: Vec<String>,
+) -> (OutputFormat, Result<ExitCode, CloveError>) {
+    let Some(name) = argv.first().cloned() else {
+        // `external_subcommand` always yields at least the subcommand token, so
+        // this is unreachable in practice; treat an empty argv as a usage error.
+        let f = resolve_format(flag, None);
+        return (
+            f,
+            Ok(output::emit_unknown_subcommand(f, "", "clove-", &[], quiet)),
+        );
+    };
+
+    let Some(path) = plugin::resolve(&[name.as_str()]) else {
+        let f = resolve_format(flag, None);
+        let installed: Vec<String> = plugin::list().into_iter().map(|p| p.name).collect();
+        let binary = format!("clove-{name}{}", std::env::consts::EXE_SUFFIX);
+        return (
+            f,
+            Ok(output::emit_unknown_subcommand(
+                f, &name, &binary, &installed, quiet,
+            )),
+        );
+    };
+
+    let ctx = match discover(clove_dir) {
+        Ok(ctx) => ctx,
+        Err(e) => return (resolve_format(flag, None), Err(e)),
+    };
+    let f = resolve_format(flag, Some(ctx.config.default_format));
+    let globals = plugin::PluginGlobals {
+        format: f,
+        color,
+        quiet,
+        no_index,
+        deep,
+    };
+    let rest = argv[1..].to_vec();
+    let result = plugin::run_plugin(&path, &rest, &[name.as_str()], &ctx, &globals, &name, None);
+    (f, result)
 }
 
 fn run_repo(
@@ -127,6 +254,7 @@ fn run_repo(
     no_index: bool,
     deep: bool,
     quiet: bool,
+    color: cli::ColorChoice,
 ) -> Result<ExitCode, CloveError> {
     let ok = ExitCode::Success;
     match command {
@@ -161,15 +289,62 @@ fn run_repo(
         Commands::Daemon(a) => cmd::daemon::run(ctx, f, a.action),
         Commands::Tui => cmd::tui::run(ctx, f).map(|_| ok),
         Commands::Serve(a) => cmd::serve::run(ctx, a, quiet).map(|_| ok),
-        Commands::Import(a) => cmd::import::run(ctx, f, a).map(|_| ok),
-        Commands::Export(a) => cmd::export::run(ctx, f, a).map(|_| ok),
-        Commands::Sync(a) => cmd::sync::run(ctx, f, a).map(|_| ok),
-        // Non-repo commands are dispatched earlier.
+        // `import` mirrors `export`: the built-in native formats (`json`/`jsonl`,
+        // clove's own restore) parse their own `rest`; any other provider
+        // (`tk`, `beads`, …) falls through to a `clove-import-<provider>` plugin
+        // (PLUGIN_SYSTEM.md §4.2).
+        Commands::Import(a) => {
+            if cmd::import::is_builtin(&a.provider) {
+                cmd::import::run(ctx, f, a)
+            } else {
+                let globals = plugin::PluginGlobals {
+                    format: f,
+                    color,
+                    quiet,
+                    no_index,
+                    deep,
+                };
+                dispatch_multiplexer("import", &a.provider, &a.rest, ctx, &globals)
+            }
+        }
+        // `export` is a pure router: the built-in file formats (`json`/`jsonl`)
+        // parse their own `rest`; any other provider falls through to a
+        // `clove-export-<provider>` plugin (PLUGIN_SYSTEM.md §4.2).
+        Commands::Export(a) => {
+            if cmd::export::is_builtin(&a.provider) {
+                cmd::export::run(ctx, f, a)
+            } else {
+                let globals = plugin::PluginGlobals {
+                    format: f,
+                    color,
+                    quiet,
+                    no_index,
+                    deep,
+                };
+                dispatch_multiplexer("export", &a.provider, &a.rest, ctx, &globals)
+            }
+        }
+        // `sync` is a pure router with no built-in providers: every provider
+        // (including `github`) falls through to a `clove-sync-<provider>` plugin
+        // (PLUGIN_SYSTEM.md §4.2).
+        Commands::Sync(a) => {
+            let globals = plugin::PluginGlobals {
+                format: f,
+                color,
+                quiet,
+                no_index,
+                deep,
+            };
+            dispatch_multiplexer("sync", &a.provider, &a.rest, ctx, &globals)
+        }
+        // Non-repo commands and external plugins are dispatched earlier.
         Commands::Version
         | Commands::Init(_)
         | Commands::AgentDoc(_)
         | Commands::Setup(_)
         | Commands::MergeDriver(_)
+        | Commands::Plugin(_)
+        | Commands::External(_)
         | Commands::Mcp => Ok(ok),
     }
 }

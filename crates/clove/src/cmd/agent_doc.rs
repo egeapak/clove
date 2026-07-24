@@ -96,14 +96,24 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
 \n\
 ## Interop (import / export / merge)\n\
 \n\
-- `clove import tk <.tickets-dir> [--dry-run]` — import tk tickets.\n\
-- `clove import beads <issues.jsonl> [--dry-run]` — import a Beads JSONL export.\n\
 - `clove export json` / `clove export jsonl [--out FILE]` — dump all items as a\n\
-  JSON envelope (`data` array) or one item per line (NDJSON, Beads-isomorphic).\n\
+  JSON envelope (`data` array) or one item per line (NDJSON), in clove's native\n\
+  item schema — the exact inverse of `import json|jsonl`. (A Beads-native export\n\
+  is the `beads` plugin, `clove export beads`, not this built-in.)\n\
+- `clove import json <file>` / `clove import jsonl <file> [--dry-run]\n\
+  [--overwrite]` — built-in native restore, the inverse of `export json|jsonl`:\n\
+  recreates items preserving their ids (existing ids skipped unless\n\
+  `--overwrite`). A full `export → import` round-trip.\n\
+- `clove import tk <.tickets-dir> [--dry-run]` — import tk tickets (needs the\n\
+  `clove-import-tk` plugin; `cargo install clove-import-tk`).\n\
+- `clove import beads <issues.jsonl> [--dry-run]` — import a Beads JSONL export\n\
+  (needs the `clove-import-beads` plugin).\n\
 - `clove sync github <owner/repo> [--dry-run] [--prefer P] [--no-comments]` —\n\
   two-way GitHub sync (pull + push + comments in one pass; conflict policy\n\
-  `newer|local|remote|manual`). Needs the `github` build feature + a token via\n\
-  `GITHUB_TOKEN` or `gh auth token`. The single GitHub path (replaces the old\n\
+  `newer|local|remote|manual`). Needs the `clove-sync-github` plugin\n\
+  (`cargo install clove-sync-github`) + a token via `GITHUB_TOKEN` or\n\
+  `gh auth token`; without the plugin it exits 4 with an install hint. The\n\
+  single GitHub path (replaces the old\n\
   one-way `import github` / `export github`).\n\
 - File imports are idempotent on `external_ref`: re-running skips already-imported\n\
   items. `--dry-run` reports `{{ would_create, would_skip, conflicts }}` and\n\

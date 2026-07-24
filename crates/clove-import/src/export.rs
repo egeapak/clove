@@ -26,6 +26,7 @@ const ENVELOPE_VERSION: u32 = 1;
 /// calls with the same `items` produce byte-identical output. A single trailing
 /// newline is written after the envelope.
 pub fn export_json<W: Write>(writer: &mut W, items: &[Value], meta: Value) -> io::Result<()> {
+    let meta = with_export_provenance(meta);
     let envelope = json!({
         "v": ENVELOPE_VERSION,
         "ok": true,
@@ -36,9 +37,29 @@ pub fn export_json<W: Write>(writer: &mut W, items: &[Value], meta: Value) -> io
     writer.write_all(b"\n")
 }
 
+/// Stamp export provenance into the caller-supplied `_meta` object so a later
+/// `import json` can version-check the container (see [`crate::restore`]):
+/// `_meta.clove_export = { "format": EXPORT_FORMAT_VERSION, "item_schema":
+/// CURRENT_SCHEMA_VERSION }`. Caller keys (e.g. `source`, `warnings`) are
+/// preserved; a non-object `meta` is passed through untouched (defensive — every
+/// caller supplies an object).
+fn with_export_provenance(mut meta: Value) -> Value {
+    if let Value::Object(map) = &mut meta {
+        map.insert(
+            "clove_export".to_owned(),
+            json!({
+                "format": crate::restore::EXPORT_FORMAT_VERSION,
+                "item_schema": clove_types::CURRENT_SCHEMA_VERSION,
+            }),
+        );
+    }
+    meta
+}
+
 /// Write `items` as NDJSON: one bare item object per line, each terminated by a
-/// single `\n` (including the final line). No envelope wrapper — this is the
-/// Beads-isomorphic `issues.jsonl` shape that `clove import beads` re-reads.
+/// single `\n` (including the final line). No envelope wrapper — this is clove's
+/// native item schema, the exact inverse of `clove import jsonl` (a Beads-native
+/// `issues.jsonl` is the separate `beads` plugin, not this built-in).
 ///
 /// An empty `items` slice writes nothing (zero lines).
 pub fn export_jsonl<W: Write>(writer: &mut W, items: &[Value]) -> io::Result<()> {
@@ -70,6 +91,30 @@ mod tests {
         assert_eq!(v["ok"], true);
         assert_eq!(v["v"], 1);
         assert_eq!(v["data"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn json_meta_carries_export_provenance_and_preserves_caller_keys() {
+        let mut buf = Vec::new();
+        export_json(
+            &mut buf,
+            &items(),
+            json!({ "warnings": [], "source": "file" }),
+        )
+        .unwrap();
+        let v: Value = serde_json::from_slice(&buf).unwrap();
+        // Provenance injected for the restore version gate.
+        assert_eq!(
+            v["_meta"]["clove_export"]["format"],
+            json!(crate::restore::EXPORT_FORMAT_VERSION)
+        );
+        assert_eq!(
+            v["_meta"]["clove_export"]["item_schema"],
+            json!(clove_types::CURRENT_SCHEMA_VERSION)
+        );
+        // Caller-supplied keys survive the merge.
+        assert_eq!(v["_meta"]["source"], "file");
+        assert_eq!(v["_meta"]["warnings"], json!([]));
     }
 
     #[test]

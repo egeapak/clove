@@ -42,6 +42,17 @@ pub struct NewItem {
     pub body: String,
 }
 
+/// The outcome of a single [`ItemStore::restore_item`] call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoreOutcome {
+    /// The id did not exist on disk; the item file was written.
+    Created,
+    /// The id already existed and `overwrite` was false; nothing was written.
+    Skipped,
+    /// The id already existed and `overwrite` was true; the file was replaced.
+    Overwritten,
+}
+
 /// A per-file failure encountered while scanning the store.
 #[derive(Debug, Error)]
 pub enum ScanError {
@@ -208,6 +219,57 @@ impl ItemStore {
         ensure_valid(&item.frontmatter, &self.path_for(&id))?;
         write_item_file(&item, &self.path_for(&id))?;
         Ok(item)
+    }
+
+    /// Restore an item **verbatim** from an export — the faithful, id-preserving
+    /// inverse of `export json`/`jsonl` (a backup/restore, not a fresh create).
+    ///
+    /// Unlike [`ItemStore::create`], this mints no id and forces no
+    /// `status`/`schema`/timestamp values: the frontmatter is written exactly as
+    /// supplied (lists are sorted + de-duped only to match the canonical
+    /// serializer, as `create` does), so id, status, the `closed` timestamp,
+    /// `created`/`updated`, and every other field survive a round-trip byte-for-
+    /// byte after a re-read.
+    ///
+    /// If the id already exists on disk: with `overwrite` false the call is a
+    /// no-op returning [`RestoreOutcome::Skipped`]; with `overwrite` true the
+    /// file is replaced and [`RestoreOutcome::Overwritten`] is returned.
+    ///
+    /// The item is field-validated with the **same checks as `create`**: a
+    /// non-empty `title` and non-blank `assignee` (via `fields`), plus
+    /// `validate_item` (priority range, status↔`closed` coupling, supported
+    /// schema, oversized list) — so a corrupt export item is rejected rather than
+    /// written. Referential integrity of `deps`/`parent` is **not** checked here:
+    /// a bulk restore may legitimately reference items imported later in the same
+    /// batch, and `clove doctor` re-validates the graph after the fact. Never
+    /// re-stamps timestamps — `created`/`updated` are written as supplied.
+    pub fn restore_item(&self, item: &Item, overwrite: bool) -> Result<RestoreOutcome, CloveError> {
+        // Serialize existence-check + write behind the store-wide write lock, the
+        // same window `create`/`delete` use, so a concurrent writer cannot race
+        // the exists→write decision.
+        let mut lock = self.write_lock()?;
+        let _guard = lock.lock()?;
+
+        let path = self.path_for(&item.frontmatter.id);
+        let existed = path.exists();
+        if existed && !overwrite {
+            return Ok(RestoreOutcome::Skipped);
+        }
+
+        // Match `create`'s field validation — `validate_item` alone does not
+        // reject an empty title / blank assignee.
+        fields::parse_title(&item.frontmatter.title)?;
+        fields::parse_assignee(item.frontmatter.assignee.clone())?;
+        ensure_valid(&item.frontmatter, &path)?;
+        // The canonical serializer sorts + de-dupes list fields at write time, so
+        // no in-memory normalization is needed for a byte-stable round-trip.
+        write_item_file(item, &path)?;
+
+        Ok(if existed {
+            RestoreOutcome::Overwritten
+        } else {
+            RestoreOutcome::Created
+        })
     }
 
     /// Read and parse the item with the given id.
@@ -613,6 +675,92 @@ mod tests {
         store.delete(&item.frontmatter.id, false).unwrap();
         assert!(!store.path_for(&item.frontmatter.id).exists());
         assert!(!store.item_dir(&item.frontmatter.id).exists());
+    }
+
+    /// A fully-populated, closed item with a distinct id, for restore tests.
+    fn restorable(id: &str) -> Item {
+        Item {
+            frontmatter: ItemFrontmatter {
+                schema: CURRENT_SCHEMA_VERSION,
+                id: CloveId::new(id).unwrap(),
+                title: "Restored".to_owned(),
+                status: ItemStatus::Closed,
+                item_type: ItemType::Bug,
+                priority: Priority(1),
+                created: ts("2026-01-01T00:00:00Z"),
+                updated: ts("2026-02-02T00:00:00Z"),
+                closed: Some(ts("2026-02-02T00:00:00Z")),
+                assignee: Some("ege".to_owned()),
+                parent: None,
+                labels: vec!["area:core".to_owned()],
+                deps: Vec::new(),
+                relates: Vec::new(),
+                duplicates: Vec::new(),
+                supersedes: Vec::new(),
+                source_system: Some("github".to_owned()),
+                external_ref: Some("gh-42".to_owned()),
+            },
+            body: "Restored body.\n".to_owned(),
+        }
+    }
+
+    #[test]
+    fn restore_fresh_item_is_created_and_verbatim() {
+        let (_tmp, store) = temp_store();
+        let item = restorable("proj-REST0001");
+
+        let outcome = store.restore_item(&item, false).unwrap();
+        assert_eq!(outcome, RestoreOutcome::Created);
+
+        // Every field survives verbatim — id, status, the closed timestamp,
+        // created/updated, and the body — with no re-stamping.
+        let reread = store.get(&item.frontmatter.id).unwrap();
+        assert_eq!(reread, item);
+    }
+
+    #[test]
+    fn restore_existing_without_overwrite_is_skipped() {
+        let (_tmp, store) = temp_store();
+        let item = restorable("proj-REST0002");
+        store.restore_item(&item, false).unwrap();
+
+        // A second restore of a different-bodied item with the same id is a no-op.
+        let mut changed = item.clone();
+        changed.body = "Should not be written.\n".to_owned();
+        changed.frontmatter.title = "Changed".to_owned();
+        let outcome = store.restore_item(&changed, false).unwrap();
+        assert_eq!(outcome, RestoreOutcome::Skipped);
+
+        let reread = store.get(&item.frontmatter.id).unwrap();
+        assert_eq!(reread, item, "the on-disk item is unchanged");
+    }
+
+    #[test]
+    fn restore_existing_with_overwrite_replaces() {
+        let (_tmp, store) = temp_store();
+        let item = restorable("proj-REST0003");
+        store.restore_item(&item, false).unwrap();
+
+        let mut changed = item.clone();
+        changed.frontmatter.title = "Overwritten title".to_owned();
+        changed.body = "New body.\n".to_owned();
+        let outcome = store.restore_item(&changed, true).unwrap();
+        assert_eq!(outcome, RestoreOutcome::Overwritten);
+
+        let reread = store.get(&item.frontmatter.id).unwrap();
+        assert_eq!(reread, changed);
+    }
+
+    #[test]
+    fn restore_rejects_invalid_item() {
+        let (_tmp, store) = temp_store();
+        // status=open with a closed timestamp violates the coupling invariant.
+        let mut bad = restorable("proj-REST0004");
+        bad.frontmatter.status = ItemStatus::Open;
+        // closed is Some(..) from `restorable`.
+        let err = store.restore_item(&bad, false).unwrap_err();
+        assert!(matches!(err, CloveError::Invalid { .. }));
+        assert!(!store.exists(&bad.frontmatter.id), "nothing was written");
     }
 
     #[test]

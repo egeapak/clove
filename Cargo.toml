@@ -9,6 +9,11 @@ members = [
     "crates/clove-mcp",
     "crates/clove-tui",
     "crates/clove-web",
+    "crates/clove-plugin",
+    "crates/clove-plugin-echo",
+    "crates/clove-sync-github",
+    "crates/clove-import-tk",
+    "crates/clove-import-beads",
     "crates/clove",
     "crates/cloved",
     "xtask",
@@ -113,6 +118,7 @@ clove-ipc = { path = "crates/clove-ipc", version = "0.1.0" }
 clove-mcp = { path = "crates/clove-mcp", version = "0.1.0" }
 clove-tui = { path = "crates/clove-tui", version = "0.1.0" }
 clove-web = { path = "crates/clove-web", version = "0.1.0" }
+clove-plugin = { path = "crates/clove-plugin", version = "0.1.0" }
 
 [profile.release]
 lto = true            # fat LTO: cross-crate inlining/dedup; meaningfully smaller than "thin"

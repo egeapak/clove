@@ -10,8 +10,10 @@ the whole runbook once before running any `cargo publish`.
 
 > **Naming context.** The crates.io name `clove` is taken by an unrelated ML
 > framework, so the CLI crate ships as **`clove-cli`** (the installed command is
-> still `clove` — `[[bin]] name = "clove"`). All ten workspace crate names were
-> verified **free** on crates.io on 2026-07-18. Re-verify at publish time (step 2).
+> still `clove` — `[[bin]] name = "clove"`). The ten core crate names were
+> verified **free** on crates.io on 2026-07-18; the four crates the plugin system
+> added (`clove-plugin` + the three `clove-{sync-github,import-tk,import-beads}`
+> plugins) must be re-verified too. Re-verify all fourteen at publish time (step 2).
 
 ---
 
@@ -56,14 +58,15 @@ git rev-parse HEAD        # note this SHA — it's what you tag
 Names can be claimed by anyone at any time. Right before publishing:
 
 ```sh
-for c in clove-types clove-core clove-index clove-import clove-ipc \
-         clove-mcp clove-tui clove-web cloved clove-cli; do
+for c in clove-types clove-core clove-plugin clove-index clove-import clove-ipc \
+         clove-mcp clove-tui clove-web cloved clove-cli \
+         clove-sync-github clove-import-tk clove-import-beads; do
   code=$(curl -s -o /dev/null -w '%{http_code}' "https://crates.io/api/v1/crates/$c")
   echo "$c -> HTTP $code ($([ "$code" = 404 ] && echo FREE || echo TAKEN))"
 done
 ```
 
-All ten must report **FREE (404)** for a first release. If any is TAKEN,
+All fourteen must report **FREE (404)** for a first release. If any is TAKEN,
 **stop** — resolve the collision (rename that crate, or contact the owner)
 before continuing, exactly as was done for `clove` → `clove-cli`.
 
@@ -76,33 +79,44 @@ Each crate must be on crates.io **before** anything that depends on it, because
 build against the registry. The workspace's internal edges are:
 
 ```
-clove-types  → (none)
-clove-core   → clove-types
-clove-index  → clove-types, clove-core
-clove-import → clove-types, clove-core
-clove-ipc    → clove-types, clove-core
-clove-tui    → clove-types, clove-core
-clove-mcp    → clove-types, clove-core, clove-ipc
-clove-web    → clove-types, clove-core, clove-index
-cloved       → clove-types, clove-core, clove-index, clove-import, clove-ipc, clove-web
-clove-cli    → clove-types, clove-core, clove-index, clove-import, clove-ipc, clove-mcp, clove-tui, clove-web
+clove-types        → (none)
+clove-core         → clove-types
+clove-plugin       → clove-types, clove-core
+clove-index        → clove-types, clove-core
+clove-import       → clove-types, clove-core
+clove-ipc          → clove-types, clove-core
+clove-tui          → clove-types, clove-core
+clove-mcp          → clove-types, clove-core, clove-ipc
+clove-web          → clove-types, clove-core, clove-index
+cloved             → clove-types, clove-core, clove-index, clove-ipc, clove-web
+clove-cli          → clove-types, clove-core, clove-plugin, clove-index, clove-import, clove-ipc, clove-mcp, clove-tui, clove-web
+clove-sync-github  → clove-types, clove-core, clove-plugin, clove-import (github)
+clove-import-tk    → clove-types, clove-core, clove-plugin, clove-import
+clove-import-beads → clove-types, clove-core, clove-plugin, clove-import
 ```
 
 A valid topological publish order:
 
 1. `clove-types`
 2. `clove-core`
-3. `clove-index`
-4. `clove-import`
-5. `clove-ipc`
-6. `clove-tui`
-7. `clove-mcp`
-8. `clove-web`
-9. `cloved`
-10. `clove-cli`
+3. `clove-plugin`
+4. `clove-index`
+5. `clove-import`
+6. `clove-ipc`
+7. `clove-tui`
+8. `clove-mcp`
+9. `clove-web`
+10. `cloved`
+11. `clove-cli`
+12. `clove-sync-github`
+13. `clove-import-tk`
+14. `clove-import-beads`
 
-> `xtask` (`publish = false`) and the `fuzz/` crate (a separate excluded
-> workspace) are **not** published — skip them.
+> `xtask` (`publish = false`), the `clove-plugin-echo` test fixture
+> (`publish = false`), and the `fuzz/` crate (a separate excluded workspace) are
+> **not** published — skip them. The three `clove-{sync-github,import-tk,import-beads}`
+> plugins carry `publish = true` and go last: they depend on `clove-import` and
+> `clove-plugin`, and nothing depends on them.
 
 Internal deps already declare both `path` **and** `version = "0.1.0"` (see
 `[workspace.dependencies]` in the root `Cargo.toml`), which is exactly what
@@ -140,6 +154,7 @@ available on the index before returning, so the next publish resolves cleanly:
 ```sh
 cargo publish -p clove-types
 cargo publish -p clove-core
+cargo publish -p clove-plugin  # after clove-core; needed by clove-cli + the plugins
 cargo publish -p clove-index
 cargo publish -p clove-import
 cargo publish -p clove-ipc
@@ -148,6 +163,9 @@ cargo publish -p clove-mcp
 cargo publish -p clove-web     # see the web-UI gotcha above
 cargo publish -p cloved
 cargo publish -p clove-cli
+cargo publish -p clove-sync-github
+cargo publish -p clove-import-tk
+cargo publish -p clove-import-beads
 ```
 
 If a publish fails midway, fix the cause and **resume from the failed crate** —
@@ -178,9 +196,13 @@ git push origin v0.1.0
 
 ## 6. GitHub Release binaries (CI-driven)
 
-Both CI systems trigger on a `v*` tag and build native `clove` + `cloved`
-binaries **carrying the real embedded SPA** (each job runs `npm run build` into
-`crates/clove-web/dist`, then compiles with `CLOVE_SKIP_WEB_BUILD=1`):
+Both CI systems trigger on a `v*` tag and build the native binaries — `clove` and
+`cloved` plus the three plugin binaries (`clove-sync-github`, `clove-import-tk`,
+`clove-import-beads`) — **carrying the real embedded SPA** (each job runs
+`npm run build` into `crates/clove-web/dist`, then compiles with
+`CLOVE_SKIP_WEB_BUILD=1`). Shipping the plugins in the release archive is what
+lets a binary-install user run `clove sync github` / `clove import beads` without
+a separate `cargo install`:
 
 - **`.github/workflows/release.yml`** (GitHub Actions, canonical) — builds Linux,
   macOS arm64 + x86_64, and Windows; uploads tarballs/zips **plus SHA256
@@ -221,6 +243,11 @@ class Clove < Formula
   def install
     bin.install "clove"
     bin.install "cloved"
+    # The plugins must land on PATH next to `clove` so `clove sync github`,
+    # `clove import tk`, and `clove import|export beads` resolve (PLUGIN_SYSTEM §5).
+    bin.install "clove-sync-github"
+    bin.install "clove-import-tk"
+    bin.install "clove-import-beads"
   end
 
   test do

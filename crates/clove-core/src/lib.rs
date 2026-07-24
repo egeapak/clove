@@ -44,7 +44,7 @@ pub use stats::{
     compute as compute_stats, EpicRollup, KeyCount, StatsOptions, StatsReport, StatusCounts,
     Throughput, TypeCounts,
 };
-pub use store::{ItemStore, NewItem, ScanError};
+pub use store::{ItemStore, NewItem, RestoreOutcome, ScanError};
 pub use view::{frontmatter_object, item_object, project, rank_of, sort_by_rank, Filters};
 
 // Bring the `clove-types` data types the lib uses into this crate's namespace

@@ -1,0 +1,383 @@
+//! Dynamic, plugin-aware `--help` for the `import`/`export`/`sync` multiplexers
+//! (`PLUGIN_REGISTRY.md` §6).
+//!
+//! clap's derive `after_help` is a compile-time string, so it cannot list the
+//! *installed* provider plugins. Instead the host intercepts a multiplexer help
+//! invocation in argv **before** `Cli::try_parse()`: [`detect`] recognizes both
+//! spellings — `<mux> --help` and clap's `help <mux>` subcommand form (reusing the
+//! "globals precede the provider" rule) — and [`render`] rebuilds clap's help for
+//! that subcommand with a runtime `after_help` that probes the `clove-<mux>-*`
+//! plugins on the search path. Routing both spellings through [`render`] makes
+//! `clove <mux> --help` and `clove help <mux>` byte-identical. Every other argv is
+//! untouched — it falls through to the normal parser.
+
+use clap::CommandFactory;
+
+use crate::cli::Cli;
+use crate::plugin;
+
+/// The global flags that take a value (`PLUGIN_REGISTRY.md` §6). These MUST mirror
+/// the `global = true` value-taking args on [`Cli`] exactly — the drift-guard test
+/// [`global_flag_lists_match_the_cli`] pins that. [`detect`] consumes the flag's
+/// value token (or handles the `--flag=value` form) when skipping past them.
+const GLOBAL_VALUE_FLAGS: &[&str] = &["-f", "--format", "--color", "--clove-dir"];
+
+/// The global boolean flags (`PLUGIN_REGISTRY.md` §6). MUST mirror the boolean
+/// `global = true` args on [`Cli`] exactly (drift-guarded). [`detect`] skips these
+/// without consuming a following token.
+const GLOBAL_BOOL_FLAGS: &[&str] = &["--no-index", "--deep", "--quiet"];
+
+/// The multiplexers whose `--help` is dynamically rendered.
+const MULTIPLEXERS: &[&str] = &["import", "export", "sync"];
+
+/// The flag name of a token, stripping a `=value` suffix (`--format=json` →
+/// `--format`) so a value flag matches in either spelling.
+fn flag_name(token: &str) -> &str {
+    token.split_once('=').map(|(name, _)| name).unwrap_or(token)
+}
+
+/// True if `token` is a global **short** value flag with its value attached in
+/// the same token, e.g. `-fjson` for `-f`. clap accepts this spelling, so
+/// [`detect`] must treat the whole token as a self-contained value flag (it does
+/// *not* consume a following token). Only the two-char short entries in
+/// [`GLOBAL_VALUE_FLAGS`] (`-f`) qualify; long flags carry their value via `=`.
+fn is_attached_short_value(token: &str) -> bool {
+    GLOBAL_VALUE_FLAGS.iter().any(|flag| {
+        flag.len() == 2 && !flag.starts_with("--") && token.len() > 2 && token.starts_with(flag)
+    })
+}
+
+/// Detect a multiplexer help invocation to intercept (`PLUGIN_REGISTRY.md` §6).
+///
+/// `argv` is the full process argv (argv[0] is the program name). Skips the
+/// leading global flags (a value flag consumes its value token unless written
+/// `--flag=value`), then recognizes **both** help spellings and returns the
+/// multiplexer so [`render`] serves an identical page for each:
+/// - `<mux> -h|--help` — the flag form (`clove import --help`);
+/// - `help <mux>` — clap's built-in help-subcommand form (`clove help import`).
+///
+/// So `import --help` and `help import` both intercept, but `import tk --help`
+/// does not (the `--help` is past the provider and is forwarded to the plugin),
+/// and `clove --help` / bare `clove help` do not (no multiplexer named).
+pub fn detect(argv: &[String]) -> Option<&'static str> {
+    let mut iter = argv.iter().skip(1);
+
+    // Skip the leading global flags to reach the first positional token.
+    let first = loop {
+        let token = iter.next()?;
+        let name = flag_name(token);
+        if GLOBAL_VALUE_FLAGS.contains(&name) {
+            // A separate value token (`-f json`) is consumed; the `--flag=value`
+            // form already carries its value in the same token.
+            if !token.contains('=') {
+                iter.next();
+            }
+            continue;
+        }
+        // Attached short-value form (`-fjson`): a self-contained value flag —
+        // don't misread it as the first positional.
+        if is_attached_short_value(token) {
+            continue;
+        }
+        if GLOBAL_BOOL_FLAGS.contains(&name) {
+            continue;
+        }
+        break token;
+    };
+
+    // `help <mux>` — clap's built-in help-subcommand form. Route it to the same
+    // renderer so `clove help <mux>` is byte-identical to `clove <mux> --help`.
+    if first == "help" {
+        let next = iter.next()?;
+        return MULTIPLEXERS.iter().copied().find(|m| *m == next);
+    }
+
+    // Otherwise the first positional must be a known multiplexer…
+    let mux = MULTIPLEXERS.iter().copied().find(|m| *m == first)?;
+
+    // …and the very next token must be the help flag (i.e. the provider slot).
+    match iter.next() {
+        Some(next) if next == "-h" || next == "--help" => Some(mux),
+        _ => None,
+    }
+}
+
+/// Render the dynamic help for `mux` and print it to stdout (`PLUGIN_REGISTRY.md`
+/// §6). Keeps clap as the single source for usage/args **and** the static prose
+/// trailer (`cli.rs` `after_help`: built-in providers, install hints, the
+/// globals-precede-provider note), and *appends* the one thing clap cannot know at
+/// compile time — the [`render_installed_section`] list of installed provider
+/// plugins. Both help spellings ([`detect`] routes `<mux> --help` and `help <mux>`
+/// here) render this same page, so they are byte-identical.
+pub fn render(mux: &str) {
+    let base = Cli::command();
+    let static_after = base
+        .find_subcommand(mux)
+        .and_then(|sub| sub.get_after_help())
+        .map(|help| help.to_string())
+        .unwrap_or_default();
+    let installed = render_installed_section(mux);
+
+    let combined = match (static_after.trim().is_empty(), installed.is_empty()) {
+        (false, false) => format!("{static_after}\n\n{installed}"),
+        (false, true) => static_after,
+        (true, false) => installed,
+        (true, true) => String::new(),
+    };
+
+    let mut cmd = base.mut_subcommand(mux, move |c| c.after_help(combined));
+    cmd.build();
+    if let Some(sub) = cmd.find_subcommand_mut(mux) {
+        let _ = sub.print_long_help();
+    }
+}
+
+/// Build the `Installed providers:` block for `mux`'s help — the dynamic complement
+/// to clap's static `after_help` prose (`PLUGIN_REGISTRY.md` §6). Returns `""` when
+/// no plugin serves `mux` (the caller then shows the static prose alone).
+///
+/// Providers are bucketed by the **`<mux>:<provider>` capability token** each plugin
+/// advertises (`--clove-plugin-info`-probed), unioned with the token its *name*
+/// implies — so a multi-capability binary like `clove-sync-github` (`provides:
+/// sync/import/export:github`) lists under all three of `import`/`export`/`sync
+/// --help` from one install (`PLUGIN_SYSTEM.md` §4.2), while a name-based
+/// `clove-<mux>-<provider>` still lists even with no probe (dispatch is name-based,
+/// so it is genuinely reachable). When two binaries serve the same provider, a
+/// dedicated `clove-<mux>-<provider>` is preferred in the row (it wins dispatch).
+/// Rows are column-aligned on the provider name.
+fn render_installed_section(mux: &str) -> String {
+    use std::collections::BTreeMap;
+
+    // provider → (description, is-dedicated). Dedup by provider; a dedicated
+    // `clove-<mux>-<provider>` binary's row replaces an umbrella binary's.
+    let want = format!("{mux}:");
+    let dedicated_name = |provider: &str| format!("{mux}-{provider}");
+    let mut rows: BTreeMap<String, (String, bool)> = BTreeMap::new();
+
+    for plugin in plugin::list_enriched() {
+        // Capability tokens = the UNION of the probed `provides` and the token the
+        // binary's *name* implies (see the doc comment above for why the name token
+        // is always reachable). A no-probe plugin contributes only its name token.
+        let mut tokens: Vec<String> = plugin
+            .probed
+            .as_ref()
+            .map(|p| p.provides.clone())
+            .unwrap_or_default();
+        if let Some(name_token) = name_capability_token(&plugin.info.name) {
+            if !tokens.contains(&name_token) {
+                tokens.push(name_token);
+            }
+        }
+
+        for token in tokens {
+            let Some(provider) = token.strip_prefix(&want) else {
+                continue;
+            };
+            let binary = format!("clove-{}", plugin.info.name);
+            let descr = match &plugin.probed {
+                Some(info) => format!("{binary} {} — {}", info.version, info.about),
+                None => format!("{binary} (no metadata)"),
+            };
+            let is_dedicated = plugin.info.name == dedicated_name(provider);
+            rows.entry(provider.to_owned())
+                .and_modify(|existing| {
+                    // A dedicated binary's row wins over an umbrella's.
+                    if is_dedicated && !existing.1 {
+                        *existing = (descr.clone(), true);
+                    }
+                })
+                .or_insert((descr, is_dedicated));
+        }
+    }
+
+    if rows.is_empty() {
+        return String::new();
+    }
+
+    // Align the `descr` column on the widest provider name for a clean table.
+    let width = rows.keys().map(|p| p.chars().count()).max().unwrap_or(0);
+    let mut out = String::from("Installed providers:\n");
+    for (provider, (descr, _)) in &rows {
+        out.push_str(&format!(
+            "  {provider:<width$}  {descr}   (clove {mux} {provider})\n"
+        ));
+    }
+    out
+}
+
+/// The single `<mux>:<provider>` capability token implied by a plugin's *name*
+/// (`clove-<mux>-<provider>` ⇒ `<mux>:<provider>`), used only as the fallback when
+/// a plugin answers no `--clove-plugin-info` probe. Returns `None` for a name that
+/// is not `<one-of import|export|sync>-<provider>`.
+fn name_capability_token(name: &str) -> Option<String> {
+    MULTIPLEXERS.iter().find_map(|mux| {
+        let prefix = format!("{mux}-");
+        name.strip_prefix(&prefix)
+            .filter(|provider| !provider.is_empty())
+            .map(|provider| format!("{mux}:{provider}"))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(items: &[&str]) -> Vec<String> {
+        // Prepend the argv[0] program name the real process carries.
+        std::iter::once("clove".to_owned())
+            .chain(items.iter().map(|s| (*s).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn intercepts_bare_mux_help() {
+        assert_eq!(detect(&s(&["import", "--help"])), Some("import"));
+        assert_eq!(detect(&s(&["import", "-h"])), Some("import"));
+        assert_eq!(detect(&s(&["export", "--help"])), Some("export"));
+        assert_eq!(detect(&s(&["sync", "--help"])), Some("sync"));
+    }
+
+    #[test]
+    fn intercepts_help_subcommand_form() {
+        // `clove help <mux>` routes to the same renderer as `clove <mux> --help`.
+        assert_eq!(detect(&s(&["help", "import"])), Some("import"));
+        assert_eq!(detect(&s(&["help", "export"])), Some("export"));
+        assert_eq!(detect(&s(&["help", "sync"])), Some("sync"));
+        // Globals may precede the `help` subcommand.
+        assert_eq!(
+            detect(&s(&["--format", "json", "help", "sync"])),
+            Some("sync")
+        );
+    }
+
+    #[test]
+    fn does_not_intercept_provider_help() {
+        // `--help` is past the provider → forwarded to the plugin, not intercepted.
+        assert_eq!(detect(&s(&["import", "tk", "--help"])), None);
+        assert_eq!(detect(&s(&["sync", "github", "--help"])), None);
+        // `help <non-mux>` and bare `help` are clap's own — not intercepted.
+        assert_eq!(detect(&s(&["help", "tk"])), None);
+        assert_eq!(detect(&s(&["help"])), None);
+    }
+
+    #[test]
+    fn does_not_intercept_top_level_help() {
+        assert_eq!(detect(&s(&["--help"])), None);
+        assert_eq!(detect(&s(&["-h"])), None);
+        assert_eq!(detect(&s(&[])), None);
+    }
+
+    #[test]
+    fn name_capability_token_infers_home_mux() {
+        // The no-probe fallback: a `clove-<mux>-<provider>` name implies it serves
+        // `<mux>:<provider>` (used only when a plugin answers no probe).
+        assert_eq!(
+            name_capability_token("sync-github"),
+            Some("sync:github".to_owned())
+        );
+        assert_eq!(
+            name_capability_token("import-tk"),
+            Some("import:tk".to_owned())
+        );
+        assert_eq!(
+            name_capability_token("export-csv"),
+            Some("export:csv".to_owned())
+        );
+        // A non-mux name (generic plugin) implies no provider capability.
+        assert_eq!(name_capability_token("frobnicate"), None);
+    }
+
+    #[test]
+    fn does_not_intercept_non_help_mux() {
+        // `import` alone (no help flag) is a normal parse, not an interception.
+        assert_eq!(detect(&s(&["import"])), None);
+        assert_eq!(detect(&s(&["import", "tk"])), None);
+    }
+
+    #[test]
+    fn skips_a_value_global_before_the_mux() {
+        // The value flag's value token must be skipped so `import` lands in the
+        // positional slot.
+        assert_eq!(
+            detect(&s(&["--clove-dir", "X", "import", "--help"])),
+            Some("import")
+        );
+        assert_eq!(
+            detect(&s(&["-f", "json", "import", "--help"])),
+            Some("import")
+        );
+        assert_eq!(
+            detect(&s(&["--format", "json", "sync", "--help"])),
+            Some("sync")
+        );
+        // The `--flag=value` form carries its value inline (no token to consume).
+        assert_eq!(
+            detect(&s(&["--format=json", "export", "--help"])),
+            Some("export")
+        );
+        // The attached short-value form (`-fjson`) is self-contained — clap accepts
+        // it, so `detect` must not misread it as the first positional.
+        assert_eq!(detect(&s(&["-fjson", "import", "--help"])), Some("import"));
+    }
+
+    #[test]
+    fn skips_a_bool_global_before_the_mux() {
+        assert_eq!(detect(&s(&["--quiet", "import", "--help"])), Some("import"));
+        assert_eq!(
+            detect(&s(&["--no-index", "--deep", "sync", "--help"])),
+            Some("sync")
+        );
+    }
+
+    #[test]
+    fn global_flag_lists_match_the_cli() {
+        // Drift-guard: the const lists MUST mirror the `global = true` flags on the
+        // `Cli` derive exactly (both directions), so the argv skipper in `detect`
+        // can never disagree with what clap actually treats as a global.
+        use std::collections::BTreeSet;
+
+        let cmd = Cli::command();
+        // Split clap's globals by whether the flag *takes a value*, so the guard
+        // catches a flag placed in the wrong const list — not just a missing/extra
+        // one. A mis-categorized value flag would make `detect` fail to consume its
+        // value token and shift the positional scan by one (MINOR).
+        let mut actual_value: BTreeSet<String> = BTreeSet::new();
+        let mut actual_bool: BTreeSet<String> = BTreeSet::new();
+        for arg in cmd.get_arguments() {
+            if !arg.is_global_set() {
+                continue;
+            }
+            let id = arg.get_id().as_str();
+            // clap's auto-added help/version are propagated but are not part of the
+            // multiplexer-forwarding rule we mirror here.
+            if id == "help" || id == "version" {
+                continue;
+            }
+            let bucket = if arg.get_action().takes_values() {
+                &mut actual_value
+            } else {
+                &mut actual_bool
+            };
+            if let Some(short) = arg.get_short() {
+                bucket.insert(format!("-{short}"));
+            }
+            if let Some(long) = arg.get_long() {
+                bucket.insert(format!("--{long}"));
+            }
+        }
+
+        let declared_value: BTreeSet<String> =
+            GLOBAL_VALUE_FLAGS.iter().map(|s| (*s).to_owned()).collect();
+        let declared_bool: BTreeSet<String> =
+            GLOBAL_BOOL_FLAGS.iter().map(|s| (*s).to_owned()).collect();
+
+        assert_eq!(
+            actual_value, declared_value,
+            "GLOBAL_VALUE_FLAGS drifted from the Cli value-taking global flags"
+        );
+        assert_eq!(
+            actual_bool, declared_bool,
+            "GLOBAL_BOOL_FLAGS drifted from the Cli boolean global flags"
+        );
+    }
+}

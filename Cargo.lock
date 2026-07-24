@@ -577,6 +577,7 @@ dependencies = [
  "clove-index",
  "clove-ipc",
  "clove-mcp",
+ "clove-plugin",
  "clove-tui",
  "clove-types",
  "clove-web",
@@ -640,6 +641,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "clove-import-beads"
+version = "0.1.0"
+dependencies = [
+ "camino",
+ "chrono",
+ "clap",
+ "clove-core",
+ "clove-import",
+ "clove-plugin",
+ "clove-types",
+ "serde_json",
+]
+
+[[package]]
+name = "clove-import-tk"
+version = "0.1.0"
+dependencies = [
+ "camino",
+ "chrono",
+ "clap",
+ "clove-core",
+ "clove-import",
+ "clove-plugin",
+ "clove-types",
+ "serde_json",
+]
+
+[[package]]
 name = "clove-index"
 version = "0.1.0"
 dependencies = [
@@ -692,6 +721,38 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "clove-plugin"
+version = "0.1.0"
+dependencies = [
+ "camino",
+ "clap",
+ "clove-core",
+ "clove-types",
+ "serde_json",
+]
+
+[[package]]
+name = "clove-plugin-echo"
+version = "0.1.0"
+dependencies = [
+ "clove-plugin",
+ "serde_json",
+]
+
+[[package]]
+name = "clove-sync-github"
+version = "0.1.0"
+dependencies = [
+ "camino",
+ "clap",
+ "clove-core",
+ "clove-import",
+ "clove-plugin",
+ "clove-types",
+ "serde_json",
 ]
 
 [[package]]
@@ -758,7 +819,6 @@ dependencies = [
  "chrono",
  "clap",
  "clove-core",
- "clove-import",
  "clove-index",
  "clove-ipc",
  "clove-types",

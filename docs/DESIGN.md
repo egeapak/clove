@@ -15,8 +15,12 @@ clove/                          (workspace root)
   crates/
     clove-core/                 lib — item model, file store, DAG engine, ID gen
     clove-index/                lib — SQLite index, FTS5, staleness, reindex
-    clove-import/               lib — beads / tk / github importers
-    clove/                      bin — CLI, JSON envelopes, exit codes
+    clove-import/               lib — json/jsonl export, merge driver, tk/beads importer logic, pure GitHub mapping
+    clove-plugin/               lib — cargo-style plugin support (PluginContext + envelope harness)
+    clove-sync-github/          bin — the `clove-sync-github` plugin (two-way GitHub sync, octocrab)
+    clove-import-tk/            bin — the `clove-import-tk` plugin (import a tk `.tickets/` dir)
+    clove-import-beads/         bin — the `clove-import-beads` plugin (import a Beads `issues.jsonl`)
+    clove/                      bin — CLI, JSON envelopes, exit codes, plugin dispatch
     cloved/                     bin — daemon, file-watcher, IPC server
   benches/                      criterion benchmarks (shared fixture crate)
   fuzz/                         cargo-fuzz targets
@@ -731,8 +735,14 @@ clove stats [--top N] [--no-epics] [--snapshot]      # work-item analytics + dae
 clove comment <id> <message> [--format json]
 clove comments <id> [--limit N] [--format json]
 clove reindex [--force] [--format json]
-clove import <beads|tk|github> <src> [--dry-run] [--format json]
-clove export <json|jsonl|github> [--out FILE]
+clove import [--format json] <json|jsonl> <file> [--dry-run] [--overwrite]  # BUILT-IN native restore (inverse of export);
+clove import [--format json] <beads|tk> <src> [--dry-run]   # tk/beads are clove-import-<p> plugins;
+clove export [--format json] <json|jsonl> [--out FILE]      # export json/jsonl are built-in; clove global flags precede the
+                                                            # provider, provider-owned flags (<src>/--out/--dry-run) follow it
+clove export [--format json] beads [--out FILE]             # export beads → clove-import-beads plugin (inverse of import beads)
+clove sync   [--format json] github <owner/repo> [--dry-run]        # two-way; clove-sync-github plugin
+clove import [--format json] github <owner/repo> [--dry-run]        # pull-only view of the sync (same plugin)
+clove export [--format json] github <owner/repo> [--dry-run]        # push-only view of the sync (same plugin)
 clove agent-doc [--format markdown|json] [--out FILE]
 clove agent-doc --check [--file PATH]       # verify embedded doc vs binary
 clove migrate [--yes] [--dry-run]
@@ -1244,11 +1254,28 @@ with `comment_count > 0` emit a warning to stderr listing the IDs and suggesting
 `bd show --json <id>` to extract comment bodies. The importer must NOT silently succeed with
 missing comment data.
 
+The inverse — `clove export beads`, a beads-native `issues.jsonl` dump that
+round-trips back through this importer — is served by the *same*
+`clove-import-beads` binary (bidirectional beads in one binary; see §11.4 and
+`PLUGIN_SYSTEM.md` §4.2).
+
 ### 11.3 GitHub Sync
 
-GitHub is reached through **one** command — `clove sync github <owner/repo>`, a
-two-way reconcile (the earlier one-way `import github` / `export github` were
-removed in favour of it). It uses the `octocrab` crate behind the `github` feature.
+GitHub's canonical command is `clove sync github <owner/repo>`, a two-way
+reconcile. It is a **cargo-style plugin**: `clove sync github` resolves and runs
+the separately-installed `clove-sync-github` binary (which carries `octocrab`
+behind `clove-import`'s `github` feature), so the core `clove`/`cloved` are
+octocrab-free. See `docs/PLUGIN_SYSTEM.md`.
+
+**One-way views (`import github` / `export github`).** These are available again,
+served by the *same* `clove-sync-github` binary as directional projections of the
+one reconcile (`PLUGIN_SYSTEM.md` §4.2, the umbrella fallback): `import github`
+runs it **pull-only** (remote → local), `export github` **push-only** (local →
+remote), and the full `sync github` is both. Issue **comments only sync under the
+full `sync github`** — a one-way `import`/`export github` reconciles items only.
+The plugin picks the direction from `$CLOVE_COMMAND`, so all three share one
+reconcile planner and one code path; there is no separate one-way importer to
+drift.
 
 **Field mapping.** `number` ↔ `external_ref = "gh-<number>"` (the durable link;
 clove mints a fresh `CloveId` on pull-create), `title` ↔ `title`, `state`
@@ -1300,13 +1327,69 @@ of the same repo and mint duplicate issues; a second concurrent sync fails clean
 ### 11.4 Export
 
 ```
-clove export json         → single JSON envelope with all items
-clove export jsonl        → one item per line (NDJSON)
+clove export json         → single JSON envelope with all items         (built-in)
+clove export jsonl        → one item per line (NDJSON), clove's native item schema (built-in)
+clove export beads        → beads-native issues.jsonl                    (clove-import-beads plugin)
+clove export github       → push-only view of the GitHub reconcile       (clove-sync-github plugin, §11.3)
 clove sync   github       → two-way GitHub reconcile (pull + push + comments, §11.3)
 ```
 
-JSONL export format is isomorphic with Beads' `.beads/issues.jsonl` format, enabling
-bidirectional migration scripts.
+Both `json` and `jsonl` export in clove's **native item schema** — the exact inverse
+of `import json`/`jsonl` (§11.5), for backup/restore and cross-repo copy.
+
+A **Beads-native export** (isomorphic with `.beads/issues.jsonl`) is the `beads`
+*plugin*, not a built-in — foreign trackers stay out of the core. It is served by
+the **same `clove-import-beads` binary** as `import beads` (bidirectional beads in
+one binary, reached via the umbrella fallback, `PLUGIN_SYSTEM.md` §4.2): `clove
+export beads [--out FILE]` dumps a beads-native `issues.jsonl` (`chore`→`task`,
+body→`description`, `deps`/`parent`/`relates` as structured `dependencies[]`,
+`duplicates`/`supersedes` as flat arrays, a `deferred` label→`status:"deferred"`,
+`external_ref` preserved) that **round-trips** back through `clove import beads`
+(§11.2). Like the built-in `export json/jsonl`, the dump is raw NDJSON on stdout
+(or `--out`), not wrapped in the plugin envelope.
+
+A **GitHub export** (`clove export github`) is the push-only view of the two-way
+reconcile, served by `clove-sync-github` (§11.3) — not a built-in.
+
+### 11.5 Native round-trip (`import json`/`jsonl`) and format versioning
+
+`import json` / `import jsonl` are **built-in** (like their export counterparts —
+clove's own serialization is core; only *foreign* trackers, §11.1–11.3, are
+plugins). They are the exact inverse of `export json`/`jsonl`: a **verbatim,
+id-preserving restore**. `clove export json > a.json` then `clove import json
+a.json` into another repo reproduces every item exactly — same ids, status
+(incl. the `closed` timestamp), type, priority, labels, deps/relations,
+`parent`, `source_system`/`external_ref`, `created`/`updated`, and body. This is
+a backup/restore and cross-repo copy path (repo→repo transfer of the *files*
+still happens via git; this is the serialized-snapshot path).
+
+- **Preserve, don't re-mint.** Unlike the foreign importers (which mint new clove
+  ids and set `external_ref` to the source id), the native importer writes each
+  item under its existing id via `ItemStore::restore_item` — the same atomic-write
+  + validation path as `create`/`update`, but no id minting and no re-stamping.
+- **Idempotent.** An id already present is **skipped** by default; `--overwrite`
+  restores over it; `--dry-run` plans without writing. The report is
+  `{ created, skipped, overwritten }`.
+- **Comments are not included.** The export carries `comment_count` only, not
+  comment bodies (comments are append-only sidecar files, §2.5), so the native
+  round-trip is item-level; comments travel via git.
+
+**Format versioning (for migrations).** The export is self-describing on two axes
+so a future data-model change stays readable:
+
+1. **Per-item `schema`** — every exported item carries its frontmatter schema
+   version (§2.4). Present in both `json` and `jsonl`.
+2. **Container format** — `export json` stamps
+   `_meta.clove_export = { format: <EXPORT_FORMAT_VERSION>, item_schema:
+   <CURRENT_SCHEMA_VERSION> }`.
+
+On import: a **container `format` newer** than this binary is a hard reject (exit
+4, "produced by a newer clove — upgrade"); a **per-item `schema` newer** than
+`CURRENT_SCHEMA_VERSION` is a per-item warning-and-skip (so one future item never
+aborts a batch, and `jsonl` — which has no container header — still guards each
+line). An **older** per-item schema is where a future `v(N-1)→vN` migration
+hooks in (identity today, since the only version is `1`). Adding a schema version
+therefore only ever *extends* the migration seam; old exports stay importable.
 
 ---
 

@@ -1,0 +1,30 @@
+# `clove-import-tk` — the tk (`.tickets/`) importer, extracted as a
+# separately-installable cargo-style subcommand plugin (`PLUGIN_SYSTEM.md`
+# §4.2/§6). `clove import tk <src>` resolves this binary on the search path and
+# hands off. It is a `clove-plugin` consumer that reuses `clove-import`'s pure
+# `TkImporter` + planning layer (no `github` feature — tk is file-only), so the
+# core `clove` binary carries no importer-specific code.
+[package]
+name = "clove-import-tk"
+description = "clove plugin: import items from a tk .tickets/ directory (clove import tk)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = true
+
+[[bin]]
+name = "clove-import-tk"
+path = "src/main.rs"
+
+[dependencies]
+clove-plugin = { workspace = true, features = ["clap"] }
+clove-core.workspace = true
+clove-types.workspace = true
+# Pure file-format layer only (no `github` feature): the tk importer + render.
+clove-import = { workspace = true, default-features = false }
+clap.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+camino.workspace = true

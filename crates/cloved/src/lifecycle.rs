@@ -204,7 +204,7 @@ pub fn run(clove_dir: &Utf8Path) -> anyhow::Result<()> {
                 .as_ref()
                 .and_then(|c| c.daemon.github_sync_repo.clone());
             crate::github_sync::github_sync_loop(
-                repo_root.clone(),
+                clove_dir.to_owned(),
                 repo,
                 crate::github_sync::github_sync_interval(interval_min),
             )

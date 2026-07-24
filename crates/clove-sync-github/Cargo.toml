@@ -1,0 +1,32 @@
+# The first-party GitHub sync plugin, extracted as a separately-installable
+# binary (`PLUGIN_SYSTEM.md` §6/§8). It is a `clove-plugin` consumer that depends
+# on `clove-import` with the `github` feature (the low-risk extraction: it reuses
+# clove-import's existing `sync_net::sync_github` entry point rather than moving
+# it). `cargo install clove-sync-github` lights up `clove sync github` with no
+# core rebuild — the ~3.5 MB of vendored TLS/HTTP now lives only in this artifact.
+[package]
+name = "clove-sync-github"
+description = "clove plugin: two-way GitHub Issues sync (clove sync github)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = true
+
+[[bin]]
+name = "clove-sync-github"
+path = "src/main.rs"
+
+[dependencies]
+clove-plugin = { workspace = true, features = ["clap"] }
+clove-core.workspace = true
+clove-types.workspace = true
+# The whole crate *is* the GitHub opt-in unit, so the `github` feature (octocrab,
+# tokio, rustls, fd-lock) is enabled unconditionally here.
+clove-import = { workspace = true, features = ["github"] }
+clap.workspace = true
+serde_json.workspace = true
+# Used by the ImportError -> CloveError mapping (sync_err) for the `<github>`
+# placeholder path, mirroring the host's cmd/sync.rs.
+camino.workspace = true
