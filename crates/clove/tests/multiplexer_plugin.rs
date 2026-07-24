@@ -27,7 +27,11 @@ fn install_echo_as(name: &str) -> (TempDir, PathBuf) {
         .run()
         .expect("build clove-echo fixture");
     let dir = tempfile::tempdir().unwrap();
-    let dest = dir.path().join(name);
+    // The host resolver looks for `clove-<provider>{EXE_SUFFIX}`, so the renamed
+    // copy must carry the platform executable suffix (`.exe` on Windows).
+    let dest = dir
+        .path()
+        .join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
     std::fs::copy(built.path(), &dest).expect("copy echo fixture into the plugin dir");
     (dir, dest)
 }

@@ -23,7 +23,11 @@ fn install_echo_as(name: &str) -> (TempDir, PathBuf) {
         .run()
         .expect("build clove-echo fixture");
     let dir = tempfile::tempdir().unwrap();
-    let dest = dir.path().join(name);
+    // The host resolver looks for `clove-<provider>{EXE_SUFFIX}`, so the renamed
+    // copy must carry the platform executable suffix (`.exe` on Windows).
+    let dest = dir
+        .path()
+        .join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
     std::fs::copy(built.path(), &dest).expect("copy echo fixture into the plugin dir");
     (dir, dest)
 }
@@ -132,27 +136,37 @@ fn import_help_lists_builtins_and_installed_providers() {
 }
 
 #[test]
-fn help_subcommand_form_matches_the_flag_form() {
-    // `clove help <mux>` and `clove <mux> --help` are routed to the same dynamic
-    // renderer, so they produce byte-identical output (both carry the installed
-    // providers list clap's own static help cannot).
+fn help_subcommand_form_is_routed_to_the_dynamic_renderer() {
+    // `clove help <mux>` is intercepted and routed to the same dynamic renderer as
+    // `clove <mux> --help` (the `detect` unit test pins that both argv spellings
+    // resolve to the mux). End-to-end, that means `clove help import` carries the
+    // dynamic "Installed providers" list clap's own static help cannot produce —
+    // plus the static prose. (We assert the markers rather than byte-comparing two
+    // live invocations: the resolver also scans the current-exe dir, which
+    // concurrent test binaries mutate by building workspace plugins, so a
+    // cross-invocation byte-compare is racy under a parallel test run.)
     let (plugin_dir, _echo) = install_echo_as("clove-import-echo");
     let repo = init_repo("proj");
 
-    let run = |args: &[&str]| -> String {
+    let out = {
         let assert = clove(repo.path())
             .env("CLOVE_PLUGIN_PATH", plugin_dir.path())
-            .args(args)
+            .args(["help", "import"])
             .assert()
             .success();
         String::from_utf8(assert.get_output().stdout.clone()).unwrap()
     };
 
-    let flag_form = run(&["import", "--help"]);
-    assert_eq!(flag_form, run(&["help", "import"]), "help forms diverge");
+    // The dynamic provider list (only the runtime renderer emits this)…
     assert!(
-        flag_form.contains("Installed providers:"),
-        "dynamic list missing from both forms: {flag_form}"
+        out.contains("Installed providers:"),
+        "dynamic list missing from `help import`: {out}"
+    );
+    assert!(out.contains("clove import echo"), "echo row missing: {out}");
+    // …alongside clap's static prose (a static-only token proves it is preserved).
+    assert!(
+        out.contains("--overwrite"),
+        "static prose missing from `help import`: {out}"
     );
 }
 

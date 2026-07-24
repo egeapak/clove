@@ -37,7 +37,9 @@ fn install_echo_as(dir: &Path, name: &str) -> PathBuf {
             .path()
             .to_path_buf()
     });
-    let dest = dir.join(name);
+    // The host resolver looks for `clove-<provider>{EXE_SUFFIX}`, so the renamed
+    // copy must carry the platform executable suffix (`.exe` on Windows).
+    let dest = dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
     std::fs::copy(built, &dest).expect("copy clove-echo fixture into the plugin dir");
     #[cfg(unix)]
     {
@@ -226,7 +228,11 @@ fn unsupported_capability_is_exit_2() {
         .run()
         .expect("build clove-import-tk");
     let plugin_dir = tempfile::tempdir().unwrap();
-    let dest = plugin_dir.path().join("clove-import-tk");
+    // The renamed copy must carry the platform executable suffix (`.exe` on Windows)
+    // for the host resolver to find it.
+    let dest = plugin_dir
+        .path()
+        .join(format!("clove-import-tk{}", std::env::consts::EXE_SUFFIX));
     std::fs::copy(built.path(), &dest).unwrap();
     let repo = init_repo("proj");
 
