@@ -19,7 +19,7 @@ name = "clove-sync-github"
 path = "src/main.rs"
 
 [dependencies]
-clove-plugin.workspace = true
+clove-plugin = { workspace = true, features = ["clap"] }
 clove-core.workspace = true
 clove-types.workspace = true
 # The whole crate *is* the GitHub opt-in unit, so the `github` feature (octocrab,

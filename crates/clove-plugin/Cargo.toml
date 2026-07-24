@@ -17,3 +17,11 @@ clove-types.workspace = true
 clove-core.workspace = true
 camino.workspace = true
 serde_json.workspace = true
+# Optional: only the `clap`-based plugin mains (almost all of them) enable this to
+# reuse the shared `clap_exit_code`/`parse_format` helpers. Gated so the contract
+# crate stays clap-free for a host or a hand-parsed plugin that does not need it.
+clap = { workspace = true, optional = true }
+
+[features]
+# Enables the shared clap helpers (`clove_plugin::{clap_exit_code, parse_format}`).
+clap = ["dep:clap"]

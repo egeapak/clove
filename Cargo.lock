@@ -728,6 +728,7 @@ name = "clove-plugin"
 version = "0.1.0"
 dependencies = [
  "camino",
+ "clap",
  "clove-core",
  "clove-types",
  "serde_json",

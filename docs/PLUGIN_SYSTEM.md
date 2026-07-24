@@ -576,7 +576,12 @@ because the boundary is a subprocess.
      bespoke human rendering that `run`/`run_with_info` can't do. A lower-level
      `run_raw(info, |cx, args| -> ExitCode)` that owns the probe + `from_env` and
      hands the plugin full rendering control would remove that duplication and keep
-     the contract in one crate.
+     the contract in one crate. *(Partly done: the clap value-parser and
+     clap→exit-code mapping are now shared as `clove_plugin::{parse_format,
+     clap_exit_code}` behind the crate's optional **`clap`** feature — a plugin that
+     parses argv with clap enables `clove-plugin`'s `clap` feature and reuses them,
+     so the contract crate stays clap-free for the host. The `main` prologue itself
+     is the remaining dedup.)*
   3. **`_meta` shape** — `clove_plugin::emit_success` emits `_meta: {}`, while the
      built-in `export` and the import plugins (via `emit_success_with_meta`) emit
      `_meta: {"warnings": []}`. `emit_success_with_meta` (added for the import

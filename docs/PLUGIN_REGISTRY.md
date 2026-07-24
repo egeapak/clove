@@ -202,9 +202,10 @@ error as a warning (`_meta.registry_error`).
 
 `clove import --help` (and `export`/`sync`) must list built-in **and** installed
 plugin providers, but clap's derive `after_help` is a compile-time string. The
-solution: **intercept `<mux> --help` in argv before `Cli::try_parse()`**, reusing
-the existing *"global flags precede the provider; everything after the provider is
-forwarded raw"* rule.
+solution: **intercept a mux help invocation in argv before `Cli::try_parse()`**,
+reusing the existing *"global flags precede the provider; everything after the
+provider is forwarded raw"* rule. Both spellings — `<mux> --help` and clap's own
+`help <mux>` subcommand — route to the same renderer, so they are byte-identical.
 
 In `main()`:
 
@@ -215,22 +216,26 @@ let cli = Cli::try_parse() … // unchanged for every other argv
 
 - **`detect(argv)`** skips the global flags (a shared const list of the
   `global=true` flags, pinned by a drift-guard unit test against the `Cli`
-  derive), takes the first non-flag token; if it's `import|export|sync` **and**
-  the next token is `-h|--help`, returns that mux. So:
-  - `clove import --help` → `--help` is in the provider slot → **intercept**.
+  derive), takes the first non-flag token, and returns the mux for either spelling:
+  the token is `import|export|sync` **and** the next token is `-h|--help`, or the
+  token is `help` **and** the next is a mux. So:
+  - `clove import --help` / `clove help import` → **intercept** (identical output).
   - `clove import tk --help` → `--help` is *after* the provider → **not**
     intercepted → forwarded to `clove-import-tk`'s own help (unchanged).
-  - `clove --help` / `clove --clove-dir sync import --help` → handled correctly by
-    the skipper.
-- **`render(mux)`** rebuilds clap's help for that subcommand with a runtime
-  `after_help`: `Cli::command().mut_subcommand(mux, |c| c.after_help(section))`
-  then `render_help()`. clap stays the single source for usage/args; only the
-  trailer is dynamic.
-- **`section`** = built-in providers (json/jsonl; none for sync) + installed
-  `clove-<mux>-*` plugins (filtered so only that mux's plugins are probed), each
-  `--clove-plugin-info`-probed with a timeout, rendered as
-  `github  clove-sync-github 0.1.0 — Two-way GitHub sync  (clove sync github)`,
-  plus the existing "globals precede the provider" note.
+  - `clove --help` / bare `clove help` / `clove --clove-dir sync import --help` →
+    handled correctly by the skipper.
+- **`render(mux)`** rebuilds clap's help for that subcommand and *appends* the
+  dynamic trailer to clap's existing static `after_help`:
+  `Cli::command().mut_subcommand(mux, |c| c.after_help(static + section))` then
+  `print_long_help()`. clap stays the single source for usage/args and the static
+  prose; only the installed-providers list is dynamic, so the dynamic page is a
+  superset of the static one (and, via `detect`, the two help spellings match).
+- **`section`** = the installed `clove-<mux>-*` plugins (and multi-capability
+  binaries serving the mux), each `--clove-plugin-info`-probed with a timeout,
+  column-aligned and rendered as
+  `github  clove-sync-github 0.1.0 — … (clove sync github)`. The built-in
+  providers (json/jsonl; none for sync) and the "globals precede the provider"
+  note live in clap's static `after_help`, not re-authored here.
 
 **Lazy + self-correcting + no cache:** the probe cost is paid only on an actual
 `<mux> --help`, only for that mux's plugins; a freshly-installed plugin appears on

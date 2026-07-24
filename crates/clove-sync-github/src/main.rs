@@ -24,10 +24,11 @@
 
 use std::process::ExitCode;
 
-use clap::error::ErrorKind;
 use clap::Parser;
 use clove_core::OutputFormat;
-use clove_plugin::{emit_error, emit_success, PluginArgs, PluginContext, PluginInfo};
+use clove_plugin::{
+    clap_exit_code, emit_error, emit_success, parse_format, PluginArgs, PluginContext, PluginInfo,
+};
 use clove_types::CloveError;
 use serde_json::json;
 
@@ -69,24 +70,6 @@ struct Cli {
     /// works even with the flag after the provider.
     #[arg(long, value_name = "FORMAT", value_parser = parse_format)]
     format: Option<OutputFormat>,
-}
-
-/// clap value-parser for `--format` (mirrors the host's).
-fn parse_format(raw: &str) -> Result<OutputFormat, String> {
-    OutputFormat::parse(raw)
-        .ok_or_else(|| format!("invalid format `{raw}` (expected human|json|jsonl)"))
-}
-
-/// Map a clap parse error to a clove exit code (DESIGN §7.6): `0` for
-/// help/version, `1` (Usage) otherwise — never clap's native `2`, which is
-/// `NotFound` in clove's table.
-fn clap_exit_code(err: &clap::Error) -> u8 {
-    match err.kind() {
-        ErrorKind::DisplayHelp
-        | ErrorKind::DisplayVersion
-        | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => 0,
-        _ => 1,
-    }
 }
 
 fn main() -> ExitCode {

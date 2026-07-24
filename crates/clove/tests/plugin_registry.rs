@@ -114,8 +114,8 @@ fn import_help_lists_builtins_and_installed_providers() {
     assert!(out.contains("json"), "json missing: {out}");
     assert!(out.contains("jsonl"), "jsonl missing: {out}");
     // The static clap prose is preserved (not replaced) by the dynamic renderer:
-    // `clove <mux> --help` is a superset of `clove help <mux>`, so a static-only
-    // token like `--overwrite` still appears alongside the dynamic provider list.
+    // the provider list is appended to it, so a static-only token like
+    // `--overwrite` still appears alongside the dynamic list.
     assert!(out.contains("--overwrite"), "static prose dropped: {out}");
     // The installed provider line: provider name, the binary, and the run-as.
     assert!(
@@ -128,6 +128,31 @@ fn import_help_lists_builtins_and_installed_providers() {
     assert!(
         out.contains("must come BEFORE the provider"),
         "note missing: {out}"
+    );
+}
+
+#[test]
+fn help_subcommand_form_matches_the_flag_form() {
+    // `clove help <mux>` and `clove <mux> --help` are routed to the same dynamic
+    // renderer, so they produce byte-identical output (both carry the installed
+    // providers list clap's own static help cannot).
+    let (plugin_dir, _echo) = install_echo_as("clove-import-echo");
+    let repo = init_repo("proj");
+
+    let run = |args: &[&str]| -> String {
+        let assert = clove(repo.path())
+            .env("CLOVE_PLUGIN_PATH", plugin_dir.path())
+            .args(args)
+            .assert()
+            .success();
+        String::from_utf8(assert.get_output().stdout.clone()).unwrap()
+    };
+
+    let flag_form = run(&["import", "--help"]);
+    assert_eq!(flag_form, run(&["help", "import"]), "help forms diverge");
+    assert!(
+        flag_form.contains("Installed providers:"),
+        "dynamic list missing from both forms: {flag_form}"
     );
 }
 

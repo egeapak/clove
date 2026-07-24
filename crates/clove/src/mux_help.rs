@@ -2,12 +2,14 @@
 //! (`PLUGIN_REGISTRY.md` §6).
 //!
 //! clap's derive `after_help` is a compile-time string, so it cannot list the
-//! *installed* provider plugins. Instead the host intercepts a bare `<mux>
-//! --help` in argv **before** `Cli::try_parse()`: [`detect`] recognizes it
-//! (reusing the "globals precede the provider" rule), and [`render`] rebuilds
-//! clap's help for that subcommand with a runtime `after_help` that probes the
-//! `clove-<mux>-*` plugins on the search path. Every other argv is untouched — it
-//! falls through to the normal parser.
+//! *installed* provider plugins. Instead the host intercepts a multiplexer help
+//! invocation in argv **before** `Cli::try_parse()`: [`detect`] recognizes both
+//! spellings — `<mux> --help` and clap's `help <mux>` subcommand form (reusing the
+//! "globals precede the provider" rule) — and [`render`] rebuilds clap's help for
+//! that subcommand with a runtime `after_help` that probes the `clove-<mux>-*`
+//! plugins on the search path. Routing both spellings through [`render`] makes
+//! `clove <mux> --help` and `clove help <mux>` byte-identical. Every other argv is
+//! untouched — it falls through to the normal parser.
 
 use clap::CommandFactory;
 
@@ -45,15 +47,18 @@ fn is_attached_short_value(token: &str) -> bool {
     })
 }
 
-/// Detect a `<mux> --help` invocation to intercept (`PLUGIN_REGISTRY.md` §6).
+/// Detect a multiplexer help invocation to intercept (`PLUGIN_REGISTRY.md` §6).
 ///
 /// `argv` is the full process argv (argv[0] is the program name). Skips the
 /// leading global flags (a value flag consumes its value token unless written
-/// `--flag=value`), takes the first non-flag token, and — if it is one of
-/// `import`/`export`/`sync` **and** the next token is `-h`/`--help` — returns that
-/// multiplexer. So `import --help` intercepts, but `import tk --help` does not
-/// (the `--help` is past the provider and is forwarded to the plugin), and
-/// `clove --help` does not (the first token is not a multiplexer).
+/// `--flag=value`), then recognizes **both** help spellings and returns the
+/// multiplexer so [`render`] serves an identical page for each:
+/// - `<mux> -h|--help` — the flag form (`clove import --help`);
+/// - `help <mux>` — clap's built-in help-subcommand form (`clove help import`).
+///
+/// So `import --help` and `help import` both intercept, but `import tk --help`
+/// does not (the `--help` is past the provider and is forwarded to the plugin),
+/// and `clove --help` / bare `clove help` do not (no multiplexer named).
 pub fn detect(argv: &[String]) -> Option<&'static str> {
     let mut iter = argv.iter().skip(1);
 
@@ -80,7 +85,14 @@ pub fn detect(argv: &[String]) -> Option<&'static str> {
         break token;
     };
 
-    // The first positional must be a known multiplexer.
+    // `help <mux>` — clap's built-in help-subcommand form. Route it to the same
+    // renderer so `clove help <mux>` is byte-identical to `clove <mux> --help`.
+    if first == "help" {
+        let next = iter.next()?;
+        return MULTIPLEXERS.iter().copied().find(|m| *m == next);
+    }
+
+    // Otherwise the first positional must be a known multiplexer…
     let mux = MULTIPLEXERS.iter().copied().find(|m| *m == first)?;
 
     // …and the very next token must be the help flag (i.e. the provider slot).
@@ -90,15 +102,13 @@ pub fn detect(argv: &[String]) -> Option<&'static str> {
     }
 }
 
-/// Render the dynamic `--help` for `mux` and print it to stdout
-/// (`PLUGIN_REGISTRY.md` §6). Keeps clap as the single source for usage/args **and**
-/// the static prose trailer (`cli.rs` `after_help`: built-in providers, install
-/// hints, the globals-precede-provider note), and *appends* the one thing clap
-/// cannot know at compile time — the [`render_installed_section`] list of installed
-/// provider plugins. So `clove <mux> --help` is a strict superset of `clove help
-/// <mux>`: same prose, plus the live plugin list. (`clove help <mux>`, clap's own
-/// built-in, shows the static prose alone — it is never *wrong*, only missing the
-/// runtime list, which clap fundamentally cannot render.)
+/// Render the dynamic help for `mux` and print it to stdout (`PLUGIN_REGISTRY.md`
+/// §6). Keeps clap as the single source for usage/args **and** the static prose
+/// trailer (`cli.rs` `after_help`: built-in providers, install hints, the
+/// globals-precede-provider note), and *appends* the one thing clap cannot know at
+/// compile time — the [`render_installed_section`] list of installed provider
+/// plugins. Both help spellings ([`detect`] routes `<mux> --help` and `help <mux>`
+/// here) render this same page, so they are byte-identical.
 pub fn render(mux: &str) {
     let base = Cli::command();
     let static_after = base
@@ -228,10 +238,26 @@ mod tests {
     }
 
     #[test]
+    fn intercepts_help_subcommand_form() {
+        // `clove help <mux>` routes to the same renderer as `clove <mux> --help`.
+        assert_eq!(detect(&s(&["help", "import"])), Some("import"));
+        assert_eq!(detect(&s(&["help", "export"])), Some("export"));
+        assert_eq!(detect(&s(&["help", "sync"])), Some("sync"));
+        // Globals may precede the `help` subcommand.
+        assert_eq!(
+            detect(&s(&["--format", "json", "help", "sync"])),
+            Some("sync")
+        );
+    }
+
+    #[test]
     fn does_not_intercept_provider_help() {
         // `--help` is past the provider → forwarded to the plugin, not intercepted.
         assert_eq!(detect(&s(&["import", "tk", "--help"])), None);
         assert_eq!(detect(&s(&["sync", "github", "--help"])), None);
+        // `help <non-mux>` and bare `help` are clap's own — not intercepted.
+        assert_eq!(detect(&s(&["help", "tk"])), None);
+        assert_eq!(detect(&s(&["help"])), None);
     }
 
     #[test]

@@ -18,10 +18,14 @@
 //! reuse [`clove_types::error_code`], so a plugin reports the identical
 //! `code`/`exit` a built-in would for the same failure.
 
+#[cfg(feature = "clap")]
+mod clap_util;
 mod context;
 mod envelope;
 mod run;
 
+#[cfg(feature = "clap")]
+pub use clap_util::{clap_exit_code, parse_format};
 pub use context::{PluginColor, PluginContext, PluginEnvError};
 pub use envelope::{emit_error, emit_success, emit_success_with_meta, ENVELOPE_VERSION};
 pub use run::{
