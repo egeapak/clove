@@ -175,6 +175,8 @@ fn umbrella_fallback_routes_import_and_export_to_sync_binary() {
     install_echo_as(plugin_dir.path(), "clove-sync-echo");
     let repo = init_repo("proj");
 
+    // The plugin reports its real binary filename, which carries `.exe` on Windows.
+    let expect_binary = format!("clove-sync-echo{}", std::env::consts::EXE_SUFFIX);
     for (mux, expect) in [("import", "import"), ("export", "export"), ("sync", "sync")] {
         let assert = clove(repo.path())
             .env("CLOVE_PLUGIN_PATH", plugin_dir.path())
@@ -185,7 +187,7 @@ fn umbrella_fallback_routes_import_and_export_to_sync_binary() {
         assert_eq!(v["ok"], true, "envelope: {v}");
         assert_eq!(v["data"]["command"], expect, "mux {mux}: {v}");
         assert_eq!(v["data"]["provider"], "echo", "mux {mux}: {v}");
-        assert_eq!(v["data"]["binary"], "clove-sync-echo", "mux {mux}: {v}");
+        assert_eq!(v["data"]["binary"], expect_binary, "mux {mux}: {v}");
         let argv = v["data"]["argv"].as_array().unwrap();
         assert!(argv.iter().any(|a| a == "arg1"), "argv {argv:?}");
     }
@@ -212,8 +214,10 @@ fn dedicated_binary_wins_over_umbrella() {
     };
 
     // Dedicated import binary wins; export has no dedicated binary → sync umbrella.
-    assert_eq!(reach("import"), "clove-import-echo");
-    assert_eq!(reach("export"), "clove-sync-echo");
+    // The reported binary carries `.exe` on Windows.
+    let exe = std::env::consts::EXE_SUFFIX;
+    assert_eq!(reach("import"), format!("clove-import-echo{exe}"));
+    assert_eq!(reach("export"), format!("clove-sync-echo{exe}"));
 }
 
 /// A plugin reached via the umbrella fallback for a capability outside its

@@ -73,7 +73,10 @@ fn plugin_list_json_is_enriched_with_version_provides_status() {
     // Additive over the old `{name,path}`: binary, version, provides, commands,
     // installed, status.
     assert_eq!(echo["binary"], "clove-echo");
-    assert!(echo["path"].as_str().unwrap().ends_with("clove-echo"));
+    // `path` is the full filename, which carries `.exe` on Windows (unlike the
+    // stripped `binary`/`name`).
+    let echo_file = format!("clove-echo{}", std::env::consts::EXE_SUFFIX);
+    assert!(echo["path"].as_str().unwrap().ends_with(&echo_file));
     assert!(
         !echo["version"].as_str().unwrap().is_empty(),
         "echo: {echo}"
