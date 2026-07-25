@@ -238,6 +238,75 @@ fn corrupt_db_is_rebuilt_by_open_or_create() {
     assert_eq!(index.item_count().unwrap(), 0);
 }
 
+/// A schema bump must leave a *populated* index, not an empty one.
+///
+/// `open_or_create` recovers the file and stops. Empty is indistinguishable from
+/// "nothing matched" at every call site — `clove search` returned zero rows for
+/// every query after a bump — and the staleness gate then reports every file as
+/// changed, which is over the inline-refresh limit, so the CLI silently falls
+/// back to scanning files for every query until someone reindexes by hand.
+#[test]
+fn a_schema_bump_rebuilds_from_the_files_not_to_empty() {
+    let repo = Repo::new();
+    ItemSpec::new("proj-AAAAAAAA")
+        .title("persisted")
+        .write_to(&repo);
+    clove_index::reindex(&repo.issues, &repo.db).unwrap();
+    assert_eq!(Index::open(&repo.db).unwrap().item_count().unwrap(), 1);
+
+    // Simulate an index written by an older (or newer) clove.
+    let stale_version = clove_index::SCHEMA_VERSION - 1;
+    {
+        let conn = rusqlite::Connection::open(&repo.db).unwrap();
+        conn.pragma_update(None, "user_version", stale_version)
+            .unwrap();
+    }
+    assert!(
+        matches!(
+            Index::open(&repo.db),
+            Err(IndexError::SchemaMismatch { .. })
+        ),
+        "the fixture must actually produce a version mismatch"
+    );
+
+    // The old behaviour: a valid, queryable, and *empty* index.
+    assert_eq!(
+        Index::open_or_create(&repo.db)
+            .unwrap()
+            .item_count()
+            .unwrap(),
+        0,
+        "open_or_create still recovers without repopulating"
+    );
+
+    // Put the mismatch back and use the rebuilding open.
+    {
+        let conn = rusqlite::Connection::open(&repo.db).unwrap();
+        conn.pragma_update(None, "user_version", stale_version)
+            .unwrap();
+    }
+    let index = Index::open_or_rebuild(&repo.db, &repo.issues).unwrap();
+    assert_eq!(index.item_count().unwrap(), 1, "rebuilt from the files");
+    assert_eq!(index.search("persisted", None).unwrap().len(), 1);
+}
+
+/// The rebuilding open must not re-scan on every call for a store that is
+/// legitimately empty — the discard is the signal, not the row count.
+#[test]
+fn open_or_rebuild_is_a_no_op_when_nothing_was_discarded() {
+    let repo = Repo::new();
+    clove_index::reindex(&repo.issues, &repo.db).unwrap();
+    let before = std::fs::metadata(&repo.db).unwrap().modified().unwrap();
+    let index = Index::open_or_rebuild(&repo.db, &repo.issues).unwrap();
+    assert_eq!(index.item_count().unwrap(), 0);
+    drop(index);
+    assert_eq!(
+        std::fs::metadata(&repo.db).unwrap().modified().unwrap(),
+        before,
+        "an empty store must not trigger a rebuild on every open"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 2. upsert + FTS + re-upsert
 // ---------------------------------------------------------------------------

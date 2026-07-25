@@ -92,7 +92,7 @@ pub fn list_via_index(
         return Ok(None);
     }
 
-    let mut index = match Index::open_or_create(&ctx.db_path) {
+    let mut index = match Index::open_or_rebuild(&ctx.db_path, &ctx.issues_dir) {
         Ok(index) => index,
         // A broken index is non-fatal: fall back to files.
         Err(_) => return Ok(None),

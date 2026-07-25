@@ -54,7 +54,7 @@ pub fn run(clove_dir: &Utf8Path) -> anyhow::Result<()> {
     // 2. Open the index (rebuilt if stale/corrupt — it is a cache).
     let db_path = clove_dir.join("index.db");
     let issues_dir = clove_dir.join("issues");
-    let index = Index::open_or_create(&db_path).context("opening index")?;
+    let index = Index::open_or_rebuild(&db_path, &issues_dir).context("opening index")?;
     let items = index.item_count().unwrap_or(0) as u64;
     let index = Arc::new(Mutex::new(index));
     let state = Arc::new(Mutex::new(DaemonState::new(items)));

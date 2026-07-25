@@ -2,6 +2,7 @@
 //! file-content scan. Both paths return the same JSON shape; `_meta.source`
 //! distinguishes them. Title matches are ranked ahead of body-only matches.
 
+use clove_core::view::rank_search_hits;
 use clove_core::OutputFormat;
 use clove_types::{CloveError, CloveId, ItemFrontmatter};
 
@@ -16,12 +17,13 @@ use crate::context::{index_error, Ctx};
 ///
 /// `search` previously queried the index with no staleness check at all, so any
 /// item created since the last reindex was silently missing from results — and
-/// after a schema change `Index::open_or_create` drops and recreates the file
-/// *empty*, which read as "no matches" for every query rather than "index
-/// unavailable". Mirrors the gate the list commands use (`cmd/index_read.rs`),
-/// including the `auto_refresh` opt-out and the too-far-behind bail.
+/// a schema change left the file *empty*, which read as "no matches" for every
+/// query rather than "index unavailable". `open_or_rebuild` now repopulates
+/// instead of leaving it empty, so that second failure is fixed at the source;
+/// this gate still mirrors the list commands' (`cmd/index_read.rs`), including
+/// the `auto_refresh` opt-out and the too-far-behind bail.
 fn usable_index(ctx: &Ctx, deep: bool) -> Result<Option<clove_index::Index>, CloveError> {
-    let Ok(mut index) = clove_index::Index::open_or_create(&ctx.db_path) else {
+    let Ok(mut index) = clove_index::Index::open_or_rebuild(&ctx.db_path, &ctx.issues_dir) else {
         return Ok(None); // a broken index is non-fatal
     };
     if !ctx.config.index.auto_refresh {
@@ -66,13 +68,12 @@ pub fn run(
     // exactly like the local index path) — truncating inside its SQL would cut
     // by `(priority, topo, id)` before title matches are ranked first.
     if let Some(ids) = search_via_daemon(ctx, no_index, &text) {
-        let frontmatters = ids
+        let items = ids
             .iter()
             .filter_map(|id| CloveId::new(id).ok())
             .filter_map(|id| ctx.store.get(&id).ok())
-            .map(|item| item.frontmatter)
             .collect();
-        let ordered = rank_title_first(frontmatters, &text);
+        let ordered = frontmatters_of(rank_search_hits(items, &text));
         let objects = objects_from_frontmatters(&ordered);
         let total = objects.len();
         emit(
@@ -96,15 +97,18 @@ pub fn run(
                 let rows = index
                     .search(&text, None)
                     .map_err(|e| index_error(e, &ctx.db_path))?;
-                let mut frontmatters = Vec::new();
+                // The FTS narrows the candidate set; the shared classifier does
+                // the ranking, over the full items (it needs labels and body,
+                // which the row does not carry).
+                let mut items = Vec::new();
                 for row in &rows {
                     if let Ok(id) = CloveId::new(&row.id) {
                         if let Ok(item) = ctx.store.get(&id) {
-                            frontmatters.push(item.frontmatter);
+                            items.push(item);
                         }
                     }
                 }
-                (rank_title_first(frontmatters, &text), "index")
+                (frontmatters_of(rank_search_hits(items, &text)), "index")
             }
             // A broken, stale, or freshly-rebuilt (empty) index is non-fatal:
             // fall back to files.
@@ -149,38 +153,17 @@ fn search_via_daemon(ctx: &Ctx, no_index: bool, text: &str) -> Option<Vec<String
 }
 
 /// Parallel substring scan over file content (the no-index fallback).
+///
+/// Matching and ranking are `view::rank_search_hits`, the same function
+/// `ops::search` (MCP, web) and the index path above use. This path previously
+/// had its own predicate that missed label matches entirely, and its own
+/// two-class ranking where the shared one has three.
 fn file_search(ctx: &Ctx, text: &str) -> Result<Vec<ItemFrontmatter>, CloveError> {
-    let needle = text.to_lowercase();
     let (items, _errors) = ctx.store.scan()?;
-    let matched: Vec<ItemFrontmatter> = items
-        .into_iter()
-        .filter(|item| {
-            item.frontmatter.title.to_lowercase().contains(&needle)
-                || item.body.to_lowercase().contains(&needle)
-        })
-        .map(|item| item.frontmatter)
-        .collect();
-    Ok(rank_title_first(matched, text))
+    Ok(frontmatters_of(rank_search_hits(items, text)))
 }
 
-/// Stable order: title matches first, then `(priority, id)`.
-fn rank_title_first(frontmatters: Vec<ItemFrontmatter>, text: &str) -> Vec<ItemFrontmatter> {
-    let needle = text.to_lowercase();
-    let mut keyed: Vec<(u8, ItemFrontmatter)> = frontmatters
-        .into_iter()
-        .map(|fm| {
-            let rank = if fm.title.to_lowercase().contains(&needle) {
-                0
-            } else {
-                1
-            };
-            (rank, fm)
-        })
-        .collect();
-    keyed.sort_by(|a, b| {
-        a.0.cmp(&b.0)
-            .then_with(|| a.1.priority.cmp(&b.1.priority))
-            .then_with(|| a.1.id.cmp(&b.1.id))
-    });
-    keyed.into_iter().map(|(_, fm)| fm).collect()
+/// Drop the bodies once ranking (which needs them) is done.
+fn frontmatters_of(items: Vec<clove_types::Item>) -> Vec<ItemFrontmatter> {
+    items.into_iter().map(|item| item.frontmatter).collect()
 }

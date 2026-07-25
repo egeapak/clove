@@ -245,6 +245,15 @@ pub async fn get_deptree(
 }
 
 /// `GET /api/v1/board?group_by=status`.
+///
+/// `limit`/`offset` window each column **independently** — a board caps how tall
+/// a column gets, which is the only reading of a single limit over grouped
+/// columns that means anything. It previously accepted both (it shares
+/// `matches`/`sort_items` with the item list) and silently dropped them.
+///
+/// `count` stays the column's full size, so a header reading "Closed · 412"
+/// over 50 visible cards is honest rather than wrong; `returned` is what came
+/// back.
 pub async fn get_board(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
@@ -267,13 +276,28 @@ pub async fn get_board(
             col.2.push(value);
         }
     }
+    let window = page_window(&params);
     let columns: Vec<Value> = columns
         .into_iter()
-        .map(|(key, label, items)| json!({ "key": key, "label": label, "count": items.len(), "items": items }))
+        .map(|(key, label, items)| {
+            let (page, count) = window.apply(items);
+            json!({
+                "key": key,
+                "label": label,
+                "count": count,
+                "returned": page.len(),
+                "items": page,
+            })
+        })
         .collect();
     Ok(ok(
         json!({ "columns": columns }),
-        json!({ "source": state.source }),
+        json!({
+            "source": state.source,
+            "offset": window.offset,
+            "limit": window.reported_limit(),
+            "per_column": true,
+        }),
     ))
 }
 

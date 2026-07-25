@@ -19,6 +19,9 @@ Status of what shipped, for context:
 | Ordering (`sort`/`dir`) | Web only — §1 |
 | Filters | Web has a superset — §2 |
 | Read tiering (daemon → index → files) | CLI only; MCP always reads files — §4 |
+| Search match set + ranking | **Done** — one `view::rank_search_hits`, FTS indexes labels |
+| Index rebuild on schema bump | **Done** — `Index::open_or_rebuild` |
+| `/board` window | **Done** — per-column `limit`/`offset` |
 
 ---
 
@@ -131,14 +134,14 @@ truth.
 
 ---
 
-## 3. Index schema v5 — canonical timestamps, and a rebuild that rebuilds
+## 3. Canonical timestamps
 
 Two separate version numbers, easy to confuse: the **item** `schema` field
-(`clove_types::CURRENT_SCHEMA_VERSION`, currently **1**) and the **index**
-schema (`clove_index::SCHEMA_VERSION`, in `PRAGMA user_version`, currently
-**4**). This section bumps the index one, 4 → 5. The item schema stays at 1 —
-canonical RFC3339 is still RFC3339, so nothing about the file format changes
-shape.
+(`clove_types::CURRENT_SCHEMA_VERSION`, **1**) and the **index** schema
+(`clove_index::SCHEMA_VERSION`, in `PRAGMA user_version`, now **5** after the
+FTS-labels bump in §6.1). This section bumps the index one again. The item
+schema stays at 1 — canonical RFC3339 is still RFC3339, so nothing about the
+file format changes shape.
 
 **Problem.** Timestamps are stored as written. `clove-import`'s GitHub sync
 compares them, `clove stats --history` sorts by them as strings
@@ -152,16 +155,14 @@ change when nothing changed.
 1. Canonicalize on write: parse to `DateTime<Utc>`, emit one spelling
    (`to_rfc3339_opts(SecondsFormat::Secs, true)` — the store already truncates
    to seconds).
-2. Bump `clove_index::SCHEMA_VERSION` 4 → 5, so existing indexes holding
-   non-canonical strings are replaced rather than compared against.
-3. `Index::open_or_rebuild` — on a version mismatch, **rebuild from the files**
-   rather than drop-and-recreate-empty. `open_or_create` currently drops the
-   file and leaves it empty, which reads as *"no matches"* rather than *"index
-   unavailable"*; `clove search` silently returned nothing after a schema change
-   until that was patched at the call site (`cmd/search.rs::usable_index`).
-   Fixing it in the index is the real repair, and it is a prerequisite for
-   bumping the version at all — without it, every bump ships a window where
-   searches return nothing.
+2. Bump `clove_index::SCHEMA_VERSION` (now **5**, after §6.1) so existing
+   indexes holding non-canonical strings are replaced rather than compared
+   against. The tripwire assertion in `db.rs` makes this a deliberate act.
+3. ~~`Index::open_or_rebuild`~~ — **done**, shipped with the v5 bump for FTS
+   labels (§6.1). On a version mismatch it rebuilds from the files rather than
+   leaving an empty index. It was a prerequisite for bumping the version at all:
+   without it every bump ships a window where searches return nothing and the
+   CLI silently falls back to file scans for every query.
 4. Migration on read: accept any parseable RFC3339, rewrite on next mutation.
    No flag day, no `clove migrate` — the store is files and users have branches
    in flight.
@@ -169,6 +170,9 @@ change when nothing changed.
 **Test.** A fixture with every spelling variant that must compare equal after
 canonicalization, and a `sync github` round-trip asserting zero diffs when
 nothing changed.
+
+This section is now smaller than it was: the rebuild half shipped with §6.1,
+leaving only the canonicalization itself.
 
 ---
 
@@ -251,29 +255,38 @@ is exactly why `GET /items/:id/comments` kept the unlimited web default.
 
 ---
 
-## 6. Known divergences left open
+## 6. Closed divergences
 
-Neither is a regression; both need a decision rather than a quiet fix.
+Both are **done**; kept here because the resolutions are decisions worth
+recording, not just diffs.
 
-**6.1 `search` disagrees with itself across surfaces.** `ops::search` (MCP)
-matches title, **labels**, and body. `clove search`'s file path matches title and
-body; its index path uses FTS5 over `title, body` only
-(`crates/clove-index/src/db.rs`). So a label-only hit is found by the MCP tool
-and by neither CLI path. Ranking differs too — the CLI has two match classes
-(title / not-title), `ops::search` has three (title / label / body).
+**6.1 `search` disagreed with itself across surfaces.** `ops::search` (MCP, web)
+matched title, **labels**, and body with three ranking classes; `clove search`'s
+file path matched title and body with two, and its index path used an FTS table
+over `title, body` only. A label-only hit was returned by the MCP tool and by
+neither CLI path.
 
-Options: (a) add `labels` to the FTS table — an index schema bump, so fold it
-into §3's 4 → 5; (b) drop labels from `ops::search` — loses capability; (c) route the
-CLI through `ops::search` on its file path and accept that index and files
-differ on labels — the worst of the three, since `--no-index` would change
-results. **(a) is the recommendation.**
+Resolved by option (a) of the three considered — index labels in FTS — because
+(b) dropping labels from `ops::search` loses capability and (c) routing only the
+CLI's file path through the shared matcher would have made `--no-index` change
+results, which is worse than the original bug. Matching and ranking now live in
+`view::rank_search_hits`, used by `ops::search` and by both CLI paths, so the
+question cannot be answered differently by different callers. Index schema
+4 → 5, which is what forced §3's `open_or_rebuild` to be written first.
 
-**6.2 `GET /api/v1/board` takes no window.** It shares `matches()` and
-`sort_items()` with `list_items`, so it accepts every filter and sort parameter,
-but silently ignores `limit`/`offset`. A single limit across three grouped
-status columns has no obvious meaning. Options: per-column limits
-(`?limit_per_column=`), or document it as unpaginated (done, in §7.8 of DESIGN)
-and reject `limit` explicitly rather than dropping it.
+Pinned by `search_agrees_across_the_file_and_index_paths` in
+`crates/clove/tests/cli_commands.rs`, which asserts both paths return the same
+ids in the same order for an item set with one hit per match class.
+
+**6.2 `GET /api/v1/board` took no window.** It shares `matches()`/`sort_items()`
+with the item list, so it accepted every filter and sort parameter and silently
+dropped `limit`/`offset`.
+
+Resolved as a **per-column** window rather than by rejecting the parameters: a
+board caps how tall a column gets, which is the only reading of one limit over
+grouped columns that means anything. `count` stays the column's full size so a
+header reading "Closed · 412" over 50 visible cards is honest; `returned` is what
+came back; `_meta.per_column` marks the difference from a flat list.
 
 ---
 

@@ -112,6 +112,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`clove search` and `clove_search` disagreed on what counts as a hit.** The
+  MCP tool matched title, **labels**, and body and ranked in three classes; the
+  CLI matched title and body and ranked in two — and its index path used an FTS
+  table that indexed `title, body` only, so a label-only hit was returned by the
+  MCP tool and by neither CLI path. Matching and ranking are now one function
+  (`view::rank_search_hits`) shared by all three, and `items_fts` indexes labels.
+
+  *Index schema v4 → v5.* Existing indexes are replaced on next open.
+- **A schema bump left the index empty rather than rebuilt.** `open_or_create`
+  recovered the file and stopped, and "empty" is indistinguishable from "nothing
+  matched" at every call site — `clove search` returned zero rows for every query
+  after a bump until that was patched defensively at the call site. The staleness
+  gate then reported every file as changed, over the inline-refresh limit, so the
+  CLI silently fell back to scanning files for *every* query until someone ran
+  `clove reindex` by hand. `Index::open_or_rebuild` repopulates from the files
+  instead; the CLI read paths and the daemon use it.
+- **`GET /api/v1/board` silently dropped `limit`/`offset`.** It shares its filter
+  and sort handling with the item list, so it accepted both and ignored them.
+  They now window each column independently — the one reading of a single limit
+  over grouped columns that means anything. `count` remains the column's full
+  size (so a header reading "Closed · 412" over 50 cards stays honest) and
+  `returned` is what came back.
 - **`clove_search` paged over an undefined order.** Results were ranked by match
   class (title / label / body) with a *stable* sort over `read_dir` order, so
   ties kept whatever order the filesystem happened to return and reshuffled when

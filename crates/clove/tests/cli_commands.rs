@@ -428,6 +428,76 @@ fn search_follows_the_shared_limit_contract() {
     assert_eq!(idx["_meta"]["total"], 120);
 }
 
+/// `clove search` finds the same items, in the same order, on the file path and
+/// the index path — and agrees with the `clove_search` MCP tool.
+///
+/// The three used to disagree twice over. The CLI matched title and body only,
+/// so a label-only hit was invisible to it while `ops::search` (MCP, web)
+/// returned it; and the FTS table indexed `title, body`, so even after the file
+/// path learned about labels the index path would not have. Ranking differed
+/// too: two match classes on the CLI, three in `ops::search`.
+#[test]
+fn search_agrees_across_the_file_and_index_paths() {
+    let dir = init_repo();
+    let issues = dir.path().join(".clove/issues");
+    // One item per match class, so ranking is observable, plus a non-match.
+    let rows = [
+        ("AAAAAAAA", "Payments gateway", "unrelated prose", ""),
+        (
+            "BBBBBBBB",
+            "Unrelated title",
+            "unrelated prose",
+            "area:gateway",
+        ),
+        ("CCCCCCCC", "Another title", "the gateway times out", ""),
+        ("DDDDDDDD", "Nothing here", "nothing at all", "area:core"),
+    ];
+    for (suffix, title, body, label) in rows {
+        let id = format!("proj-{suffix}");
+        let labels = if label.is_empty() {
+            String::new()
+        } else {
+            format!("labels:\n  - {label}\n")
+        };
+        std::fs::write(
+            issues.join(format!("{id}.md")),
+            format!(
+                "---\nschema: 1\nid: {id}\ntitle: {title}\nstatus: open\ntype: feature\n\
+                 priority: 2\ncreated: 2026-06-02T10:00:00Z\nupdated: 2026-06-02T10:00:00Z\n\
+                 {labels}---\n{body}\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    // Title, then label, then body — and the non-matching item is absent.
+    let expected = vec!["proj-AAAAAAAA", "proj-BBBBBBBB", "proj-CCCCCCCC"];
+    let ids_of = |v: &Value| -> Vec<String> {
+        v["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+
+    let files = json_ok(clove(dir.path()).args(["search", "gateway", "--no-index"]));
+    assert_eq!(
+        ids_of(&files),
+        expected,
+        "file path: class order, labels found"
+    );
+
+    clove(dir.path()).arg("reindex").assert().success();
+    let index = json_ok(clove(dir.path()).args(["search", "gateway"]));
+    assert_eq!(index["_meta"]["source"], "index", "the index must answer");
+    assert_eq!(
+        ids_of(&index),
+        expected,
+        "index path must agree with the file path, labels included"
+    );
+}
+
 #[test]
 fn ls_default_limit_caps_at_100_with_full_total() {
     let dir = init_repo();

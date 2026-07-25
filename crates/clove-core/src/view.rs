@@ -165,6 +165,76 @@ impl Page {
     }
 }
 
+/// Where a search needle was found in an item, best match first.
+///
+/// The single definition of "what counts as a hit, and how well" — shared by
+/// `ops::search` (MCP, web) and `clove search`'s file and index paths, which
+/// previously disagreed on both. The CLI matched title and body only and ranked
+/// in two classes; `ops::search` matched labels too and ranked in three, so a
+/// label-only hit was found by the MCP tool and by neither CLI path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MatchClass {
+    /// In the title — the strongest signal, ranked first.
+    Title,
+    /// In a label.
+    Label,
+    /// Somewhere in the body.
+    Body,
+}
+
+/// Classify `item` against an already-lowercased `needle`, or `None` for no hit.
+///
+/// `needle` is taken pre-lowered so a caller scanning a whole store lowers it
+/// once rather than per item.
+pub fn match_class(item: &Item, needle: &str) -> Option<MatchClass> {
+    let fm = &item.frontmatter;
+    if fm.title.to_lowercase().contains(needle) {
+        Some(MatchClass::Title)
+    } else if fm.labels.iter().any(|l| l.to_lowercase().contains(needle)) {
+        Some(MatchClass::Label)
+    } else if item.body.to_lowercase().contains(needle) {
+        Some(MatchClass::Body)
+    } else {
+        None
+    }
+}
+
+/// Order search hits by `(match class, priority, id)` — a *total* order.
+///
+/// Ranking by match class alone left ties in the caller's input order, which for
+/// the file paths is raw `read_dir` order: undefined, and it reshuffles when a
+/// file is added. That was survivable while search had no `offset`, but paging
+/// over a non-total order silently repeats and skips rows between requests.
+///
+/// Takes the classified pairs rather than a store, so the ordering can be tested
+/// against a deliberately scrambled input — a test going through the store is at
+/// the mercy of `read_dir` and passes with the tiebreak removed.
+pub fn sort_by_match<T>(hits: &mut [(MatchClass, T)], key: impl Fn(&T) -> (Priority, CloveId)) {
+    hits.sort_by(|a, b| {
+        let (ap, ai) = key(&a.1);
+        let (bp, bi) = key(&b.1);
+        a.0.cmp(&b.0)
+            .then_with(|| ap.cmp(&bp))
+            .then_with(|| ai.cmp(&bi))
+    });
+}
+
+/// Classify, filter, and order a set of items against a search `text`.
+///
+/// The whole shared search pipeline, so every surface's ranking is the same
+/// function and not three that happen to agree.
+pub fn rank_search_hits(items: Vec<Item>, text: &str) -> Vec<Item> {
+    let needle = text.to_lowercase();
+    let mut hits: Vec<(MatchClass, Item)> = items
+        .into_iter()
+        .filter_map(|item| match_class(&item, &needle).map(|class| (class, item)))
+        .collect();
+    sort_by_match(&mut hits, |item| {
+        (item.frontmatter.priority, item.frontmatter.id.clone())
+    });
+    hits.into_iter().map(|(_, item)| item).collect()
+}
+
 /// Sort frontmatter in place by `(priority, topological_rank, id)` — the
 /// canonical list order shared by the file and index paths.
 pub fn sort_by_rank(items: &mut [ItemFrontmatter], ranks: &HashMap<CloveId, usize>) {
@@ -434,6 +504,82 @@ mod tests {
             Page::new(max, Some(2), 0).sql_fetch().unwrap() <= i64::MAX as usize,
             "an over-range fetch count is a SQLite type error, not a big page"
         );
+    }
+
+    /// Search results are totally ordered, so paging over them is stable.
+    ///
+    /// Driven against a scrambled list rather than through a store: `search`
+    /// reads the issues directory, so a store-based test sees whatever order
+    /// `read_dir` returns — which on this filesystem is already sorted, making
+    /// such a test pass with the tiebreak removed.
+    #[test]
+    fn search_hits_are_totally_ordered() {
+        let hit = |class: MatchClass, priority: u8, raw: &str| {
+            (
+                class,
+                (Priority::new(priority).unwrap(), CloveId::new(raw).unwrap()),
+            )
+        };
+        // Scrambled, and built so every key matters: three share a match class,
+        // two of those share a priority.
+        let mut hits = vec![
+            hit(MatchClass::Body, 0, "proj-BBBBBBBB"),
+            hit(MatchClass::Title, 3, "proj-CCCCCCCC"),
+            hit(MatchClass::Title, 1, "proj-ZZZZZZZZ"),
+            hit(MatchClass::Label, 4, "proj-AAAAAAAA"),
+            hit(MatchClass::Title, 3, "proj-AAAAAAAB"),
+        ];
+        sort_by_match(&mut hits, |k| k.clone());
+        let order: Vec<&str> = hits.iter().map(|h| h.1 .1.as_str()).collect();
+        assert_eq!(
+            order,
+            vec![
+                "proj-ZZZZZZZZ", // title, p1
+                "proj-AAAAAAAB", // title, p3, id sorts first
+                "proj-CCCCCCCC", // title, p3
+                "proj-AAAAAAAA", // label
+                "proj-BBBBBBBB", // body — despite arriving first, at p0
+            ],
+            "class, then priority, then id — no input order survives"
+        );
+
+        // The result does not depend on the order the hits arrive in.
+        let mut reversed: Vec<_> = hits.iter().rev().cloned().collect();
+        sort_by_match(&mut reversed, |k| k.clone());
+        let reordered: Vec<&str> = reversed.iter().map(|h| h.1 .1.as_str()).collect();
+        assert_eq!(reordered, order, "a permuted input must sort identically");
+    }
+
+    /// A label-only hit is a hit. This is what the CLI's own predicate missed:
+    /// it matched title and body, so an item found by the MCP tool was invisible
+    /// to `clove search` on both of its paths.
+    #[test]
+    fn match_class_finds_titles_labels_and_bodies() {
+        let mut f = fm("Widget rendering", ItemStatus::Open, ItemType::Bug, 1, &[]);
+        f.labels = vec!["area:payments".to_owned()];
+        let item = |body: &str| Item {
+            frontmatter: f.clone(),
+            body: body.to_owned(),
+        };
+
+        assert_eq!(match_class(&item(""), "widget"), Some(MatchClass::Title));
+        assert_eq!(match_class(&item(""), "payments"), Some(MatchClass::Label));
+        assert_eq!(
+            match_class(&item("mentions gateway here"), "gateway"),
+            Some(MatchClass::Body)
+        );
+        // Ranking is by strongest match, not by first found.
+        assert_eq!(
+            match_class(&item("widget widget widget"), "widget"),
+            Some(MatchClass::Title),
+            "a title hit outranks the same needle in the body"
+        );
+        // Case-insensitive on every field, and a miss is a miss.
+        assert_eq!(
+            match_class(&item(""), "WIDGET".to_lowercase().as_str()),
+            Some(MatchClass::Title)
+        );
+        assert_eq!(match_class(&item("nothing"), "absent"), None);
     }
 
     #[test]

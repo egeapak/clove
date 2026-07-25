@@ -275,6 +275,64 @@ async fn board_groups_by_status() {
     assert!(body.contains("\"key\":\"closed\""));
 }
 
+/// `/board` windows each column independently. It accepts every filter and sort
+/// parameter (it shares `matches`/`sort_items` with the item list) but used to
+/// drop `limit`/`offset` silently — advertised by association and ignored.
+///
+/// `count` stays the column's *full* size so a header reading "Open · 2" over
+/// one visible card is honest; `returned` is what came back.
+#[tokio::test]
+async fn board_windows_each_column_independently() {
+    let (_tmp, addr, _id) = spawn().await;
+    let column = |body: &str, key: &str| -> serde_json::Value {
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        v["data"]["columns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["key"] == key)
+            .unwrap()
+            .clone()
+    };
+
+    // The fixture is two open items, both in the same column.
+    let (_, all) = get(addr, "/api/v1/board").await;
+    let open = column(&all, "open");
+    assert_eq!(open["count"], 2);
+    assert_eq!(open["returned"], 2);
+    assert_eq!(open["items"].as_array().unwrap().len(), 2);
+
+    // `limit` caps the column without lying about how tall it is.
+    let (_, capped) = get(addr, "/api/v1/board?limit=1").await;
+    let open = column(&capped, "open");
+    assert_eq!(open["count"], 2, "count is the full column");
+    assert_eq!(open["returned"], 1);
+    assert_eq!(open["items"].as_array().unwrap().len(), 1);
+    // Every column is windowed, including the empty ones.
+    let closed = column(&capped, "closed");
+    assert_eq!(closed["count"], 0);
+    assert_eq!(closed["returned"], 0);
+
+    // `offset` walks the column, and `limit=0` is unlimited as everywhere else.
+    let (_, skipped) = get(addr, "/api/v1/board?offset=1").await;
+    let open_skipped = column(&skipped, "open");
+    assert_eq!(open_skipped["returned"], 1);
+    assert_eq!(
+        open_skipped["items"][0]["id"],
+        column(&all, "open")["items"][1]["id"],
+        "offset skips into the same order"
+    );
+    let (_, unlimited) = get(addr, "/api/v1/board?limit=0").await;
+    assert_eq!(column(&unlimited, "open")["returned"], 2);
+
+    let meta: serde_json::Value = serde_json::from_str(&capped).unwrap();
+    assert_eq!(meta["_meta"]["limit"], 1);
+    assert_eq!(
+        meta["_meta"]["per_column"], true,
+        "the window is per column"
+    );
+}
+
 #[tokio::test]
 async fn stats_history_synthesizes_daily_series() {
     let (_tmp, addr, _id) = spawn().await;

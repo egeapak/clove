@@ -614,52 +614,14 @@ pub fn search(
     text: &str,
     window: crate::view::Page,
 ) -> Result<Value, CloveError> {
-    let needle = text.to_lowercase();
-    let items = store.list()?;
-    let mut hits: Vec<SearchHit> = Vec::new();
-    for item in &items {
-        let fm = &item.frontmatter;
-        let in_title = fm.title.to_lowercase().contains(&needle);
-        let in_label = fm.labels.iter().any(|l| l.to_lowercase().contains(&needle));
-        let in_body = item.body.to_lowercase().contains(&needle);
-        if in_title || in_label || in_body {
-            let rank = if in_title {
-                0
-            } else if in_label {
-                1
-            } else {
-                2
-            };
-            hits.push((
-                rank,
-                fm.priority,
-                fm.id.clone(),
-                Value::Object(item_object(item)),
-            ));
-        }
-    }
-    sort_hits(&mut hits);
-    let objects: Vec<Value> = hits.into_iter().map(|(_, _, _, o)| o).collect();
+    // Matching and ranking are `view::rank_search_hits`, shared with the CLI's
+    // file and index paths so the three cannot disagree on what counts as a hit.
+    let ranked = crate::view::rank_search_hits(store.list()?, text);
+    let objects: Vec<Value> = ranked
+        .iter()
+        .map(|item| Value::Object(item_object(item)))
+        .collect();
     Ok(page(objects, window))
-}
-
-/// One search hit: `(match class, priority, id, item JSON)`.
-type SearchHit = (u8, crate::Priority, CloveId, Value);
-
-/// Order search hits by `(match class, priority, id)` — a *total* order.
-///
-/// Ranking by match class alone left ties in `store.list()` order, which is raw
-/// `read_dir` order: undefined, and it reshuffles when a file is added. That was
-/// survivable while search had no `offset`, but paging over an unstable order
-/// silently repeats and skips rows between requests. Split out so the ordering
-/// can be tested against a deliberately scrambled input, which a test going
-/// through the store cannot do — it would be at the mercy of `read_dir`.
-fn sort_hits(hits: &mut [SearchHit]) {
-    hits.sort_by(|a, b| {
-        a.0.cmp(&b.0)
-            .then_with(|| a.1.cmp(&b.1))
-            .then_with(|| a.2.cmp(&b.2))
-    });
 }
 
 /// The dependency tree rooted at `id` to `depth`, as a nested JSON object.
@@ -1192,52 +1154,6 @@ mod tests {
             search(&store, "zzzzz", Page::unlimited()).unwrap()["total"],
             0
         );
-    }
-
-    /// Search results are totally ordered, so paging over them is stable.
-    ///
-    /// Driven directly against a scrambled hit list rather than through the
-    /// store: `search` reads the issues directory, so a store-based test sees
-    /// whatever order `read_dir` returns — which on this filesystem is already
-    /// sorted, making such a test pass with the bug still in place.
-    #[test]
-    fn search_hits_are_totally_ordered() {
-        let hit = |class: u8, priority: u8, raw: &str| -> SearchHit {
-            (
-                class,
-                crate::Priority::new(priority).unwrap(),
-                CloveId::new(raw).unwrap(),
-                Value::Null,
-            )
-        };
-        // Scrambled, and built so every key matters: three share a match class,
-        // two of those share a priority.
-        let mut hits = vec![
-            hit(2, 0, "proj-BBBBBBBB"),
-            hit(0, 3, "proj-CCCCCCCC"),
-            hit(0, 1, "proj-ZZZZZZZZ"),
-            hit(1, 4, "proj-AAAAAAAA"),
-            hit(0, 3, "proj-AAAAAAAB"),
-        ];
-        sort_hits(&mut hits);
-        let order: Vec<&str> = hits.iter().map(|h| h.2.as_str()).collect();
-        assert_eq!(
-            order,
-            vec![
-                "proj-ZZZZZZZZ", // class 0, p1
-                "proj-AAAAAAAB", // class 0, p3, id sorts first
-                "proj-CCCCCCCC", // class 0, p3
-                "proj-AAAAAAAA", // class 1
-                "proj-BBBBBBBB", // class 2 — despite arriving first, at p0
-            ],
-            "class, then priority, then id — no input order survives"
-        );
-
-        // The result does not depend on the order the hits arrive in.
-        let mut reversed: Vec<SearchHit> = hits.iter().rev().cloned().collect();
-        sort_hits(&mut reversed);
-        let reordered: Vec<&str> = reversed.iter().map(|h| h.2.as_str()).collect();
-        assert_eq!(reordered, order, "a permuted input must sort identically");
     }
 
     /// End-to-end: consecutive windows over a search tile the result set exactly

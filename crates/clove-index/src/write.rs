@@ -155,16 +155,21 @@ pub(crate) fn write_row(
 
     // (6) FTS5 mirror (contentless, contentless_delete=1: managed explicitly).
     // Delete the old shadow row by rowid first, then insert the current
-    // title/body. We use `DELETE ... WHERE rowid` (not the FTS5 'delete'
+    // title/labels/body. We use `DELETE ... WHERE rowid` (not the FTS5 'delete'
     // command) because that command requires the *previous* column values,
     // which we don't have when the body changed — passing the new values would
     // corrupt the token counts. `contentless_delete=1` (DESIGN §6.1 DDL) makes
     // rowid-only deletes sound.
+    //
+    // `labels` is indexed so the index path finds label-only hits. Without it
+    // the FTS never returned them, while the file path and the MCP tool did —
+    // the same query answering differently depending on whether an index
+    // happened to be present.
     let rowid = fts_rowid(id);
     tx.execute("DELETE FROM items_fts WHERE rowid = ?1", params![rowid])?;
     tx.execute(
-        "INSERT INTO items_fts(rowid, id, title, body) VALUES (?1, ?2, ?3, ?4)",
-        params![rowid, id, fm.title, item.body],
+        "INSERT INTO items_fts(rowid, id, title, labels, body) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![rowid, id, fm.title, fm.labels.join(" "), item.body],
     )?;
     // Reverse map so a full-text match (which yields only rowids on a contentless
     // table) can be resolved back to the item id.

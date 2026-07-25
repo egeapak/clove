@@ -965,9 +965,10 @@ argument is named `--skip-newest` / `skip_newest` rather than `offset`.
 `--depth` on `dep tree` follows the same `0 = unlimited` rule (so `--depth 0` and
 `--full` are one request), as does `--top` on `stats`.
 
-`GET /api/v1/board` is the one read that takes no window: it returns the three
-status columns whole, because a single limit across grouped columns has no
-well-defined meaning.
+`GET /api/v1/board` applies the window to **each column independently** — a
+board caps how tall a column gets. Each column reports `count` (its full size,
+before the window) and `returned`; `_meta.per_column` marks the difference from
+a flat list.
 
 Cursor-based pagination is deferred to post-v1; offset is sufficient for M0–M2.
 

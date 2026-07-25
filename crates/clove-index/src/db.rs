@@ -21,7 +21,7 @@ use thiserror::Error;
 /// in-memory `ready_items` exactly, and the incremental path now keeps
 /// `topological_rank`/`has_dangling_deps`/`excluded` exact (no longer
 /// reindex-only). The index is a rebuildable cache, so each bump just rebuilds.
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// Complete DDL for the index (DESIGN §6.1). Kept as one reviewable block.
 /// PRAGMAs that must run per-connection (not persisted) are applied separately
@@ -81,6 +81,7 @@ CREATE TABLE labels (
 CREATE VIRTUAL TABLE items_fts USING fts5(
     id UNINDEXED,
     title,
+    labels,
     body,
     content='',
     contentless_delete=1,
@@ -329,8 +330,16 @@ impl Index {
     /// the wrong schema version or corrupt (DESIGN §6.1). A corrupt file is
     /// logged to stderr before rebuilding.
     pub fn open_or_create(path: &Utf8Path) -> Result<Index, IndexError> {
+        Index::open_reporting(path).map(|(index, _discarded)| index)
+    }
+
+    /// [`Index::open_or_create`], also reporting whether the existing database
+    /// had to be **discarded** (wrong schema version or corrupt). The caller
+    /// gets a valid but *empty* index in that case; `true` is the signal that it
+    /// needs repopulating from the files.
+    fn open_reporting(path: &Utf8Path) -> Result<(Index, bool), IndexError> {
         match Index::open(path) {
-            Ok(index) => Ok(index),
+            Ok(index) => Ok((index, false)),
             Err(IndexError::SchemaMismatch { found, expected }) => {
                 eprintln!(
                     "note: index schema changed (found {found}, expected {expected}); rebuilding {path}"
@@ -343,20 +352,46 @@ impl Index {
                 if !preserved.is_empty() {
                     crate::stats_store::insert_raw(index.conn(), &preserved)?;
                 }
-                Ok(index)
+                Ok((index, true))
             }
             Err(IndexError::CorruptIndex(msg)) => {
                 eprintln!("warning: index at {path} is corrupt ({msg}); rebuilding");
                 remove_db_files(path)?;
-                Index::open(path)
+                Index::open(path).map(|index| (index, true))
             }
             Err(IndexError::SqliteError(e)) if is_corrupt(&e) => {
                 eprintln!("warning: index at {path} is corrupt ({e}); rebuilding");
                 remove_db_files(path)?;
-                Index::open(path)
+                Index::open(path).map(|index| (index, true))
             }
             Err(other) => Err(other),
         }
+    }
+
+    /// [`Index::open_or_create`], but *repopulated* from `issues_dir` when the
+    /// open had to discard the old database.
+    ///
+    /// `open_or_create` recovers the file and stops there, leaving a valid but
+    /// **empty** index. Empty is indistinguishable from "nothing matched" at
+    /// every call site: `clove search` returned zero rows for every query after
+    /// a schema bump until that was patched defensively at the call site, and a
+    /// list command sees a store that appears to have no items. The staleness
+    /// gate then reports every file as changed, which is over the inline-refresh
+    /// limit, so the CLI silently falls back to scanning files for every query
+    /// until someone runs `clove reindex` by hand.
+    ///
+    /// Prefer this wherever the issues directory is known — which is every read
+    /// path. Rebuilding costs one scan, once, at the moment the schema changed.
+    pub fn open_or_rebuild(path: &Utf8Path, issues_dir: &Utf8Path) -> Result<Index, IndexError> {
+        let (index, discarded) = Index::open_reporting(path)?;
+        if !discarded {
+            return Ok(index);
+        }
+        // Close before reindexing: `reindex` opens the database itself and takes
+        // the rebuild lock.
+        drop(index);
+        crate::reindex::reindex(issues_dir, path)?;
+        Index::open(path)
     }
 
     /// Borrow the connection for reads (queries, staleness checks). Not a write
@@ -578,9 +613,32 @@ mod tests {
             )
             .unwrap();
         assert!(has_col, "file_mtimes.synced_at must exist at schema v3+");
+        // A tripwire, on purpose: bumping the version invalidates every index in
+        // the wild, so it should never happen as a side effect. v5 adds `labels`
+        // to `items_fts` — without it the index path could not find label-only
+        // hits that the file path and the MCP tool both returned.
         assert_eq!(
-            SCHEMA_VERSION, 4,
-            "M4 incremental graph ships index schema v4"
+            SCHEMA_VERSION, 5,
+            "index schema v5 indexes labels for full-text search"
+        );
+    }
+
+    /// The FTS mirror indexes labels, which is the whole point of v5.
+    #[test]
+    fn items_fts_indexes_labels() {
+        let (_dir, path) = tmp_db();
+        let index = Index::open(&path).unwrap();
+        let columns: Vec<String> = index
+            .conn()
+            .prepare("SELECT name FROM pragma_table_info('items_fts')")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(
+            columns.iter().any(|c| c == "labels"),
+            "items_fts must index labels; got {columns:?}"
         );
     }
 }
