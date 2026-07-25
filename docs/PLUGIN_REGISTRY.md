@@ -1,12 +1,32 @@
 # Plugin registry, install & discovery
 
-> **Status:** Design — implementation-ready (planned by a design team, decisions
-> adopted). Builds on the cargo-style plugin dispatch in
-> [`PLUGIN_SYSTEM.md`](PLUGIN_SYSTEM.md). Adds: an enriched `clove plugin list`,
-> a curated registry (`clove plugin list --all`), `clove plugin install/uninstall/
-> update`, and **dynamic, plugin-aware `--help`** for the `import`/`export`/`sync`
-> multiplexers. **The core dispatch path stays network- and dependency-free** —
-> everything here lives only on the `plugin install` / `list --all` path.
+> **Status:** Partly implemented, partly superseded. Read this alongside the two
+> documents that revise it:
+>
+> | Section | Status |
+> |---|---|
+> | §2 compat probe, §3 enriched `list`, §6 dynamic `--help` | **Shipped** (`cdea402`) |
+> | §7 search path & install root | **Shipped**, with one correction — the root is *not* `~/.clove`; see below |
+> | §1 registry manifest, §4 `list --all`, §5 `install` | **Superseded** by [`crates.io as the clove plugin registry`](superpowers/specs/2026-07-24-crates-io-plugin-registry-design.md). `list --all`/`search` shipped against crates.io; install is deferred to Stage 2 of the [implementation plan](superpowers/specs/2026-07-25-plugin-registry-implementation-plan.md) |
+> | §8 Phase 3 (prebuilt download, sha256, `plugins.json`, `CLOVE_PLUGINS`) | **Superseded, not scheduled** — `cargo install` replaces it, and `release.yml` already bundles the plugin binaries |
+>
+> Two adopted decisions below did not survive contact with reality:
+>
+> - **"Shell out to `curl`" (decision 1)** is superseded. The registry client is
+>   in-process `ureq`, always on: `reverse_dependencies` has no library binding
+>   anywhere, so the request is hand-rolled regardless, and shelling out adds a
+>   "curl not installed" failure mode for no gain. Measured cost is ~1 MB.
+> - **The install root is not `~/.clove` (decision 3, §7).** Repository discovery
+>   treats *any* ancestor containing a `.clove/` **directory** as a repository
+>   root, with no marker check, so an install root by that name makes `$HOME`
+>   resolve as a clove repository for every command run beneath it. The root is
+>   `$CLOVE_HOME`, else `$XDG_DATA_HOME/clove`, else `~/.local/share/clove`
+>   (`%APPDATA%\clove` on Windows).
+>
+> Builds on the cargo-style plugin dispatch in
+> [`PLUGIN_SYSTEM.md`](PLUGIN_SYSTEM.md). **The core dispatch path stays network-
+> and dependency-free** — everything here lives only on the `plugin install` /
+> `list --all` path.
 
 ## Goal
 
@@ -43,7 +63,15 @@ clove import --help               # shows built-in providers AND installed impor
    target.
 4. **Phased delivery** (below).
 
-## 1. Registry manifest
+## 1. Registry manifest — SUPERSEDED
+
+> Not built. crates.io is the registry; `registry/plugins.toml` was never
+> created, so there is nothing to migrate. Kept for the rationale on
+> multi-capability binaries vs. multi-binary bundles, which still holds —
+> though the crates.io model makes bundles unrepresentable (one crate, one
+> install), and the umbrella fallback in `PLUGIN_SYSTEM.md` §4.2 made
+> one-binary-many-capabilities the pattern that actually matters.
+
 
 Committed at `registry/plugins.toml`, compiled into `clove` via `include_str!`
 (the offline default), and reachable live at
@@ -177,7 +205,16 @@ clean); human output shows an *Installed* and an *Available* section. A
 registry-fetch failure **degrades** — the Installed section still prints, with the
 error as a warning (`_meta.registry_error`).
 
-## 5. `clove plugin install / uninstall / update`
+## 5. `clove plugin install / uninstall / update` — SUPERSEDED (deferred)
+
+> Install is **not implemented**. The crates.io design replaces the
+> curated-manifest resolution here, and the security review of the
+> implementation plan found this section materially under-specified —
+> notably the **"non-TTY/JSON proceeds (scriptable)"** rule below, which is
+> **dead**: proceeding without a prompt is unattended execution of
+> third-party code. The full corrected requirement set lives in §5 of the
+> [implementation plan](superpowers/specs/2026-07-25-plugin-registry-implementation-plan.md).
+
 
 - **`install <name>`** resolves `name` **only** through the curated manifest,
   then for each binary runs `cargo install --locked --git <source.git> --tag

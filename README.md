@@ -84,6 +84,13 @@ no core rebuild. The daemon's periodic sync spawns the same `clove sync github`,
 so it needs the plugin too. See [`docs/PLUGIN_SYSTEM.md`](docs/PLUGIN_SYSTEM.md) for
 the dispatch/discovery/env contract.
 
+`clove plugin list` shows what is installed and whether each plugin is compatible
+with this clove; `clove plugin list --all` and `clove plugin search <text>` also
+report plugins published to crates.io. There is no curated registry — a plugin is
+discoverable because it depends on `clove-plugin`, which is what makes it a
+plugin. Discovery is strictly additive: if it is unavailable, the installed list
+still prints and plugin dispatch is unaffected.
+
 ## Quick start
 
 ```sh
@@ -228,7 +235,7 @@ cd crates/clove-web/web && npm run check && npm run test   # svelte-check + vite
 | [`docs/DESIGN.md`](docs/DESIGN.md) | the authoritative, implementation-ready spec (read this first) |
 | [`docs/RELEASE.md`](docs/RELEASE.md) | the release runbook (crates.io + pre-built binaries) |
 | [`docs/PLUGIN_SYSTEM.md`](docs/PLUGIN_SYSTEM.md) | the cargo-style plugin system: dispatch, discovery, and the host↔plugin contract |
-| [`docs/PLUGIN_REGISTRY.md`](docs/PLUGIN_REGISTRY.md) | plugin list/install/`--help` discovery and the registry manifest schema |
+| [`docs/PLUGIN_REGISTRY.md`](docs/PLUGIN_REGISTRY.md) | plugin `list`/`search`/`--help` discovery, host↔plugin compatibility, and the install root |
 | [`docs/json-schema/`](docs/json-schema/) | JSON Schemas for the stable `--format json` output |
 | [`CHANGELOG.md`](CHANGELOG.md) | release notes |
 
