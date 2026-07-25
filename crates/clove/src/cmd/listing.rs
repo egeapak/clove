@@ -20,10 +20,10 @@ pub use clove_core::view::Filters;
 /// steps only this many rows). `_meta.total` still reports the full match count.
 pub use clove_core::view::defaults::CLI_LIMIT as DEFAULT_LIST_LIMIT;
 
-/// Resolve the effective page limit through the shared contract: `None` flag →
-/// the CLI default; `--limit 0` → unlimited; `--limit n` → `n`.
-pub fn effective_limit(arg: Option<usize>) -> Option<usize> {
-    clove_core::view::Page::new(0, arg, DEFAULT_LIST_LIMIT).limit
+/// The CLI's read window, through the shared contract: no `--limit` → the CLI
+/// default; `--limit 0` → unlimited; `--limit n` → `n`.
+pub fn window(offset: Option<usize>, limit: Option<usize>) -> clove_core::view::Page {
+    clove_core::view::Page::new(offset.unwrap_or(0), limit, DEFAULT_LIST_LIMIT)
 }
 
 /// Pagination, projection, and metadata options for [`emit`].
@@ -31,8 +31,9 @@ pub fn effective_limit(arg: Option<usize>) -> Option<usize> {
 pub struct ListOpts<'a> {
     /// Match count before pagination.
     pub total: usize,
-    pub offset: usize,
-    pub limit: Option<usize>,
+    /// The requested window. `emit` applies it, so the page and the `_meta` it
+    /// reports can't disagree.
+    pub window: clove_core::view::Page,
     pub fields: Option<&'a [String]>,
     /// Drop null/empty-list keys from JSON output. Matches the MCP read tools'
     /// `compact`, so the same request shapes the same on either surface.
@@ -92,11 +93,9 @@ pub fn objects_from_wire_rows(rows: &[clove_ipc::LeanRow]) -> Vec<ListObject> {
 /// Objects are pre-built so the index path can pass a lean projection and the
 /// file path the full frontmatter, through one renderer.
 pub fn emit(format: OutputFormat, objects: Vec<ListObject>, opts: ListOpts<'_>) {
-    let page: Vec<&ListObject> = objects
-        .iter()
-        .skip(opts.offset)
-        .take(opts.limit.unwrap_or(usize::MAX))
-        .collect();
+    let (page, _) = opts
+        .window
+        .apply(objects.iter().collect::<Vec<&ListObject>>());
 
     match format {
         OutputFormat::Json | OutputFormat::Jsonl => {
@@ -121,10 +120,10 @@ pub fn emit(format: OutputFormat, objects: Vec<ListObject>, opts: ListOpts<'_>) 
                 print_json_list(
                     values,
                     json!({
-                        "limit": opts.limit.unwrap_or(0),
+                        "limit": opts.window.reported_limit(),
                         "total": opts.total,
                         "returned": page.len(),
-                        "offset": opts.offset,
+                        "offset": opts.window.offset,
                         "source": opts.source,
                         "warnings": opts.warnings,
                     }),

@@ -33,7 +33,7 @@ pub fn run(
     }
 
     let opts = StatsOptions {
-        top: args.top.unwrap_or(10),
+        top: args.top.unwrap_or(clove_core::view::defaults::STATS_TOP),
         include_epics: !args.no_epics,
     };
 
@@ -88,9 +88,15 @@ fn show_history(ctx: &Ctx, format: OutputFormat, args: &StatsArgs) -> Result<(),
     }
 
     let index = Index::open_or_create(&ctx.db_path).map_err(|e| index_error(e, &ctx.db_path))?;
+    // Fetch the whole series and window it here, through the same contract as
+    // every other list command. Pushing `--limit` into the query made `_meta`
+    // report the *post*-window count as `total`, so a truncated series was
+    // indistinguishable from an exhausted one.
     let snapshots = index
-        .snapshot_history(args.since.as_deref(), args.limit)
+        .snapshot_history(args.since.as_deref(), None)
         .map_err(|e| index_error(e, &ctx.db_path))?;
+    let window = crate::cmd::listing::window(args.offset, args.limit);
+    let (snapshots, total) = window.apply(snapshots);
 
     match format {
         OutputFormat::Json | OutputFormat::Jsonl => {
@@ -103,8 +109,17 @@ fn show_history(ctx: &Ctx, format: OutputFormat, args: &StatsArgs) -> Result<(),
                     })
                 })
                 .collect();
-            let total = items.len();
-            print_json_list(items, json!({ "total": total, "source": "index" }));
+            let returned = items.len();
+            print_json_list(
+                items,
+                json!({
+                    "total": total,
+                    "returned": returned,
+                    "offset": window.offset,
+                    "limit": window.reported_limit(),
+                    "source": "index",
+                }),
+            );
         }
         OutputFormat::Human => {
             if snapshots.is_empty() {

@@ -8,7 +8,7 @@ use clove_types::{CloveError, CloveId, ItemFrontmatter};
 use clove_ipc::{DaemonClient, SearchRequest};
 
 use crate::cli::SearchArgs;
-use crate::cmd::listing::{effective_limit, emit, objects_from_frontmatters, ListOpts};
+use crate::cmd::listing::{emit, objects_from_frontmatters, window, ListOpts};
 use crate::context::{index_error, Ctx};
 
 /// Whether the index may answer a search, freshening it in place if it is only
@@ -54,10 +54,10 @@ pub fn run(
     deep: bool,
 ) -> Result<(), CloveError> {
     let text = args.text;
-    // Same limit contract as every other list command: no flag → default cap,
-    // `--limit 0` → unlimited.
-    let limit = effective_limit(args.limit);
-    let offset = args.offset.unwrap_or(0);
+    // Same window contract as every other list command: no flag → default
+    // cap, `--limit 0` → unlimited.
+    let window = window(args.offset, args.limit);
+    let fields = args.fields.as_deref().map(crate::item_json::parse_fields);
 
     // Daemon fast path: the daemon runs the FTS over its hot index and returns
     // matched ids; we still read those files for full detail, so the output is
@@ -80,10 +80,9 @@ pub fn run(
             objects,
             ListOpts {
                 total,
-                offset,
-                limit,
-                fields: None,
-                compact: false,
+                window,
+                fields: fields.as_deref(),
+                compact: args.compact,
                 source: "daemon",
                 warnings: Vec::new(),
             },
@@ -122,10 +121,9 @@ pub fn run(
         objects,
         ListOpts {
             total,
-            offset,
-            limit,
-            fields: None,
-            compact: false,
+            window,
+            fields: fields.as_deref(),
+            compact: args.compact,
             source,
             warnings: Vec::new(),
         },

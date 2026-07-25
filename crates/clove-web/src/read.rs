@@ -191,21 +191,37 @@ pub async fn get_comments(
     Query(params): Query<HashMap<String, String>>,
 ) -> ApiResult {
     let id = parse_id(&id)?;
-    let limit = clove_core::view::Page::new(
-        0,
-        params.get("limit").and_then(|s| s.parse::<usize>().ok()),
-        clove_core::view::defaults::COMMENTS_LIMIT,
-    )
-    .limit;
     // Shared with `clove comments` and the `clove_comments` MCP tool. This
     // endpoint used to `truncate`, keeping the *oldest* n while both other
     // surfaces kept the newest — the same flag name with the opposite meaning.
-    let page = clove_core::ops::comments(&state.store, &id, 0, limit)?;
+    //
+    // The window is anchored at the newest end, so the skip parameter is
+    // `skip_newest`, not `offset` — the same spelling the CLI and MCP use. The
+    // default is the *web* default (unlimited), like every other read here: the
+    // SPA sends no limit and renders the thread against `comment_count`, so a
+    // cap would show a full count above a truncated list.
+    let window = clove_core::view::Page::new(
+        params
+            .get("skip_newest")
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(0),
+        params.get("limit").and_then(|s| s.parse::<usize>().ok()),
+        clove_core::view::defaults::WEB_LIMIT,
+    );
+    let page = clove_core::ops::comments(&state.store, &id, window)?;
     let data = page
         .get("items")
         .cloned()
         .unwrap_or_else(|| Value::Array(Vec::new()));
-    Ok(ok_data(data))
+    Ok(ok(
+        data,
+        json!({
+            "total": page["total"],
+            "returned": page["returned"],
+            "skip_newest": page["skip_newest"],
+            "limit": page["limit"],
+        }),
+    ))
 }
 
 /// `GET /api/v1/items/:id/deptree?depth=`.
@@ -298,10 +314,9 @@ fn recorded_history_points(
     }
     let index = Index::open(&db_path).ok()?;
     let since = params.get("since").map(String::as_str);
-    let limit = params
-        .get("limit")
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&n| n > 0);
+    // Through the shared contract like every other read here: `?limit=0` is
+    // unlimited, and the web default is unlimited.
+    let limit = page_window(params).limit;
     // snapshot_history returns most-recent-first; reverse to chronological order
     // so the throughput deltas below run forward in time.
     let mut snapshots = index.snapshot_history(since, limit).ok()?;

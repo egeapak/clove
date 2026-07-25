@@ -75,6 +75,10 @@ impl Filters {
 
 /// Per-surface page-size defaults.
 ///
+/// A comment thread is a list like any other, so `clove comments` /
+/// `clove_comments` / `GET /items/:id/comments` page on the *same* per-surface
+/// default as the item lists rather than on one of their own.
+///
 /// These are the *only* place a read default may be written. The numbers differ
 /// on purpose — a terminal, an agent's context budget, and a browser that
 /// virtualizes the whole store have genuinely different cost functions — but the
@@ -91,12 +95,11 @@ pub mod defaults {
     /// the endpoint already scans and graphs everything per request, so a
     /// serialization cap would buy nothing and silently truncate the UI.
     pub const WEB_LIMIT: usize = 0;
-    /// `clove dep tree` / `clove_dep_tree` / `GET /deptree`.
+    /// `clove dep tree` / `clove_dep_tree` / `GET /deptree`. `0` is unlimited
+    /// here too, matching the page limits (`clove dep tree --full`).
     pub const DEP_TREE_DEPTH: usize = 5;
     /// `clove stats --top`.
     pub const STATS_TOP: usize = 10;
-    /// `clove comments` / `clove_comments`.
-    pub const COMMENTS_LIMIT: usize = 50;
 }
 
 /// An offset/limit window over a result set.
@@ -106,7 +109,7 @@ pub mod defaults {
 /// Before this existed the three surfaces each parsed it inline and disagreed —
 /// most visibly, `?limit=0` on the web API returned *zero* rows where the CLI
 /// and MCP returned *everything*.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Page {
     pub offset: usize,
     /// `None` is unlimited.
@@ -147,6 +150,18 @@ impl Page {
     /// matching the encoding callers pass in.
     pub fn reported_limit(&self) -> usize {
         self.limit.unwrap_or(0)
+    }
+
+    /// How many rows a SQL `LIMIT` must fetch for this window: `offset + limit`,
+    /// since the offset is applied after the query. `None` is unlimited.
+    ///
+    /// Clamped to `i64::MAX` because SQLite binds integers as `i64` — a window
+    /// near the top of the `usize` range is a legal (empty) page that the file
+    /// path answers with `[]`, and without the clamp the index path answered
+    /// the same query with a `datatype mismatch` reported as `IO_ERROR`.
+    pub fn sql_fetch(&self) -> Option<usize> {
+        self.limit
+            .map(|n| self.offset.saturating_add(n).min(i64::MAX as usize))
     }
 }
 
@@ -398,6 +413,27 @@ mod tests {
         assert_eq!(Page::new(0, Some(0), 100).reported_limit(), 0);
         assert_eq!(Page::new(0, Some(25), 100).reported_limit(), 25);
         assert_eq!(Page::new(0, None, 50).reported_limit(), 50);
+    }
+
+    /// The SQL fetch count is `offset + limit`, clamped into SQLite's `i64`
+    /// range. Without the clamp a legal window near the top of `usize` reached
+    /// SQLite as an out-of-range integer and came back as a `datatype mismatch`
+    /// — reported as `IO_ERROR`/exit 5 for what the file path answers with an
+    /// empty page and exit 0.
+    #[test]
+    fn sql_fetch_stays_inside_sqlites_integer_range() {
+        assert_eq!(Page::new(0, Some(10), 0).sql_fetch(), Some(10));
+        assert_eq!(Page::new(5, Some(10), 0).sql_fetch(), Some(15));
+        // Unlimited fetches everything, with no row count at all.
+        assert_eq!(Page::new(3, Some(0), 100).sql_fetch(), None);
+
+        let max = i64::MAX as usize;
+        assert_eq!(Page::new(max, Some(2), 0).sql_fetch(), Some(max));
+        assert_eq!(Page::new(usize::MAX, Some(1), 0).sql_fetch(), Some(max));
+        assert!(
+            Page::new(max, Some(2), 0).sql_fetch().unwrap() <= i64::MAX as usize,
+            "an over-range fetch count is a SQLite type error, not a big page"
+        );
     }
 
     #[test]

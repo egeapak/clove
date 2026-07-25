@@ -638,6 +638,28 @@ fn comments_page_from_the_newest_end() {
     let older =
         json_ok(clove(dir.path()).args(["comments", &id, "--limit", "1", "--skip-newest", "1"]));
     assert_eq!(bodies(&older), ["second"]);
+
+    // A capped thread is never silent about it. `data` stays the bare array the
+    // schema pins, so the counts ride in `_meta` like every other list command's.
+    assert_eq!(older["_meta"]["total"], 3, "total is the whole thread");
+    assert_eq!(older["_meta"]["returned"], 1);
+    assert_eq!(older["_meta"]["skip_newest"], 1);
+    assert_eq!(older["_meta"]["limit"], 1);
+    assert_eq!(all["_meta"]["limit"], 0, "--limit 0 reports as unlimited");
+
+    // Human output says so out loud, since it has no `_meta` to inspect.
+    let human = |args: &[&str]| -> String {
+        let out = clove(dir.path()).args(args).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let text = human(&["comments", &id, "--limit", "1"]);
+    assert!(
+        text.contains("showing 1 of 3 comments"),
+        "truncation must be visible in human output: {text}"
+    );
+    // ...and only when it actually truncated.
+    let text = human(&["comments", &id, "--limit", "0"]);
+    assert!(!text.contains("showing"), "no notice when nothing was cut");
 }
 
 #[test]

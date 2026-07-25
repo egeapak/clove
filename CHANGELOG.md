@@ -27,12 +27,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`clove ls`/`ready`/`blocked` accept `--compact`**, applying the same
   null/empty-key omission the MCP read tools use, so the same query shapes
   identically on either surface.
-- **`offset` on every list read.** `clove search --offset`, and `offset` on the
-  `clove_ready`, `clove_blocked` and `clove_search` MCP tools. All four
-  advertised a `limit` while pinning the offset to zero, so anything past the
-  first page was simply unreachable — an agent that hit the cap had no way to
-  ask for the rest. `clove comments` gains `--skip-newest`, matching the
-  `clove_comments` argument of the same name.
+- **`offset` on every list read.** `clove search --offset`, `clove stats
+  --history --offset`, and `offset` on the `clove_ready`, `clove_blocked` and
+  `clove_search` MCP tools. All of them advertised a `limit` while pinning the
+  offset to zero, so anything past the first page was simply unreachable — an
+  agent that hit the cap had no way to ask for the rest. `clove comments` gains
+  `--skip-newest` and `GET /api/v1/items/:id/comments` gains `?skip_newest=`,
+  matching the `clove_comments` argument of the same name.
+- **Read-shaping parity.** `--fields` and `--compact` on `clove search`,
+  `--compact` on `clove show` and `clove query`. Each already existed on the
+  matching MCP tool or on a sibling CLI command, so the same query shaped
+  differently depending on which surface asked.
 
 ### Changed
 
@@ -47,8 +52,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   - `GET /api/v1/items?limit=0` returned *zero* rows; on the CLI and MCP the same
     value means *everything*. It now means everything on all three.
-  - `clove comments --limit 0` returned no comments, for the same reason, and
-    had no default cap at all where `clove_comments` capped at 50.
+  - `cloved`'s query RPC took the wire `limit` as a raw pass-through, so a
+    non-CLI client sending `limit: 0` got zero rows from the one surface that
+    documents the opposite.
+  - `clove comments --limit 0` returned no comments, for the same reason.
+
+  A comment thread now pages on the same per-surface default as an item list, so
+  **`clove comments` caps at 100 by default** where it previously returned the
+  whole thread. That cap is never silent: JSON output carries `_meta.total` /
+  `returned` / `limit` (the `data` array itself is unchanged), and human output
+  prints a `showing N of M comments` line. `--limit 0` returns everything.
+  `GET /api/v1/items/:id/comments` keeps its unlimited web default, so the
+  bundled UI is unaffected.
 
 - **`clove show` no longer scans the whole store.** `ready`/`blocked_by` are
   computed from the item's own dependency closure, falling back to the
@@ -97,6 +112,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`clove_search` paged over an undefined order.** Results were ranked by match
+  class (title / label / body) with a *stable* sort over `read_dir` order, so
+  ties kept whatever order the filesystem happened to return and reshuffled when
+  a file was added. Harmless while the tool had no `offset`; adding one turned it
+  into a paging contract, where an agent walking `offset=0,50,100…` would re-read
+  some items and never see others. The order is now the total
+  `(match class, priority, id)`. `clove_list`/`clove_ready`/`clove_blocked` were
+  never affected — they already sorted by `(priority, topological rank, id)`.
+- **`clove stats --history --limit N` reported the truncated count as
+  `_meta.total`**, so a capped series was indistinguishable from an exhausted
+  one. The limit was pushed into the SQL query; the series is now windowed after
+  the fetch, like every other list, and `_meta` carries `returned`/`offset`/
+  `limit` alongside the real total.
+- **An index-backed list with a very large `--offset` failed where the file scan
+  succeeded.** `offset + limit` was handed to SQLite as the row count to fetch;
+  above `i64::MAX` that is a datatype error, surfaced as `IO_ERROR`/exit 5 for
+  what is a legal (empty) window — and `--no-index` answered the same query with
+  `[]` and exit 0. The fetch count is now clamped to SQLite's range.
 - **`clove search` could answer from a stale index.** It queried the index with
   no freshness check at all, so any item created since the last `clove reindex`
   was silently absent from results. After a schema change the effect was total:

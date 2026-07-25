@@ -10,8 +10,8 @@ use serde::Deserialize;
 use crate::cli::QueryArgs;
 use crate::cmd::index_read::{list_via_daemon, list_via_index};
 use crate::cmd::listing::{
-    effective_limit, emit, objects_from_frontmatters, objects_from_lean_rows, ranks_of,
-    sort_by_priority_topo, Filters, ListOpts,
+    emit, objects_from_frontmatters, objects_from_lean_rows, ranks_of, sort_by_priority_topo,
+    window, Filters, ListOpts,
 };
 use crate::context::Ctx;
 use crate::item_json::parse_fields;
@@ -59,21 +59,19 @@ pub fn run(
     )?;
 
     let fields = args.fields.as_deref().map(parse_fields);
-    let offset = args.offset.or(qf.offset).unwrap_or(0);
-    let limit = effective_limit(args.limit.or(qf.limit));
+    let window = window(args.offset.or(qf.offset), args.limit.or(qf.limit));
 
     if let Some((objects, total, warnings)) =
-        list_via_daemon(ctx, no_index, QueryMode::List, &filters, offset, limit)
+        list_via_daemon(ctx, no_index, QueryMode::List, &filters, window)
     {
         emit(
             format,
             objects,
             ListOpts {
                 total,
-                offset,
-                limit,
+                window,
                 fields: fields.as_deref(),
-                compact: false,
+                compact: args.compact,
                 source: "daemon",
                 warnings,
             },
@@ -81,24 +79,17 @@ pub fn run(
         return Ok(());
     }
 
-    if let Some((rows, total, warnings)) = list_via_index(
-        ctx,
-        no_index,
-        deep,
-        QueryMode::List,
-        &filters,
-        offset,
-        limit,
-    )? {
+    if let Some((rows, total, warnings)) =
+        list_via_index(ctx, no_index, deep, QueryMode::List, &filters, window)?
+    {
         emit(
             format,
             objects_from_lean_rows(&rows),
             ListOpts {
                 total,
-                offset,
-                limit,
+                window,
                 fields: fields.as_deref(),
-                compact: false,
+                compact: args.compact,
                 source: "index",
                 warnings,
             },
@@ -118,10 +109,9 @@ pub fn run(
         objects,
         ListOpts {
             total,
-            offset,
-            limit,
+            window,
             fields: fields.as_deref(),
-            compact: false,
+            compact: args.compact,
             source: "files",
             warnings: Vec::new(),
         },

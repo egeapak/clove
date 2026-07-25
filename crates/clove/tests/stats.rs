@@ -155,10 +155,26 @@ fn snapshot_persists_and_history_reads_back() {
     let hist2 = json(clove(dir.path()).args(["stats", "--history", "--format", "json"]));
     assert_eq!(hist2["data"].as_array().unwrap().len(), 2);
 
-    // --limit caps the series.
+    // --limit caps the series, and `_meta` reports the window honestly: `total`
+    // is the count *before* the cap, so a truncated series is distinguishable
+    // from an exhausted one. It used to report the post-window count (`1` here),
+    // leaving a client no way to tell.
     let limited =
         json(clove(dir.path()).args(["stats", "--history", "--limit", "1", "--format", "json"]));
     assert_eq!(limited["data"].as_array().unwrap().len(), 1);
+    assert_eq!(limited["_meta"]["total"], 2, "total is pre-window");
+    assert_eq!(limited["_meta"]["returned"], 1);
+    assert_eq!(limited["_meta"]["limit"], 1);
+
+    // `--offset` pages into the series, and `--limit 0` is unlimited.
+    let skipped =
+        json(clove(dir.path()).args(["stats", "--history", "--offset", "1", "--format", "json"]));
+    assert_eq!(skipped["data"].as_array().unwrap().len(), 1);
+    assert_eq!(skipped["_meta"]["total"], 2);
+    let all =
+        json(clove(dir.path()).args(["stats", "--history", "--limit", "0", "--format", "json"]));
+    assert_eq!(all["data"].as_array().unwrap().len(), 2);
+    assert_eq!(all["_meta"]["limit"], 0);
 }
 
 #[test]

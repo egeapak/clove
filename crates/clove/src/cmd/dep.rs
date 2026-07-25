@@ -61,7 +61,19 @@ fn tree(
     if !ctx.store.exists(&id) {
         return Err(CloveError::NotFound { id: id.to_string() });
     }
-    let depth = if args.full { usize::MAX } else { args.depth };
+    // `0` means unlimited here exactly as it does for every page limit, so
+    // `--depth 0` and `--full` are the same request.
+    let depth = if args.full {
+        usize::MAX
+    } else {
+        match args
+            .depth
+            .unwrap_or(clove_core::view::defaults::DEP_TREE_DEPTH)
+        {
+            0 => usize::MAX,
+            n => n,
+        }
+    };
     // Daemon fast path: serve the tree from the daemon's cached graph.
     let root = match dep_tree_via_daemon(ctx, no_index, &id, depth) {
         Some(node_opt) => node_opt.ok_or_else(|| CloveError::NotFound { id: id.to_string() })?,

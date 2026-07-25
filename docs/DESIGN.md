@@ -721,17 +721,18 @@ clove dep tree <id> [--depth N] [--full] [--flat] [--format json]
 clove dep cycle [--fail-on-cycle] [--format json]
 clove ready [--status open|in_progress] [--type T] [--label L]
             [--assignee A] [--priority N] [--limit N] [--offset N]
-            [--format json] [--fields F,...] [--include-warnings]
-clove blocked [same filters] [--limit N] [--offset N] [--format json] [--fields F,...]
+            [--format json] [--fields F,...] [--compact]
+clove blocked [same filters] [--limit N] [--offset N] [--format json]
+              [--fields F,...] [--compact]
 clove ls [--status S] [--type T] [--label L] [--assignee A]
-         [--priority N] [--sort id|priority|created|updated]
-         [--asc|--desc] [--limit N] [--offset N]
-         [--format json] [--fields F,...]
-clove query [--filter EXPR] [--format json] [--fields F,...]
+         [--priority N] [--limit N] [--offset N]
+         [--format json] [--fields F,...] [--compact]
+clove query [--filter EXPR] [--limit N] [--offset N]
+            [--format json] [--fields F,...] [--compact]
             # also reads JSON filter object from stdin when stdin is non-TTY
-clove search <text> [--limit N] [--offset N] [--format json]
+clove search <text> [--limit N] [--offset N] [--format json] [--fields F,...] [--compact]
 clove stats [--top N] [--no-epics] [--snapshot]      # work-item analytics + daemon/index telemetry
-            [--history [--since RFC3339] [--limit N]] [--format json]
+            [--history [--since RFC3339] [--limit N] [--offset N]] [--format json]
 clove comment <id> <message> [--format json]
 clove comments <id> [--limit N] [--skip-newest N] [--format json]
 clove reindex [--force] [--format json]
@@ -839,20 +840,20 @@ regardless of warnings.
   "v": 1, "ok": true,
   "data": [{ ...item... }],
   "_meta": {
-    "took_ms": 4,
     "source": "index",
     "total": 250,
     "returned": 100,
     "offset": 0,
-    "warnings": [],
-    "stale_index": false
+    "limit": 100,
+    "warnings": []
   }
 }
 ```
 
-`total` is the unfiltered count; `returned` is `len(data)` after `--limit`; `limit`
-is the limit actually in force (`0` = unlimited), echoed so a client can tell a
-short page from an exhausted one without knowing the surface's default.
+`total` is the match count *before* the window — the number of items the filters
+selected, not the number returned. `returned` is `len(data)` after `--limit`, and
+`limit` is the limit actually in force (`0` = unlimited), echoed so a client can
+tell a short page from an exhausted one without knowing the surface's default.
 
 ### 7.6 Exit Code Table
 
@@ -941,9 +942,9 @@ Clap's default exit code (2 for argument errors) is overridden to match this tab
 
 ### 7.8 Pagination
 
-Every list read on every surface — the CLI, the MCP tools, the web API, and the
-daemon RPCs — decodes `offset`/`limit` through one implementation,
-`clove_core::view::Page`:
+Every list read on every surface — the CLI (file, index, and daemon paths), the
+MCP tools, the web API, and `cloved`'s query RPC — decodes `offset`/`limit`
+through one implementation, `clove_core::view::Page`:
 
 - **absent** → that surface's default,
 - **`0`** → unlimited,
@@ -951,14 +952,22 @@ daemon RPCs — decodes `offset`/`limit` through one implementation,
 
 The defaults differ (a terminal, an agent's context budget, and a browser that
 virtualizes the whole store have different cost functions) but live in exactly
-one place, `clove_core::view::defaults`: CLI 100, MCP 50, web unlimited,
-comments 50. `_meta.total` is always the match count *before* the window, and
-`_meta.limit` echoes the effective limit, so the default is discoverable from a
-response rather than by reading this document.
+one place, `clove_core::view::defaults`: CLI 100, MCP 50, web unlimited. A
+comment thread pages on the same per-surface default as an item list.
+`_meta.total` is always the match count *before* the window, and `_meta.limit`
+echoes the effective limit, so the default is discoverable from a response rather
+than by reading this document.
 
-`clove comments` / `clove_comments` page from the opposite end — the window is
-anchored at the *newest* comment — so its skip argument is named `--skip-newest`
-/ `skip_newest` rather than `offset`.
+`clove comments` / `clove_comments` / `GET /items/:id/comments` page from the
+opposite end — the window is anchored at the *newest* comment — so their skip
+argument is named `--skip-newest` / `skip_newest` rather than `offset`.
+
+`--depth` on `dep tree` follows the same `0 = unlimited` rule (so `--depth 0` and
+`--full` are one request), as does `--top` on `stats`.
+
+`GET /api/v1/board` is the one read that takes no window: it returns the three
+status columns whole, because a single limit across grouped columns has no
+well-defined meaning.
 
 Cursor-based pagination is deferred to post-v1; offset is sufficient for M0–M2.
 

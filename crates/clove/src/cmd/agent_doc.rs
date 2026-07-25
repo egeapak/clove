@@ -89,8 +89,8 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
 - `clove ready` / `clove blocked` — work queues (filters: `--status --type --label --assignee --priority`).\n\
 - `clove ls` / `clove query [--filter JSON]` — list/query (`--fields`, `--limit`, `--offset`).\n\
 - Every list read (`ls`, `query`, `ready`, `blocked`, `search`) takes the same `--limit`/`--offset`: no flag caps at 100, `--limit 0` returns everything, `_meta.total` is always the full match count and `_meta.limit` echoes the one in force.\n\
-- `clove comment <id> <message>` / `clove comments <id> [--limit N] [--skip-newest N]` — `--limit` keeps the *newest* N (default 50); `--skip-newest` pages back into older ones.\n\
-- `clove search <text> [--limit N] [--offset N]` — full-text (index) or substring (files) search.\n\
+- `clove comment <id> <message>` / `clove comments <id> [--limit N] [--skip-newest N]` — `--limit` keeps the *newest* N (default 100, `--limit 0` for all); `--skip-newest` pages back into older ones. `_meta.total` is the full thread length.\n\
+- `clove search <text> [--limit N] [--offset N] [--fields LIST] [--compact]` — full-text (index) or substring (files) search.\n\
 - `clove stats [--top N] [--no-epics] [--snapshot] [--history [--since RFC3339] [--limit N]]` — work-item analytics (counts by status/type/priority/assignee/label, ready/blocked, cycles, epic rollups, throughput) plus daemon/index telemetry. `--snapshot` persists to the index's durable history (`.clove/index.db`); `--history` replays the series.\n\
 - `clove reindex` — rebuild the SQLite index. `clove doctor [--fix] [--strict]` — health check.\n\
 - `clove version` — `{{ clove, schema, git_hash, build_date }}`.\n\

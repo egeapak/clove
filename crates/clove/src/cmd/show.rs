@@ -43,6 +43,11 @@ pub fn run(ctx: &Ctx, format: OutputFormat, args: ShowArgs) -> Result<(), CloveE
         Some(f) => project(obj, f),
         None => obj,
     };
+    let projected = if args.compact {
+        clove_core::view::compact(projected)
+    } else {
+        projected
+    };
 
     match format {
         OutputFormat::Json | OutputFormat::Jsonl => {

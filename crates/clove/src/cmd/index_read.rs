@@ -39,8 +39,7 @@ pub fn list_via_daemon(
     no_index: bool,
     mode: QueryMode,
     filters: &Filters,
-    offset: usize,
-    limit: Option<usize>,
+    window: clove_core::view::Page,
 ) -> Option<DaemonList> {
     if no_index {
         return None;
@@ -58,8 +57,8 @@ pub fn list_via_daemon(
         priority: filters.priority,
         assignee: filters.assignee.clone(),
         label: filters.label.clone(),
-        offset,
-        limit,
+        offset: window.offset,
+        limit: window.limit,
     };
     match client.query_list(request) {
         Ok(resp) => Some((
@@ -87,8 +86,7 @@ pub fn list_via_index(
     deep: bool,
     mode: QueryMode,
     filters: &Filters,
-    offset: usize,
-    limit: Option<usize>,
+    window: clove_core::view::Page,
 ) -> Result<Option<IndexList>, CloveError> {
     if no_index || !ctx.db_path.exists() {
         return Ok(None);
@@ -128,8 +126,9 @@ pub fn list_via_index(
         assignee: filters.assignee.clone(),
         label: filters.label.clone(),
         parent: None,
-        // Fetch only the rows the page needs (offset + limit); unlimited stays None.
-        limit: limit.map(|n| offset.saturating_add(n)),
+        // Fetch only the rows the page needs; the shared window knows how many
+        // that is (offset + limit) and keeps it inside SQLite's i64 range.
+        limit: window.sql_fetch(),
     };
     let total = index
         .count_items(&filter)

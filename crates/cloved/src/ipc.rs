@@ -446,7 +446,13 @@ impl Dispatcher {
 
 /// Build a `clove_index::Filter` from the wire request (mirrors the CLI's
 /// `list_via_index`: fetch `offset + limit` rows; `total` is reported separately).
+///
+/// The wire values go through the shared [`clove_core::view::Page`] so a client
+/// that is not the `clove` CLI gets the documented contract rather than a raw
+/// pass-through: `limit: Some(0)` means *unlimited* here as it does everywhere
+/// else, not "zero rows".
 fn build_filter(q: &QueryRequest) -> Filter {
+    let window = clove_core::view::Page::new(q.offset, q.limit, 0);
     Filter {
         mode: match q.kind {
             QueryKind::List => QueryMode::List,
@@ -458,7 +464,7 @@ fn build_filter(q: &QueryRequest) -> Filter {
         assignee: q.assignee.clone(),
         label: q.label.clone(),
         parent: None,
-        limit: q.limit.map(|n| q.offset.saturating_add(n)),
+        limit: window.sql_fetch(),
     }
 }
 

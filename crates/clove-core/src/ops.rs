@@ -451,8 +451,7 @@ pub fn show(store: &ItemStore, id: &CloveId) -> Result<Value, CloveError> {
 pub fn comments(
     store: &ItemStore,
     id: &CloveId,
-    skip_newest: usize,
-    limit: Option<usize>,
+    window: crate::view::Page,
 ) -> Result<Value, CloveError> {
     if !store.exists(id) {
         return Err(CloveError::NotFound { id: id.to_string() });
@@ -460,11 +459,12 @@ pub fn comments(
     let all = list_comments(store.issues_dir(), id)?;
     let total = all.len();
 
-    // Window from the newest end: `skip_newest` skips the most recent, `limit`
-    // caps how many older ones follow. Saturating throughout so an over-large
-    // skip yields an empty page rather than panicking.
-    let end = total.saturating_sub(skip_newest);
-    let start = limit.map_or(0, |n| end.saturating_sub(n));
+    // Window from the newest end: `offset` skips the most recent (hence the
+    // `skip_newest` spelling every surface exposes it under), `limit` caps how
+    // many older ones follow. Saturating throughout so an over-large skip
+    // yields an empty page rather than panicking.
+    let end = total.saturating_sub(window.offset);
+    let start = window.limit.map_or(0, |n| end.saturating_sub(n));
     let items: Vec<Value> = all[start..end]
         .iter()
         .map(|c| {
@@ -479,7 +479,8 @@ pub fn comments(
     Ok(json!({
         "total": total,
         "returned": items.len(),
-        "skip_newest": skip_newest,
+        "skip_newest": window.offset,
+        "limit": window.reported_limit(),
         "items": items,
     }))
 }
@@ -615,7 +616,7 @@ pub fn search(
 ) -> Result<Value, CloveError> {
     let needle = text.to_lowercase();
     let items = store.list()?;
-    let mut hits: Vec<(u8, Value)> = Vec::new();
+    let mut hits: Vec<SearchHit> = Vec::new();
     for item in &items {
         let fm = &item.frontmatter;
         let in_title = fm.title.to_lowercase().contains(&needle);
@@ -629,12 +630,36 @@ pub fn search(
             } else {
                 2
             };
-            hits.push((rank, Value::Object(item_object(item))));
+            hits.push((
+                rank,
+                fm.priority,
+                fm.id.clone(),
+                Value::Object(item_object(item)),
+            ));
         }
     }
-    hits.sort_by_key(|a| a.0);
-    let objects: Vec<Value> = hits.into_iter().map(|(_, o)| o).collect();
+    sort_hits(&mut hits);
+    let objects: Vec<Value> = hits.into_iter().map(|(_, _, _, o)| o).collect();
     Ok(page(objects, window))
+}
+
+/// One search hit: `(match class, priority, id, item JSON)`.
+type SearchHit = (u8, crate::Priority, CloveId, Value);
+
+/// Order search hits by `(match class, priority, id)` — a *total* order.
+///
+/// Ranking by match class alone left ties in `store.list()` order, which is raw
+/// `read_dir` order: undefined, and it reshuffles when a file is added. That was
+/// survivable while search had no `offset`, but paging over an unstable order
+/// silently repeats and skips rows between requests. Split out so the ordering
+/// can be tested against a deliberately scrambled input, which a test going
+/// through the store cannot do — it would be at the mercy of `read_dir`.
+fn sort_hits(hits: &mut [SearchHit]) {
+    hits.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.2.cmp(&b.2))
+    });
 }
 
 /// The dependency tree rooted at `id` to `depth`, as a nested JSON object.
@@ -1169,6 +1194,86 @@ mod tests {
         );
     }
 
+    /// Search results are totally ordered, so paging over them is stable.
+    ///
+    /// Driven directly against a scrambled hit list rather than through the
+    /// store: `search` reads the issues directory, so a store-based test sees
+    /// whatever order `read_dir` returns — which on this filesystem is already
+    /// sorted, making such a test pass with the bug still in place.
+    #[test]
+    fn search_hits_are_totally_ordered() {
+        let hit = |class: u8, priority: u8, raw: &str| -> SearchHit {
+            (
+                class,
+                crate::Priority::new(priority).unwrap(),
+                CloveId::new(raw).unwrap(),
+                Value::Null,
+            )
+        };
+        // Scrambled, and built so every key matters: three share a match class,
+        // two of those share a priority.
+        let mut hits = vec![
+            hit(2, 0, "proj-BBBBBBBB"),
+            hit(0, 3, "proj-CCCCCCCC"),
+            hit(0, 1, "proj-ZZZZZZZZ"),
+            hit(1, 4, "proj-AAAAAAAA"),
+            hit(0, 3, "proj-AAAAAAAB"),
+        ];
+        sort_hits(&mut hits);
+        let order: Vec<&str> = hits.iter().map(|h| h.2.as_str()).collect();
+        assert_eq!(
+            order,
+            vec![
+                "proj-ZZZZZZZZ", // class 0, p1
+                "proj-AAAAAAAB", // class 0, p3, id sorts first
+                "proj-CCCCCCCC", // class 0, p3
+                "proj-AAAAAAAA", // class 1
+                "proj-BBBBBBBB", // class 2 — despite arriving first, at p0
+            ],
+            "class, then priority, then id — no input order survives"
+        );
+
+        // The result does not depend on the order the hits arrive in.
+        let mut reversed: Vec<SearchHit> = hits.iter().rev().cloned().collect();
+        sort_hits(&mut reversed);
+        let reordered: Vec<&str> = reversed.iter().map(|h| h.2.as_str()).collect();
+        assert_eq!(reordered, order, "a permuted input must sort identically");
+    }
+
+    /// End-to-end: consecutive windows over a search tile the result set exactly
+    /// once, which is what `offset` promises a paging client.
+    #[test]
+    fn search_windows_tile_the_result_set() {
+        let (_d, store) = store();
+        for _ in 0..8 {
+            create(
+                &store,
+                "proj",
+                ItemType::Feature,
+                NewSpec {
+                    title: "widget".to_owned(),
+                    ..Default::default()
+                },
+                Utc::now(),
+            )
+            .unwrap();
+        }
+        let ids = |p: Page| -> Vec<String> {
+            search(&store, "widget", p).unwrap()["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|o| o["id"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let all = ids(Page::unlimited());
+        assert_eq!(all.len(), 8);
+        let paged: Vec<String> = (0..4)
+            .flat_map(|i| ids(Page::new(i * 2, Some(2), 0)))
+            .collect();
+        assert_eq!(paged, all, "windows must tile without gaps or repeats");
+    }
+
     #[test]
     fn dep_tree_renders_and_rejects_missing() {
         let (_d, store) = store();
@@ -1390,35 +1495,42 @@ mod tests {
         }
 
         // No limit: the whole thread, oldest first.
-        let all = comments(&store, &id, 0, None).unwrap();
+        let all = comments(&store, &id, Page::new(0, None, 0)).unwrap();
         assert_eq!(all["total"], 5);
         assert_eq!(all["returned"], 5);
         assert_eq!(all["items"][0]["body"], "note 0");
 
         // A limit keeps the NEWEST n, still in chronological order.
-        let last2 = comments(&store, &id, 0, Some(2)).unwrap();
+        let last2 = comments(&store, &id, Page::new(0, Some(2), 0)).unwrap();
         assert_eq!(last2["returned"], 2);
         assert_eq!(last2["items"][0]["body"], "note 3");
         assert_eq!(last2["items"][1]["body"], "note 4");
         assert_eq!(last2["total"], 5, "total is the unpaginated count");
 
         // `skip_newest` walks backwards through history from the newest end.
-        let older = comments(&store, &id, 2, Some(2)).unwrap();
+        let older = comments(&store, &id, Page::new(2, Some(2), 0)).unwrap();
         assert_eq!(older["items"][0]["body"], "note 1");
         assert_eq!(older["items"][1]["body"], "note 2");
 
         // Edge: skipping past the end is an empty page, not a panic.
-        let past = comments(&store, &id, 99, Some(2)).unwrap();
+        let past = comments(&store, &id, Page::new(99, Some(2), 0)).unwrap();
         assert_eq!(past["returned"], 0);
         assert_eq!(past["total"], 5);
 
         // An item with no comments is an empty page, not an error.
         let quiet = new_id(&store, "quiet");
-        assert_eq!(comments(&store, &quiet, 0, None).unwrap()["total"], 0);
+        assert_eq!(
+            comments(&store, &quiet, Page::new(0, None, 0)).unwrap()["total"],
+            0
+        );
 
         // A missing item is NotFound (matching `show`).
         assert!(matches!(
-            comments(&store, &CloveId::new("proj-ZZZZZZZZ").unwrap(), 0, None),
+            comments(
+                &store,
+                &CloveId::new("proj-ZZZZZZZZ").unwrap(),
+                Page::unlimited()
+            ),
             Err(CloveError::NotFound { .. })
         ));
     }

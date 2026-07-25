@@ -266,6 +266,9 @@ pub struct ShowArgs {
     /// Compute `ready`/`blocked_by` even for human output.
     #[arg(short = 'v', long)]
     pub verbose: bool,
+    /// Omit null and empty-list keys from JSON output (as `clove_show` does).
+    #[arg(long)]
+    pub compact: bool,
 }
 
 #[derive(Debug, Args)]
@@ -345,10 +348,10 @@ pub enum DepAction {
 pub struct DepTreeArgs {
     /// The root item id.
     pub id: String,
-    /// Maximum depth (default 5).
-    #[arg(long, default_value_t = 5)]
-    pub depth: usize,
-    /// Remove the depth limit.
+    /// Maximum depth (default 5; use `--depth 0` for no limit).
+    #[arg(long)]
+    pub depth: Option<usize>,
+    /// Remove the depth limit (same as `--depth 0`).
     #[arg(long)]
     pub full: bool,
     /// Emit a flat array with a `depth` field instead of a nested tree.
@@ -404,6 +407,9 @@ pub struct QueryArgs {
     /// Comma-separated field projection.
     #[arg(long, value_name = "LIST")]
     pub fields: Option<String>,
+    /// Omit null and empty-list keys from JSON output.
+    #[arg(long)]
+    pub compact: bool,
     /// Maximum number of results (default 100; use `--limit 0` for no limit).
     #[arg(long)]
     pub limit: Option<usize>,
@@ -444,6 +450,12 @@ pub struct SearchArgs {
     /// Skip this many results.
     #[arg(long)]
     pub offset: Option<usize>,
+    /// Comma-separated field projection.
+    #[arg(long, value_name = "LIST")]
+    pub fields: Option<String>,
+    /// Omit null and empty-list keys from JSON output (as `clove_search` does).
+    #[arg(long)]
+    pub compact: bool,
 }
 
 #[derive(Debug, Args)]
@@ -464,9 +476,13 @@ pub struct StatsArgs {
     /// With `--history`: only snapshots at/after this RFC3339 timestamp.
     #[arg(long, value_name = "RFC3339")]
     pub since: Option<String>,
-    /// With `--history`: show at most this many (most recent) snapshots.
+    /// With `--history`: show at most this many snapshots (default 100; use
+    /// `--limit 0` for all).
     #[arg(long, value_name = "N")]
     pub limit: Option<usize>,
+    /// With `--history`: skip this many snapshots.
+    #[arg(long, value_name = "N")]
+    pub offset: Option<usize>,
 }
 
 #[derive(Debug, Args)]

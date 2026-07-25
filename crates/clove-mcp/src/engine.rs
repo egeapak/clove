@@ -19,7 +19,7 @@ use serde_json::Value;
 
 use crate::args::*;
 use crate::shape::{self, Shape};
-use clove_core::view::defaults::{COMMENTS_LIMIT, DEP_TREE_DEPTH, STATS_TOP};
+use clove_core::view::defaults::{DEP_TREE_DEPTH, STATS_TOP};
 use clove_core::view::Page;
 
 /// Shared, cheap-to-clone context for the tools.
@@ -136,13 +136,7 @@ impl Engine {
 
     pub fn comments(&self, a: CommentsArgs) -> Result<Value, String> {
         let id = parse_id(&a.id)?;
-        ops::comments(
-            &self.store(),
-            &id,
-            a.skip_newest.unwrap_or(0) as usize,
-            Page::new(0, a.limit.map(|n| n as usize), COMMENTS_LIMIT).limit,
-        )
-        .map_err(stringify)
+        ops::comments(&self.store(), &id, window(a.skip_newest, a.limit)).map_err(stringify)
     }
 
     pub fn dep_tree(&self, a: DepTreeArgs) -> Result<Value, String> {

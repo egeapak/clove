@@ -7,8 +7,8 @@ use clove_types::CloveError;
 use crate::cli::FilterArgs;
 use crate::cmd::index_read::{list_via_daemon, list_via_index};
 use crate::cmd::listing::{
-    effective_limit, emit, objects_from_frontmatters, objects_from_lean_rows, ranks_of,
-    sort_by_priority_topo, Filters, ListOpts,
+    emit, objects_from_frontmatters, objects_from_lean_rows, ranks_of, sort_by_priority_topo,
+    window, Filters, ListOpts,
 };
 use crate::context::Ctx;
 use crate::item_json::parse_fields;
@@ -28,21 +28,19 @@ pub fn run(
         args.priority,
     )?;
     let fields = args.fields.as_deref().map(parse_fields);
-    let offset = args.offset.unwrap_or(0);
-    let limit = effective_limit(args.limit);
+    let window = window(args.offset, args.limit);
 
     // Daemon fast path: a running daemon serves the lean projection from its hot
     // index (the CLI skips its own staleness scan — the daemon owns freshness).
     if let Some((objects, total, warnings)) =
-        list_via_daemon(ctx, no_index, QueryMode::List, &filters, offset, limit)
+        list_via_daemon(ctx, no_index, QueryMode::List, &filters, window)
     {
         emit(
             format,
             objects,
             ListOpts {
                 total,
-                offset,
-                limit,
+                window,
                 fields: fields.as_deref(),
                 compact: args.compact,
                 source: "daemon",
@@ -53,22 +51,15 @@ pub fn run(
     }
 
     // Index fast path: the DB serves the lean projection directly.
-    if let Some((rows, total, warnings)) = list_via_index(
-        ctx,
-        no_index,
-        deep,
-        QueryMode::List,
-        &filters,
-        offset,
-        limit,
-    )? {
+    if let Some((rows, total, warnings)) =
+        list_via_index(ctx, no_index, deep, QueryMode::List, &filters, window)?
+    {
         emit(
             format,
             objects_from_lean_rows(&rows),
             ListOpts {
                 total,
-                offset,
-                limit,
+                window,
                 fields: fields.as_deref(),
                 compact: args.compact,
                 source: "index",
@@ -91,8 +82,7 @@ pub fn run(
         objects,
         ListOpts {
             total,
-            offset,
-            limit,
+            window,
             fields: fields.as_deref(),
             compact: args.compact,
             source: "files",

@@ -7,9 +7,7 @@ use clove_ipc::{DaemonClient, GraphRequest, GraphResponse};
 use clove_types::{CloveError, CloveId, ItemFrontmatter};
 
 use crate::cli::FilterArgs;
-use crate::cmd::listing::{
-    effective_limit, emit, ranks_of, sort_by_priority_topo, Filters, ListOpts,
-};
+use crate::cmd::listing::{emit, ranks_of, sort_by_priority_topo, window, Filters, ListOpts};
 use crate::context::Ctx;
 use crate::item_json::parse_fields;
 
@@ -28,6 +26,7 @@ pub fn run(
         args.priority,
     )?;
     let fields = args.fields.as_deref().map(parse_fields);
+    let window = window(args.offset, args.limit);
 
     // `blocked_by` is the whole point of this list, and the CLI used to omit it
     // while `ops::blocked` and the web API both emit it. `ops::graph_terms`
@@ -67,8 +66,7 @@ pub fn run(
             objects,
             ListOpts {
                 total,
-                offset: args.offset.unwrap_or(0),
-                limit: effective_limit(args.limit),
+                window,
                 fields: fields.as_deref(),
                 compact: args.compact,
                 source: "daemon",
@@ -102,8 +100,7 @@ pub fn run(
         objects,
         ListOpts {
             total,
-            offset: args.offset.unwrap_or(0),
-            limit: effective_limit(args.limit),
+            window,
             fields: fields.as_deref(),
             compact: args.compact,
             source: "files",

@@ -107,18 +107,41 @@ pub fn list(
     let window = clove_core::view::Page::new(
         skip_newest.unwrap_or(0),
         limit,
-        clove_core::view::defaults::COMMENTS_LIMIT,
+        clove_core::view::defaults::CLI_LIMIT,
     );
-    let page = clove_core::ops::comments(&ctx.store, &id, window.offset, window.limit)?;
+    let page = clove_core::ops::comments(&ctx.store, &id, window)?;
     let items = page["items"].as_array().cloned().unwrap_or_default();
 
     match format {
         OutputFormat::Json | OutputFormat::Jsonl => {
-            // `clove comments` predates the paged shape and is pinned to a bare
-            // array by `comment-list.json`; the envelope stays as it was.
-            print_json_success(Value::Array(items), json!({ "warnings": [] }));
+            // `data` is pinned to a bare array of comments by
+            // `comment-list.json`, so the page counts ride in `_meta` (which the
+            // schema leaves open) alongside every other list command's. Without
+            // them a default-capped thread is indistinguishable from a short
+            // one — the caller sees N comments and no way to learn there are
+            // more.
+            print_json_success(
+                Value::Array(items),
+                json!({
+                    "total": page["total"],
+                    "returned": page["returned"],
+                    "skip_newest": page["skip_newest"],
+                    "limit": page["limit"],
+                    "warnings": [],
+                }),
+            );
         }
         OutputFormat::Human => {
+            let total = page["total"].as_u64().unwrap_or(0);
+            let returned = page["returned"].as_u64().unwrap_or(0);
+            if returned < total {
+                // The default cap must not truncate in silence: without this a
+                // capped thread reads as the whole thread.
+                println!(
+                    "showing {returned} of {total} comments \
+                     (--limit 0 for all, --skip-newest N for older)\n"
+                );
+            }
             for c in &items {
                 println!(
                     "{}  {}",

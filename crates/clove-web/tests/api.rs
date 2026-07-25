@@ -191,6 +191,56 @@ async fn list_pages_on_the_shared_limit_contract() {
     assert_eq!(second["_meta"]["limit"], 1, "the effective limit is echoed");
 }
 
+/// The comments endpoint pages from the *newest* end, like `clove comments` and
+/// `clove_comments`, and takes the same `skip_newest` — which it did not have,
+/// making it the one surface of the three that could not reach older comments.
+/// Its default is the web default (unlimited), so the bundled UI, which sends no
+/// limit and renders against `comment_count`, cannot show a count above a
+/// truncated list.
+#[tokio::test]
+async fn comments_page_from_the_newest_end() {
+    let (_tmp, addr, id) = spawn().await;
+    for body in ["first", "second", "third"] {
+        let (status, _) = send(
+            addr,
+            "POST",
+            &format!("/api/v1/items/{id}/comments"),
+            Some(&format!(r#"{{"body":"{body}"}}"#)),
+        )
+        .await;
+        assert!(status.contains("200"), "post comment: {status}");
+    }
+    let bodies = |body: &str| -> Vec<String> {
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        v["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["body"].as_str().unwrap().to_owned())
+            .collect()
+    };
+
+    // No parameter → the whole thread, oldest-first.
+    let (_, all) = get(addr, &format!("/api/v1/items/{id}/comments")).await;
+    assert_eq!(bodies(&all), ["first", "second", "third"]);
+    let meta: serde_json::Value = serde_json::from_str(&all).unwrap();
+    assert_eq!(meta["_meta"]["total"], 3);
+    assert_eq!(meta["_meta"]["limit"], 0, "unlimited by default on the web");
+
+    // `limit` keeps the newest; `skip_newest` walks back into older ones.
+    let (_, newest) = get(addr, &format!("/api/v1/items/{id}/comments?limit=1")).await;
+    assert_eq!(bodies(&newest), ["third"]);
+    let (_, older) = get(
+        addr,
+        &format!("/api/v1/items/{id}/comments?limit=1&skip_newest=1"),
+    )
+    .await;
+    assert_eq!(bodies(&older), ["second"]);
+    let older: serde_json::Value = serde_json::from_str(&older).unwrap();
+    assert_eq!(older["_meta"]["total"], 3, "total is the whole thread");
+    assert_eq!(older["_meta"]["skip_newest"], 1);
+}
+
 #[tokio::test]
 async fn detail_includes_computed_fields() {
     let (_tmp, addr, id) = spawn().await;
