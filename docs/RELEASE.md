@@ -58,13 +58,25 @@ git rev-parse HEAD        # note this SHA — it's what you tag
 Names can be claimed by anyone at any time. Right before publishing:
 
 ```sh
+# The User-Agent is mandatory: crates.io answers 403 to anonymous API requests
+# for *every* crate, so without `-A` this loop reports TAKEN for all fourteen —
+# including the ones that are genuinely free.
+UA="clove-release-check (+https://github.com/egeapak/clove)"
 for c in clove-types clove-core clove-plugin clove-index clove-import clove-ipc \
          clove-mcp clove-tui clove-web cloved clove-cli \
          clove-sync-github clove-import-tk clove-import-beads; do
-  code=$(curl -s -o /dev/null -w '%{http_code}' "https://crates.io/api/v1/crates/$c")
-  echo "$c -> HTTP $code ($([ "$code" = 404 ] && echo FREE || echo TAKEN))"
+  code=$(curl -s -A "$UA" -o /dev/null -w '%{http_code}' "https://crates.io/api/v1/crates/$c")
+  case "$code" in
+    404) verdict=FREE ;;
+    200) verdict=TAKEN ;;
+    *)   verdict="UNKNOWN (HTTP $code — check the request, do not assume)" ;;
+  esac
+  echo "$c -> HTTP $code ($verdict)"
 done
 ```
+
+Any status other than 200/404 means the check itself failed and tells you
+**nothing** about availability — resolve that before reading the results.
 
 All fourteen must report **FREE (404)** for a first release. If any is TAKEN,
 **stop** — resolve the collision (rename that crate, or contact the owner)

@@ -139,6 +139,29 @@ jobs:
         run: cargo check -p clove-cli --no-default-features
       - name: cloved without git-sync
         run: cargo check -p cloved --no-default-features
+      # The registry client (ureq -> rustls) must stay on `ring`. A rustls with
+      # default features unifies the tree onto aws-lc-sys and triples the binary,
+      # so the workspace pins `ring` explicitly (root Cargo.toml) — this asserts
+      # the pin actually held.
+      #
+      # `-e normal` is required: aws-lc-sys IS legitimately reachable from
+      # clove-cli through its `jsonschema` **dev**-dependency (-> reqwest ->
+      # rustls/default), and it stays in Cargo.lock via clove-sync-github's
+      # octocrab either way. Only the normal-edge tree is the shipped one.
+      #
+      # The exit code cannot be the signal: `cargo tree -i` exits 101 when the
+      # package is absent from the lockfile entirely, and 0 with "nothing to
+      # print" on stderr when it is present but filtered out. Assert empty stdout.
+      - name: registry TLS stays on ring (no aws-lc-sys in the shipped tree)
+        run: |
+          found=$(cargo tree -p clove-cli -e normal -i aws-lc-sys 2>/dev/null || true)
+          if [ -n "$found" ]; then
+            echo "aws-lc-sys reached clove-cli's normal dependency tree:"
+            echo "$found"
+            echo "The rustls 'ring' pin in the root Cargo.toml has been defeated by feature unification."
+            exit 1
+          fi
+          echo "ok: aws-lc-sys is absent from clove-cli's normal dependency tree"
       # Informational: track the shipped binary size. The release profile is fat
       # LTO + codegen-units=1 + panic=abort + strip (see root Cargo.toml). cargo
       # forces the test/bench harness back to unwind, so `cargo test --release`

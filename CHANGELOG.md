@@ -6,6 +6,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Plugin discovery via crates.io** — clove uses crates.io itself as its plugin
+  registry rather than a curated manifest, so a plugin becomes discoverable by
+  publishing it.
+  - `clove plugin list --all` lists installed plugins alongside published ones,
+    discovered as the reverse dependencies of `clove-plugin` (a crate appears
+    only if it genuinely depends on it) and cached for 24 hours; `--refresh`
+    re-fetches.
+  - `clove plugin search <text>` filters published plugins by name or
+    description. When the registry is unavailable it falls back to probing the
+    candidate crate names directly — crates.io has no prefix search, but the
+    naming convention is total, so the names can be constructed instead.
+  - Discovery is strictly additive: if it fails for any reason the installed
+    list still prints and the cause is reported in `_meta.registry_error`.
+    Plain `clove plugin list` remains a pure filesystem walk, and plugin
+    dispatch never touches the network.
+- `<clove-home>/bin` joins the plugin search path (between `$CLOVE_PLUGIN_PATH`
+  and `$PATH`), resolved from `$CLOVE_HOME`, else `$XDG_DATA_HOME/clove`, else
+  `~/.local/share/clove` (`%APPDATA%\clove` on Windows).
+- New `REGISTRY_ERROR` error code (exit 5) for an unreachable registry.
+
+### Changed
+
+- `clove plugin list` gained `--all`/`--refresh` flags; its default output is
+  unchanged.
+
 ## [0.1.0] - 2026-07-20
 
 The initial feature set (milestones M0–M4). First tagged public release.

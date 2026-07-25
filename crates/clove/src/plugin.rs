@@ -68,11 +68,19 @@ fn binary_name(segments: &[&str]) -> String {
 }
 
 /// The ordered plugin search path (§5): the directory of the running `clove`
-/// binary, then each dir in `$CLOVE_PLUGIN_PATH`, then each dir on `$PATH`.
+/// binary, then each dir in `$CLOVE_PLUGIN_PATH`, then the clove-managed
+/// `<clove-home>/bin`, then each dir on `$PATH`.
 ///
 /// The current-exe directory comes first so a plugin installed next to `clove`
 /// (the common `cargo install` case) is found even when that dir is not on
 /// `$PATH`. Splitting uses the platform path separator (`;` on Windows else `:`).
+///
+/// `<clove-home>/bin` — where `clove plugin install` puts binaries — sits
+/// **after** `$CLOVE_PLUGIN_PATH` and **before** `$PATH`. The order is
+/// deliberate: `$CLOVE_PLUGIN_PATH` is the user's explicit opt-in directory, so
+/// a binary clove fetched from the internet must never outrank a deliberate
+/// local override; but a clove-managed install should still win over an
+/// incidental `$PATH` entry.
 fn search_dirs() -> Vec<Utf8PathBuf> {
     let mut dirs: Vec<Utf8PathBuf> = Vec::new();
 
@@ -84,17 +92,25 @@ fn search_dirs() -> Vec<Utf8PathBuf> {
         }
     }
 
-    for var in ["CLOVE_PLUGIN_PATH", "PATH"] {
-        if let Some(value) = std::env::var_os(var) {
-            for path in std::env::split_paths(&value) {
-                if let Ok(dir) = Utf8PathBuf::from_path_buf(path) {
-                    dirs.push(dir);
-                }
+    push_env_dirs(&mut dirs, "CLOVE_PLUGIN_PATH");
+    // An unresolvable clove home (no `$HOME`) simply contributes no entry.
+    if let Some(bin) = crate::clove_home::bin_dir() {
+        dirs.push(bin);
+    }
+    push_env_dirs(&mut dirs, "PATH");
+
+    dirs
+}
+
+/// Append every directory listed in the path-style environment variable `var`.
+fn push_env_dirs(dirs: &mut Vec<Utf8PathBuf>, var: &str) {
+    if let Some(value) = std::env::var_os(var) {
+        for path in std::env::split_paths(&value) {
+            if let Ok(dir) = Utf8PathBuf::from_path_buf(path) {
+                dirs.push(dir);
             }
         }
     }
-
-    dirs
 }
 
 /// Is `path` an existing regular file that can be executed? On Unix this requires

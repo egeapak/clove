@@ -19,6 +19,7 @@ allow = [
     "ISC",
     "Unicode-3.0",
     "Zlib",
+    "CDLA-Permissive-2.0",  # Community Data License Agreement, permissive v2 — a data licence with no copyleft and no attribution-in-binary requirement; via `webpki-roots` (the bundled Mozilla CA set the ureq/rustls registry client verifies crates.io against)
 ]
 # An allow-list entry that no dependency currently carries is a harmless
 # forward-declaration, not a failure: don't error when an allowed license isn't

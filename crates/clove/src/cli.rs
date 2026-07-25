@@ -145,7 +145,7 @@ provider — everything after it is the provider's own arguments.")]
     Serve(ServeArgs),
     /// Print version and schema information.
     Version,
-    /// Inspect installed subcommand plugins (`clove-*` on the search path).
+    /// Inspect installed subcommand plugins and discover published ones.
     Plugin(PluginArgs),
     /// Run an external subcommand plugin (`clove-<name>` on the search path).
     ///
@@ -156,7 +156,8 @@ provider — everything after it is the provider's own arguments.")]
     External(Vec<String>),
 }
 
-/// `clove plugin <list>` — inspect the installed subcommand plugins.
+/// `clove plugin <list|search>` — inspect installed plugins and discover
+/// published ones.
 #[derive(Debug, Args)]
 pub struct PluginArgs {
     #[command(subcommand)]
@@ -166,7 +167,39 @@ pub struct PluginArgs {
 #[derive(Debug, Subcommand)]
 pub enum PluginAction {
     /// List resolvable `clove-*` plugin binaries with their paths.
-    List,
+    List(PluginListArgs),
+
+    /// Search published plugins by name or description.
+    ///
+    /// Filters the discovered set locally: crates.io's own `?q=` is fuzzy
+    /// full-text and returns nothing useful for a prefix like `clove-sync`.
+    Search(PluginSearchArgs),
+}
+
+/// `clove plugin list [--all] [--refresh]`.
+#[derive(Debug, Args)]
+pub struct PluginListArgs {
+    /// Also list plugins published to crates.io but not installed here.
+    ///
+    /// Without this flag the command is a pure filesystem walk and never
+    /// touches the network.
+    #[arg(long)]
+    pub all: bool,
+
+    /// Bypass the cached registry result and re-fetch (implies `--all`).
+    #[arg(long)]
+    pub refresh: bool,
+}
+
+/// `clove plugin search <query> [--refresh]`.
+#[derive(Debug, Args)]
+pub struct PluginSearchArgs {
+    /// Text matched case-insensitively against plugin names and descriptions.
+    pub query: String,
+
+    /// Bypass the cached registry result and re-fetch.
+    #[arg(long)]
+    pub refresh: bool,
 }
 
 /// `clove serve` (DESIGN web UI / M4). Starts an HTTP server that serves the

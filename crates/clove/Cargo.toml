@@ -15,10 +15,17 @@ default-run = "clove"
 name = "clove"
 path = "src/main.rs"
 
-# The host carries **zero** network dependencies: `clove sync github` resolves
-# the external `clove-sync-github` plugin (PLUGIN_SYSTEM.md §4.2/§8), so there is
-# no in-process `github` feature and `clove-import` is used only for its pure
-# file-format layers (tk/beads/json/jsonl/merge-driver).
+# The host carries no *integration* network dependencies: `clove sync github`
+# resolves the external `clove-sync-github` plugin (PLUGIN_SYSTEM.md §4.2/§8), so
+# there is no in-process `github` feature and `clove-import` is used only for its
+# pure file-format layers (tk/beads/json/jsonl/merge-driver).
+#
+# The one network dependency the host does carry is the crates.io registry client
+# (`ureq`, src/registry/) behind `clove plugin list --all` / `search`. That is
+# discovery plumbing, not an integration, and it is always on so there is a single
+# code path and no "curl not installed" failure mode. Dispatch itself
+# (`clove sync github` → exec the plugin) stays a pure `stat` walk and never
+# touches the network.
 [features]
 default = ["mcp"]
 full = ["mcp"]
@@ -45,6 +52,9 @@ serde_json.workspace = true
 camino.workspace = true
 chrono.workspace = true
 tempfile.workspace = true       # T-M04: atomic `export --out FILE` writes
+ureq.workspace = true            # crates.io registry client (registry/, `plugin list --all`)
+semver.workspace = true          # crates.io version ordering
+toml.workspace = true            # parse crates.io/Cargo metadata in the registry client
 
 # `clove daemon stop` on Windows signals the daemon's named event (DESIGN §8.9).
 [target.'cfg(windows)'.dependencies]

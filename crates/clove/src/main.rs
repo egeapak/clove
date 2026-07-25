@@ -6,6 +6,7 @@
 //! each subcommand under [`cmd`].
 
 mod cli;
+mod clove_home;
 mod cmd;
 mod context;
 mod exit;
@@ -13,6 +14,7 @@ mod item_json;
 mod mux_help;
 mod output;
 mod plugin;
+mod registry;
 mod util;
 
 use clap::error::ErrorKind;
@@ -122,10 +124,16 @@ fn dispatch(cli: Cli) -> (OutputFormat, Result<ExitCode, CloveError>) {
             )
         }
         // `plugin list` is a pure `stat` walk of the search path; it needs no
-        // repository (so `clove plugin list` works before `clove init`).
-        Commands::Plugin(_) => {
+        // repository (so `clove plugin list` works before `clove init`). The
+        // registry-backed forms (`list --all`, `search`) reach crates.io but
+        // still need no repo — discovery is about the machine, not the project.
+        Commands::Plugin(args) => {
             let f = resolve_format(flag, None);
-            (f, cmd::plugin::run(f).map(|_| ExitCode::Success))
+            let result = match &args.action {
+                cli::PluginAction::List(list) => cmd::plugin::run_list(f, list),
+                cli::PluginAction::Search(search) => cmd::plugin::run_search(f, search),
+            };
+            (f, result.map(|_| ExitCode::Success))
         }
         // An external plugin (`clove-<name>`). Resolution runs *before* discovery:
         // an unknown subcommand is a usage error (exit 1) that needs no repo, so

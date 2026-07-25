@@ -33,11 +33,17 @@ fn install_echo_as(name: &str) -> (TempDir, PathBuf) {
 }
 
 /// A `clove` invocation rooted at `dir` with a hermetic environment.
+///
+/// `CLOVE_HOME` is pinned into `dir` because `assert_cmd` inherits `$HOME`:
+/// without it, the clove-home fallback would resolve to the developer's real
+/// `~/.local/share/clove`, and a test could read (or write) their actual plugin
+/// install root and registry cache.
 fn clove(dir: &Path) -> Command {
     let mut cmd = Command::cargo_bin("clove").unwrap();
     cmd.current_dir(dir);
     cmd.env_remove("CLOVE_FORMAT");
     cmd.env("CLOVE_AUTHOR", "tester@example.com");
+    cmd.env("CLOVE_HOME", dir.join("clove-home"));
     cmd
 }
 
@@ -212,5 +218,195 @@ fn provider_help_is_not_intercepted_by_the_dynamic_renderer() {
     assert!(
         !out.contains("Installed providers:"),
         "dynamic section should be absent (not intercepted): {out}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Registry-backed discovery (`plugin list --all`, `plugin search`).
+//
+// All hermetic: `CLOVE_REGISTRY_URL` points the client at a dead loopback port,
+// so every test here exercises the *degradation* path without touching the real
+// crates.io. `CLOVE_HOME` is pinned to a temp dir in `clove()` so no test can
+// read or write a developer's real install root or registry cache.
+// ---------------------------------------------------------------------------
+
+/// A `clove` invocation whose registry client points at a closed port, so
+/// discovery deterministically fails at the transport layer.
+fn clove_offline(dir: &Path, home: &Path) -> Command {
+    let mut cmd = clove(dir);
+    cmd.env("CLOVE_HOME", home);
+    // Port 1 on loopback: reserved, and nothing is listening.
+    cmd.env("CLOVE_REGISTRY_URL", "http://127.0.0.1:1/api/v1");
+    cmd
+}
+
+#[test]
+fn plain_plugin_list_never_consults_the_registry() {
+    let (plugin_dir, _echo) = install_echo_as("clove-echo");
+    let home = tempfile::tempdir().unwrap();
+
+    // Even with the registry pointed at a dead port, a plain `list` succeeds and
+    // reports nothing about the registry — it is a pure filesystem walk.
+    let assert = clove_offline(plugin_dir.path(), home.path())
+        .env("CLOVE_PLUGIN_PATH", plugin_dir.path())
+        .args(["--format", "json", "plugin", "list"])
+        .assert()
+        .success();
+
+    let v: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(v["ok"], true);
+    assert!(
+        v["_meta"].get("registry_error").is_none(),
+        "plain list must not consult the registry: {v}"
+    );
+    assert!(v["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p["name"] == "echo"));
+}
+
+#[test]
+fn list_all_degrades_to_the_installed_set_when_discovery_fails() {
+    let (plugin_dir, _echo) = install_echo_as("clove-echo");
+    let home = tempfile::tempdir().unwrap();
+
+    let assert = clove_offline(plugin_dir.path(), home.path())
+        .env("CLOVE_PLUGIN_PATH", plugin_dir.path())
+        .args(["--format", "json", "plugin", "list", "--all"])
+        .assert()
+        // Degradation, not failure: a discovery outage must never fail the
+        // command or hide the installed plugins.
+        .success();
+
+    let v: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(v["ok"], true, "envelope: {v}");
+    assert!(
+        v["_meta"]["registry_error"].is_string(),
+        "the failure cause must be reported: {v}"
+    );
+    assert!(
+        v["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["name"] == "echo"),
+        "the installed set must still print: {v}"
+    );
+}
+
+#[test]
+fn jsonl_carries_the_registry_error_too() {
+    // `print_jsonl_items` has no `_meta` channel, so a discovery failure used to
+    // vanish entirely in jsonl — making it indistinguishable from "nothing to
+    // report". The trailing meta line closes that.
+    let (plugin_dir, _echo) = install_echo_as("clove-echo");
+    let home = tempfile::tempdir().unwrap();
+
+    let assert = clove_offline(plugin_dir.path(), home.path())
+        .env("CLOVE_PLUGIN_PATH", plugin_dir.path())
+        .args(["--format", "jsonl", "plugin", "list", "--all"])
+        .assert()
+        .success();
+
+    let out = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let lines: Vec<Value> = out
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).expect("each line is valid JSON"))
+        .collect();
+
+    assert!(
+        lines.iter().any(|l| l["data"]["name"] == "echo"),
+        "installed plugin missing: {out}"
+    );
+    assert!(
+        lines.iter().any(|l| l
+            .get("_meta")
+            .is_some_and(|m| m["registry_error"].is_string())),
+        "no trailing _meta line carrying the registry error: {out}"
+    );
+}
+
+#[test]
+fn human_list_all_labels_its_sections_even_with_no_plugins_installed() {
+    // `render_human` used to return early on an empty installed set, so `--all`
+    // on a clean machine printed nothing at all — indistinguishable from a
+    // broken command.
+    let empty = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+
+    let assert = clove_offline(empty.path(), home.path())
+        .env("CLOVE_PLUGIN_PATH", empty.path())
+        .args(["plugin", "list", "--all"])
+        .assert()
+        .success();
+
+    let out = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let err = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(out.contains("Installed"), "no Installed section: {out}");
+    assert!(err.contains("warning:"), "no warning on stderr: {err}");
+}
+
+#[test]
+fn search_reports_no_matches_without_failing_when_discovery_is_down() {
+    let empty = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+
+    clove_offline(empty.path(), home.path())
+        .env("CLOVE_PLUGIN_PATH", empty.path())
+        .args(["--format", "json", "plugin", "search", "gitlab"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn a_traversal_or_flag_shaped_query_is_never_put_into_a_request() {
+    // The query is interpolated into a URL on the name-probe path, so it has to
+    // be filtered before that. Two independent layers do it:
+    //
+    //   1. clap rejects a bare `-rf` as an unknown flag (exit 1) — it never
+    //      reaches the command at all;
+    //   2. behind `--`, the value does reach the command, and the crate-name
+    //      validator refuses to probe it. That is *not* an error: a search query
+    //      may legitimately be a description phrase like "two-way sync". It
+    //      simply cannot match a crate name, so there are no name hits.
+    let empty = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+
+    // Layer 1: clap.
+    clove_offline(empty.path(), home.path())
+        .env("CLOVE_PLUGIN_PATH", empty.path())
+        .args(["plugin", "search", "-rf"])
+        .assert()
+        .failure();
+
+    // Layer 2: the validator, for values that get past argument parsing.
+    for query in ["../../summary", "-rf", "--upload-pack=/bin/sh", "a b"] {
+        clove_offline(empty.path(), home.path())
+            .env("CLOVE_PLUGIN_PATH", empty.path())
+            .args(["--format", "json", "plugin", "search", "--", query])
+            .assert()
+            .success();
+    }
+}
+
+#[test]
+fn the_registry_cache_lands_in_clove_home_not_a_dot_clove_dir() {
+    // The install root must never be `~/.clove`: repository discovery treats any
+    // ancestor containing a `.clove/` *directory* as a repo root, so that name
+    // would turn the user's home into a clove repository.
+    let empty = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+
+    clove_offline(empty.path(), home.path())
+        .env("CLOVE_PLUGIN_PATH", empty.path())
+        .args(["plugin", "list", "--all"])
+        .assert()
+        .success();
+
+    assert!(
+        !home.path().join(".clove").exists(),
+        "the clove home must not contain a `.clove/` directory"
     );
 }

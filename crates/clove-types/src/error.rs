@@ -138,6 +138,16 @@ pub enum CloveError {
     #[error("not yet implemented: {feature}")]
     NotYetImplemented { feature: String },
 
+    /// The plugin registry (crates.io) could not be reached or understood —
+    /// offline, rate-limited, a TLS/proxy failure, or a malformed response.
+    ///
+    /// Never raised for "this plugin does not exist": a 404 is an authoritative
+    /// answer, not an error. Classified at exit 5 alongside the other
+    /// environment failures, since the command was well-formed and the world
+    /// was not cooperating.
+    #[error("registry error: {message}")]
+    Registry { message: String },
+
     /// A plugin binary was dispatched (structurally, probe-free — PLUGIN_SYSTEM.md
     /// §4.2) for a capability it does not implement. Raised by a multi-capability
     /// plugin's own `main` when it is handed a `<mux> <provider>` outside its
@@ -185,5 +195,6 @@ pub fn error_code(error: &CloveError) -> (&'static str, u8) {
         CloveError::NoRepo { .. } => ("NO_REPO", 5),
         CloveError::Io { .. } => ("IO_ERROR", 5),
         CloveError::NotYetImplemented { .. } => ("NOT_YET_IMPLEMENTED", 1),
+        CloveError::Registry { .. } => ("REGISTRY_ERROR", 5),
     }
 }

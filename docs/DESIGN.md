@@ -861,7 +861,7 @@ regardless of warnings.
 | 2 | NotFound | Item does not exist |
 | 3 | CycleDetected | `dep add` when a cycle-path is detected; also used with `--fail-on-cycle` flag on `dep cycle` |
 | 4 | ValidationError | Bad field value, ID collision, invalid priority |
-| 5 | IoError | `.clove/` missing, file unreadable, filesystem error |
+| 5 | IoError | `.clove/` missing, file unreadable, filesystem error, plugin registry unreachable (`REGISTRY_ERROR`) |
 | 6 | IndexError | Stale index with `--strict`; index unrecoverable |
 | 7 | DaemonError | Daemon communication failure |
 

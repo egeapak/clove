@@ -1,0 +1,267 @@
+//! A TTL cache for the discovery result, so `plugin list --all` stays fast and
+//! keeps working offline after a first successful fetch.
+//!
+//! The clock is a **parameter**, never `Utc::now()` inline, so expiry is testable
+//! without sleeping. Writes go through a temp file + rename so a crash or a
+//! concurrent run can never leave a half-written cache — the read path tolerates
+//! corruption anyway, but preventing beats recovering.
+//!
+//! Scope note: this cache serves `list --all` and `search` only. When install
+//! lands it must fetch its verification evidence **live** — a cache is a file
+//! anyone who can set `$CLOVE_HOME` can write, and it must never be able to
+//! decide what counts as a verified plugin.
+
+use camino::{Utf8Path, Utf8PathBuf};
+use chrono::{DateTime, Duration, Utc};
+use serde::{Deserialize, Serialize};
+
+use super::RegistryPlugin;
+
+/// The cache-file format version, so a future shape change can be migrated (or
+/// simply ignored) rather than mis-parsed.
+const CACHE_SCHEMA: u32 = 1;
+
+/// How long a cached discovery result stays fresh.
+pub const TTL: Duration = Duration::hours(24);
+
+/// The cache file, relative to the clove home directory.
+const FILE_NAME: &str = "registry-cache.json";
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CacheFile {
+    schema: u32,
+    fetched_at: DateTime<Utc>,
+    /// `None` records that the registry itself is absent (`clove-plugin`
+    /// unpublished) — distinct from a published registry with no dependents.
+    plugins: Option<Vec<CachedPlugin>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CachedPlugin {
+    crate_name: String,
+    #[serde(default)]
+    latest: Option<String>,
+    #[serde(default)]
+    latest_yanked: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    repository: Option<String>,
+    #[serde(default)]
+    bin_names: Vec<String>,
+    #[serde(default)]
+    published_by: Option<String>,
+    #[serde(default)]
+    downloads: u64,
+}
+
+impl From<&RegistryPlugin> for CachedPlugin {
+    fn from(p: &RegistryPlugin) -> Self {
+        CachedPlugin {
+            crate_name: p.crate_name.clone(),
+            latest: p.latest.as_ref().map(|v| v.to_string()),
+            latest_yanked: p.latest_yanked.as_ref().map(|v| v.to_string()),
+            description: p.description.clone(),
+            repository: p.repository.clone(),
+            bin_names: p.bin_names.clone(),
+            published_by: p.published_by.clone(),
+            downloads: p.downloads,
+        }
+    }
+}
+
+impl From<CachedPlugin> for RegistryPlugin {
+    fn from(c: CachedPlugin) -> Self {
+        RegistryPlugin {
+            crate_name: c.crate_name,
+            latest: c.latest.and_then(|v| semver::Version::parse(&v).ok()),
+            latest_yanked: c
+                .latest_yanked
+                .and_then(|v| semver::Version::parse(&v).ok()),
+            description: c.description,
+            repository: c.repository,
+            bin_names: c.bin_names,
+            published_by: c.published_by,
+            downloads: c.downloads,
+        }
+    }
+}
+
+/// The cache file path inside `home`.
+pub fn path_in(home: &Utf8Path) -> Utf8PathBuf {
+    home.join(FILE_NAME)
+}
+
+/// Read the cache if it exists and is still fresh at `now`.
+///
+/// Returns `None` for every failure mode — absent, unreadable, corrupt, wrong
+/// schema, or expired — because a cache miss is always recoverable by fetching.
+/// A corrupt cache must never be fatal.
+pub fn read(
+    home: &Utf8Path,
+    now: DateTime<Utc>,
+    ttl: Duration,
+) -> Option<Option<Vec<RegistryPlugin>>> {
+    let raw = std::fs::read_to_string(path_in(home)).ok()?;
+    let parsed: CacheFile = serde_json::from_str(&raw).ok()?;
+    if parsed.schema != CACHE_SCHEMA {
+        return None;
+    }
+    // A cache stamped in the future (clock skew, a restored backup) is treated as
+    // stale rather than trusted indefinitely.
+    if now < parsed.fetched_at || now - parsed.fetched_at > ttl {
+        return None;
+    }
+    Some(
+        parsed
+            .plugins
+            .map(|plugins| plugins.into_iter().map(RegistryPlugin::from).collect()),
+    )
+}
+
+/// Write the discovery result, stamped at `now`.
+///
+/// Best-effort: a cache that cannot be written is not an error worth failing a
+/// read-only command over, so this returns `()` and swallows I/O failures.
+pub fn write(home: &Utf8Path, now: DateTime<Utc>, plugins: Option<&[RegistryPlugin]>) {
+    let file = CacheFile {
+        schema: CACHE_SCHEMA,
+        fetched_at: now,
+        plugins: plugins.map(|ps| ps.iter().map(CachedPlugin::from).collect()),
+    };
+    let Ok(encoded) = serde_json::to_string_pretty(&file) else {
+        return;
+    };
+    if std::fs::create_dir_all(home).is_err() {
+        return;
+    }
+    // Temp + rename: a torn write can never be observed, even if two runs race.
+    let temp = home.join(format!(".{FILE_NAME}.tmp{}", std::process::id()));
+    if std::fs::write(&temp, encoded).is_err() {
+        return;
+    }
+    if std::fs::rename(&temp, path_in(home)).is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample() -> Vec<RegistryPlugin> {
+        vec![RegistryPlugin {
+            crate_name: "clove-sync-gitlab".to_owned(),
+            latest: Some(semver::Version::new(0, 10, 0)),
+            latest_yanked: Some(semver::Version::new(0, 11, 0)),
+            description: Some("Two-way GitLab sync".to_owned()),
+            repository: None,
+            bin_names: vec!["clove-sync-gitlab".to_owned()],
+            published_by: Some("someone".to_owned()),
+            downloads: 41,
+        }]
+    }
+
+    fn home() -> (tempfile::TempDir, Utf8PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
+        (dir, path)
+    }
+
+    #[test]
+    fn fresh_cache_round_trips() {
+        let (_dir, home) = home();
+        let now = Utc::now();
+        write(&home, now, Some(&sample()));
+
+        let read_back = read(&home, now + Duration::hours(1), TTL).expect("fresh hit");
+        let plugins = read_back.expect("registry present");
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0].crate_name, "clove-sync-gitlab");
+        assert_eq!(
+            plugins[0].latest.as_ref(),
+            Some(&semver::Version::new(0, 10, 0)),
+            "semver must survive the string round-trip through the cache"
+        );
+        assert_eq!(
+            plugins[0].latest_yanked,
+            Some(semver::Version::new(0, 11, 0))
+        );
+    }
+
+    #[test]
+    fn expired_cache_is_a_miss() {
+        let (_dir, home) = home();
+        let now = Utc::now();
+        write(&home, now, Some(&sample()));
+        assert!(read(&home, now + TTL + Duration::minutes(1), TTL).is_none());
+        // Still fresh one minute before expiry.
+        assert!(read(&home, now + TTL - Duration::minutes(1), TTL).is_some());
+    }
+
+    #[test]
+    fn corrupt_cache_is_a_miss_not_a_failure() {
+        let (_dir, home) = home();
+        std::fs::write(path_in(&home), "{ this is not json").unwrap();
+        assert!(read(&home, Utc::now(), TTL).is_none());
+
+        // Valid JSON of the wrong shape is equally survivable.
+        std::fs::write(path_in(&home), r#"{"schema":1}"#).unwrap();
+        assert!(read(&home, Utc::now(), TTL).is_none());
+    }
+
+    #[test]
+    fn a_future_stamped_cache_is_stale() {
+        // Clock skew or a restored backup must not pin a cache as fresh forever.
+        let (_dir, home) = home();
+        let now = Utc::now();
+        write(&home, now + Duration::hours(48), Some(&sample()));
+        assert!(read(&home, now, TTL).is_none());
+    }
+
+    #[test]
+    fn wrong_schema_is_a_miss() {
+        let (_dir, home) = home();
+        let body = format!(
+            r#"{{"schema":99,"fetched_at":"{}","plugins":[]}}"#,
+            Utc::now().to_rfc3339()
+        );
+        std::fs::write(path_in(&home), body).unwrap();
+        assert!(read(&home, Utc::now(), TTL).is_none());
+    }
+
+    #[test]
+    fn absent_registry_round_trips_distinctly_from_empty() {
+        let (_dir, home) = home();
+        let now = Utc::now();
+
+        // Absent: `clove-plugin` is not published.
+        write(&home, now, None);
+        assert_eq!(read(&home, now, TTL), Some(None));
+
+        // Empty: published, but nothing depends on it yet.
+        write(&home, now, Some(&[]));
+        assert_eq!(read(&home, now, TTL), Some(Some(vec![])));
+    }
+
+    #[test]
+    fn write_leaves_no_temp_file_behind() {
+        let (_dir, home) = home();
+        write(&home, Utc::now(), Some(&sample()));
+        let stray: Vec<_> = std::fs::read_dir(&home)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".tmp"))
+            .collect();
+        assert!(stray.is_empty(), "temp files left behind: {stray:?}");
+    }
+
+    #[test]
+    fn write_creates_the_home_directory() {
+        let (_dir, home) = home();
+        let nested = home.join("nested/clove");
+        write(&nested, Utc::now(), Some(&sample()));
+        assert!(read(&nested, Utc::now(), TTL).is_some());
+    }
+}

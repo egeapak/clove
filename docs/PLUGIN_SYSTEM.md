@@ -208,7 +208,19 @@ executable suffix (`.exe` on Windows). Search, in order:
    found even if that dir isn't on `PATH`.
 2. **`$CLOVE_PLUGIN_PATH`** (`:`-separated, or `;` on Windows) — explicit opt-in
    dirs, for dev/testing and non-standard installs.
-3. **Every directory on `$PATH`.**
+3. **`<clove-home>/bin`** — the clove-managed install root, where
+   `clove plugin install` puts binaries. Resolved from `$CLOVE_HOME`, else
+   `$XDG_DATA_HOME/clove`, else `~/.local/share/clove` (`%APPDATA%\clove` on
+   Windows). It sits *below* `$CLOVE_PLUGIN_PATH` deliberately: that variable is
+   the user's explicit override, and a binary clove fetched from the internet
+   must never outrank it. It sits *above* `$PATH` so a clove-managed install
+   still beats an incidental one.
+
+   **Never `~/.clove`.** Repository discovery treats any ancestor directory
+   containing a `.clove/` *directory* as a repository root, with no marker check
+   — so an install root at `~/.clove` would make `$HOME` itself resolve as a
+   clove repository for every command run beneath it.
+4. **Every directory on `$PATH`.**
 
 First match wins. Resolution is a pure `stat`-for-executable walk (no exec) so
 `clove --list` / help can enumerate cheaply. On Unix, require the file be
