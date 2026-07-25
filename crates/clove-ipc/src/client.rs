@@ -49,19 +49,25 @@ pub enum ClientError {
     #[error("daemon connect timed out")]
     Timeout,
 
-    /// The daemon received the call and **rejected** it: a definite, final
-    /// answer carrying the daemon's own error classification.
+    /// The daemon received the call and **reported a decision**, carrying its
+    /// own error classification.
     ///
-    /// Distinguishing this from [`ClientError::Transport`] matters for writes.
-    /// A rejected write provably did not apply, so the caller can report it
-    /// verbatim; an indeterminate one must not be retried or silently retried
-    /// against the local store (see `Transport`).
+    /// This means the request was processed and answered — *not* that a write
+    /// left the store untouched. Several failures are raised after the mutation
+    /// is already durable: `atomic_write` renames the file and only then fsyncs
+    /// the parent directory, `add_comment_at` creates the comment file before
+    /// writing it, and a panic in the daemon's blocking worker is reported as an
+    /// app-level `internal` error even if it happened after the write.
+    ///
+    /// So a caller must not treat this as "safe to retry locally". What it does
+    /// mean is that the daemon's classification is authoritative and should be
+    /// reported verbatim, rather than reinterpreted.
     #[error("{0}")]
     App(RpcError),
 
     /// The transport failed, or the reply had an unexpected shape or protocol
-    /// version. The call's fate is **indeterminate**: the daemon may well have
-    /// applied a write before the response was lost.
+    /// version. The call never produced an answer, so its fate is unknown: the
+    /// daemon may have applied a write before the response was lost.
     ///
     /// A write that fails this way must surface as an error rather than fall
     /// back to direct ops, because re-applying is not universally safe — a
@@ -76,8 +82,11 @@ impl From<ClientError> for clove_types::CloveError {
     /// through the one taxonomy (`clove_types::error_code`) rather than
     /// re-deriving one per surface.
     ///
-    /// An [`ClientError::App`] keeps the daemon's own `code`/`exit`, so a write
-    /// it rejected exits exactly as the same write would have locally. Every
+    /// An [`ClientError::App`] carries the daemon's `code` across, so a failure
+    /// it reported classifies exactly as the same failure raised locally. The
+    /// `exit` rides along for clients that do not share the taxonomy (and for
+    /// logs), but `clove_types::error_code` resolves the *code* against its own
+    /// table rather than trusting that number — see its `Remote` arm. Every
     /// other variant is a communication failure the daemon never classified, and
     /// becomes `DAEMON_ERROR` / exit 7.
     fn from(err: ClientError) -> Self {
@@ -185,7 +194,11 @@ impl DaemonClient {
             Ok(_) => DaemonHealth::Healthy,
             // Answered, but with a mismatched protocol version (or an otherwise
             // incompatible reply): it is alive — do not touch its socket/pid.
-            Err(ClientError::Transport(_)) => DaemonHealth::Incompatible,
+            // `App` is unreachable today (`ping` is infallible at the app level),
+            // but it is *proof of life*, so it belongs here rather than falling
+            // into `Dead` below — where `doctor --fix` would unlink the socket of
+            // a running daemon.
+            Err(ClientError::Transport(_) | ClientError::App(_)) => DaemonHealth::Incompatible,
             // Could not connect at all (no listener / refused / stale socket):
             // corpse files from a crashed daemon.
             Err(_) => DaemonHealth::Dead,
@@ -339,12 +352,12 @@ impl DaemonClient {
     }
 
     /// Drive a fallible RPC call to completion, keeping the application-level
-    /// [`RpcError`] (the daemon rejected the call) distinct from the
-    /// transport-level `tarpc::client::RpcError` (the call's fate is unknown).
+    /// [`RpcError`] (the daemon answered) distinct from the transport-level
+    /// `tarpc::client::RpcError` (no answer; the call's fate is unknown).
     ///
     /// These were previously flattened into one stringly-typed variant, which
-    /// lost both the daemon's error classification and — more importantly — the
-    /// difference between "definitely did not apply" and "may have applied".
+    /// lost both the daemon's error classification and the difference between
+    /// "the daemon decided" and "we never heard back".
     fn app<T, F>(&self, fut: F) -> Result<T, ClientError>
     where
         F: std::future::Future<Output = Result<Result<T, RpcError>, tarpc::client::RpcError>>,
@@ -395,23 +408,41 @@ mod tests {
         assert!(DaemonClient::probe(&clove_dir).is_none());
     }
 
-    /// A rejected call keeps the daemon's own classification, so the caller
-    /// exits exactly as it would have for the same failure raised locally.
+    /// A failure the daemon reports classifies exactly as the same failure
+    /// raised locally — the property the whole seam exists for.
+    ///
+    /// The expected pair is taken from the *local* classifier rather than
+    /// written out here: hardcoding it would only prove that the wire value is
+    /// echoed back, which is true of any implementation.
     #[test]
-    fn app_error_preserves_the_daemon_classification() {
-        let cases = [
-            ("ITEM_NOT_FOUND", 2u8),
-            ("CYCLE_DETECTED", 3),
-            ("VALIDATION_ERROR", 4),
-            ("IO_ERROR", 5),
+    fn app_error_matches_the_local_classification() {
+        let locals = [
+            clove_types::CloveError::NotFound {
+                id: "proj-0000000A".into(),
+            },
+            clove_types::CloveError::DependencyCycle {
+                from: "a".into(),
+                to: "b".into(),
+                cycle: vec![],
+            },
+            clove_types::CloveError::InvalidField {
+                field: "priority".into(),
+                reason: "out of range".into(),
+            },
+            clove_types::CloveError::Io {
+                path: "/x".into(),
+                source: std::io::Error::other("disk"),
+            },
         ];
-        for (code, exit) in cases {
-            let err = ClientError::App(RpcError::with_exit(code, "boom", exit));
-            let core: clove_types::CloveError = err.into();
+        for local in locals {
+            let (code, exit) = clove_types::error_code(&local);
+            // What `cloved` would put on the wire for this failure.
+            let remote: clove_types::CloveError =
+                ClientError::App(RpcError::with_exit(code, local.to_string(), exit)).into();
             assert_eq!(
-                clove_types::error_code(&core),
+                clove_types::error_code(&remote),
                 (code, exit),
-                "{code} must survive the wire round-trip"
+                "`{code}` must classify identically whether local or remote"
             );
         }
     }
@@ -423,6 +454,15 @@ mod tests {
         let err = ClientError::App(RpcError::with_exit("SOME_FUTURE_CODE", "boom", 42));
         let core: clove_types::CloveError = err.into();
         assert_eq!(clove_types::error_code(&core), ("DAEMON_ERROR", 7));
+    }
+
+    /// A known code carrying a bogus exit must not reach the caller. Exit 0 is
+    /// the dangerous one: it would make a failed command report success.
+    #[test]
+    fn a_hostile_remote_exit_cannot_force_success() {
+        let err = ClientError::App(RpcError::with_exit("ITEM_NOT_FOUND", "gone", 0));
+        let core: clove_types::CloveError = err.into();
+        assert_eq!(clove_types::error_code(&core), ("ITEM_NOT_FOUND", 2));
     }
 
     /// Every non-`App` variant is a communication failure the daemon never

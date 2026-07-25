@@ -6,6 +6,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Daemon-reported errors now use clove's standard error codes.** `cloved`
+  emitted a private code set (`not_found`, `self_loop`, `cycle`,
+  `already_exists`, `invalid_field`, `op_failed`) that neither matched the
+  documented `error.code` spellings nor covered them — every unrecognized
+  failure collapsed into `op_failed`, merging distinct classes (I/O, exit 5,
+  with parse failures, exit 4), so no client could recover the right exit code.
+  It now emits the same `code`/`exit` pair as the CLI and web API, so a failure
+  reported by the daemon is indistinguishable from the same failure raised
+  locally.
+
+  *User-visible:* MCP tool errors that route through the daemon now read
+  `ITEM_NOT_FOUND: no item with id …` rather than `not_found: …` (likewise
+  `CYCLE_DETECTED`, `VALIDATION_ERROR`, `SELF_LOOP`, `ALREADY_EXISTS`). Scripts
+  matching the old lowercase strings need updating; the new spellings are the
+  documented ones (DESIGN §7.3). `clove daemon` failures now report
+  `daemon transport error: …` rather than `daemon protocol error: …`.
+
+  The IPC wire is otherwise unchanged: the error reply gains a self-describing
+  `exit` field that defaults compatibly in both directions, so there is no
+  protocol bump and a mixed-version `clove`/`cloved` pair keeps working.
+
 ### Fixed
 
 - **Silent lost updates in `clove status`/`start`/`close`, `clove set`, and

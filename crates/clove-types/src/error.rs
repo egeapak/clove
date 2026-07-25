@@ -202,39 +202,234 @@ pub fn error_code(error: &CloveError) -> (&'static str, u8) {
         CloveError::Io { .. } => ("IO_ERROR", 5),
         CloveError::NotYetImplemented { .. } => ("NOT_YET_IMPLEMENTED", 1),
 
-        // A remote failure already carries the daemon's own classification.
-        // Trust it only when the code is one this build knows: a daemon that is
-        // newer, older, or simply wrong must not be able to steer the caller's
-        // exit code to an arbitrary value.
-        CloveError::Remote { code, exit, .. } => match canonical_code(code) {
-            Some(known) => (known, *exit),
-            None => ("DAEMON_ERROR", 7),
-        },
+        // A remote failure names its class on the wire; resolve that name
+        // against the local table rather than trusting the numeric `exit` that
+        // came with it. Otherwise a daemon that is newer, older, or simply
+        // buggy could hand back `("ITEM_NOT_FOUND", 200)` and steer the caller's
+        // exit code — including into `error.json`'s `maximum: 7` on the web
+        // envelope. An unrecognized code degrades to the generic daemon error.
+        CloveError::Remote { code, .. } => canonical_code(code).unwrap_or(DAEMON_ERROR),
     }
 }
 
-/// The stable wire code as a `&'static str`, if this build recognizes it.
+/// The generic classification for a daemon failure this build cannot name.
+const DAEMON_ERROR: (&str, u8) = ("DAEMON_ERROR", 7);
+
+/// Every `(code, exit)` pair [`error_code`] can produce.
 ///
-/// [`error_code`] returns `&'static str`, but a [`CloveError::Remote`] carries an
-/// owned `String` off the wire; this maps it back to the canonical constant (and
-/// doubles as validation — see the `Remote` arm above).
-fn canonical_code(code: &str) -> Option<&'static str> {
-    const CODES: &[&str] = &[
-        "ITEM_NOT_FOUND",
-        "UNSUPPORTED_CAPABILITY",
-        "ID_CONFLICT",
-        "INVALID_ID",
-        "VALIDATION_ERROR",
-        "HAS_DEPENDENTS",
-        "SELF_LOOP",
-        "ALREADY_EXISTS",
-        "CYCLE_DETECTED",
-        "CONFIG_ERROR",
-        "PARSE_ERROR",
-        "NO_REPO",
-        "IO_ERROR",
-        "NOT_YET_IMPLEMENTED",
-        "DAEMON_ERROR",
-    ];
-    CODES.iter().copied().find(|known| *known == code)
+/// This is the lookup used to resolve a code that arrives off the wire (see the
+/// [`CloveError::Remote`] arm). It must stay in step with the match above;
+/// `every_error_code_is_canonical` fails if a variant's code is missing here.
+const CODES: &[(&str, u8)] = &[
+    ("ITEM_NOT_FOUND", 2),
+    ("UNSUPPORTED_CAPABILITY", 2),
+    ("ID_CONFLICT", 4),
+    ("INVALID_ID", 4),
+    ("VALIDATION_ERROR", 4),
+    ("HAS_DEPENDENTS", 4),
+    ("SELF_LOOP", 4),
+    ("ALREADY_EXISTS", 4),
+    ("CYCLE_DETECTED", 3),
+    ("CONFIG_ERROR", 4),
+    ("PARSE_ERROR", 4),
+    ("NO_REPO", 5),
+    ("IO_ERROR", 5),
+    ("NOT_YET_IMPLEMENTED", 1),
+    DAEMON_ERROR,
+];
+
+/// Resolve a wire code to its canonical `(code, exit)`, if this build knows it.
+fn canonical_code(code: &str) -> Option<(&'static str, u8)> {
+    CODES
+        .iter()
+        .find(|(known, _)| *known == code)
+        .map(|(known, exit)| (*known, *exit))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One instance of every [`CloveError`] variant.
+    ///
+    /// `exhaustive_variant_check` below is what keeps this honest: it matches on
+    /// `CloveError` without a wildcard, so adding a variant fails to compile
+    /// there and points here.
+    fn one_of_each() -> Vec<CloveError> {
+        let path = || Utf8PathBuf::from("/x");
+        vec![
+            CloveError::InvalidId {
+                value: "x".into(),
+                reason: "r".into(),
+            },
+            CloveError::PathTraversal { id: "x".into() },
+            CloveError::IdConflict { attempts: 1 },
+            CloveError::CommentConflict { attempts: 1 },
+            CloveError::InvalidField {
+                field: "f".into(),
+                reason: "r".into(),
+            },
+            CloveError::EmptyLabel { raw: "".into() },
+            CloveError::Config {
+                path: path(),
+                message: "m".into(),
+            },
+            CloveError::FrontmatterTooLarge {
+                path: path(),
+                limit: 1,
+            },
+            CloveError::BodyTooLarge {
+                path: path(),
+                limit: 1,
+            },
+            CloveError::AliasNotAllowed { path: path() },
+            CloveError::MissingFrontmatter { path: path() },
+            CloveError::UnterminatedFrontmatter { path: path() },
+            CloveError::IdMismatch {
+                path: path(),
+                id: "a".into(),
+                stem: "b".into(),
+            },
+            CloveError::InvalidYaml {
+                path: path(),
+                message: "m".into(),
+            },
+            CloveError::Invalid {
+                path: path(),
+                count: 1,
+                summary: "s".into(),
+            },
+            CloveError::NoRepo { searched: path() },
+            CloveError::NotFound { id: "x".into() },
+            CloveError::HasDependents {
+                id: "x".into(),
+                dependents: vec![],
+            },
+            CloveError::SelfDependency { id: "x".into() },
+            CloveError::DependencyCycle {
+                from: "a".into(),
+                to: "b".into(),
+                cycle: vec![],
+            },
+            CloveError::DependencyExists {
+                from: "a".into(),
+                to: "b".into(),
+            },
+            CloveError::ScanFailed {
+                path: path(),
+                count: 1,
+                message: "m".into(),
+            },
+            CloveError::Io {
+                path: path(),
+                source: std::io::Error::other("e"),
+            },
+            CloveError::NotYetImplemented {
+                feature: "f".into(),
+            },
+            CloveError::Remote {
+                code: "IO_ERROR".into(),
+                exit: 5,
+                message: "m".into(),
+            },
+            CloveError::UnsupportedCapability {
+                plugin: "p".into(),
+                capability: "c".into(),
+            },
+        ]
+    }
+
+    /// Adding a `CloveError` variant must fail to compile here until it is added
+    /// to `one_of_each`, so the coverage of the tests below cannot silently rot.
+    #[allow(dead_code)]
+    fn exhaustive_variant_check(e: &CloveError) {
+        match e {
+            CloveError::InvalidId { .. }
+            | CloveError::PathTraversal { .. }
+            | CloveError::IdConflict { .. }
+            | CloveError::CommentConflict { .. }
+            | CloveError::InvalidField { .. }
+            | CloveError::EmptyLabel { .. }
+            | CloveError::Config { .. }
+            | CloveError::FrontmatterTooLarge { .. }
+            | CloveError::BodyTooLarge { .. }
+            | CloveError::AliasNotAllowed { .. }
+            | CloveError::MissingFrontmatter { .. }
+            | CloveError::UnterminatedFrontmatter { .. }
+            | CloveError::IdMismatch { .. }
+            | CloveError::InvalidYaml { .. }
+            | CloveError::Invalid { .. }
+            | CloveError::NoRepo { .. }
+            | CloveError::NotFound { .. }
+            | CloveError::HasDependents { .. }
+            | CloveError::SelfDependency { .. }
+            | CloveError::DependencyCycle { .. }
+            | CloveError::DependencyExists { .. }
+            | CloveError::ScanFailed { .. }
+            | CloveError::Io { .. }
+            | CloveError::NotYetImplemented { .. }
+            | CloveError::Remote { .. }
+            | CloveError::UnsupportedCapability { .. } => {}
+        }
+    }
+
+    /// Every code `error_code` can emit must resolve through `CODES`, or a
+    /// failure reported by a same-build daemon would silently degrade to
+    /// `DAEMON_ERROR`.
+    #[test]
+    fn every_error_code_is_canonical() {
+        for error in one_of_each() {
+            let (code, exit) = error_code(&error);
+            assert_eq!(
+                canonical_code(code),
+                Some((code, exit)),
+                "`{code}` is missing from CODES, or its exit disagrees with the match arm"
+            );
+        }
+    }
+
+    /// A code that survives the wire classifies exactly as the local error does.
+    /// This is the property the daemon seam exists for: a rejected write must
+    /// exit the same whether the daemon or the local store refused it.
+    #[test]
+    fn remote_round_trips_every_code_to_the_local_classification() {
+        for local in one_of_each() {
+            let (code, exit) = error_code(&local);
+            let remote = CloveError::Remote {
+                code: code.to_owned(),
+                exit,
+                message: "over the wire".to_owned(),
+            };
+            assert_eq!(
+                error_code(&remote),
+                (code, exit),
+                "`{code}` must round-trip"
+            );
+        }
+    }
+
+    /// The numeric `exit` on the wire is informational: classification resolves
+    /// the *code* against the local table, so a daemon cannot push a caller to an
+    /// arbitrary exit status (`error.json` caps `exit` at 7).
+    #[test]
+    fn a_bogus_remote_exit_is_ignored() {
+        let hostile = CloveError::Remote {
+            code: "ITEM_NOT_FOUND".to_owned(),
+            exit: 200,
+            message: "boom".to_owned(),
+        };
+        assert_eq!(error_code(&hostile), ("ITEM_NOT_FOUND", 2));
+    }
+
+    /// An unrecognized code (an older or newer daemon) degrades to the generic
+    /// daemon error rather than being trusted.
+    #[test]
+    fn an_unknown_remote_code_degrades_to_daemon_error() {
+        let future = CloveError::Remote {
+            code: "SOME_FUTURE_CODE".to_owned(),
+            exit: 3,
+            message: "boom".to_owned(),
+        };
+        assert_eq!(error_code(&future), ("DAEMON_ERROR", 7));
+    }
 }
