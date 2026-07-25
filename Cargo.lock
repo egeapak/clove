@@ -591,7 +591,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
- "toml",
  "ureq",
  "windows-sys 0.59.0",
 ]
