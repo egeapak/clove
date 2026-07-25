@@ -8,7 +8,14 @@ use std::time::Duration;
 use super::{Fetch, FetchError};
 
 /// How long a single request may take before it is abandoned.
-const TIMEOUT: Duration = Duration::from_secs(20);
+///
+/// Kept short deliberately. Discovery is never on a critical path — every caller
+/// degrades to a warning — but the *name probe* fires up to four requests in
+/// sequence, after pagination. Against a black-holing firewall (packets dropped,
+/// no RST) a generous per-request timeout multiplies into a minute-plus of an
+/// apparently hung command for what is an optional lookup. A connection that has
+/// not answered in this long is not going to.
+const TIMEOUT: Duration = Duration::from_secs(8);
 
 /// A cap on the response body clove will read. `reverse_dependencies` pages are
 /// a few tens of KB; this only stops a hostile or misconfigured endpoint from
@@ -52,8 +59,46 @@ impl UreqFetch {
     }
 }
 
+/// How many times a retryable failure is re-attempted before giving up.
+const MAX_RETRIES: u32 = 2;
+
+/// Ceiling on an honored `Retry-After`. crates.io can ask for a long wait; a CLI
+/// must not silently block for it, so a longer request is treated as "come back
+/// later" and reported rather than slept through.
+const MAX_BACKOFF: Duration = Duration::from_secs(5);
+
 impl Fetch for UreqFetch {
+    /// Issue the request, retrying a *transient* failure with the server's own
+    /// backoff where it supplied one.
+    ///
+    /// crates.io rate-limits with `429` + `Retry-After`, and the name probe issues
+    /// several sequential requests, so a single 429 would otherwise turn a working
+    /// lookup into "the registry is unavailable". A 403 (the missing-User-Agent
+    /// case) and a decode failure are *not* retryable — repeating them just wastes
+    /// the user's time.
     fn get(&self, url: &str) -> Result<Option<String>, FetchError> {
+        let mut attempt = 0;
+        loop {
+            match self.get_once(url) {
+                Err(error) if error.is_retryable() && attempt < MAX_RETRIES => {
+                    let backoff = error
+                        .retry_after()
+                        .unwrap_or_else(|| Duration::from_millis(250 * (1 << attempt)));
+                    if backoff > MAX_BACKOFF {
+                        return Err(error);
+                    }
+                    std::thread::sleep(backoff);
+                    attempt += 1;
+                }
+                other => return other,
+            }
+        }
+    }
+}
+
+impl UreqFetch {
+    /// A single attempt, with no retry.
+    fn get_once(&self, url: &str) -> Result<Option<String>, FetchError> {
         let response = self
             .agent
             .get(url)

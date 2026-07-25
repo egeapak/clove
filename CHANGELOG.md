@@ -26,12 +26,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `<clove-home>/bin` joins the plugin search path (between `$CLOVE_PLUGIN_PATH`
   and `$PATH`), resolved from `$CLOVE_HOME`, else `$XDG_DATA_HOME/clove`, else
   `~/.local/share/clove` (`%APPDATA%\clove` on Windows).
-- New `REGISTRY_ERROR` error code (exit 5) for an unreachable registry.
+- New `REGISTRY_ERROR` error classification (exit 5) for registry failures.
+  No shipped command returns it: discovery degrades to a warning at exit 0
+  by design. It is the classification for callers where a registry failure
+  is fatal, which today means none of them.
 
 ### Changed
 
-- `clove plugin list` gained `--all`/`--refresh` flags; its default output is
-  unchanged.
+- `clove plugin list` gained `--all` and `--refresh` (`--refresh` implies
+  `--all`). Its human and JSONL output are unchanged; the JSON `_meta` gains
+  `installed_count`/`available_count` alongside the existing `count`.
 
 ## [0.1.0] - 2026-07-20
 

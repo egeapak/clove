@@ -279,7 +279,22 @@ let cli = Cli::try_parse() … // unchanged for every other argv
 the next run with nothing to invalidate. A per-probe timeout bounds a broken
 plugin.
 
-## 7. Search path & install root
+## 7. Search path & install root — SUPERSEDED (shipped, but not as written here)
+
+> The **normative** description is [`PLUGIN_SYSTEM.md`](PLUGIN_SYSTEM.md) §5.
+> This section shipped with two corrections, both of which invert what the
+> original text below says:
+>
+> - **The root is not `~/.clove`.** It is `$CLOVE_HOME`, else
+>   `$XDG_DATA_HOME/clove`, else `~/.local/share/clove` (`%APPDATA%\clove` on
+>   Windows). `~/.clove` would be picked up by repository discovery as a repo
+>   root — see the banner at the top of this document.
+> - **It sits *after* `$CLOVE_PLUGIN_PATH`, not before.** That variable is the
+>   user's explicit opt-in directory, so a binary clove fetched from the internet
+>   must not outrank a deliberate local override. Shipped order:
+>   current-exe dir → `$CLOVE_PLUGIN_PATH` → `<clove-home>/bin` → `$PATH`.
+>
+> `$CLOVE_PLUGIN_HOME`, named below, does not exist in the codebase.
 
 `plugin::search_dirs()` gains `$CLOVE_HOME/bin` (default `~/.clove/bin`,
 overridable via `$CLOVE_HOME`/`$CLOVE_PLUGIN_HOME`), inserted **after** the

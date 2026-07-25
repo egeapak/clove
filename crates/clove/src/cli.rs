@@ -166,7 +166,7 @@ pub struct PluginArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum PluginAction {
-    /// List resolvable `clove-*` plugin binaries with their paths.
+    /// List installed plugins; with `--all`, also those published to crates.io.
     List(PluginListArgs),
 
     /// Search published plugins by name or description.

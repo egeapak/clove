@@ -94,11 +94,18 @@ pub fn run_search(format: OutputFormat, args: &PluginSearchArgs) -> Result<(), C
         .cloned()
         .collect();
 
-    // With no usable registry there is nothing to filter, but the query can
-    // still be answered: the naming convention is total, so the candidate crate
-    // names are *constructible*. Probe them directly.
+    // Nothing matched the discovered set, but the query can still be answered
+    // directly: the naming convention is total, so the candidate crate names are
+    // *constructible*.
+    //
+    // Probe whenever the filter found nothing — *not* only when discovery failed.
+    // Gating on the warning would mean a stale-but-valid cache (up to 24h old)
+    // silently answers "no published plugins matched" for a plugin published an
+    // hour ago, with no indication the answer came from a snapshot. Perversely,
+    // the same query would work if the network were down. The probe is exact-name
+    // and cheap (at most four requests), so it costs little to always try.
     let mut warning = discovery.warning();
-    if matches.is_empty() && warning.is_some() {
+    if matches.is_empty() {
         match probe_by_name(&args.query) {
             // The probe answered the question, so the registry's absence is no
             // longer something the user needs to act on.
@@ -108,9 +115,11 @@ pub fn run_search(format: OutputFormat, args: &PluginSearchArgs) -> Result<(), C
             }
             // Probed, nothing published under any candidate name.
             Ok(_) => {}
-            // A transport failure here does not replace the registry warning
-            // that is already being reported — one cause is enough.
-            Err(_) => {}
+            // Report the probe's own failure when nothing else is being reported.
+            // Swallowing it would print a bare "no published plugins matched" for
+            // what is actually "we could not ask" — the exact conflation the
+            // `Fetch` return type exists to prevent.
+            Err(error) => warning = warning.or(Some(error.to_string())),
         }
     }
 
@@ -224,15 +233,48 @@ fn not_installed(
 ) -> Vec<RegistryPlugin> {
     discovered
         .iter()
-        .filter(|candidate| !is_installed(candidate, installed))
+        .filter(|candidate| is_dispatchable(candidate) && !is_installed(candidate, installed))
         .cloned()
         .collect()
 }
 
-fn is_installed(candidate: &RegistryPlugin, installed: &[EnrichedPlugin]) -> bool {
+/// Does this crate build a binary clove could actually dispatch to?
+///
+/// The registry client already drops dependents that build no binary at all; this
+/// is the clove-specific half — only a `clove-`-prefixed binary is resolvable
+/// (`PLUGIN_SYSTEM.md` §5), so a crate that depends on `clove-plugin` but ships a
+/// differently-named binary could never be run as `clove <something>`. Offering
+/// it under "Available" would promise a command that cannot exist.
+///
+/// The naming convention lives here rather than in the crates.io client so that
+/// client stays a general-purpose registry reader.
+fn is_dispatchable(candidate: &RegistryPlugin) -> bool {
     candidate.bin_names.iter().any(|bin| {
-        let bare = bin.strip_prefix("clove-").unwrap_or(bin);
-        installed.iter().any(|p| p.info.name == bare)
+        bin.strip_prefix("clove-")
+            .is_some_and(|rest| !rest.is_empty())
+    })
+}
+
+fn is_installed(candidate: &RegistryPlugin, installed: &[EnrichedPlugin]) -> bool {
+    installed_match(candidate, installed).is_some()
+}
+
+/// The installed plugin corresponding to `candidate`, if any.
+///
+/// Only a `clove-`-prefixed binary can match. Falling back to the raw name would
+/// compare a bin literally named `gitlab` against the installed set's *stripped*
+/// names and match an unrelated `clove-gitlab` — filtering a genuinely available
+/// plugin out of `list --all`. A false positive hides a plugin from the user,
+/// while a false negative merely shows a duplicate row, so this errs toward
+/// showing. A binary without the prefix is not dispatch-resolvable anyway, so it
+/// can never legitimately mean "installed".
+fn installed_match<'a>(
+    candidate: &RegistryPlugin,
+    installed: &'a [EnrichedPlugin],
+) -> Option<&'a EnrichedPlugin> {
+    candidate.bin_names.iter().find_map(|bin| {
+        let bare = bin.strip_prefix("clove-")?;
+        installed.iter().find(|p| p.info.name == bare)
     })
 }
 
@@ -266,13 +308,21 @@ fn render_search(
     installed: &[EnrichedPlugin],
     warning: Option<String>,
 ) -> Result<(), CloveError> {
+    let mut installed_matches = 0usize;
     let items: Vec<Value> = matches
         .iter()
         .map(|p| {
             let mut value = available_json(p);
-            if is_installed(p, installed) {
+            // Carry the *real* compat verdict, path and probed version from the
+            // installed plugin. Synthesizing `status: "ok"` here would contradict
+            // the field's documented meaning and could report a plugin that
+            // dispatch actively refuses to run (`needs_newer_clove`) as healthy.
+            if let Some(local) = installed_match(p, installed) {
+                installed_matches += 1;
                 value["installed"] = json!(true);
-                value["status"] = json!("ok");
+                value["status"] = json!(local.status.as_str());
+                value["path"] = json!(local.info.path.as_str());
+                value["version"] = json!(local.probed.as_ref().map(|probe| probe.version.as_str()));
             }
             value
         })
@@ -289,7 +339,17 @@ fn render_search(
                 render_available_table(matches, installed);
             }
         }
-        OutputFormat::Json => print_json_list(items, meta(0, matches.len(), warning)),
+        // A search's matches are counted by whether each row is already installed,
+        // so the envelope's counts agree with the rows' own `installed` flags
+        // instead of reporting `installed_count: 0` next to `"installed": true`.
+        OutputFormat::Json => print_json_list(
+            items,
+            meta(
+                installed_matches,
+                matches.len() - installed_matches,
+                warning,
+            ),
+        ),
         OutputFormat::Jsonl => print_jsonl_items_with_meta(
             &items,
             warning.map_or(Value::Null, |w| json!({ "registry_error": w })),
@@ -554,6 +614,53 @@ mod tests {
         let candidate = discovered("clove-sync-github", &["clove-sync-github"]);
         let installed = vec![installed_plugin("sync-github")];
         assert!(is_installed(&candidate, &installed));
+    }
+
+    #[test]
+    fn a_crate_with_no_dispatchable_binary_is_not_offered() {
+        // Depending on `clove-plugin` is necessary but not sufficient: only a
+        // `clove-`-prefixed binary is resolvable, so a crate shipping `helper`
+        // could never be run as a clove subcommand.
+        let lib_only = discovered("clove-plugin-utils", &[]);
+        let wrong_name = discovered("clove-sync-odd", &["helper"]);
+        let good = discovered("clove-sync-gitlab", &["clove-sync-gitlab"]);
+
+        assert!(!is_dispatchable(&lib_only));
+        assert!(!is_dispatchable(&wrong_name));
+        assert!(is_dispatchable(&good));
+
+        let available = not_installed(&[lib_only, wrong_name, good], &[]);
+        assert_eq!(available.len(), 1);
+        assert_eq!(available[0].crate_name, "clove-sync-gitlab");
+    }
+
+    #[test]
+    fn a_bin_without_the_clove_prefix_never_counts_as_installed() {
+        // `strip_prefix(..).unwrap_or(bin)` would compare a bin literally named
+        // `gitlab` against the installed set's *stripped* names and match an
+        // unrelated `clove-gitlab`, filtering a genuinely available plugin out of
+        // `list --all`. A false positive hides a plugin; a false negative only
+        // shows a duplicate row.
+        let candidate = discovered("clove-sync-gitlab", &["gitlab"]);
+        let installed = vec![installed_plugin("gitlab")];
+        assert!(
+            !is_installed(&candidate, &installed),
+            "an unprefixed bin must not match an installed plugin"
+        );
+    }
+
+    #[test]
+    fn search_rows_carry_the_real_compat_verdict_not_a_synthesized_ok() {
+        // `status` is the host<->plugin compat verdict. Hardcoding "ok" for an
+        // installed match would report a plugin dispatch actively refuses to run
+        // (`needs_newer_clove`) as healthy.
+        let mut local = installed_plugin("sync-github");
+        local.status = PluginStatus::NeedsNewerClove;
+        let installed = vec![local];
+        let candidate = discovered("clove-sync-github", &["clove-sync-github"]);
+
+        let matched = installed_match(&candidate, &installed).expect("matches");
+        assert_eq!(matched.status.as_str(), "needs_newer_clove");
     }
 
     #[test]

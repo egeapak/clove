@@ -301,6 +301,24 @@ whose value is logically absent (e.g. `CLOVE_PROVIDER` for a generic plugin) is
 **omitted**, never set to empty. New context is added by *appending* vars, never
 repurposing one — plugins must ignore unknown `CLOVE_*` vars.
 
+**Host-only `CLOVE_*` vars (read by clove, _not_ exported to plugins)**
+
+These configure the host itself and are deliberately absent from the table
+above. They are listed here so the `CLOVE_*` namespace stays documented in one
+place and so nobody mistakes their absence for an oversight:
+
+| Var | Read by | Meaning |
+|-----|---------|---------|
+| `CLOVE_HOME` | `clove_home.rs` | The clove-managed root (§5): `bin/` for installed plugins, plus the registry cache. Falls back to `$XDG_DATA_HOME/clove`, then `~/.local/share/clove` (`%APPDATA%\clove` on Windows). |
+| `CLOVE_PLUGIN_PATH` | `plugin.rs` | Extra plugin search directories (§5). |
+| `CLOVE_REGISTRY_URL` | `registry/crates_io.rs` | Overrides the crates.io API root, for a mirror or for tests. The counterpart of `CLOVE_GITHUB_API_URL` in the sync tests. |
+
+`CLOVE_HOME` is **not** exported to plugins today: no plugin needs the install
+root, and the §6.2 contract is deliberately minimal — every exported var is one
+the host has to keep compatible forever. If a plugin ever needs it, export it as
+a resolved value rather than letting the plugin re-derive the fallback ladder,
+which is exactly the disagreement this section exists to prevent.
+
 ### 6.3 Output & exit codes — plugins are first-class clove citizens
 
 A plugin **must** obey the same contracts as a built-in so scripts and agents

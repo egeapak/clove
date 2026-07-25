@@ -410,3 +410,109 @@ fn the_registry_cache_lands_in_clove_home_not_a_dot_clove_dir() {
         "the clove home must not contain a `.clove/` directory"
     );
 }
+
+#[test]
+fn a_plugin_in_the_clove_home_bin_is_resolvable_and_pinnable() {
+    // Two things at once:
+    //
+    //   1. `<clove-home>/bin` really is on the search path — a plugin installed
+    //      there resolves with no `$CLOVE_PLUGIN_PATH` and no `$PATH` edit, which
+    //      is the whole point of the clove-managed install root;
+    //   2. `CLOVE_HOME` really does pin it. Every plugin test relies on that: the
+    //      root falls back to `~/.local/share/clove/bin`, and `assert_cmd`
+    //      inherits `$HOME`, so an unpinned test would resolve a developer's real
+    //      installed plugins and silently break "no plugin installed" assertions.
+    let home = tempfile::tempdir().unwrap();
+    let bin = home.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+
+    let built = escargot::CargoBuild::new()
+        .package("clove-plugin-echo")
+        .bin("clove-echo")
+        .run()
+        .expect("build clove-echo fixture");
+    let dest = bin.join(format!("clove-homed{}", std::env::consts::EXE_SUFFIX));
+    std::fs::copy(built.path(), &dest).unwrap();
+
+    let workdir = tempfile::tempdir().unwrap();
+
+    // Pinned at the home that holds it → resolvable.
+    let assert = clove(workdir.path())
+        .env("CLOVE_HOME", home.path())
+        .env("CLOVE_PLUGIN_PATH", workdir.path())
+        .args(["--format", "json", "plugin", "list"])
+        .assert()
+        .success();
+    let v: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert!(
+        v["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["name"] == "homed"),
+        "a plugin in <clove-home>/bin must resolve: {v}"
+    );
+
+    // Pinned elsewhere → invisible. This is the assertion that fails if the
+    // pinning ever regresses to reading the real home.
+    let other = tempfile::tempdir().unwrap();
+    let assert = clove(workdir.path())
+        .env("CLOVE_HOME", other.path())
+        .env("CLOVE_PLUGIN_PATH", workdir.path())
+        .args(["--format", "json", "plugin", "list"])
+        .assert()
+        .success();
+    let v: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert!(
+        !v["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["name"] == "homed"),
+        "CLOVE_HOME must pin the search path: {v}"
+    );
+}
+
+#[test]
+fn clove_plugin_path_outranks_the_clove_home_install_root() {
+    // Precedence is security-relevant: `$CLOVE_PLUGIN_PATH` is the user's explicit
+    // opt-in directory, so a binary clove fetched from the internet and installed
+    // into `<clove-home>/bin` must never shadow it.
+    let home = tempfile::tempdir().unwrap();
+    let home_bin = home.path().join("bin");
+    std::fs::create_dir_all(&home_bin).unwrap();
+    let explicit = tempfile::tempdir().unwrap();
+
+    let built = escargot::CargoBuild::new()
+        .package("clove-plugin-echo")
+        .bin("clove-echo")
+        .run()
+        .expect("build clove-echo fixture");
+    let name = format!("clove-contended{}", std::env::consts::EXE_SUFFIX);
+    std::fs::copy(built.path(), home_bin.join(&name)).unwrap();
+    std::fs::copy(built.path(), explicit.path().join(&name)).unwrap();
+
+    let workdir = tempfile::tempdir().unwrap();
+    let assert = clove(workdir.path())
+        .env("CLOVE_HOME", home.path())
+        .env("CLOVE_PLUGIN_PATH", explicit.path())
+        .args(["--format", "json", "plugin", "list"])
+        .assert()
+        .success();
+    let v: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+
+    let resolved = v["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "contended")
+        .expect("the contended plugin is listed")["path"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    assert!(
+        resolved.starts_with(explicit.path().to_str().unwrap()),
+        "$CLOVE_PLUGIN_PATH must win over <clove-home>/bin, resolved to {resolved}"
+    );
+}

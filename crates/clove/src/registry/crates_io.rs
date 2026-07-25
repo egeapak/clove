@@ -21,8 +21,8 @@ pub const API_ROOT_ENV: &str = "CLOVE_REGISTRY_URL";
 /// silent clamp.
 const PER_PAGE: usize = 100;
 
-/// A hard bound on pagination, so a malformed or hostile `meta.total` cannot
-/// spin the client forever.
+/// A hard bound on pagination, so a server that keeps returning full pages
+/// cannot spin the client forever.
 const MAX_PAGES: usize = 50;
 
 /// The subset of `GET /crates/{name}` this client reads.
@@ -69,8 +69,6 @@ struct VersionObject {
     published_by: Option<PublishedBy>,
     #[serde(default)]
     yanked: bool,
-    #[serde(default)]
-    downloads: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -79,20 +77,16 @@ struct PublishedBy {
     login: Option<String>,
 }
 
+/// Note there is deliberately no `meta` field: `meta.total` is *not* used to
+/// bound pagination. It is optional in practice (a mirror may omit or approximate
+/// it), and a missing value deserializes to `0`, which would end the walk on the
+/// first page with a silently truncated list. A short page is the reliable signal.
 #[derive(Debug, Deserialize)]
 struct ReverseDepsResponse {
     #[serde(default)]
     dependencies: Vec<DependencyObject>,
     #[serde(default)]
     versions: Vec<VersionObject>,
-    #[serde(default)]
-    meta: Meta,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct Meta {
-    #[serde(default)]
-    total: u64,
 }
 
 /// One dependency edge.
@@ -108,6 +102,14 @@ struct DependencyObject {
     version_id: u64,
     #[serde(default)]
     kind: String,
+    /// The **dependent crate's** total downloads. Note the version objects in the
+    /// same response carry their own per-*version* `downloads`, which is a much
+    /// smaller number; the crate total is the popularity signal, and it is what
+    /// [`plugin_from_crate`] reports on the name-probe path — so both paths must
+    /// read the crate-level figure or the same plugin shows two different counts
+    /// depending on how it was found.
+    #[serde(default)]
+    downloads: u64,
 }
 
 /// A crates.io client bound to an API root and a transport.
@@ -169,7 +171,6 @@ impl<'a> CratesIo<'a> {
     pub fn reverse_dependents(&self, of: &str) -> Result<Option<Vec<RegistryPlugin>>, FetchError> {
         let mut by_crate: HashMap<String, RegistryPlugin> = HashMap::new();
         let mut page = 1usize;
-        let mut seen_rows = 0usize;
 
         loop {
             let url = format!(
@@ -177,31 +178,52 @@ impl<'a> CratesIo<'a> {
                 self.api_root
             );
             let Some(body) = self.fetch.get(&url)? else {
-                // The registry crate itself does not exist.
-                return Ok(None);
+                if page == 1 {
+                    // The registry crate itself does not exist.
+                    return Ok(None);
+                }
+                // A 404 on a *later* page means we walked past the end (or hit a
+                // mirror that 404s beyond its last page) — not that `of` is
+                // unpublished. Returning `None` here would discard everything
+                // already collected and report "the registry is not available",
+                // which would then be cached for a day.
+                break;
             };
             let parsed: ReverseDepsResponse =
                 serde_json::from_str(&body).map_err(|e| FetchError::Decode(e.to_string()))?;
 
             let page_rows = parsed.dependencies.len();
-            let total = parsed.meta.total;
-            seen_rows += page_rows;
             merge_page(&mut by_crate, parsed);
 
-            // Stop on a short page (the usual end), once `meta.total` rows have
-            // been seen, on an empty page (so a server that always returns rows
-            // cannot loop), or at the hard page cap.
-            if page_rows < PER_PAGE
-                || page_rows == 0
-                || seen_rows as u64 >= total
-                || page >= MAX_PAGES
-            {
+            // Stop on a short or empty page (the usual end, and a server that
+            // always returns rows cannot loop), or at the hard page cap.
+            //
+            // Deliberately *not* keyed on `meta.total`: it is `#[serde(default)]`,
+            // so a response without a `meta` key yields `0` and `seen >= 0` would
+            // break on page 1 with a silently truncated list. `$CLOVE_REGISTRY_URL`
+            // is a supported mirror seam, and a mirror is exactly what omits or
+            // approximates `total`. A short page is the reliable signal; the cost
+            // of ignoring `total` is at most one extra request.
+            if page_rows < PER_PAGE || page >= MAX_PAGES {
                 break;
             }
             page += 1;
         }
 
-        let mut plugins: Vec<RegistryPlugin> = by_crate.into_values().collect();
+        let mut plugins: Vec<RegistryPlugin> = by_crate
+            .into_values()
+            // A reverse dependent that builds no binary at all is a *library* that
+            // happens to depend on the registry root (a shared helper, a plugin's
+            // own lib half, a test harness). It can never be installed as a
+            // command — `cargo install` would fail with "no binaries", after a
+            // full download and build.
+            //
+            // Only the "builds something" rule lives here; whether a binary is
+            // *dispatch-resolvable* is the `clove-<mux>-<provider>` naming
+            // convention, which belongs to the command layer, not to a generic
+            // crates.io client.
+            .filter(|plugin| !plugin.bin_names.is_empty())
+            .collect();
         plugins.sort_by(|a, b| a.crate_name.cmp(&b.crate_name));
         Ok(Some(plugins))
     }
@@ -247,7 +269,9 @@ fn merge_page(by_crate: &mut HashMap<String, RegistryPlugin>, page: ReverseDepsR
                 downloads: 0,
             });
 
-        entry.downloads = entry.downloads.max(version.downloads);
+        // The crate-level total from the dependency row, not `version.downloads`
+        // (which is this single version's count) — see `DependencyObject`.
+        entry.downloads = entry.downloads.max(dep.downloads);
 
         // Metadata is taken from whichever version is currently the best
         // candidate, so the displayed description/bins match the version a user
@@ -284,6 +308,7 @@ fn plugin_from_crate(response: CrateResponse) -> RegistryPlugin {
     let mut latest: Option<semver::Version> = None;
     let mut latest_yanked: Option<semver::Version> = None;
     let mut best: Option<&VersionObject> = None;
+    let mut best_yanked: Option<&VersionObject> = None;
 
     for version in &response.versions {
         let Ok(parsed) = semver::Version::parse(&version.num) else {
@@ -292,6 +317,7 @@ fn plugin_from_crate(response: CrateResponse) -> RegistryPlugin {
         if version.yanked {
             if latest_yanked.as_ref().is_none_or(|cur| &parsed > cur) {
                 latest_yanked = Some(parsed);
+                best_yanked = Some(version);
             }
         } else {
             let better = latest.as_ref().is_none_or(|cur| &parsed > cur);
@@ -301,9 +327,12 @@ fn plugin_from_crate(response: CrateResponse) -> RegistryPlugin {
             }
         }
     }
-    // With no non-yanked release, describe the crate from its newest version so
-    // `bin_names` is still populated.
-    let best = best.or_else(|| response.versions.first());
+    // With no non-yanked release, describe the crate from its highest-semver
+    // yanked version so `bin_names` is still populated — tracked alongside
+    // `latest_yanked` rather than taken from `versions.first()`, which is
+    // *publication* order. A crate that shipped 0.9.0 and then backported 0.8.1
+    // (both yanked) would otherwise report version 0.9.0 with 0.8.1's metadata.
+    let best = best.or(best_yanked).or_else(|| response.versions.first());
 
     RegistryPlugin {
         crate_name: response.krate.name,
@@ -516,6 +545,110 @@ mod tests {
             "an 11-row page is short of per_page=100, so one request suffices"
         );
         assert!(fetch.seen.borrow()[0].contains("per_page=100"));
+    }
+
+    #[test]
+    fn library_only_dependents_are_not_listed_as_plugins() {
+        // A crate can depend on `clove-plugin` as a *library* (a shared helper, a
+        // plugin's own lib half) without building any dispatchable binary. The
+        // recorded fixture contains exactly that shape.
+        let fetch = FakeFetch::ok(&fixture("reverse_deps.json"));
+        let client = CratesIo::with_root(&fetch, "https://example.invalid/api/v1");
+        let plugins = client
+            .reverse_dependents("cargo-subcommand")
+            .unwrap()
+            .unwrap();
+
+        assert!(
+            plugins.iter().all(|p| !p.bin_names.is_empty()),
+            "every listed dependent must build a binary, got {:?}",
+            plugins
+                .iter()
+                .map(|p| (&p.crate_name, &p.bin_names))
+                .collect::<Vec<_>>()
+        );
+        // `simics-package` is in the fixture as a lib-only dependent.
+        assert!(!plugins.iter().any(|p| p.crate_name == "simics-package"));
+    }
+
+    #[test]
+    fn downloads_come_from_the_crate_total_not_the_version_count() {
+        // The response carries BOTH: `versions[].downloads` is that single
+        // version's count, `dependencies[].downloads` is the crate total. The
+        // crate total is the popularity signal and is what the name-probe path
+        // reports, so the two paths must not disagree.
+        let body = r#"{
+          "dependencies":[{"version_id":1,"crate_id":"clove-plugin","kind":"normal","downloads":199183}],
+          "versions":[{"id":1,"crate":"clove-sync-x","num":"1.0.0","yanked":false,
+                       "bin_names":["clove-sync-x"],"downloads":16039}],
+          "meta":{"total":1}
+        }"#;
+        let fetch = FakeFetch::ok(body);
+        let client = CratesIo::with_root(&fetch, "https://example.invalid/api/v1");
+        let plugins = client.reverse_dependents("clove-plugin").unwrap().unwrap();
+        assert_eq!(plugins[0].downloads, 199_183, "expected the crate total");
+    }
+
+    #[test]
+    fn a_404_on_a_later_page_keeps_what_was_collected() {
+        // Only page 1 answering 404 means "the registry crate does not exist".
+        // Later pages 404 when we walk past the end, or on a mirror; treating that
+        // as an absent registry would discard a full page of real results and
+        // report "not published" — and cache that for a day.
+        let mut page1 = String::from(r#"{"dependencies":["#);
+        let mut versions = String::from(r#"],"versions":["#);
+        for i in 0..100 {
+            if i > 0 {
+                page1.push(',');
+                versions.push(',');
+            }
+            page1.push_str(&format!(
+                r#"{{"version_id":{i},"crate_id":"clove-plugin","kind":"normal","downloads":1}}"#
+            ));
+            versions.push_str(&format!(
+                r#"{{"id":{i},"crate":"clove-sync-p{i}","num":"1.0.0","yanked":false,"bin_names":["clove-sync-p{i}"]}}"#
+            ));
+        }
+        let page1 = format!("{page1}{versions}]}}");
+
+        let fetch = FakeFetch::sequence(vec![Ok(Some(page1)), Ok(None)]);
+        let client = CratesIo::with_root(&fetch, "https://example.invalid/api/v1");
+        let plugins = client
+            .reverse_dependents("clove-plugin")
+            .unwrap()
+            .expect("a later-page 404 must not read as an absent registry");
+        assert_eq!(plugins.len(), 100, "the first full page must be kept");
+    }
+
+    #[test]
+    fn pagination_does_not_truncate_when_meta_total_is_missing() {
+        // `meta` is optional; a missing one used to deserialize to total = 0 and
+        // end the walk after page 1 with a silently partial list.
+        let mut deps = String::new();
+        let mut versions = String::new();
+        for i in 0..100 {
+            if i > 0 {
+                deps.push(',');
+                versions.push(',');
+            }
+            deps.push_str(&format!(
+                r#"{{"version_id":{i},"crate_id":"clove-plugin","kind":"normal","downloads":1}}"#
+            ));
+            versions.push_str(&format!(
+                r#"{{"id":{i},"crate":"clove-sync-q{i}","num":"1.0.0","yanked":false,"bin_names":["clove-sync-q{i}"]}}"#
+            ));
+        }
+        // No `meta` key at all on either page.
+        let full = format!(r#"{{"dependencies":[{deps}],"versions":[{versions}]}}"#);
+        let tail = r#"{"dependencies":[{"version_id":900,"crate_id":"clove-plugin","kind":"normal","downloads":1}],
+                       "versions":[{"id":900,"crate":"clove-sync-tail","num":"1.0.0","yanked":false,"bin_names":["clove-sync-tail"]}]}"#;
+
+        let fetch = FakeFetch::sequence(vec![Ok(Some(full)), Ok(Some(tail.to_owned()))]);
+        let client = CratesIo::with_root(&fetch, "https://example.invalid/api/v1");
+        let plugins = client.reverse_dependents("clove-plugin").unwrap().unwrap();
+
+        assert_eq!(plugins.len(), 101, "page 2 must still be fetched");
+        assert!(plugins.iter().any(|p| p.crate_name == "clove-sync-tail"));
     }
 
     #[test]
