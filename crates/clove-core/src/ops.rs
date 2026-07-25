@@ -260,9 +260,120 @@ pub fn set_parent(
     Ok(Value::Object(item_object(&saved)))
 }
 
+/// How many items a single item's hard-dependency closure may reach before
+/// [`local_graph_terms`] gives up and the caller falls back to a whole-store
+/// graph build. Bounds the pathological case (one long chain) while covering
+/// every realistic dependency neighbourhood.
+const LOCAL_CLOSURE_BUDGET: usize = 512;
+
+/// The closure of `id` was too large to walk item-by-item; use the whole-store
+/// graph instead.
+struct BudgetExceeded;
+
+/// `ready` / `blocked_by` for **one** item, without scanning the whole store.
+///
+/// Every term in those two answers is a query rooted at the item, not a global
+/// one (see `GraphStore::{ready_items, blocked_items}`):
+///
+/// - unclosed and dangling hard deps — the item's own `deps`, one level;
+/// - a malformed parent — a walk up the parent chain, which is functional (one
+///   parent each), so an SCC through the item is exactly a cycle back to it;
+/// - a hard-dependency cycle — whether the item is reachable from itself, i.e.
+///   a DFS over its forward `deps` closure.
+///
+/// An item with no `deps` and no `parent` — the common case — needs no extra
+/// reads at all. Returns `Err(BudgetExceeded)` rather than an approximation when
+/// the closure is too large, so the result is always exactly what `GraphStore`
+/// would have said.
+fn local_graph_terms(
+    store: &ItemStore,
+    fm: &ItemFrontmatter,
+) -> Result<(bool, Vec<String>), BudgetExceeded> {
+    let read = |id: &CloveId| -> Option<ItemFrontmatter> {
+        crate::parse_frontmatter_file(&store.path_for(id)).ok()
+    };
+
+    // Direct hard deps, split into dangling (no such item) and unclosed. Order
+    // matches `GraphStore`: `blocking_deps` sorted, then `dangling_deps` in the
+    // file's own `deps` order.
+    let mut dangling: Vec<CloveId> = Vec::new();
+    let mut open: Vec<CloveId> = Vec::new();
+    for dep in &fm.deps {
+        match read(dep) {
+            None => dangling.push(dep.clone()),
+            Some(target) if target.status != ItemStatus::Closed => open.push(dep.clone()),
+            Some(_) => {}
+        }
+    }
+    open.sort();
+    open.dedup();
+
+    // Malformed parent: self-parent, or a parent chain that cycles back to us.
+    // `visited` bounds a pre-existing cycle that does *not* contain this item.
+    let mut malformed_parent = false;
+    if let Some(parent) = &fm.parent {
+        if parent == &fm.id {
+            malformed_parent = true;
+        } else {
+            let mut visited: std::collections::HashSet<CloveId> =
+                std::collections::HashSet::from([fm.id.clone()]);
+            let mut cursor = Some(parent.clone());
+            while let Some(node) = cursor {
+                if node == fm.id {
+                    malformed_parent = true;
+                    break;
+                }
+                if !visited.insert(node.clone()) {
+                    break;
+                }
+                if visited.len() > LOCAL_CLOSURE_BUDGET {
+                    return Err(BudgetExceeded);
+                }
+                cursor = read(&node).and_then(|p| p.parent);
+            }
+        }
+    }
+
+    // Hard-dependency cycle: is this item reachable from itself? An item with no
+    // deps has no outgoing edges and so cannot be, which skips the walk for the
+    // overwhelmingly common case.
+    let mut in_cycle = false;
+    if !fm.deps.is_empty() {
+        let mut seen: std::collections::HashSet<CloveId> = std::collections::HashSet::new();
+        let mut stack: Vec<CloveId> = fm.deps.clone();
+        while let Some(node) = stack.pop() {
+            if node == fm.id {
+                in_cycle = true;
+                break;
+            }
+            if !seen.insert(node.clone()) {
+                continue;
+            }
+            if seen.len() > LOCAL_CLOSURE_BUDGET {
+                return Err(BudgetExceeded);
+            }
+            if let Some(next) = read(&node) {
+                stack.extend(next.deps);
+            }
+        }
+    }
+
+    let excluded = in_cycle || malformed_parent;
+    let active = fm.status.is_active();
+    let ready = active && dangling.is_empty() && !excluded && open.is_empty();
+    let blocked_by = if active && !excluded && !(open.is_empty() && dangling.is_empty()) {
+        open.iter()
+            .chain(dangling.iter())
+            .map(CloveId::to_string)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Ok((ready, blocked_by))
+}
+
 /// The full §7.4 item object for `id`: frontmatter + body + comment_count +
-/// computed `ready`/`blocked_by` (a whole-store graph build, like `clove show
-/// --format json`).
+/// computed `ready`/`blocked_by` (the same shape as `clove show --format json`).
 pub fn show(store: &ItemStore, id: &CloveId) -> Result<Value, CloveError> {
     let item = store.get(id)?;
     let comment_count = list_comments(store.issues_dir(), id)
@@ -273,21 +384,31 @@ pub fn show(store: &ItemStore, id: &CloveId) -> Result<Value, CloveError> {
     obj.insert("body".to_owned(), json!(item.body));
     obj.insert("comment_count".to_owned(), json!(comment_count));
 
-    let (frontmatters, _errors) = store.scan_frontmatter()?;
-    let (graph, _dangling) = GraphStore::build(&frontmatters);
-    let ready = graph.ready_items().contains(id);
-    let blocked_by: Vec<String> = graph
-        .blocked_items()
-        .into_iter()
-        .find(|b| &b.id == id)
-        .map(|b| {
-            b.blocking_deps
-                .iter()
-                .chain(b.dangling_deps.iter())
-                .map(CloveId::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
+    // Prefer the item-local computation: showing one item used to scan and parse
+    // every file in the store purely to derive two fields (~57ms at 10k items).
+    // The whole-store path remains the fallback, so the answer is identical
+    // either way — `local_terms_match_the_graph_oracle` pins that.
+    let (ready, blocked_by) = match local_graph_terms(store, &item.frontmatter) {
+        Ok(terms) => terms,
+        Err(BudgetExceeded) => {
+            let (frontmatters, _errors) = store.scan_frontmatter()?;
+            let (graph, _dangling) = GraphStore::build(&frontmatters);
+            let ready = graph.ready_items().contains(id);
+            let blocked_by: Vec<String> = graph
+                .blocked_items()
+                .into_iter()
+                .find(|b| &b.id == id)
+                .map(|b| {
+                    b.blocking_deps
+                        .iter()
+                        .chain(b.dangling_deps.iter())
+                        .map(CloveId::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            (ready, blocked_by)
+        }
+    };
     obj.insert("ready".to_owned(), json!(ready));
     obj.insert("blocked_by".to_owned(), json!(blocked_by));
     Ok(Value::Object(obj))
@@ -1031,6 +1152,138 @@ mod tests {
         assert_eq!(v["total"], 2);
         assert_eq!(v["by_status"]["closed"], 1);
         assert_eq!(v["by_status"]["open"], 1);
+    }
+
+    /// `local_graph_terms` must agree with `GraphStore` for **every** item in a
+    /// store, including the shapes the graph treats specially: hard-dep cycles
+    /// (2-cycle and self-loop), malformed parents (self-parent and parent
+    /// cycle), dangling deps, and a closed dep that still points back.
+    ///
+    /// This is the guard that lets `show` skip the whole-store build: a silent
+    /// divergence here would be wrong, not merely slow.
+    #[test]
+    fn local_terms_match_the_graph_oracle() {
+        let (_d, store) = store();
+
+        // A plain ready item, and a simple blocked chain.
+        let a = new_id(&store, "a");
+        let b = new_id(&store, "b");
+        dep_add(&store, &a, &b, Utc::now()).unwrap(); // a blocked by open b
+                                                      // A closed dep: the dependent becomes ready again.
+        let c = new_id(&store, "c");
+        let d = new_id(&store, "d");
+        dep_add(&store, &c, &d, Utc::now()).unwrap();
+        transition(&store, &d, ItemStatus::Closed, Utc::now()).unwrap();
+        // An inactive item.
+        let closed = new_id(&store, "closed");
+        transition(&store, &closed, ItemStatus::Closed, Utc::now()).unwrap();
+
+        // Shapes `dep_add`/`set_parent` refuse to create: written directly.
+        let raw = |id: &CloveId, mutate: &dyn Fn(&mut ItemFrontmatter)| {
+            let mut item = store.get(id).unwrap();
+            mutate(&mut item.frontmatter);
+            store.update(&item, Utc::now()).unwrap();
+        };
+        // Dangling dep.
+        let dangler = new_id(&store, "dangler");
+        let ghost = CloveId::new("proj-ZZZZZZZZ").unwrap();
+        raw(&dangler, &|fm| fm.deps = vec![ghost.clone()]);
+        // Hard self-loop.
+        let selfloop = new_id(&store, "selfloop");
+        raw(&selfloop, &|fm| fm.deps = vec![fm.id.clone()]);
+        // A 2-cycle.
+        let cyc1 = new_id(&store, "cyc1");
+        let cyc2 = new_id(&store, "cyc2");
+        raw(&cyc1, &|fm| fm.deps = vec![cyc2.clone()]);
+        raw(&cyc2, &|fm| fm.deps = vec![cyc1.clone()]);
+        // Self-parent.
+        let selfparent = new_id(&store, "selfparent");
+        raw(&selfparent, &|fm| fm.parent = Some(fm.id.clone()));
+        // A parent cycle between two items, plus a child hanging off it (which
+        // is NOT itself in the cycle and must stay unexcluded).
+        let p1 = new_id(&store, "p1");
+        let p2 = new_id(&store, "p2");
+        raw(&p1, &|fm| fm.parent = Some(p2.clone()));
+        raw(&p2, &|fm| fm.parent = Some(p1.clone()));
+        let child = new_id(&store, "child");
+        raw(&child, &|fm| fm.parent = Some(p1.clone()));
+        // An item depending on a cycle member (reaches the cycle but is not in it).
+        let near = new_id(&store, "near");
+        raw(&near, &|fm| fm.deps = vec![cyc1.clone()]);
+
+        // The oracle: one whole-store graph build.
+        let (frontmatters, _errors) = store.scan_frontmatter().unwrap();
+        let (graph, _dangling) = GraphStore::build(&frontmatters);
+        let ready_set = graph.ready_items();
+        let blocked = graph.blocked_items();
+
+        for fm in &frontmatters {
+            let want_ready = ready_set.contains(&fm.id);
+            let want_blocked: Vec<String> = blocked
+                .iter()
+                .find(|b| b.id == fm.id)
+                .map(|b| {
+                    b.blocking_deps
+                        .iter()
+                        .chain(b.dangling_deps.iter())
+                        .map(CloveId::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let (got_ready, got_blocked) = match local_graph_terms(&store, fm) {
+                Ok(terms) => terms,
+                Err(BudgetExceeded) => panic!("{} exceeded the budget unexpectedly", fm.id),
+            };
+            assert_eq!(got_ready, want_ready, "ready mismatch for {}", fm.id);
+            assert_eq!(
+                got_blocked, want_blocked,
+                "blocked_by mismatch for {}",
+                fm.id
+            );
+        }
+
+        // And the shapes above are actually present, so this is not vacuous.
+        assert!(!ready_set.contains(&cyc1), "cycle member must be excluded");
+        assert!(!ready_set.contains(&selfloop), "self-loop must be excluded");
+        assert!(
+            !ready_set.contains(&selfparent),
+            "self-parent must be excluded"
+        );
+        assert!(
+            !ready_set.contains(&p1),
+            "parent-cycle member must be excluded"
+        );
+        assert!(
+            ready_set.contains(&child),
+            "a child of a cycle is not itself in it"
+        );
+        assert!(!ready_set.contains(&dangler), "a dangling dep blocks");
+    }
+
+    /// A closure larger than the budget falls back rather than answering from a
+    /// partial walk — and `show` still returns the oracle's answer.
+    #[test]
+    fn an_oversized_closure_falls_back_to_the_whole_store_graph() {
+        let (_d, store) = store();
+        let ids: Vec<CloveId> = (0..(LOCAL_CLOSURE_BUDGET + 8))
+            .map(|i| new_id(&store, &format!("n{i}")))
+            .collect();
+        // One long chain: n0 -> n1 -> n2 -> ... so n0's closure is the whole store.
+        for pair in ids.windows(2) {
+            let mut item = store.get(&pair[0]).unwrap();
+            item.frontmatter.deps = vec![pair[1].clone()];
+            store.update(&item, Utc::now()).unwrap();
+        }
+        let head = store.get(&ids[0]).unwrap();
+        assert!(
+            local_graph_terms(&store, &head.frontmatter).is_err(),
+            "a closure past the budget must decline rather than approximate"
+        );
+        // `show` still answers, via the fallback, and correctly: n0 waits on n1.
+        let shown = show(&store, &ids[0]).unwrap();
+        assert_eq!(shown["ready"], false);
+        assert_eq!(shown["blocked_by"], json!([ids[1].as_str()]));
     }
 
     #[test]
