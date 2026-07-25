@@ -161,27 +161,34 @@ fn concurrent_edit_field_adds_do_not_lose_updates() {
 
 #[test]
 fn concurrent_status_and_label_writes_do_not_clobber_each_other() {
-    // A cross-command race: `clove close` and `clove set` contend on one item.
-    // The status transition and the label append touch different fields, so a
-    // lost update shows up as one of the two edits silently disappearing.
+    // A cross-command race: `clove close` contends with several `clove set`
+    // invocations on one item. The status transition and the label appends touch
+    // different fields, so a lost update shows up as one of the edits silently
+    // disappearing.
+    //
+    // Several label writers rather than one: with a single pair, the two
+    // processes can happen to serialize on their own, and the test then passes
+    // even against the buggy code (observed ~1 run in 20). The wider fan-out
+    // makes a benign interleaving vanishingly unlikely.
     let dir = init_repo();
     let id = new_item(dir.path(), "contended");
 
-    let args = vec![
-        vec![
-            "close".to_owned(),
-            id.clone(),
-            "--format".to_owned(),
-            "json".to_owned(),
-        ],
+    const LABEL_WRITERS: usize = 6;
+    let mut args = vec![vec![
+        "close".to_owned(),
+        id.clone(),
+        "--format".to_owned(),
+        "json".to_owned(),
+    ]];
+    args.extend((0..LABEL_WRITERS).map(|i| {
         vec![
             "set".to_owned(),
             id.clone(),
-            "labels+=survivor".to_owned(),
+            format!("labels+=survivor-{i}"),
             "--format".to_owned(),
             "json".to_owned(),
-        ],
-    ];
+        ]
+    }));
     run_concurrently(dir.path(), args);
 
     let item = show(dir.path(), &id);
@@ -192,10 +199,13 @@ fn concurrent_status_and_label_writes_do_not_clobber_each_other() {
         .iter()
         .map(|v| v.as_str().unwrap().to_owned())
         .collect();
-    assert!(
-        labels.contains(&"survivor".to_owned()),
-        "the label append was lost (got {labels:?})"
-    );
+    for i in 0..LABEL_WRITERS {
+        let want = format!("survivor-{i}");
+        assert!(
+            labels.contains(&want),
+            "label {want} was lost racing `clove close` (got {labels:?})"
+        );
+    }
     // The closed-timestamp invariant must survive the interleaving too.
     assert!(
         item["closed"].is_string(),
