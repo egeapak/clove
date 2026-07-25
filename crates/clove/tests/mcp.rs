@@ -128,14 +128,15 @@ fn handshake_and_tools_list() {
 
     let resp = s.request(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
     let tools = resp["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 14, "all 14 tools advertised");
-    let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    for expected in [
+    // The wire contract, maintained by hand on purpose: this is what a client
+    // sees, so a tool appearing or vanishing should be a deliberate edit here.
+    const EXPECTED: &[&str] = &[
         "clove_ready",
         "clove_blocked",
         "clove_list",
         "clove_show",
         "clove_search",
+        "clove_comments",
         "clove_dep_tree",
         "clove_stats",
         "clove_new",
@@ -145,8 +146,15 @@ fn handshake_and_tools_list() {
         "clove_dep_add",
         "clove_dep_remove",
         "clove_set_parent",
-    ] {
-        assert!(names.contains(&expected), "missing tool {expected}");
+    ];
+    assert_eq!(
+        tools.len(),
+        EXPECTED.len(),
+        "advertised tool count drifted from the expected set"
+    );
+    let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+    for expected in EXPECTED {
+        assert!(names.contains(expected), "missing tool {expected}");
     }
     // Each tool publishes an input schema object.
     let ready = tools.iter().find(|t| t["name"] == "clove_ready").unwrap();
@@ -260,7 +268,7 @@ fn starts_without_a_repository() {
 
     // Handshake already succeeded inside Session::start; tools are still listed.
     let resp = s.request(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
-    assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 14);
+    assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 15);
 
     // A read tool returns a tool error (not a protocol error / crash) because
     // there is no repository yet.
@@ -362,6 +370,64 @@ fn resources_are_listed_and_readable() {
         "params": { "uri": "clove://nope" }
     }));
     assert!(bad.get("error").is_some(), "unknown uri → error: {bad}");
+
+    s.shutdown();
+}
+
+/// An agent can read back what it wrote. Before `clove_comments`, `clove_comment`
+/// was write-only over MCP — `clove_show` reported a `comment_count` and nothing
+/// else, so findings an agent recorded were unreachable in a later session.
+#[test]
+fn comments_round_trip_through_mcp() {
+    let dir = init_repo();
+    let mut s = Session::start(dir.path());
+
+    let created = s.call(2, "clove_new", json!({ "title": "investigate" }));
+    let id = created["structuredContent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    for note in ["first finding", "second finding", "third finding"] {
+        let r = s.call(3, "clove_comment", json!({ "id": id, "message": note }));
+        assert_ne!(r["isError"], true, "comment failed: {r}");
+    }
+
+    let all = s.call(4, "clove_comments", json!({ "id": id }));
+    let page = &all["structuredContent"];
+    assert_eq!(page["total"], 3);
+    assert_eq!(page["returned"], 3);
+    let bodies: Vec<&str> = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["body"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        bodies,
+        vec!["first finding", "second finding", "third finding"],
+        "comments come back oldest-first"
+    );
+    // Authorship is attributed, but lossily: comments carry the author only in
+    // their file name, so it is stored as a filename-safe slug
+    // (`tester@example.com` -> `tester-example-com`) and the original address is
+    // not recoverable. Pinned here so the MCP surface's fidelity is explicit.
+    assert_eq!(page["items"][0]["author"], "tester-example-com");
+
+    // `limit` keeps the most recent, matching `clove comments --limit`.
+    let last = s.call(5, "clove_comments", json!({ "id": id, "limit": 1 }));
+    assert_eq!(
+        last["structuredContent"]["items"][0]["body"],
+        "third finding"
+    );
+    assert_eq!(
+        last["structuredContent"]["total"], 3,
+        "total is the unpaginated count"
+    );
+
+    // A missing item is a tool error, not an empty page.
+    let missing = s.call(6, "clove_comments", json!({ "id": "proj-ZZZZZZZZ" }));
+    assert_eq!(missing["isError"], true);
 
     s.shutdown();
 }

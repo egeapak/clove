@@ -146,7 +146,7 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
 - `clove mcp` runs a Model Context Protocol server over stdio (newline-delimited\n\
   JSON-RPC), exposing clove as native tools so an agent need not shell out:\n\
   `clove_ready`, `clove_blocked`, `clove_list`, `clove_show`, `clove_search`,\n\
-  `clove_dep_tree`, `clove_stats` (reads) and `clove_new`, `clove_status`,\n\
+  `clove_comments`, `clove_dep_tree`, `clove_stats` (reads) and `clove_new`, `clove_status`,\n\
   `clove_edit`, `clove_comment`, `clove_dep_add` (writes). Tool results carry the\n\
   same item JSON as the CLI. Configure it as an MCP server with command `clove`\n\
   and arg `mcp`, launched in the repository.\n\

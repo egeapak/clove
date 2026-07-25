@@ -1,4 +1,4 @@
-//! The rmcp MCP server: 14 tools spanning the agent read/write loop, each
+//! The rmcp MCP server: 15 tools spanning the agent read/write loop, each
 //! delegating to the [`Engine`]. Tool bodies run on a blocking task (the engine
 //! does file I/O and, for writes, drives the blocking daemon client).
 
@@ -137,6 +137,18 @@ impl CloveServer {
         self.run(move || e.search(a)).await
     }
 
+    #[tool(description = "Read an item's comment thread, oldest first. The read \
+                       counterpart to clove_comment — clove_show reports only a \
+                       `comment_count`. `limit` keeps the most recent comments; \
+                       `offset` pages back through older ones.")]
+    async fn clove_comments(
+        &self,
+        Parameters(a): Parameters<CommentsArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let e = self.engine.clone();
+        self.run(move || e.comments(a)).await
+    }
+
     #[tool(description = "Render the dependency tree rooted at an item, with \
                           per-node status, `ready`, and `cycle_ref` markers.")]
     async fn clove_dep_tree(
@@ -262,8 +274,9 @@ impl ServerHandler for CloveServer {
              to find existing items before creating new ones, then record \
              progress as you go — clove_new to file work, clove_status to \
              transition it (open/in_progress/closed), and clove_comment to note \
-             findings. Explore with clove_show (detail), clove_blocked, and \
-             clove_dep_tree; clove_stats for an overview; clove_dep_add / \
+             findings. Explore with clove_show (detail), clove_comments (the \
+             discussion thread — clove_show gives only a count), clove_blocked, \
+             and clove_dep_tree; clove_stats for an overview; clove_dep_add / \
              clove_dep_remove / clove_set_parent to wire the graph. Ids look like \
              `proj-7af3q2k9`. Two live resources — clove://ready and \
              clove://stats — mirror the ready queue and the repo overview; \

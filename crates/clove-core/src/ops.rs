@@ -293,6 +293,49 @@ pub fn show(store: &ItemStore, id: &CloveId) -> Result<Value, CloveError> {
     Ok(Value::Object(obj))
 }
 
+/// An item's comment thread, oldest first, optionally capped to the most recent
+/// `limit`. Returns the standard `{ total, returned, offset, items }` page, with
+/// each element in the published `comment-list.json` element shape.
+///
+/// `limit` keeps the **newest** comments (the tail), not the first: a capped
+/// thread is being sampled for what happened most recently. `offset` counts back
+/// from that newest end, so paging walks backwards through history.
+pub fn comments(
+    store: &ItemStore,
+    id: &CloveId,
+    offset: usize,
+    limit: Option<usize>,
+) -> Result<Value, CloveError> {
+    if !store.exists(id) {
+        return Err(CloveError::NotFound { id: id.to_string() });
+    }
+    let all = list_comments(store.issues_dir(), id)?;
+    let total = all.len();
+
+    // Window from the newest end: `offset` skips the most recent, `limit` caps
+    // how many older ones follow. Saturating throughout so an over-large offset
+    // yields an empty page rather than panicking.
+    let end = total.saturating_sub(offset);
+    let start = limit.map_or(0, |n| end.saturating_sub(n));
+    let items: Vec<Value> = all[start..end]
+        .iter()
+        .map(|c| {
+            json!({
+                "author": c.author,
+                "timestamp": c.timestamp.to_rfc3339(),
+                "body": c.body,
+            })
+        })
+        .collect();
+
+    Ok(json!({
+        "total": total,
+        "returned": items.len(),
+        "offset": offset,
+        "items": items,
+    }))
+}
+
 /// Compute the work-item analytics report (`clove stats`) from the file store
 /// and return it as JSON. `top` caps the assignee/label breakdowns (0 = no cap).
 pub fn stats(
@@ -988,6 +1031,48 @@ mod tests {
         assert_eq!(v["total"], 2);
         assert_eq!(v["by_status"]["closed"], 1);
         assert_eq!(v["by_status"]["open"], 1);
+    }
+
+    #[test]
+    fn comments_page_from_the_newest_end() {
+        let (_d, store) = store();
+        let id = new_id(&store, "chatty");
+        for i in 0..5 {
+            comment(&store, &id, "me", &format!("note {i}")).unwrap();
+        }
+
+        // No limit: the whole thread, oldest first.
+        let all = comments(&store, &id, 0, None).unwrap();
+        assert_eq!(all["total"], 5);
+        assert_eq!(all["returned"], 5);
+        assert_eq!(all["items"][0]["body"], "note 0");
+
+        // A limit keeps the NEWEST n, still in chronological order.
+        let last2 = comments(&store, &id, 0, Some(2)).unwrap();
+        assert_eq!(last2["returned"], 2);
+        assert_eq!(last2["items"][0]["body"], "note 3");
+        assert_eq!(last2["items"][1]["body"], "note 4");
+        assert_eq!(last2["total"], 5, "total is the unpaginated count");
+
+        // Offset walks backwards through history from the newest end.
+        let older = comments(&store, &id, 2, Some(2)).unwrap();
+        assert_eq!(older["items"][0]["body"], "note 1");
+        assert_eq!(older["items"][1]["body"], "note 2");
+
+        // Edge: an offset past the end is an empty page, not a panic.
+        let past = comments(&store, &id, 99, Some(2)).unwrap();
+        assert_eq!(past["returned"], 0);
+        assert_eq!(past["total"], 5);
+
+        // An item with no comments is an empty page, not an error.
+        let quiet = new_id(&store, "quiet");
+        assert_eq!(comments(&store, &quiet, 0, None).unwrap()["total"], 0);
+
+        // A missing item is NotFound (matching `show`).
+        assert!(matches!(
+            comments(&store, &CloveId::new("proj-ZZZZZZZZ").unwrap(), 0, None),
+            Err(CloveError::NotFound { .. })
+        ));
     }
 
     #[test]

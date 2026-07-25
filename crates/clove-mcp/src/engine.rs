@@ -120,6 +120,17 @@ impl Engine {
         ops::search(&self.store(), &a.text, limit(a.limit, 50)).map_err(stringify)
     }
 
+    pub fn comments(&self, a: CommentsArgs) -> Result<Value, String> {
+        let id = parse_id(&a.id)?;
+        ops::comments(
+            &self.store(),
+            &id,
+            a.offset.unwrap_or(0) as usize,
+            limit(a.limit, 50),
+        )
+        .map_err(stringify)
+    }
+
     pub fn dep_tree(&self, a: DepTreeArgs) -> Result<Value, String> {
         let id = parse_id(&a.id)?;
         ops::dep_tree(&self.store(), &id, a.depth.unwrap_or(5) as usize).map_err(stringify)

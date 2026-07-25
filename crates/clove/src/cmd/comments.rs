@@ -1,6 +1,6 @@
 //! `clove comment` / `clove comments` (T-CLI12).
 
-use clove_core::{add_comment, list_comments, OutputFormat};
+use clove_core::{add_comment, OutputFormat};
 use clove_types::CloveError;
 use serde_json::{json, Value};
 
@@ -100,34 +100,25 @@ pub fn list(
     limit: Option<usize>,
 ) -> Result<(), CloveError> {
     let id = parse_id(id)?;
-    if !ctx.store.exists(&id) {
-        return Err(CloveError::NotFound { id: id.to_string() });
-    }
-    let mut comments = list_comments(&ctx.issues_dir, &id)?;
-    if let Some(n) = limit {
-        if comments.len() > n {
-            comments = comments.split_off(comments.len() - n);
-        }
-    }
+    // Shared with the `clove_comments` MCP tool, so the two cannot drift on
+    // which end `--limit` keeps.
+    let page = clove_core::ops::comments(&ctx.store, &id, 0, limit)?;
+    let items = page["items"].as_array().cloned().unwrap_or_default();
 
     match format {
         OutputFormat::Json | OutputFormat::Jsonl => {
-            let values: Vec<Value> = comments
-                .iter()
-                .map(|c| {
-                    json!({
-                        "author": c.author,
-                        "timestamp": c.timestamp.to_rfc3339(),
-                        "body": c.body,
-                    })
-                })
-                .collect();
-            print_json_success(Value::Array(values), json!({ "warnings": [] }));
+            // `clove comments` predates the paged shape and is pinned to a bare
+            // array by `comment-list.json`; the envelope stays as it was.
+            print_json_success(Value::Array(items), json!({ "warnings": [] }));
         }
         OutputFormat::Human => {
-            for c in &comments {
-                println!("{}  {}", c.timestamp.to_rfc3339(), c.author);
-                println!("{}\n", c.body.trim_end());
+            for c in &items {
+                println!(
+                    "{}  {}",
+                    c["timestamp"].as_str().unwrap_or_default(),
+                    c["author"].as_str().unwrap_or_default()
+                );
+                println!("{}\n", c["body"].as_str().unwrap_or_default().trim_end());
             }
         }
     }

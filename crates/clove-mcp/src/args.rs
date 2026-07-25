@@ -62,6 +62,18 @@ pub struct SearchArgs {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(crate = "rmcp::serde")]
+pub struct CommentsArgs {
+    /// The item id (e.g. `proj-7af3q2k9`).
+    pub id: String,
+    /// Max comments, keeping the most recent (0 = no limit; default 50).
+    pub limit: Option<u64>,
+    /// Skip this many of the most recent comments, to page back through
+    /// older ones.
+    pub offset: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(crate = "rmcp::serde")]
 pub struct DepTreeArgs {
     /// The root item id.
     pub id: String,
