@@ -20,7 +20,7 @@ use crate::context::{index_error, Ctx};
 /// *empty*, which read as "no matches" for every query rather than "index
 /// unavailable". Mirrors the gate the list commands use (`cmd/index_read.rs`),
 /// including the `auto_refresh` opt-out and the too-far-behind bail.
-fn usable_index(ctx: &Ctx) -> Result<Option<clove_index::Index>, CloveError> {
+fn usable_index(ctx: &Ctx, deep: bool) -> Result<Option<clove_index::Index>, CloveError> {
     let Ok(mut index) = clove_index::Index::open_or_create(&ctx.db_path) else {
         return Ok(None); // a broken index is non-fatal
     };
@@ -29,9 +29,12 @@ fn usable_index(ctx: &Ctx) -> Result<Option<clove_index::Index>, CloveError> {
         // answer a search, because "no rows" is indistinguishable from "no hits".
         return Ok(None);
     }
-    let report = index
-        .check_staleness_fast(&ctx.issues_dir)
-        .map_err(|e| index_error(e, &ctx.db_path))?;
+    let report = if deep {
+        index.check_staleness(&ctx.issues_dir)
+    } else {
+        index.check_staleness_fast(&ctx.issues_dir)
+    }
+    .map_err(|e| index_error(e, &ctx.db_path))?;
     if report.change_count() > crate::cmd::index_read::STALE_REFRESH_LIMIT {
         return Ok(None); // too far behind to freshen inline
     }
@@ -48,6 +51,7 @@ pub fn run(
     format: OutputFormat,
     args: SearchArgs,
     no_index: bool,
+    deep: bool,
 ) -> Result<(), CloveError> {
     let text = args.text;
     // Same limit contract as every other list command: no flag → default cap,
@@ -87,7 +91,7 @@ pub fn run(
     }
 
     let (ordered, source) = if !no_index && ctx.db_path.exists() {
-        match usable_index(ctx)? {
+        match usable_index(ctx, deep)? {
             Some(index) => {
                 let rows = index
                     .search(&text, None)

@@ -35,12 +35,20 @@ pub struct FilterArgs {
     pub priority: Option<u8>,
     /// Max results (0 = no limit; default 50).
     pub limit: Option<u64>,
-    /// Also include items whose only obstacle is a dangling (missing)
-    /// dependency. On `clove_blocked` this admits them to the blocked list; on
-    /// `clove_ready` it admits them to the ready list.
-    pub include_warnings: Option<bool>,
     #[serde(flatten)]
     pub shape: ShapeArgs,
+}
+
+/// `clove_ready` — the shared filters plus the dangling-dep opt-in.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(crate = "rmcp::serde")]
+pub struct ReadyArgs {
+    #[serde(flatten)]
+    pub filter: FilterArgs,
+    /// Also return items whose only obstacle is a dangling (missing)
+    /// dependency. They are not workable, but they are a data problem worth
+    /// surfacing rather than hiding from both `clove_ready` and `clove_blocked`.
+    pub include_warnings: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
@@ -48,6 +56,8 @@ pub struct FilterArgs {
 pub struct BlockedArgs {
     #[serde(flatten)]
     pub filter: FilterArgs,
+    /// Also include items blocked only by dangling (missing) deps.
+    pub include_warnings: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]

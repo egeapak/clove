@@ -85,14 +85,14 @@ impl Engine {
 
     // ---- Read tools (file-based via ops) ------------------------------------
 
-    pub fn ready(&self, a: FilterArgs) -> Result<Value, String> {
-        let filters = a.to_filters()?;
-        let shaping = shaping(&a.shape);
+    pub fn ready(&self, a: ReadyArgs) -> Result<Value, String> {
+        let filters = a.filter.to_filters()?;
+        let shaping = shaping(&a.filter.shape);
         ops::ready(
             &self.store(),
             &filters,
             a.include_warnings.unwrap_or(false),
-            limit(a.limit, 50),
+            limit(a.filter.limit, 50),
         )
         .map(|v| shape::apply(v, &shaping))
         .map_err(stringify)
@@ -104,7 +104,7 @@ impl Engine {
         ops::blocked(
             &self.store(),
             &filters,
-            a.filter.include_warnings.unwrap_or(false),
+            a.include_warnings.unwrap_or(false),
             limit(a.filter.limit, 50),
         )
         .map(|v| shape::apply(v, &shaping))

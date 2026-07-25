@@ -724,7 +724,26 @@ fn ready_include_warnings_surfaces_dangling_only_items() {
     let with = json_ok(clove(dir.path()).args(["ready", "--include-warnings"]));
     assert_eq!(
         ids_of(&with),
-        vec![id],
+        vec![id.clone()],
         "--include-warnings must admit dangling-only items"
+    );
+
+    // And it must keep working once an index exists. `ready` has three paths —
+    // daemon, index, file scan — and the first version of this fix only touched
+    // the last, so the flag was still ignored in any repo that had ever been
+    // reindexed. `init_repo` creates no index, so without this the test could
+    // not see that.
+    clove(dir.path()).arg("reindex").assert().success();
+    let indexed = json_ok(clove(dir.path()).args(["ready", "--include-warnings"]));
+    assert_eq!(
+        ids_of(&indexed),
+        vec![id],
+        "--include-warnings must survive the index fast path"
+    );
+    // The flag also must not leave a warning claiming the item was excluded.
+    let warnings = indexed["_meta"]["warnings"].as_array().unwrap();
+    assert!(
+        warnings.is_empty(),
+        "returned items must not also be reported as excluded: {warnings:?}"
     );
 }

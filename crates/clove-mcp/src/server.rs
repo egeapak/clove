@@ -87,7 +87,7 @@ impl CloveServer {
     )]
     async fn clove_ready(
         &self,
-        Parameters(a): Parameters<FilterArgs>,
+        Parameters(a): Parameters<ReadyArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let e = self.engine.clone();
         self.run(move || e.ready(a)).await
@@ -324,7 +324,7 @@ impl ServerHandler for CloveServer {
         // Reads do file I/O (same as the tools) → run on a blocking task.
         let result = match uri.as_str() {
             READY_URI => {
-                tokio::task::spawn_blocking(move || engine.ready(FilterArgs::default())).await
+                tokio::task::spawn_blocking(move || engine.ready(ReadyArgs::default())).await
             }
             STATS_URI => {
                 tokio::task::spawn_blocking(move || engine.stats(StatsArgs::default())).await
