@@ -54,7 +54,6 @@ chrono.workspace = true
 tempfile.workspace = true       # T-M04: atomic `export --out FILE` writes
 ureq.workspace = true            # crates.io registry client (registry/, `plugin list --all`)
 semver.workspace = true          # crates.io version ordering
-toml.workspace = true            # parse crates.io/Cargo metadata in the registry client
 
 # `clove daemon stop` on Windows signals the daemon's named event (DESIGN §8.9).
 [target.'cfg(windows)'.dependencies]
