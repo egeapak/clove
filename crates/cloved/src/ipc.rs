@@ -467,18 +467,18 @@ fn now() -> chrono::DateTime<chrono::Utc> {
     chrono::Utc::now()
 }
 
-/// Map a core error to a wire [`RpcError`] with a stable machine code so clients
-/// (the MCP server) can distinguish failure classes.
+/// Map a core error to a wire [`RpcError`], using the *shared* classification
+/// from [`clove_types::error_code`] rather than a daemon-local code set.
+///
+/// The previous hand-rolled table diverged from that taxonomy in two ways that
+/// mattered: it used its own spellings (`not_found` vs `ITEM_NOT_FOUND`), and it
+/// collapsed everything unrecognized into `op_failed` — merging e.g. `Io`
+/// (exit 5) with `ScanFailed` (exit 4), so no client could recover the right
+/// exit code. Emitting `(code, exit)` from the one classifier means a failure
+/// reported over IPC is indistinguishable from the same failure raised locally.
 fn rpc_err(e: CloveError) -> RpcError {
-    let code = match &e {
-        CloveError::NotFound { .. } => "not_found",
-        CloveError::SelfDependency { .. } => "self_loop",
-        CloveError::DependencyCycle { .. } => "cycle",
-        CloveError::DependencyExists { .. } => "already_exists",
-        CloveError::InvalidField { .. } => "invalid_field",
-        _ => "op_failed",
-    };
-    RpcError::new(code, e.to_string())
+    let (code, exit) = clove_types::error_code(&e);
+    RpcError::with_exit(code, e.to_string(), exit)
 }
 
 /// Project an index row onto the lean wire row.

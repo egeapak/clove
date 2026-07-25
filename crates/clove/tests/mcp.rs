@@ -457,6 +457,60 @@ fn auto_starts_daemon_and_heartbeats() {
     }
 }
 
+/// A write the *daemon* rejects must carry the same error classification the
+/// same failure produces locally. `cloved` used to emit a private code set
+/// (`not_found`, `op_failed`, …) that collapsed distinct failure classes into
+/// one bucket; it now emits `clove_types::error_code`, so the wire code matches
+/// the local one and the numeric exit rides along with it.
+///
+/// Unix-only + escargot-built `cloved`, matching the other daemon tests here.
+#[cfg(unix)]
+#[test]
+fn daemon_rejected_write_carries_the_shared_error_code() {
+    extern "C" {
+        #[link_name = "kill"]
+        fn libc_kill(pid: i32, sig: i32) -> i32;
+    }
+
+    let dir = init_repo();
+    let clove_dir = camino::Utf8PathBuf::from_path_buf(dir.path().join(".clove")).unwrap();
+    let cloved = escargot::CargoBuild::new()
+        .package("cloved")
+        .bin("cloved")
+        .run()
+        .expect("build cloved for the error-classification test");
+
+    let mut cmd = clove(dir.path());
+    cmd.env("CLOVED_PATH", cloved.path())
+        .env("CLOVED_DISABLE_WEB", "1");
+    let mut s = Session::start_cmd(cmd);
+
+    // A well-formed id with no backing item: the write routes to the daemon,
+    // which rejects it. (A malformed id would fail client-side and never reach
+    // the daemon, so it would not exercise the wire at all.)
+    let result = s.call(
+        2,
+        "clove_status",
+        json!({ "id": "proj-ZZZZZZZZ", "status": "closed" }),
+    );
+    assert_eq!(result["isError"], true, "missing item must be an error");
+    let text = result["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(
+        text.contains("ITEM_NOT_FOUND"),
+        "daemon error must carry the shared code, got: {text:?}"
+    );
+
+    s.shutdown();
+
+    if let Ok(pid) = std::fs::read_to_string(clove_dir.join("daemon.pid")) {
+        if let Ok(pid) = pid.trim().parse::<i32>() {
+            unsafe {
+                libc_kill(pid, 15);
+            }
+        }
+    }
+}
+
 /// gh-21: after subscribing to `clove://ready`, a mutation that bumps the daemon's
 /// change-generation makes the server push a `notifications/resources/updated` for
 /// that URI. Needs the daemon (the change signal), so Unix-only + escargot-built

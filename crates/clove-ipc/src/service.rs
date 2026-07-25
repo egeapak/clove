@@ -17,23 +17,52 @@ use crate::protocol::{
     StatusResponse,
 };
 
+/// The exit code carried by an [`RpcError`] that predates the `exit` field, and
+/// by daemon-internal failures that do not map to a [`clove_types::CloveError`]:
+/// 7, "daemon error" (DESIGN §7.6).
+fn default_rpc_exit() -> u8 {
+    7
+}
+
 /// A serializable RPC error returned by fallible daemon methods (mirrors the old
-/// `ErrorResponse`): a stable machine `code` plus a human `message`.
+/// `ErrorResponse`): a stable machine `code`, a human `message`, and the numeric
+/// `exit` the failure classifies to.
+///
+/// `exit` lets the client reproduce the caller's exit code without re-deriving a
+/// taxonomy the daemon already computed — a `NotFound` rejected by the daemon
+/// must exit 2 exactly as it would have locally. The wire is length-delimited
+/// JSON (self-describing), so the defaulted field is compatible in both
+/// directions with a daemon or client that predates it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 #[error("{code}: {message}")]
 pub struct RpcError {
-    /// Stable machine code, e.g. `"bad_request"`, `"query_failed"`.
+    /// Stable machine code, e.g. `"ITEM_NOT_FOUND"`, `"query_failed"`.
     pub code: String,
     /// Human-readable detail.
     pub message: String,
+    /// Numeric exit code for this failure (DESIGN §7.6).
+    #[serde(default = "default_rpc_exit")]
+    pub exit: u8,
 }
 
 impl RpcError {
-    /// Build an RPC error from a code and message.
+    /// Build an RPC error from a code and message, classified as a daemon error
+    /// (exit 7). For a failure that carries a `CloveError`'s own classification,
+    /// use [`RpcError::with_exit`].
     pub fn new(code: impl Into<String>, message: impl Into<String>) -> RpcError {
         RpcError {
             code: code.into(),
             message: message.into(),
+            exit: default_rpc_exit(),
+        }
+    }
+
+    /// Build an RPC error carrying an explicit exit code.
+    pub fn with_exit(code: impl Into<String>, message: impl Into<String>, exit: u8) -> RpcError {
+        RpcError {
+            code: code.into(),
+            message: message.into(),
+            exit,
         }
     }
 }

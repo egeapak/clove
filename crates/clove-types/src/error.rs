@@ -138,6 +138,22 @@ pub enum CloveError {
     #[error("not yet implemented: {feature}")]
     NotYetImplemented { feature: String },
 
+    /// A failure the daemon reported over IPC, carrying the classification it
+    /// already computed.
+    ///
+    /// This exists because the original variant cannot be faithfully rebuilt on
+    /// the client side — reconstructing e.g. `DependencyCycle` would mean
+    /// inventing its `from`/`to`/`cycle` fields. Carrying `code`/`exit` across
+    /// the wire instead means a write rejected by the daemon exits with the same
+    /// code it would have locally. Only ever constructed client-side, from a
+    /// `clove_ipc::ClientError`.
+    #[error("{message}")]
+    Remote {
+        code: String,
+        exit: u8,
+        message: String,
+    },
+
     /// A plugin binary was dispatched (structurally, probe-free — PLUGIN_SYSTEM.md
     /// §4.2) for a capability it does not implement. Raised by a multi-capability
     /// plugin's own `main` when it is handed a `<mux> <provider>` outside its
@@ -185,5 +201,40 @@ pub fn error_code(error: &CloveError) -> (&'static str, u8) {
         CloveError::NoRepo { .. } => ("NO_REPO", 5),
         CloveError::Io { .. } => ("IO_ERROR", 5),
         CloveError::NotYetImplemented { .. } => ("NOT_YET_IMPLEMENTED", 1),
+
+        // A remote failure already carries the daemon's own classification.
+        // Trust it only when the code is one this build knows: a daemon that is
+        // newer, older, or simply wrong must not be able to steer the caller's
+        // exit code to an arbitrary value.
+        CloveError::Remote { code, exit, .. } => match canonical_code(code) {
+            Some(known) => (known, *exit),
+            None => ("DAEMON_ERROR", 7),
+        },
     }
+}
+
+/// The stable wire code as a `&'static str`, if this build recognizes it.
+///
+/// [`error_code`] returns `&'static str`, but a [`CloveError::Remote`] carries an
+/// owned `String` off the wire; this maps it back to the canonical constant (and
+/// doubles as validation — see the `Remote` arm above).
+fn canonical_code(code: &str) -> Option<&'static str> {
+    const CODES: &[&str] = &[
+        "ITEM_NOT_FOUND",
+        "UNSUPPORTED_CAPABILITY",
+        "ID_CONFLICT",
+        "INVALID_ID",
+        "VALIDATION_ERROR",
+        "HAS_DEPENDENTS",
+        "SELF_LOOP",
+        "ALREADY_EXISTS",
+        "CYCLE_DETECTED",
+        "CONFIG_ERROR",
+        "PARSE_ERROR",
+        "NO_REPO",
+        "IO_ERROR",
+        "NOT_YET_IMPLEMENTED",
+        "DAEMON_ERROR",
+    ];
+    CODES.iter().copied().find(|known| *known == code)
 }
