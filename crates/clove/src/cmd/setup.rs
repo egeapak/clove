@@ -599,7 +599,12 @@ mod tests {
         assert_eq!(s["mcpServers"]["clove"]["command"], "clove");
         assert_eq!(s["mcpServers"]["clove"]["args"], json!(["mcp"]));
         let allow = s["permissions"]["allow"].as_array().unwrap();
-        for tool in mcp_tool_names() {
+        let names = mcp_tool_names();
+        // Both sides of the comparisons below come from `mcp_tool_names()`, so
+        // a filter that dropped everything would write zero grants and still
+        // satisfy them. Pin non-emptiness explicitly.
+        assert!(!names.is_empty(), "the permission list must never be empty");
+        for tool in names {
             assert!(allow
                 .iter()
                 .any(|v| v == &json!(format!("{SETTINGS_MCP_PREFIX}{tool}"))));

@@ -289,8 +289,17 @@ fn local_graph_terms(
     store: &ItemStore,
     fm: &ItemFrontmatter,
 ) -> Result<(bool, Vec<String>), BudgetExceeded> {
+    // Resolve an id the way the store's own scan does, or not at all. The scan
+    // skips symlinks and non-regular files (DESIGN §12.3), so such a file is not
+    // a graph node and its id must read as dangling here too — reaching it by
+    // path would follow the symlink and disagree with `ready`/`blocked`.
     let read = |id: &CloveId| -> Option<ItemFrontmatter> {
-        crate::parse_frontmatter_file(&store.path_for(id)).ok()
+        let path = store.path_for(id);
+        let meta = std::fs::symlink_metadata(&path).ok()?;
+        if !meta.is_file() {
+            return None;
+        }
+        crate::parse_frontmatter_file(&path).ok()
     };
 
     // Direct hard deps, split into dangling (no such item) and unclosed. Order
@@ -305,8 +314,12 @@ fn local_graph_terms(
             Some(_) => {}
         }
     }
+    // Sorted but NOT deduped, matching `GraphStore::open_hard_dep_targets`: a
+    // `deps` list naming the same id twice builds parallel edges, so the graph
+    // reports it twice. `dep_add` prevents duplicates, but a hand-edit, an
+    // import, or a merge can still produce them, and `clove_show` disagreeing
+    // with `clove_blocked` on the same repo would be worse than the duplicate.
     open.sort();
-    open.dedup();
 
     // Malformed parent: self-parent, or a parent chain that cycles back to us.
     // `visited` bounds a pre-existing cycle that does *not* contain this item.
@@ -1220,6 +1233,51 @@ mod tests {
         // An item depending on a cycle member (reaches the cycle but is not in it).
         let near = new_id(&store, "near");
         raw(&near, &|fm| fm.deps = vec![cyc1.clone()]);
+        // The same dep listed twice. The frontmatter *writer* sorts and dedups
+        // list fields, so this has to be patched into the file text directly —
+        // going through `store.update` would silently drop the duplicate and
+        // make this fixture vacuous. The graph builds parallel edges and reports
+        // the id twice, so the local walk must not dedup it away either.
+        let dup = new_id(&store, "dup");
+        let dup_path = store.path_for(&dup);
+        let text = std::fs::read_to_string(&dup_path).unwrap();
+        std::fs::write(
+            &dup_path,
+            text.replace("deps: []", &format!("deps: [{b}, {b}]")),
+        )
+        .unwrap();
+
+        // An item whose file is a symlink. The store's scan skips symlinks
+        // (DESIGN §12.3), so it is not a graph node and a dependent sees a
+        // dangling ref.
+        //
+        // Two details make this discriminate. The link target must carry the
+        // *same* id as the link's stem, or `parse_frontmatter_file`'s id/stem
+        // check rejects it and both paths agree by accident. And it must be
+        // `closed`: resolving the link would then report "dependency satisfied"
+        // (ready) where the graph reports "dependency missing" (blocked). An
+        // open target would read as blocked either way and prove nothing.
+        #[cfg(unix)]
+        let via_link = {
+            let linked = new_id(&store, "linked");
+            let via_link = new_id(&store, "via-link");
+            raw(&via_link, &|fm| fm.deps = vec![linked.clone()]);
+
+            // A validly-closed item, re-stamped with `linked`'s id.
+            let sink = new_id(&store, "sink");
+            transition(&store, &sink, ItemStatus::Closed, Utc::now()).unwrap();
+            let closed_text = std::fs::read_to_string(store.path_for(&sink))
+                .unwrap()
+                .replace(sink.as_str(), linked.as_str());
+            // Outside `issues/`, so the scan cannot pick the target up directly.
+            let target = store.repo_root().join("linked-elsewhere.md");
+            std::fs::write(&target, closed_text).unwrap();
+
+            let link_path = store.path_for(&linked);
+            std::fs::remove_file(&link_path).unwrap();
+            std::os::unix::fs::symlink(target.as_std_path(), link_path.as_std_path()).unwrap();
+            via_link
+        };
 
         // The oracle: one whole-store graph build.
         let (frontmatters, _errors) = store.scan_frontmatter().unwrap();
@@ -1269,6 +1327,16 @@ mod tests {
             "a child of a cycle is not itself in it"
         );
         assert!(!ready_set.contains(&dangler), "a dangling dep blocks");
+        // The duplicate really reached disk (the writer would have deduped it).
+        let dup_fm = frontmatters.iter().find(|f| f.id == dup).unwrap();
+        assert_eq!(dup_fm.deps.len(), 2, "duplicate dep fixture must be real");
+        // The symlinked item is not a node, so its dependent is blocked, not
+        // ready — the state that differs from following the link.
+        #[cfg(unix)]
+        assert!(
+            !ready_set.contains(&via_link),
+            "a dep whose file is a symlink must read as dangling, not resolved"
+        );
     }
 
     /// A closure larger than the budget falls back rather than answering from a

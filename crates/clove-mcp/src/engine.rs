@@ -147,12 +147,12 @@ impl Engine {
 
     pub fn dep_tree(&self, a: DepTreeArgs) -> Result<Value, String> {
         let id = parse_id(&a.id)?;
-        let shaping = shaping(&a.shape);
-        // Compaction recurses, so every leaf sheds its `children: []` — the
-        // single most repetitive payload in the read surface.
-        ops::dep_tree(&self.store(), &id, a.depth.unwrap_or(5) as usize)
-            .map(|v| shape::apply(v, &shaping))
-            .map_err(stringify)
+        // Deliberately unshaped: `dep-tree.json` lists `children` as *required*
+        // on every node, so compaction — which recurses and would drop the empty
+        // `children` of every leaf — puts the payload outside its published v1
+        // schema. The schema-legality argument for compacting items comes from
+        // `item.json`'s much smaller `required` set and does not transfer here.
+        ops::dep_tree(&self.store(), &id, a.depth.unwrap_or(5) as usize).map_err(stringify)
     }
 
     pub fn stats(&self, a: StatsArgs) -> Result<Value, String> {
