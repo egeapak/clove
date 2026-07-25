@@ -510,8 +510,7 @@ pub fn stats(
 pub fn list(
     store: &ItemStore,
     filters: &crate::Filters,
-    offset: usize,
-    limit: Option<usize>,
+    window: crate::view::Page,
 ) -> Result<Value, CloveError> {
     let (frontmatters, _errors) = store.scan_frontmatter()?;
     let (graph, _dangling) = GraphStore::build(&frontmatters);
@@ -525,7 +524,7 @@ pub fn list(
         .iter()
         .map(|fm| Value::Object(crate::view::frontmatter_object(fm)))
         .collect();
-    Ok(page(objects, offset, limit))
+    Ok(page(objects, window))
 }
 
 /// Items ready to work on now (open/in_progress, all hard deps closed, no
@@ -533,7 +532,7 @@ pub fn list(
 pub fn ready(
     store: &ItemStore,
     filters: &crate::Filters,
-    limit: Option<usize>,
+    window: crate::view::Page,
 ) -> Result<Value, CloveError> {
     let (frontmatters, _errors) = store.scan_frontmatter()?;
     let by_id: std::collections::HashMap<CloveId, ItemFrontmatter> = frontmatters
@@ -549,7 +548,7 @@ pub fn ready(
         .filter(|fm| filters.matches(fm))
         .map(|fm| Value::Object(crate::view::frontmatter_object(fm)))
         .collect();
-    Ok(page(objects, 0, limit))
+    Ok(page(objects, window))
 }
 
 /// Items blocked by open or (with `include_warnings`) missing deps, each with a
@@ -557,7 +556,7 @@ pub fn ready(
 pub fn blocked(
     store: &ItemStore,
     filters: &crate::Filters,
-    limit: Option<usize>,
+    window: crate::view::Page,
 ) -> Result<Value, CloveError> {
     let (frontmatters, _errors) = store.scan_frontmatter()?;
     let by_id: std::collections::HashMap<CloveId, ItemFrontmatter> = frontmatters
@@ -604,12 +603,16 @@ pub fn blocked(
             Value::Object(obj)
         })
         .collect();
-    Ok(page(objects, 0, limit))
+    Ok(page(objects, window))
 }
 
 /// Case-insensitive substring search over title/labels/body; title matches rank
 /// first, then labels, then body. Returns full item objects, paginated.
-pub fn search(store: &ItemStore, text: &str, limit: Option<usize>) -> Result<Value, CloveError> {
+pub fn search(
+    store: &ItemStore,
+    text: &str,
+    window: crate::view::Page,
+) -> Result<Value, CloveError> {
     let needle = text.to_lowercase();
     let items = store.list()?;
     let mut hits: Vec<(u8, Value)> = Vec::new();
@@ -631,7 +634,7 @@ pub fn search(store: &ItemStore, text: &str, limit: Option<usize>) -> Result<Val
     }
     hits.sort_by_key(|a| a.0);
     let objects: Vec<Value> = hits.into_iter().map(|(_, o)| o).collect();
-    Ok(page(objects, 0, limit))
+    Ok(page(objects, window))
 }
 
 /// The dependency tree rooted at `id` to `depth`, as a nested JSON object.
@@ -659,15 +662,20 @@ fn tree_to_json(node: &crate::DepTreeNode) -> Value {
     })
 }
 
-/// Apply offset/limit and wrap a list of item values into the standard payload.
-fn page(objects: Vec<Value>, offset: usize, limit: Option<usize>) -> Value {
-    let total = objects.len();
-    let items: Vec<Value> = objects
-        .into_iter()
-        .skip(offset)
-        .take(limit.unwrap_or(usize::MAX))
-        .collect();
-    json!({ "total": total, "returned": items.len(), "offset": offset, "items": items })
+/// Apply the window and wrap a list of item values into the standard payload.
+///
+/// `limit` is echoed back so a caller can see the effective page size without
+/// knowing the surface's default (`0` = unlimited, the same encoding it passes
+/// in).
+fn page(objects: Vec<Value>, window: crate::view::Page) -> Value {
+    let (items, total) = window.apply(objects);
+    json!({
+        "total": total,
+        "returned": items.len(),
+        "offset": window.offset,
+        "limit": window.reported_limit(),
+        "items": items,
+    })
 }
 
 /// The item's relative path under the repo root (best effort).
@@ -687,6 +695,7 @@ pub fn reload(store: &ItemStore, id: &CloveId) -> Result<Item, CloveError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::view::Page;
     use tempfile::TempDir;
 
     fn store() -> (TempDir, ItemStore) {
@@ -1078,11 +1087,11 @@ mod tests {
         let b = new_id(&store, "b");
         dep_add(&store, &a, &b, Utc::now()).unwrap(); // a blocked by open b
 
-        let all = list(&store, &crate::Filters::default(), 0, None).unwrap();
+        let all = list(&store, &crate::Filters::default(), Page::unlimited()).unwrap();
         assert_eq!(all["total"], 2);
         assert_eq!(all["items"].as_array().unwrap().len(), 2);
 
-        let ready_v = ready(&store, &crate::Filters::default(), None).unwrap();
+        let ready_v = ready(&store, &crate::Filters::default(), Page::unlimited()).unwrap();
         let ready_ids: Vec<&str> = ready_v["items"]
             .as_array()
             .unwrap()
@@ -1091,7 +1100,7 @@ mod tests {
             .collect();
         assert_eq!(ready_ids, vec![b.as_str()], "only b is ready");
 
-        let blocked_v = blocked(&store, &crate::Filters::default(), None).unwrap();
+        let blocked_v = blocked(&store, &crate::Filters::default(), Page::unlimited()).unwrap();
         let items = blocked_v["items"].as_array().unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["id"], a.as_str());
@@ -1105,15 +1114,14 @@ mod tests {
             new_id(&store, &format!("t{i}"));
         }
         // Edge: limit caps the page but total reflects the full match count.
-        let v = list(&store, &crate::Filters::default(), 0, Some(2)).unwrap();
+        let v = list(&store, &crate::Filters::default(), Page::new(0, Some(2), 0)).unwrap();
         assert_eq!(v["total"], 5);
         assert_eq!(v["returned"], 2);
         // Filter that matches nothing → empty page, total 0.
         let none = list(
             &store,
             &crate::Filters::parse(Some("closed"), None, None, None, None).unwrap(),
-            0,
-            None,
+            Page::unlimited(),
         )
         .unwrap();
         assert_eq!(none["total"], 0);
@@ -1146,7 +1154,7 @@ mod tests {
             Utc::now(),
         )
         .unwrap();
-        let v = search(&store, "WIDGET", None).unwrap();
+        let v = search(&store, "WIDGET", Page::unlimited()).unwrap();
         let titles: Vec<&str> = v["items"]
             .as_array()
             .unwrap()
@@ -1155,7 +1163,10 @@ mod tests {
             .collect();
         assert_eq!(titles, vec!["widget", "other"], "title hit ranks first");
         // Negative: a needle present nowhere returns nothing.
-        assert_eq!(search(&store, "zzzzz", None).unwrap()["total"], 0);
+        assert_eq!(
+            search(&store, "zzzzz", Page::unlimited()).unwrap()["total"],
+            0
+        );
     }
 
     #[test]

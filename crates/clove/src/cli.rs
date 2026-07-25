@@ -427,6 +427,11 @@ pub struct CommentsArgs {
     /// Show at most this many (most recent) comments.
     #[arg(long)]
     pub limit: Option<usize>,
+    /// Skip this many of the *newest* comments, to page back through older
+    /// ones. Named for its direction: unlike `--offset` on the list commands,
+    /// this window is anchored at the newest end, not the start.
+    #[arg(long)]
+    pub skip_newest: Option<usize>,
 }
 
 #[derive(Debug, Args)]
@@ -436,6 +441,9 @@ pub struct SearchArgs {
     /// Maximum number of results (default 100; use `--limit 0` for no limit).
     #[arg(long)]
     pub limit: Option<usize>,
+    /// Skip this many results.
+    #[arg(long)]
+    pub offset: Option<usize>,
 }
 
 #[derive(Debug, Args)]

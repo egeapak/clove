@@ -19,6 +19,8 @@ use serde_json::Value;
 
 use crate::args::*;
 use crate::shape::{self, Shape};
+use clove_core::view::defaults::{COMMENTS_LIMIT, DEP_TREE_DEPTH, STATS_TOP};
+use clove_core::view::Page;
 
 /// Shared, cheap-to-clone context for the tools.
 #[derive(Clone)]
@@ -88,7 +90,7 @@ impl Engine {
     pub fn ready(&self, a: FilterArgs) -> Result<Value, String> {
         let filters = a.to_filters()?;
         let shaping = shaping(&a.shape);
-        ops::ready(&self.store(), &filters, limit(a.limit, 50))
+        ops::ready(&self.store(), &filters, window(a.offset, a.limit))
             .map(|v| shape::apply(v, &shaping))
             .map_err(stringify)
     }
@@ -96,9 +98,13 @@ impl Engine {
     pub fn blocked(&self, a: BlockedArgs) -> Result<Value, String> {
         let filters = a.filter.to_filters()?;
         let shaping = shaping(&a.filter.shape);
-        ops::blocked(&self.store(), &filters, limit(a.filter.limit, 50))
-            .map(|v| shape::apply(v, &shaping))
-            .map_err(stringify)
+        ops::blocked(
+            &self.store(),
+            &filters,
+            window(a.filter.offset, a.filter.limit),
+        )
+        .map(|v| shape::apply(v, &shaping))
+        .map_err(stringify)
     }
 
     pub fn list(&self, a: ListArgs) -> Result<Value, String> {
@@ -107,8 +113,7 @@ impl Engine {
         ops::list(
             &self.store(),
             &filters,
-            a.offset.unwrap_or(0) as usize,
-            limit(a.filter.limit, 50),
+            window(a.filter.offset, a.filter.limit),
         )
         .map(|v| shape::apply(v, &shaping))
         .map_err(stringify)
@@ -124,7 +129,7 @@ impl Engine {
 
     pub fn search(&self, a: SearchArgs) -> Result<Value, String> {
         let shaping = shaping(&a.shape);
-        ops::search(&self.store(), &a.text, limit(a.limit, 50))
+        ops::search(&self.store(), &a.text, window(a.offset, a.limit))
             .map(|v| shape::apply(v, &shaping))
             .map_err(stringify)
     }
@@ -135,7 +140,7 @@ impl Engine {
             &self.store(),
             &id,
             a.skip_newest.unwrap_or(0) as usize,
-            limit(a.limit, 50),
+            Page::new(0, a.limit.map(|n| n as usize), COMMENTS_LIMIT).limit,
         )
         .map_err(stringify)
     }
@@ -147,13 +152,18 @@ impl Engine {
         // `children` of every leaf — puts the payload outside its published v1
         // schema. The schema-legality argument for compacting items comes from
         // `item.json`'s much smaller `required` set and does not transfer here.
-        ops::dep_tree(&self.store(), &id, a.depth.unwrap_or(5) as usize).map_err(stringify)
+        ops::dep_tree(
+            &self.store(),
+            &id,
+            a.depth.unwrap_or(DEP_TREE_DEPTH as u64) as usize,
+        )
+        .map_err(stringify)
     }
 
     pub fn stats(&self, a: StatsArgs) -> Result<Value, String> {
         ops::stats(
             &self.store(),
-            a.top.unwrap_or(10) as usize,
+            a.top.unwrap_or(STATS_TOP as u64) as usize,
             !a.no_epics.unwrap_or(false),
             Utc::now(),
         )
@@ -267,13 +277,13 @@ fn shaping(a: &ShapeArgs) -> Shape {
     }
 }
 
-/// `--limit` semantics: absent → `default`; `0` → unlimited; `n` → `n`.
-fn limit(arg: Option<u64>, default: usize) -> Option<usize> {
-    match arg {
-        None => Some(default),
-        Some(0) => None,
-        Some(n) => Some(n as usize),
-    }
+/// The MCP read window, through the shared limit contract.
+fn window(offset: Option<u64>, limit: Option<u64>) -> Page {
+    Page::new(
+        offset.unwrap_or(0) as usize,
+        limit.map(|n| n as usize),
+        clove_core::view::defaults::MCP_LIMIT,
+    )
 }
 
 fn parse_id(raw: &str) -> Result<CloveId, String> {

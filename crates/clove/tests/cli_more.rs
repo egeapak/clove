@@ -539,7 +539,106 @@ fn clove_dir_flag_points_at_explicit_clove_dir() {
     assert!(ids_of(&v).contains(&id));
 }
 
+/// `ready`, `blocked`, `search` and `ls` all take the same `--offset`/`--limit`
+/// and report the same `_meta`. `search --offset` is new: it previously pinned
+/// the offset to 0 while still advertising a `--limit`, so anything past the
+/// first page was unreachable from the CLI.
+#[test]
+fn every_list_command_pages_the_same_way() {
+    let dir = init_repo();
+    let blocker = new_item(dir.path(), "paging blocker", &[]);
+    for i in 0..5 {
+        new_item(
+            dir.path(),
+            &format!("paging item {i}"),
+            &["--dep", &blocker],
+        );
+    }
+
+    for (cmd, extra, total) in [
+        ("blocked", vec![], 5),
+        ("ls", vec![], 6),
+        ("search", vec!["paging"], 6),
+    ] {
+        let run = |args: &[&str]| {
+            let mut argv = vec![cmd];
+            argv.extend(extra.iter().copied());
+            argv.extend(["--no-index"]);
+            argv.extend(args.iter().copied());
+            json_ok(clove(dir.path()).args(argv))
+        };
+
+        let all = run(&["--limit", "0"]);
+        assert_eq!(
+            all["data"].as_array().unwrap().len(),
+            total,
+            "{cmd}: --limit 0 is unlimited"
+        );
+        let all_ids = ids_of(&all);
+
+        let page = run(&["--offset", "2", "--limit", "2"]);
+        assert_eq!(page["_meta"]["total"], total, "{cmd}: total is pre-window");
+        assert_eq!(
+            page["_meta"]["returned"], 2,
+            "{cmd}: returned is post-window"
+        );
+        assert_eq!(page["_meta"]["offset"], 2, "{cmd}: offset is echoed");
+        assert_eq!(page["_meta"]["limit"], 2, "{cmd}: limit is echoed");
+        assert_eq!(
+            ids_of(&page),
+            all_ids[2..4].to_vec(),
+            "{cmd}: --offset skips into the same order --limit 0 returns"
+        );
+
+        // Past the end is an empty page, not an error or a clamp to the last one.
+        let past = run(&["--offset", "99"]);
+        assert_eq!(past["data"].as_array().unwrap().len(), 0, "{cmd}: past end");
+        assert_eq!(past["_meta"]["total"], total, "{cmd}: total survives it");
+
+        // No flag → the CLI default, echoed back rather than left to folklore.
+        assert_eq!(run(&[])["_meta"]["limit"], 100, "{cmd}: default limit");
+    }
+
+    // `ready` shares the contract even though only the blocker is ready.
+    let ready = json_ok(clove(dir.path()).args(["ready", "--no-index", "--offset", "1"]));
+    assert_eq!(ready["_meta"]["total"], 1);
+    assert_eq!(ready["data"].as_array().unwrap().len(), 0);
+    let ready = json_ok(clove(dir.path()).args(["ready", "--no-index"]));
+    assert_eq!(ids_of(&ready), vec![blocker]);
+}
+
 // --- comments --limit -----------------------------------------------------
+
+/// `comments` pages from the *newest* end, and `--limit 0` means unlimited —
+/// the same decoding every other surface uses. It used to hand the raw value
+/// straight through, so `--limit 0` returned no comments at all.
+#[test]
+fn comments_page_from_the_newest_end() {
+    let dir = init_repo();
+    let id = new_item(dir.path(), "Discussed", &[]);
+    for msg in ["first", "second", "third"] {
+        clove(dir.path())
+            .args(["comment", &id, msg])
+            .assert()
+            .success();
+    }
+    let bodies = |v: &serde_json::Value| -> Vec<String> {
+        v["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["body"].as_str().unwrap().to_owned())
+            .collect()
+    };
+
+    let all = json_ok(clove(dir.path()).args(["comments", &id, "--limit", "0"]));
+    assert_eq!(bodies(&all), ["first", "second", "third"]);
+
+    // `--skip-newest` steps the window back toward older comments.
+    let older =
+        json_ok(clove(dir.path()).args(["comments", &id, "--limit", "1", "--skip-newest", "1"]));
+    assert_eq!(bodies(&older), ["second"]);
+}
 
 #[test]
 fn comments_limit_returns_most_recent_n() {

@@ -98,11 +98,18 @@ pub fn list(
     format: OutputFormat,
     id: &str,
     limit: Option<usize>,
+    skip_newest: Option<usize>,
 ) -> Result<(), CloveError> {
     let id = parse_id(id)?;
     // Shared with the `clove_comments` MCP tool, so the two cannot drift on
-    // which end `--limit` keeps.
-    let page = clove_core::ops::comments(&ctx.store, &id, 0, limit)?;
+    // which end `--limit` keeps — nor, through `Page`, on what `--limit 0`
+    // means (unlimited, not "no comments").
+    let window = clove_core::view::Page::new(
+        skip_newest.unwrap_or(0),
+        limit,
+        clove_core::view::defaults::COMMENTS_LIMIT,
+    );
+    let page = clove_core::ops::comments(&ctx.store, &id, window.offset, window.limit)?;
     let items = page["items"].as_array().cloned().unwrap_or_default();
 
     match format {

@@ -73,6 +73,83 @@ impl Filters {
     }
 }
 
+/// Per-surface page-size defaults.
+///
+/// These are the *only* place a read default may be written. The numbers differ
+/// on purpose — a terminal, an agent's context budget, and a browser that
+/// virtualizes the whole store have genuinely different cost functions — but the
+/// *semantics* around them are identical everywhere, and every list response
+/// echoes the effective limit back in `_meta.limit` so the default is never
+/// folklore.
+pub mod defaults {
+    /// One screenful of terminal scrollback; `_meta.total` still reports the
+    /// full match count.
+    pub const CLI_LIMIT: usize = 100;
+    /// An agent's context budget: 50 full items is already ~20 KB.
+    pub const MCP_LIMIT: usize = 50;
+    /// Unlimited. The bundled SPA fetches the store once and virtualizes, and
+    /// the endpoint already scans and graphs everything per request, so a
+    /// serialization cap would buy nothing and silently truncate the UI.
+    pub const WEB_LIMIT: usize = 0;
+    /// `clove dep tree` / `clove_dep_tree` / `GET /deptree`.
+    pub const DEP_TREE_DEPTH: usize = 5;
+    /// `clove stats --top`.
+    pub const STATS_TOP: usize = 10;
+    /// `clove comments` / `clove_comments`.
+    pub const COMMENTS_LIMIT: usize = 50;
+}
+
+/// An offset/limit window over a result set.
+///
+/// The single decoding of the limit contract, shared by every surface:
+/// **absent → that surface's default; `0` → unlimited; `n` → at most `n`**.
+/// Before this existed the three surfaces each parsed it inline and disagreed —
+/// most visibly, `?limit=0` on the web API returned *zero* rows where the CLI
+/// and MCP returned *everything*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Page {
+    pub offset: usize,
+    /// `None` is unlimited.
+    pub limit: Option<usize>,
+}
+
+impl Page {
+    /// Decode a raw `--limit`/`?limit=`/`"limit"` value against a default.
+    pub fn new(offset: usize, raw_limit: Option<usize>, default: usize) -> Page {
+        let limit = match raw_limit.unwrap_or(default) {
+            0 => None,
+            n => Some(n),
+        };
+        Page { offset, limit }
+    }
+
+    /// Everything, from the start.
+    pub fn unlimited() -> Page {
+        Page {
+            offset: 0,
+            limit: None,
+        }
+    }
+
+    /// Apply the window, returning `(page, total)` where `total` is always the
+    /// match count *before* pagination.
+    pub fn apply<T>(&self, all: Vec<T>) -> (Vec<T>, usize) {
+        let total = all.len();
+        let page = all
+            .into_iter()
+            .skip(self.offset)
+            .take(self.limit.unwrap_or(usize::MAX))
+            .collect();
+        (page, total)
+    }
+
+    /// The effective limit as it appears in `_meta.limit`: `0` for unlimited,
+    /// matching the encoding callers pass in.
+    pub fn reported_limit(&self) -> usize {
+        self.limit.unwrap_or(0)
+    }
+}
+
 /// Sort frontmatter in place by `(priority, topological_rank, id)` — the
 /// canonical list order shared by the file and index paths.
 pub fn sort_by_rank(items: &mut [ItemFrontmatter], ranks: &HashMap<CloveId, usize>) {
@@ -282,6 +359,45 @@ mod tests {
         // Edge: a missing rank sorts last (usize::MAX) — a is p2 anyway, but
         // rank_of must report MAX for the absent id.
         assert_eq!(rank_of(&ranks, &a.id), usize::MAX);
+    }
+
+    #[test]
+    fn page_decodes_the_limit_contract() {
+        // Absent → the surface default.
+        assert_eq!(Page::new(0, None, 100).limit, Some(100));
+        // 0 → unlimited, everywhere. This is the case the web API used to read
+        // as "return nothing".
+        assert_eq!(Page::new(0, Some(0), 100).limit, None);
+        // n → n, and n may exceed the default.
+        assert_eq!(Page::new(0, Some(7), 100).limit, Some(7));
+        assert_eq!(Page::new(0, Some(500), 100).limit, Some(500));
+        // A default of 0 means the surface is unlimited by default.
+        assert_eq!(Page::new(0, None, 0).limit, None);
+    }
+
+    #[test]
+    fn page_reports_total_before_pagination() {
+        let all: Vec<u8> = (0..10).collect();
+        let (rows, total) = Page::new(2, Some(3), 100).apply(all.clone());
+        assert_eq!(rows, vec![2, 3, 4]);
+        assert_eq!(total, 10, "total is the match count, not the page length");
+
+        // An offset past the end is an empty page, not a panic.
+        let (rows, total) = Page::new(99, Some(3), 100).apply(all.clone());
+        assert!(rows.is_empty());
+        assert_eq!(total, 10);
+
+        // Unlimited ignores the limit but still honours the offset.
+        let (rows, total) = Page::new(8, Some(0), 100).apply(all);
+        assert_eq!(rows, vec![8, 9]);
+        assert_eq!(total, 10);
+    }
+
+    #[test]
+    fn reported_limit_round_trips_the_wire_encoding() {
+        assert_eq!(Page::new(0, Some(0), 100).reported_limit(), 0);
+        assert_eq!(Page::new(0, Some(25), 100).reported_limit(), 25);
+        assert_eq!(Page::new(0, None, 50).reported_limit(), 50);
     }
 
     #[test]

@@ -159,6 +159,38 @@ async fn list_returns_envelope_with_items() {
     assert!(body.contains("\"total\":2"));
 }
 
+/// The web API decodes `limit` through the same shared `Page` as the CLI and
+/// MCP: absent → the web default (unlimited), `0` → unlimited, `n` → at most
+/// `n`, and `total` is always the pre-pagination count. `?limit=0` used to be
+/// taken literally here and returned *zero* rows — the exact opposite of what
+/// the same query means on every other surface.
+#[tokio::test]
+async fn list_pages_on_the_shared_limit_contract() {
+    let (_tmp, addr, _id) = spawn().await;
+
+    for (query, returned) in [("", 2), ("?limit=0", 2), ("?limit=1", 1)] {
+        let (status, body) = get(addr, &format!("/api/v1/items{query}")).await;
+        assert!(status.contains("200"), "{query}: status {status}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            v["data"].as_array().unwrap().len(),
+            returned,
+            "{query}: rows"
+        );
+        assert_eq!(v["_meta"]["total"], 2, "{query}: total is pre-window");
+        assert_eq!(v["_meta"]["returned"], returned, "{query}: returned");
+    }
+
+    // `offset` skips into the same order the unpaginated call returns.
+    let (_, all) = get(addr, "/api/v1/items?limit=0").await;
+    let all: serde_json::Value = serde_json::from_str(&all).unwrap();
+    let (_, second) = get(addr, "/api/v1/items?offset=1&limit=1").await;
+    let second: serde_json::Value = serde_json::from_str(&second).unwrap();
+    assert_eq!(second["data"][0]["id"], all["data"][1]["id"]);
+    assert_eq!(second["_meta"]["offset"], 1);
+    assert_eq!(second["_meta"]["limit"], 1, "the effective limit is echoed");
+}
+
 #[tokio::test]
 async fn detail_includes_computed_fields() {
     let (_tmp, addr, id) = spawn().await;

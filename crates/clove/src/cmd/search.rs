@@ -57,6 +57,7 @@ pub fn run(
     // Same limit contract as every other list command: no flag → default cap,
     // `--limit 0` → unlimited.
     let limit = effective_limit(args.limit);
+    let offset = args.offset.unwrap_or(0);
 
     // Daemon fast path: the daemon runs the FTS over its hot index and returns
     // matched ids; we still read those files for full detail, so the output is
@@ -79,7 +80,7 @@ pub fn run(
             objects,
             ListOpts {
                 total,
-                offset: 0,
+                offset,
                 limit,
                 fields: None,
                 compact: false,
@@ -121,7 +122,7 @@ pub fn run(
         objects,
         ListOpts {
             total,
-            offset: 0,
+            offset,
             limit,
             fields: None,
             compact: false,

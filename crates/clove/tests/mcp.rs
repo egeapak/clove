@@ -432,6 +432,106 @@ fn comments_round_trip_through_mcp() {
     s.shutdown();
 }
 
+/// Every list-shaped read tool honours the *same* `offset`/`limit` contract:
+/// absent → the surface default, `0` → unlimited, `n` → at most `n`; `total` is
+/// always the pre-pagination match count and `limit` is echoed back.
+///
+/// Before the shared `Page` existed only `clove_list` had an `offset` at all —
+/// `clove_ready` / `clove_blocked` / `clove_search` hard-coded it to zero, so an
+/// agent that hit the limit had no way to reach the rest of the matches.
+#[test]
+fn every_list_tool_pages_the_same_way() {
+    let dir = init_repo();
+    let mut s = Session::start(dir.path());
+
+    // One blocker plus five items that depend on it: `blocked` sees the five,
+    // `ready` sees the blocker alone once the five are wired up.
+    let blocker = s.call(2, "clove_new", json!({ "title": "page blocker" }));
+    let blocker = blocker["structuredContent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for n in 0..5 {
+        let r = s.call(
+            3,
+            "clove_new",
+            json!({ "title": format!("page item {n}"), "deps": [blocker] }),
+        );
+        assert_ne!(r["isError"], true, "create failed: {r}");
+    }
+
+    // Ids in the tool's own order, so the paging assertions below compare
+    // against ground truth rather than a guess about the sort.
+    let ids = |s: &mut Session, tool: &str, args: Value| -> Vec<String> {
+        let r = s.call(9, tool, args);
+        assert_ne!(r["isError"], true, "{tool} failed: {r}");
+        r["structuredContent"]["items"]
+            .as_array()
+            .expect("items array")
+            .iter()
+            .map(|i| i["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+
+    for (tool, args, expected_total) in [
+        ("clove_blocked", json!({}), 5),
+        ("clove_list", json!({}), 6),
+        ("clove_search", json!({ "text": "page" }), 6),
+    ] {
+        let with = |extra: Value| -> Value {
+            let mut merged = args.as_object().unwrap().clone();
+            for (k, v) in extra.as_object().unwrap() {
+                merged.insert(k.clone(), v.clone());
+            }
+            Value::Object(merged)
+        };
+
+        // The unpaginated order is the reference for every window below.
+        let all = ids(&mut s, tool, with(json!({ "limit": 0 })));
+        assert_eq!(all.len(), expected_total, "{tool}: limit 0 is unlimited");
+
+        let page = s.call(9, tool, with(json!({ "offset": 2, "limit": 2 })));
+        let meta = &page["structuredContent"];
+        assert_eq!(meta["total"], expected_total, "{tool}: total is pre-window");
+        assert_eq!(meta["returned"], 2, "{tool}: returned is post-window");
+        assert_eq!(meta["offset"], 2, "{tool}: offset is echoed");
+        assert_eq!(meta["limit"], 2, "{tool}: limit is echoed");
+        let windowed: Vec<String> = meta["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["id"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(
+            windowed,
+            all[2..4],
+            "{tool}: offset skips, it does not clamp"
+        );
+
+        // Walking past the end is an empty page, not an error or a wrap-around.
+        let past = s.call(9, tool, with(json!({ "offset": 99 })));
+        assert_eq!(past["structuredContent"]["returned"], 0, "{tool}: past end");
+        assert_eq!(
+            past["structuredContent"]["total"], expected_total,
+            "{tool}: total survives an out-of-range offset"
+        );
+    }
+
+    // `clove_ready` shares the contract even though only the blocker is ready.
+    let ready = s.call(9, "clove_ready", json!({ "offset": 1 }));
+    assert_eq!(ready["structuredContent"]["total"], 1);
+    assert_eq!(ready["structuredContent"]["returned"], 0);
+    assert_eq!(ids(&mut s, "clove_ready", json!({})), vec![blocker]);
+
+    // The default is the MCP default, echoed back rather than left to folklore.
+    assert_eq!(
+        s.call(9, "clove_list", json!({}))["structuredContent"]["limit"],
+        50
+    );
+
+    s.shutdown();
+}
+
 /// Read results are compacted by default and can be projected to a field
 /// subset. Both cut what an agent has to read; neither changes what the CLI,
 /// the web API, or `export json` produce.

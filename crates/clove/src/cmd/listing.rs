@@ -18,16 +18,12 @@ pub use clove_core::view::Filters;
 
 /// Default cap on list output, so `ls` on a large repo stays snappy (the index
 /// steps only this many rows). `_meta.total` still reports the full match count.
-pub const DEFAULT_LIST_LIMIT: usize = 100;
+pub use clove_core::view::defaults::CLI_LIMIT as DEFAULT_LIST_LIMIT;
 
-/// Resolve the effective page limit: `None` flag → the default cap; `--limit 0`
-/// → unlimited; `--limit n` → `n`.
+/// Resolve the effective page limit through the shared contract: `None` flag →
+/// the CLI default; `--limit 0` → unlimited; `--limit n` → `n`.
 pub fn effective_limit(arg: Option<usize>) -> Option<usize> {
-    match arg {
-        None => Some(DEFAULT_LIST_LIMIT),
-        Some(0) => None,
-        Some(n) => Some(n),
-    }
+    clove_core::view::Page::new(0, arg, DEFAULT_LIST_LIMIT).limit
 }
 
 /// Pagination, projection, and metadata options for [`emit`].
@@ -125,6 +121,7 @@ pub fn emit(format: OutputFormat, objects: Vec<ListObject>, opts: ListOpts<'_>) 
                 print_json_list(
                     values,
                     json!({
+                        "limit": opts.limit.unwrap_or(0),
                         "total": opts.total,
                         "returned": page.len(),
                         "offset": opts.offset,

@@ -35,6 +35,8 @@ pub struct FilterArgs {
     pub priority: Option<u8>,
     /// Max results (0 = no limit; default 50).
     pub limit: Option<u64>,
+    /// Skip this many results.
+    pub offset: Option<u64>,
     #[serde(flatten)]
     pub shape: ShapeArgs,
 }
@@ -51,8 +53,6 @@ pub struct BlockedArgs {
 pub struct ListArgs {
     #[serde(flatten)]
     pub filter: FilterArgs,
-    /// Skip this many results.
-    pub offset: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -71,6 +71,8 @@ pub struct SearchArgs {
     pub text: String,
     /// Max results (0 = no limit; default 50).
     pub limit: Option<u64>,
+    /// Skip this many results.
+    pub offset: Option<u64>,
     #[serde(flatten)]
     pub shape: ShapeArgs,
 }

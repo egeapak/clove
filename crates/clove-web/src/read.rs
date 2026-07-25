@@ -31,6 +31,22 @@ fn csv(params: &HashMap<String, String>, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Parse `?offset=`/`?limit=` through the shared contract.
+///
+/// `?limit=0` means **unlimited**, as it does on the CLI and MCP. It previously
+/// meant "return nothing" here — the same parameter with the opposite meaning on
+/// one surface out of three.
+fn page_window(params: &HashMap<String, String>) -> clove_core::view::Page {
+    clove_core::view::Page::new(
+        params
+            .get("offset")
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(0),
+        params.get("limit").and_then(|s| s.parse::<usize>().ok()),
+        clove_core::view::defaults::WEB_LIMIT,
+    )
+}
+
 /// Load the whole store's frontmatter and the derived graph context.
 fn load(state: &AppState) -> Result<(Vec<ItemFrontmatter>, GraphContext), ApiError> {
     let (frontmatters, _errors) = state.store.scan_frontmatter()?;
@@ -139,27 +155,23 @@ pub async fn list_items(
 
     sort_items(&mut selected, &params, ctx.graph());
 
-    let total = selected.len();
-    let offset = params
-        .get("offset")
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(0);
-    let limit = params
-        .get("limit")
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(usize::MAX);
-
-    let page: Vec<Value> = selected
+    let window = page_window(&params);
+    let rows: Vec<Value> = selected
         .iter()
-        .skip(offset)
-        .take(limit)
         .map(|fm| Value::Object(frontmatter_value(fm, &ctx)))
         .collect();
+    let (page, total) = window.apply(rows);
     let returned = page.len();
 
     Ok(ok(
         json!(page),
-        json!({ "total": total, "returned": returned, "offset": offset, "source": state.source }),
+        json!({
+            "total": total,
+            "returned": returned,
+            "offset": window.offset,
+            "limit": window.reported_limit(),
+            "source": state.source,
+        }),
     ))
 }
 
@@ -179,7 +191,12 @@ pub async fn get_comments(
     Query(params): Query<HashMap<String, String>>,
 ) -> ApiResult {
     let id = parse_id(&id)?;
-    let limit = params.get("limit").and_then(|s| s.parse::<usize>().ok());
+    let limit = clove_core::view::Page::new(
+        0,
+        params.get("limit").and_then(|s| s.parse::<usize>().ok()),
+        clove_core::view::defaults::COMMENTS_LIMIT,
+    )
+    .limit;
     // Shared with `clove comments` and the `clove_comments` MCP tool. This
     // endpoint used to `truncate`, keeping the *oldest* n while both other
     // surfaces kept the newest — the same flag name with the opposite meaning.
@@ -201,7 +218,7 @@ pub async fn get_deptree(
     let depth = params
         .get("depth")
         .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(5);
+        .unwrap_or(clove_core::view::defaults::DEP_TREE_DEPTH);
     let (_frontmatters, ctx) = load(&state)?;
     let tree = ctx
         .graph()
@@ -254,7 +271,7 @@ pub async fn get_stats(
         top: params
             .get("top")
             .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(10),
+            .unwrap_or(clove_core::view::defaults::STATS_TOP),
         include_epics: params.get("no_epics").map(String::as_str) != Some("true"),
     };
     let report = compute_stats(&frontmatters, ctx.graph(), chrono::Utc::now(), opts);

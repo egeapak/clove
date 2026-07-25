@@ -27,8 +27,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`clove ls`/`ready`/`blocked` accept `--compact`**, applying the same
   null/empty-key omission the MCP read tools use, so the same query shapes
   identically on either surface.
+- **`offset` on every list read.** `clove search --offset`, and `offset` on the
+  `clove_ready`, `clove_blocked` and `clove_search` MCP tools. All four
+  advertised a `limit` while pinning the offset to zero, so anything past the
+  first page was simply unreachable — an agent that hit the cap had no way to
+  ask for the rest. `clove comments` gains `--skip-newest`, matching the
+  `clove_comments` argument of the same name.
 
 ### Changed
+
+- **One limit contract, shared by every surface.** `clove_core::view::Page`
+  decodes `offset`/`limit` once — *absent → that surface's default, `0` →
+  unlimited, `n` → at most `n`* — and the CLI, MCP, web API and daemon all route
+  through it. Each surface keeps its own default (CLI 100, MCP 50, web
+  unlimited), but those numbers now live in one module rather than as literals
+  scattered across the call sites, and every list response echoes the effective
+  limit back as `_meta.limit` / `"limit"` so the default is discoverable rather
+  than folklore. Two disagreements this removes:
+
+  - `GET /api/v1/items?limit=0` returned *zero* rows; on the CLI and MCP the same
+    value means *everything*. It now means everything on all three.
+  - `clove comments --limit 0` returned no comments, for the same reason, and
+    had no default cap at all where `clove_comments` capped at 50.
 
 - **`clove show` no longer scans the whole store.** `ready`/`blocked_by` are
   computed from the item's own dependency closure, falling back to the

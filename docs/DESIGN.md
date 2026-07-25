@@ -722,18 +722,18 @@ clove dep cycle [--fail-on-cycle] [--format json]
 clove ready [--status open|in_progress] [--type T] [--label L]
             [--assignee A] [--priority N] [--limit N] [--offset N]
             [--format json] [--fields F,...] [--include-warnings]
-clove blocked [same filters] [--format json] [--fields F,...]
+clove blocked [same filters] [--limit N] [--offset N] [--format json] [--fields F,...]
 clove ls [--status S] [--type T] [--label L] [--assignee A]
          [--priority N] [--sort id|priority|created|updated]
          [--asc|--desc] [--limit N] [--offset N]
          [--format json] [--fields F,...]
 clove query [--filter EXPR] [--format json] [--fields F,...]
             # also reads JSON filter object from stdin when stdin is non-TTY
-clove search <text> [--limit N] [--format json]
+clove search <text> [--limit N] [--offset N] [--format json]
 clove stats [--top N] [--no-epics] [--snapshot]      # work-item analytics + daemon/index telemetry
             [--history [--since RFC3339] [--limit N]] [--format json]
 clove comment <id> <message> [--format json]
-clove comments <id> [--limit N] [--format json]
+clove comments <id> [--limit N] [--skip-newest N] [--format json]
 clove reindex [--force] [--format json]
 clove import [--format json] <json|jsonl> <file> [--dry-run] [--overwrite]  # BUILT-IN native restore (inverse of export);
 clove import [--format json] <beads|tk> <src> [--dry-run]   # tk/beads are clove-import-<p> plugins;
@@ -850,7 +850,9 @@ regardless of warnings.
 }
 ```
 
-`total` is the unfiltered count; `returned` is `len(data)` after `--limit`.
+`total` is the unfiltered count; `returned` is `len(data)` after `--limit`; `limit`
+is the limit actually in force (`0` = unlimited), echoed so a client can tell a
+short page from an exhausted one without knowing the surface's default.
 
 ### 7.6 Exit Code Table
 
@@ -939,9 +941,26 @@ Clap's default exit code (2 for argument errors) is overridden to match this tab
 
 ### 7.8 Pagination
 
-All list commands support `--limit N` (default 0 = unlimited for `--format json`; 50 for
-human) and `--offset N`. Cursor-based pagination is deferred to post-v1; offset is sufficient
-for M0–M2.
+Every list read on every surface — the CLI, the MCP tools, the web API, and the
+daemon RPCs — decodes `offset`/`limit` through one implementation,
+`clove_core::view::Page`:
+
+- **absent** → that surface's default,
+- **`0`** → unlimited,
+- **`n`** → at most `n`.
+
+The defaults differ (a terminal, an agent's context budget, and a browser that
+virtualizes the whole store have different cost functions) but live in exactly
+one place, `clove_core::view::defaults`: CLI 100, MCP 50, web unlimited,
+comments 50. `_meta.total` is always the match count *before* the window, and
+`_meta.limit` echoes the effective limit, so the default is discoverable from a
+response rather than by reading this document.
+
+`clove comments` / `clove_comments` page from the opposite end — the window is
+anchored at the *newest* comment — so its skip argument is named `--skip-newest`
+/ `skip_newest` rather than `offset`.
+
+Cursor-based pagination is deferred to post-v1; offset is sufficient for M0–M2.
 
 ### 7.9 `clove agent-doc`
 
