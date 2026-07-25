@@ -39,25 +39,11 @@ pub struct FilterArgs {
     pub shape: ShapeArgs,
 }
 
-/// `clove_ready` — the shared filters plus the dangling-dep opt-in.
-#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
-#[serde(crate = "rmcp::serde")]
-pub struct ReadyArgs {
-    #[serde(flatten)]
-    pub filter: FilterArgs,
-    /// Also return items whose only obstacle is a dangling (missing)
-    /// dependency. They are not workable, but they are a data problem worth
-    /// surfacing rather than hiding from both `clove_ready` and `clove_blocked`.
-    pub include_warnings: Option<bool>,
-}
-
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[serde(crate = "rmcp::serde")]
 pub struct BlockedArgs {
     #[serde(flatten)]
     pub filter: FilterArgs,
-    /// Also include items blocked only by dangling (missing) deps.
-    pub include_warnings: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]

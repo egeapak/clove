@@ -90,17 +90,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   silent total failure rather than a stale ordering. The list commands' behavior
   here is arguably the remaining bug.) `clove --deep search` now honors `--deep`,
   which it previously accepted and ignored.
-- **`clove ready --include-warnings` was accepted and ignored.** The flag is
-  documented (DESIGN §7.2) but never read, so an item whose only obstacle was a
-  dangling dependency appeared in neither `ready` nor `blocked` — invisible in
-  both directions. It now returns them. Also available as `include_warnings` on
-  the `clove_ready` MCP tool.
+- **An item whose only obstacle was a dangling (missing) dependency was
+  invisible.** It is excluded from `ready` — correctly, it is not workable — and
+  `blocked` also filtered it out unless `--include-warnings` was passed, so by
+  default a broken reference appeared in neither list. `blocked` now includes
+  such items by default, matching what `GraphStore` has always reported
+  (DESIGN §5.3) and keeping the `ready ∪ blocked ∪ closed` partition intact.
 
-  Note that neither accelerator can express the relaxed predicate — the index
-  hard-codes `has_dangling_deps = FALSE` for the ready query and the daemon's
-  request type has no field for it — so `ready --include-warnings` skips the
-  daemon and index fast paths and answers from a file scan. With the flag unset,
-  both fast paths are used exactly as before.
+  `--include-warnings` is **removed** from `ready` and `blocked` (and from the
+  `clove_ready`/`clove_blocked` MCP tools): it no longer selects anything. It was
+  documented on `ready` but never implemented there; rather than implement it —
+  which would have put one item in both `ready` and `blocked`, breaking a
+  DESIGN-stated invariant — the visibility it was meant to provide now comes from
+  `blocked`'s default.
+- **`clove blocked` omitted `blocked_by`.** The field the list exists for was
+  emitted by `ops::blocked` and the web API but not by the CLI. It now comes from
+  the same `ops::graph_terms` helper `clove show` and the MCP tools use, so the
+  ids cannot drift between surfaces.
 - **Silent lost updates in `clove status`/`start`/`close`, `clove set`, and
   `clove edit --field`.** These read the item without the store write lock and
   only took it for the write, so a concurrent writer — the web UI, an MCP agent,

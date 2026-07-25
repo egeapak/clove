@@ -394,9 +394,6 @@ pub struct FilterArgs {
     /// by default).
     #[arg(long)]
     pub compact: bool,
-    /// Include items with dangling dependencies (ready/blocked).
-    #[arg(long)]
-    pub include_warnings: bool,
 }
 
 #[derive(Debug, Args)]

@@ -87,15 +87,18 @@ impl CloveServer {
     )]
     async fn clove_ready(
         &self,
-        Parameters(a): Parameters<ReadyArgs>,
+        Parameters(a): Parameters<FilterArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let e = self.engine.clone();
         self.run(move || e.ready(a)).await
     }
 
     #[tool(
-        description = "List work items blocked by open or missing dependencies, \
-                       each with its `blocked_by` ids, ordered by (priority, topology)."
+        description = "List work items blocked by open OR missing dependencies, \
+                       each with its `blocked_by` ids, ordered by (priority, \
+                       topology). An item whose dependency id has no backing \
+                       file is blocked too — that is a broken reference worth \
+                       seeing, not a reason to omit it."
     )]
     async fn clove_blocked(
         &self,
@@ -324,7 +327,7 @@ impl ServerHandler for CloveServer {
         // Reads do file I/O (same as the tools) → run on a blocking task.
         let result = match uri.as_str() {
             READY_URI => {
-                tokio::task::spawn_blocking(move || engine.ready(ReadyArgs::default())).await
+                tokio::task::spawn_blocking(move || engine.ready(FilterArgs::default())).await
             }
             STATS_URI => {
                 tokio::task::spawn_blocking(move || engine.stats(StatsArgs::default())).await

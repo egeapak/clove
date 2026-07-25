@@ -700,50 +700,46 @@ fn search_does_not_answer_from_a_stale_index() {
     assert_eq!(titles.len(), 2, "both items match (got {titles:?})");
 }
 
-/// `--include-warnings` is documented on `ready` (DESIGN §7.2) but was accepted
-/// and silently ignored: an item whose only obstacle is a dangling dependency
-/// appeared in neither `ready` nor `blocked`.
+/// An item whose only obstacle is a dangling (missing) dependency must be
+/// visible. It is excluded from `ready` — it is genuinely not workable — so
+/// `blocked` lists it by default; previously both filtered it out and a broken
+/// reference was invisible in either direction.
+///
+/// `blocked` including it also keeps the DESIGN §5.3 partition intact
+/// (`ready ∪ blocked ∪ closed == all`, with no item in two of them), which
+/// admitting it to `ready` instead would have broken.
 #[test]
-fn ready_include_warnings_surfaces_dangling_only_items() {
+fn a_dangling_reference_is_blocked_not_invisible() {
     let dir = init_repo();
     let id = new_item(dir.path(), "dangling dep", &[]);
-    // A well-formed id with no backing item — only reachable by hand-editing,
-    // which is exactly how dangling refs arise (bad merge, partial import).
+    // Hand-edited, which is how dangling refs actually arise (bad merge,
+    // partial import) — `dep add` refuses a target that does not exist.
     let path = dir.path().join(".clove/issues").join(format!("{id}.md"));
     let text = std::fs::read_to_string(&path).unwrap();
     std::fs::write(&path, text.replace("deps: []", "deps: [proj-ZZZZZZZZ]")).unwrap();
 
-    // Excluded from `ready` by default: it is not actually workable.
-    let plain = json_ok(clove(dir.path()).args(["ready"]));
     assert!(
-        ids_of(&plain).is_empty(),
-        "a dangling dep keeps an item out of ready by default"
+        ids_of(&json_ok(clove(dir.path()).args(["ready"]))).is_empty(),
+        "a dangling dep is not workable, so it is not ready"
     );
-
-    // ...but `--include-warnings` surfaces it, mirroring `blocked`.
-    let with = json_ok(clove(dir.path()).args(["ready", "--include-warnings"]));
+    let blocked = json_ok(clove(dir.path()).args(["blocked"]));
     assert_eq!(
-        ids_of(&with),
+        ids_of(&blocked),
         vec![id.clone()],
-        "--include-warnings must admit dangling-only items"
+        "...but it must appear in blocked"
+    );
+    assert_eq!(
+        blocked["data"][0]["blocked_by"],
+        serde_json::json!(["proj-ZZZZZZZZ"]),
+        "and name the broken id"
     );
 
-    // And it must keep working once an index exists. `ready` has three paths —
-    // daemon, index, file scan — and the first version of this fix only touched
-    // the last, so the flag was still ignored in any repo that had ever been
-    // reindexed. `init_repo` creates no index, so without this the test could
-    // not see that.
+    // Same answer once an index exists — `blocked` has a daemon fast path, and
+    // this must not depend on which tier answered.
     clove(dir.path()).arg("reindex").assert().success();
-    let indexed = json_ok(clove(dir.path()).args(["ready", "--include-warnings"]));
     assert_eq!(
-        ids_of(&indexed),
+        ids_of(&json_ok(clove(dir.path()).args(["blocked"]))),
         vec![id],
-        "--include-warnings must survive the index fast path"
-    );
-    // The flag also must not leave a warning claiming the item was excluded.
-    let warnings = indexed["_meta"]["warnings"].as_array().unwrap();
-    assert!(
-        warnings.is_empty(),
-        "returned items must not also be reported as excluded: {warnings:?}"
+        "the index tier must agree"
     );
 }

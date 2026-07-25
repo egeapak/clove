@@ -85,30 +85,20 @@ impl Engine {
 
     // ---- Read tools (file-based via ops) ------------------------------------
 
-    pub fn ready(&self, a: ReadyArgs) -> Result<Value, String> {
-        let filters = a.filter.to_filters()?;
-        let shaping = shaping(&a.filter.shape);
-        ops::ready(
-            &self.store(),
-            &filters,
-            a.include_warnings.unwrap_or(false),
-            limit(a.filter.limit, 50),
-        )
-        .map(|v| shape::apply(v, &shaping))
-        .map_err(stringify)
+    pub fn ready(&self, a: FilterArgs) -> Result<Value, String> {
+        let filters = a.to_filters()?;
+        let shaping = shaping(&a.shape);
+        ops::ready(&self.store(), &filters, limit(a.limit, 50))
+            .map(|v| shape::apply(v, &shaping))
+            .map_err(stringify)
     }
 
     pub fn blocked(&self, a: BlockedArgs) -> Result<Value, String> {
         let filters = a.filter.to_filters()?;
         let shaping = shaping(&a.filter.shape);
-        ops::blocked(
-            &self.store(),
-            &filters,
-            a.include_warnings.unwrap_or(false),
-            limit(a.filter.limit, 50),
-        )
-        .map(|v| shape::apply(v, &shaping))
-        .map_err(stringify)
+        ops::blocked(&self.store(), &filters, limit(a.filter.limit, 50))
+            .map(|v| shape::apply(v, &shaping))
+            .map_err(stringify)
     }
 
     pub fn list(&self, a: ListArgs) -> Result<Value, String> {

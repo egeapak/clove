@@ -34,18 +34,9 @@ pub fn run(
     let offset = args.offset.unwrap_or(0);
     let limit = effective_limit(args.limit);
 
-    // `--include-warnings` relaxes a predicate neither accelerator can express:
-    // the index hard-codes `has_dangling_deps = FALSE` for the ready query
-    // (`clove-index/src/query.rs`), and `QueryRequest` has no field for it. Both
-    // fast paths are therefore skipped when the flag is set, rather than
-    // silently answering without it — which is how this flag came to be ignored
-    // in the first place. The file path below is always exact.
-    let accelerated = !args.include_warnings;
-
     // Daemon fast path: a running daemon serves the ready set from its hot index.
-    if let Some((objects, total, warnings)) = accelerated
-        .then(|| list_via_daemon(ctx, no_index, QueryMode::Ready, &filters, offset, limit))
-        .flatten()
+    if let Some((objects, total, warnings)) =
+        list_via_daemon(ctx, no_index, QueryMode::Ready, &filters, offset, limit)
     {
         emit(
             format,
@@ -64,20 +55,15 @@ pub fn run(
     }
 
     // Index fast path: the ready SQL replaces the in-memory graph build.
-    let indexed = if accelerated {
-        list_via_index(
-            ctx,
-            no_index,
-            deep,
-            QueryMode::Ready,
-            &filters,
-            offset,
-            limit,
-        )?
-    } else {
-        None
-    };
-    if let Some((rows, total, warnings)) = indexed {
+    if let Some((rows, total, warnings)) = list_via_index(
+        ctx,
+        no_index,
+        deep,
+        QueryMode::Ready,
+        &filters,
+        offset,
+        limit,
+    )? {
         emit(
             format,
             objects_from_lean_rows(&rows),
@@ -105,15 +91,15 @@ pub fn run(
     let (graph, _ranks) = ranks_of(&frontmatters);
     // ready_items() is already ordered by (priority, topo rank, id).
     let mut ordered: Vec<ItemFrontmatter> = graph
-        .ready_items_with(args.include_warnings)
+        .ready_items()
         .iter()
         .filter_map(|id| by_id.get(id).cloned())
         .collect();
     ordered.retain(|fm| filters.matches(fm));
 
     // Items excluded from `ready` because they reference missing dependencies.
-    // Under `--include-warnings` they were *returned*, so announcing them as
-    // excluded would contradict the payload.
+    // They are not lost: `clove blocked` lists them, with the broken ids in
+    // `blocked_by`.
     let mut warnings = Vec::new();
     let dangling: Vec<String> = frontmatters
         .iter()
@@ -125,7 +111,7 @@ pub fn run(
         })
         .map(|fm| fm.id.to_string())
         .collect();
-    if !dangling.is_empty() && !args.include_warnings {
+    if !dangling.is_empty() {
         let msg = format!(
             "{} item(s) excluded with dangling deps: {}",
             dangling.len(),

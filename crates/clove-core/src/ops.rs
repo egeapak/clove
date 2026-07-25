@@ -533,7 +533,6 @@ pub fn list(
 pub fn ready(
     store: &ItemStore,
     filters: &crate::Filters,
-    include_warnings: bool,
     limit: Option<usize>,
 ) -> Result<Value, CloveError> {
     let (frontmatters, _errors) = store.scan_frontmatter()?;
@@ -544,7 +543,7 @@ pub fn ready(
         .collect();
     let (graph, _dangling) = GraphStore::build(&frontmatters);
     let objects: Vec<Value> = graph
-        .ready_items_with(include_warnings)
+        .ready_items()
         .iter()
         .filter_map(|id| by_id.get(id))
         .filter(|fm| filters.matches(fm))
@@ -558,7 +557,6 @@ pub fn ready(
 pub fn blocked(
     store: &ItemStore,
     filters: &crate::Filters,
-    include_warnings: bool,
     limit: Option<usize>,
 ) -> Result<Value, CloveError> {
     let (frontmatters, _errors) = store.scan_frontmatter()?;
@@ -573,7 +571,10 @@ pub fn blocked(
     let mut rows: Vec<(ItemFrontmatter, Vec<String>)> = graph
         .blocked_items()
         .into_iter()
-        .filter(|b| include_warnings || !b.blocking_deps.is_empty())
+        // Dangling-only items are included, per DESIGN §5.3: `GraphStore` puts
+        // them in the blocked partition, and filtering them out here made them
+        // invisible in *both* `ready` and `blocked` — a broken reference is a
+        // data problem you need to see, not one to hide.
         .filter_map(|b| {
             by_id.get(&b.id).cloned().map(|fm| {
                 let blocked_by: Vec<String> = b
@@ -1081,7 +1082,7 @@ mod tests {
         assert_eq!(all["total"], 2);
         assert_eq!(all["items"].as_array().unwrap().len(), 2);
 
-        let ready_v = ready(&store, &crate::Filters::default(), false, None).unwrap();
+        let ready_v = ready(&store, &crate::Filters::default(), None).unwrap();
         let ready_ids: Vec<&str> = ready_v["items"]
             .as_array()
             .unwrap()
@@ -1090,7 +1091,7 @@ mod tests {
             .collect();
         assert_eq!(ready_ids, vec![b.as_str()], "only b is ready");
 
-        let blocked_v = blocked(&store, &crate::Filters::default(), false, None).unwrap();
+        let blocked_v = blocked(&store, &crate::Filters::default(), None).unwrap();
         let items = blocked_v["items"].as_array().unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["id"], a.as_str());
