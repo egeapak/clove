@@ -1,0 +1,122 @@
+{
+  "dependencies": [
+    {
+      "version_id": 10,
+      "crate_id": "clove-plugin",
+      "req": "^0.1",
+      "kind": "normal",
+      "downloads": 12
+    },
+    {
+      "version_id": 11,
+      "crate_id": "clove-plugin",
+      "req": "^0.1",
+      "kind": "normal",
+      "downloads": 40
+    },
+    {
+      "version_id": 12,
+      "crate_id": "clove-plugin",
+      "req": "^0.1",
+      "kind": "normal",
+      "downloads": 3
+    },
+    {
+      "version_id": 13,
+      "crate_id": "clove-plugin",
+      "req": "^0.1",
+      "kind": "dev",
+      "downloads": 99
+    },
+    {
+      "version_id": 14,
+      "crate_id": "clove-plugin",
+      "req": "^0.1",
+      "kind": "normal",
+      "downloads": 7
+    }
+  ],
+  "versions": [
+    {
+      "id": 10,
+      "crate": "clove-sync-gitlab",
+      "num": "0.2.0",
+      "bin_names": [
+        "clove-sync-gitlab"
+      ],
+      "has_lib": false,
+      "description": "Two-way GitLab sync",
+      "repository": "https://github.com/x/clove-sync-gitlab",
+      "published_by": {
+        "login": "some-user"
+      },
+      "yanked": false,
+      "rust_version": "1.85"
+    },
+    {
+      "id": 11,
+      "crate": "clove-sync-gitlab",
+      "num": "0.10.0",
+      "bin_names": [
+        "clove-sync-gitlab"
+      ],
+      "has_lib": false,
+      "description": "Two-way GitLab sync",
+      "repository": "https://github.com/x/clove-sync-gitlab",
+      "published_by": {
+        "login": "some-user"
+      },
+      "yanked": false,
+      "rust_version": "1.85"
+    },
+    {
+      "id": 12,
+      "crate": "clove-sync-gitlab",
+      "num": "0.11.0",
+      "bin_names": [
+        "clove-sync-gitlab"
+      ],
+      "has_lib": false,
+      "description": "Two-way GitLab sync",
+      "repository": "https://github.com/x/clove-sync-gitlab",
+      "published_by": {
+        "login": "some-user"
+      },
+      "yanked": true,
+      "rust_version": "1.85"
+    },
+    {
+      "id": 13,
+      "crate": "some-test-harness",
+      "num": "1.0.0",
+      "bin_names": [],
+      "has_lib": true,
+      "description": "Only dev-depends on clove-plugin",
+      "repository": null,
+      "published_by": {
+        "login": "other"
+      },
+      "yanked": false,
+      "rust_version": null
+    },
+    {
+      "id": 14,
+      "crate": "clove-import-jira",
+      "num": "0.1.0",
+      "bin_names": [
+        "clove-import-jira"
+      ],
+      "has_lib": false,
+      "description": "Import from Jira",
+      "repository": "https://example.com/jira",
+      "published_by": {
+        "login": "third-party"
+      },
+      "yanked": false,
+      "rust_version": null
+    }
+  ],
+  "meta": {
+    "total": 5
+  }
+}
