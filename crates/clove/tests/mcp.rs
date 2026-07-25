@@ -432,6 +432,71 @@ fn comments_round_trip_through_mcp() {
     s.shutdown();
 }
 
+/// Read results are compacted by default and can be projected to a field
+/// subset. Both cut what an agent has to read; neither changes what the CLI,
+/// the web API, or `export json` produce.
+#[test]
+fn read_results_are_compact_and_projectable() {
+    let dir = init_repo();
+    let mut s = Session::start(dir.path());
+    s.call(2, "clove_new", json!({ "title": "shape me" }));
+
+    // Default: keys that are null or empty on a plain item are gone, but a
+    // definite `false` is not.
+    let default = s.call(3, "clove_list", json!({}));
+    let row = &default["structuredContent"]["items"][0];
+    for absent in [
+        "assignee",
+        "parent",
+        "closed",
+        "labels",
+        "deps",
+        "relates",
+        "duplicates",
+        "supersedes",
+        "source_system",
+        "external_ref",
+        "schema",
+    ] {
+        assert!(row.get(absent).is_none(), "`{absent}` should be compacted");
+    }
+    assert!(row.get("id").is_some());
+    assert!(row.get("title").is_some());
+    // The page envelope is never shaped away.
+    assert_eq!(default["structuredContent"]["total"], 1);
+    assert_eq!(default["structuredContent"]["returned"], 1);
+
+    // `fields` projects, and is honoured literally.
+    let projected = s.call(4, "clove_list", json!({ "fields": ["id", "title"] }));
+    let row = &projected["structuredContent"]["items"][0];
+    assert_eq!(
+        row.as_object().unwrap().len(),
+        2,
+        "exactly the two asked for"
+    );
+    assert!(row.get("id").is_some() && row.get("title").is_some());
+
+    // `compact: false` restores the pre-existing full shape for any client that
+    // depended on it.
+    let full = s.call(5, "clove_list", json!({ "compact": false }));
+    let row = &full["structuredContent"]["items"][0];
+    assert!(row["assignee"].is_null(), "opt-out returns the null keys");
+    assert_eq!(row["labels"], json!([]));
+    assert_eq!(row["schema"], 1);
+
+    // `clove_show` shapes too, and `ready: false` survives compaction — it is an
+    // answer, not an absence.
+    let id = default["structuredContent"]["items"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let shown = s.call(6, "clove_show", json!({ "id": id }));
+    assert_eq!(shown["structuredContent"]["ready"], true);
+    assert!(shown["structuredContent"].get("assignee").is_none());
+
+    s.shutdown();
+}
+
 #[test]
 fn tool_error_is_reported_as_is_error() {
     let dir = init_repo();

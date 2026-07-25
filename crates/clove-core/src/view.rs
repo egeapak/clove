@@ -104,6 +104,42 @@ pub fn item_object(item: &Item) -> Map<String, Value> {
     frontmatter_object(&item.frontmatter)
 }
 
+/// Drop keys whose value carries no information: JSON `null` and empty arrays.
+///
+/// Booleans (including `false`), numbers, and strings (including `""`) are
+/// always kept — `ready: false` and `body: ""` are answers, not absences, and
+/// dropping them would turn a definite result into an ambiguity.
+///
+/// This is a *presentation* filter for token-sensitive consumers (the MCP read
+/// tools). [`frontmatter_object`] is deliberately left alone: the CLI's human
+/// renderer, the web DTOs, `export json`, and the GitHub sync fingerprints all
+/// depend on the full-key shape. Absent keys are v1-legal — only
+/// `id`/`title`/`status`/`type`/`priority`/`created`/`updated` are `required` in
+/// `item.json`, and the index-backed `clove ls` path has always returned a
+/// reduced shape.
+pub fn compact(obj: Map<String, Value>) -> Map<String, Value> {
+    obj.into_iter()
+        .filter_map(|(key, value)| match value {
+            Value::Null => None,
+            Value::Array(items) if items.is_empty() => None,
+            Value::Array(items) => Some((
+                key,
+                Value::Array(
+                    items
+                        .into_iter()
+                        .map(|item| match item {
+                            Value::Object(inner) => Value::Object(compact(inner)),
+                            other => other,
+                        })
+                        .collect(),
+                ),
+            )),
+            Value::Object(inner) => Some((key, Value::Object(compact(inner)))),
+            other => Some((key, other)),
+        })
+        .collect()
+}
+
 /// Restrict `obj` to the keys named in `fields`. Unknown field names are
 /// ignored. (Key order in the result follows `serde_json::Map`, which is a
 /// sorted `BTreeMap` unless the `preserve_order` feature is enabled.)
@@ -246,6 +282,52 @@ mod tests {
         // Edge: a missing rank sorts last (usize::MAX) — a is p2 anyway, but
         // rank_of must report MAX for the absent id.
         assert_eq!(rank_of(&ranks, &a.id), usize::MAX);
+    }
+
+    #[test]
+    fn compact_drops_null_and_empty_lists() {
+        let f = fm("hi", ItemStatus::Open, ItemType::Bug, 0, &[]);
+        let out = compact(frontmatter_object(&f));
+        for gone in ["assignee", "parent", "closed", "labels", "deps", "relates"] {
+            assert!(!out.contains_key(gone), "{gone} should have been dropped");
+        }
+        // Real values stay.
+        assert_eq!(out["title"], "hi");
+        assert_eq!(out["priority"], 0);
+    }
+
+    /// The load-bearing negative: `false` and `""` are answers, not absences.
+    /// Dropping `ready: false` would make "definitely not ready" indistinguishable
+    /// from "not computed".
+    #[test]
+    fn compact_keeps_false_zero_and_empty_string() {
+        let mut obj = Map::new();
+        obj.insert("ready".to_owned(), serde_json::json!(false));
+        obj.insert("body".to_owned(), serde_json::json!(""));
+        obj.insert("priority".to_owned(), serde_json::json!(0));
+        obj.insert("comment_count".to_owned(), serde_json::json!(0));
+        let out = compact(obj);
+        assert_eq!(out.len(), 4, "nothing informative may be dropped: {out:?}");
+    }
+
+    #[test]
+    fn compact_recurses_into_nested_objects_and_arrays() {
+        let obj = serde_json::json!({
+            "items": [{ "id": "a", "children": [], "parent": null }],
+            "tree": { "id": "root", "children": [] },
+        });
+        let Value::Object(map) = obj else {
+            unreachable!()
+        };
+        let out = compact(map);
+        let item = &out["items"][0];
+        assert_eq!(item["id"], "a");
+        assert!(item.get("children").is_none(), "empty child list dropped");
+        assert!(item.get("parent").is_none(), "null dropped inside an array");
+        assert!(
+            out["tree"].get("children").is_none(),
+            "nested object recursed"
+        );
     }
 
     #[test]

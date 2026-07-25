@@ -7,6 +7,17 @@ use clove_types::{CloveError, EditRequest};
 use rmcp::schemars::{self, JsonSchema};
 use rmcp::serde::Deserialize;
 
+/// Result-shaping options shared by the read tools.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(crate = "rmcp::serde")]
+pub struct ShapeArgs {
+    /// Return only these keys per item (e.g. ["id","title","status"]). Unknown
+    /// names are ignored. Cuts list payloads by roughly two thirds.
+    pub fields: Option<Vec<String>>,
+    /// Omit null and empty-list keys. Defaults to true unless `fields` is given.
+    pub compact: Option<bool>,
+}
+
 /// Shared filter fields for `clove_ready` / `clove_list` / `clove_blocked`.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[serde(crate = "rmcp::serde")]
@@ -24,6 +35,8 @@ pub struct FilterArgs {
     pub priority: Option<u8>,
     /// Max results (0 = no limit; default 50).
     pub limit: Option<u64>,
+    #[serde(flatten)]
+    pub shape: ShapeArgs,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
@@ -49,6 +62,8 @@ pub struct ListArgs {
 pub struct IdArgs {
     /// The item id (e.g. `proj-7af3q2k9`).
     pub id: String,
+    #[serde(flatten)]
+    pub shape: ShapeArgs,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -58,6 +73,8 @@ pub struct SearchArgs {
     pub text: String,
     /// Max results (0 = no limit; default 50).
     pub limit: Option<u64>,
+    #[serde(flatten)]
+    pub shape: ShapeArgs,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]

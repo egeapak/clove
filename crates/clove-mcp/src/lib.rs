@@ -10,6 +10,7 @@
 mod args;
 mod engine;
 mod server;
+mod shape;
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};

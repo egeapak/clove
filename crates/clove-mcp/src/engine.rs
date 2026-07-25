@@ -18,6 +18,7 @@ use clove_types::{CloveId, ItemStatus, ItemType, NewSpec};
 use serde_json::Value;
 
 use crate::args::*;
+use crate::shape::{self, Shape};
 
 /// Shared, cheap-to-clone context for the tools.
 #[derive(Clone)]
@@ -86,38 +87,51 @@ impl Engine {
 
     pub fn ready(&self, a: FilterArgs) -> Result<Value, String> {
         let filters = a.to_filters()?;
-        ops::ready(&self.store(), &filters, limit(a.limit, 50)).map_err(stringify)
+        let shaping = shaping(&a.shape);
+        ops::ready(&self.store(), &filters, limit(a.limit, 50))
+            .map(|v| shape::apply(v, &shaping))
+            .map_err(stringify)
     }
 
     pub fn blocked(&self, a: BlockedArgs) -> Result<Value, String> {
         let filters = a.filter.to_filters()?;
+        let shaping = shaping(&a.filter.shape);
         ops::blocked(
             &self.store(),
             &filters,
             a.include_warnings.unwrap_or(false),
             limit(a.filter.limit, 50),
         )
+        .map(|v| shape::apply(v, &shaping))
         .map_err(stringify)
     }
 
     pub fn list(&self, a: ListArgs) -> Result<Value, String> {
         let filters = a.filter.to_filters()?;
+        let shaping = shaping(&a.filter.shape);
         ops::list(
             &self.store(),
             &filters,
             a.offset.unwrap_or(0) as usize,
             limit(a.filter.limit, 50),
         )
+        .map(|v| shape::apply(v, &shaping))
         .map_err(stringify)
     }
 
     pub fn show(&self, a: IdArgs) -> Result<Value, String> {
         let id = parse_id(&a.id)?;
-        ops::show(&self.store(), &id).map_err(stringify)
+        let shaping = shaping(&a.shape);
+        ops::show(&self.store(), &id)
+            .map(|v| shape::apply(v, &shaping))
+            .map_err(stringify)
     }
 
     pub fn search(&self, a: SearchArgs) -> Result<Value, String> {
-        ops::search(&self.store(), &a.text, limit(a.limit, 50)).map_err(stringify)
+        let shaping = shaping(&a.shape);
+        ops::search(&self.store(), &a.text, limit(a.limit, 50))
+            .map(|v| shape::apply(v, &shaping))
+            .map_err(stringify)
     }
 
     pub fn comments(&self, a: CommentsArgs) -> Result<Value, String> {
@@ -242,6 +256,14 @@ impl Engine {
                 ops::set_parent(&self.store(), &id, parent.as_ref(), Utc::now()).map_err(stringify)
             }
         }
+    }
+}
+
+/// Translate the wire shaping args into the shaping request.
+fn shaping(a: &ShapeArgs) -> Shape {
+    Shape {
+        fields: a.fields.clone(),
+        compact: a.compact,
     }
 }
 

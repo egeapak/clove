@@ -6,8 +6,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **MCP read tools take `fields` and `compact`.** `fields` projects each item to
+  a named subset (`{"fields": ["id", "title"]}`); `compact` drops keys that are
+  null or an empty list. Compaction is on by default — measured on a 12-item
+  repo, a `clove_list` result went from 4595 to 2555 bytes (-44%), and to 764
+  with a two-field projection (-83%). `compact: false` restores the previous
+  shape exactly. A definite `false` or `0` is never dropped: `ready: false` is an
+  answer, not an absence. Absent keys are v1-legal (only
+  `id`/`title`/`status`/`type`/`priority`/`created`/`updated` are `required` in
+  `item.json`), and the index-backed `clove ls` path has always returned a
+  reduced shape. The CLI, web API, `export json`, and GitHub sync fingerprints
+  are unaffected — shaping is applied at the MCP boundary only.
+- **`clove_comments`** reads an item's comment thread. `clove_comment` could
+  write comments that no MCP tool could read back; `clove_show` reported only a
+  count.
+
 ### Changed
 
+- **`clove show` no longer scans the whole store.** `ready`/`blocked_by` are
+  computed from the item's own dependency closure, falling back to the
+  whole-store graph only when that closure is very large. Measured 57.3ms ->
+  0.06ms at 10k items, and flat rather than linear in store size. Affects
+  `clove show`, the `clove_show` MCP tool, and the daemon's `show` RPC.
 - **Daemon-reported errors now use clove's standard error codes.** `cloved`
   emitted a private code set (`not_found`, `self_loop`, `cycle`,
   `already_exists`, `invalid_field`, `op_failed`) that neither matched the
