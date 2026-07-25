@@ -33,8 +33,9 @@ const NOISE: &[&str] = &["schema"];
 ///
 /// Handles both result forms the read tools produce: a
 /// `{total, returned, offset, items: [...]}` page, where only the elements are
-/// shaped and the envelope counts are preserved, and a single object (`show`,
-/// `dep_tree`), which is shaped directly.
+/// shaped and the envelope counts are preserved, and a single object (`show`, or
+/// a `dep_tree` node), which is shaped directly — compaction recurses into
+/// nested objects and arrays, so a tree's leaves shed their empty `children`.
 pub fn apply(value: Value, shape: &Shape) -> Value {
     match value {
         Value::Object(mut obj) if obj.contains_key("items") => {

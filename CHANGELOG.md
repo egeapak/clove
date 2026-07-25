@@ -28,8 +28,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`clove show` no longer scans the whole store.** `ready`/`blocked_by` are
   computed from the item's own dependency closure, falling back to the
   whole-store graph only when that closure is very large. Measured 57.3ms ->
-  0.06ms at 10k items, and flat rather than linear in store size. Affects
-  `clove show`, the `clove_show` MCP tool, and the daemon's `show` RPC.
+  0.06ms at 10k items, and flat rather than linear in store size. `clove show`,
+  the `clove_show` MCP tool, and the daemon's `show` RPC now share one
+  implementation instead of two.
+
+  *User-visible:* `clove show` computes `ready`/`blocked_by` unconditionally.
+  They were previously gated behind `--verbose` — emitted as `null` with a
+  "pass --verbose for ready/blocked_by" warning otherwise — solely because
+  deriving them meant scanning the store. `--verbose` remains accepted and is
+  now a no-op for this purpose.
 - **Daemon-reported errors now use clove's standard error codes.** `cloved`
   emitted a private code set (`not_found`, `self_loop`, `cycle`,
   `already_exists`, `invalid_field`, `op_failed`) that neither matched the
@@ -49,7 +56,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   The IPC wire is otherwise unchanged: the error reply gains a self-describing
   `exit` field that defaults compatibly in both directions, so there is no
-  protocol bump and a mixed-version `clove`/`cloved` pair keeps working.
+  protocol bump and a mixed-version `clove`/`cloved` pair keeps working. The
+  numeric `exit` has no consumer yet — every surface still reports daemon
+  failures as text — so today this change is visible as the error *strings*
+  above, with the classification in place for the write routing that will use
+  it.
 
 ### Fixed
 
@@ -62,6 +73,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   concurrent writers were affected; a single user running one command at a time
   never was. Each command also samples the clock once now, so a close writes the
   same timestamp to `closed` and `updated`.
+- **The same lost-update race in `clove sync github`.** `link_local`, which
+  stamps `source_system`/`external_ref` onto an item after reconciling it, read
+  and wrote without holding the store lock. The per-repo sync lock does not help:
+  it excludes other syncs, not the CLI, web, MCP, or daemon. Worse than the CLI
+  case, because the write persists a whole-frontmatter snapshot — a concurrent
+  edit landing mid-window was lost entirely rather than partially.
 
 ## [0.1.0] - 2026-07-20
 

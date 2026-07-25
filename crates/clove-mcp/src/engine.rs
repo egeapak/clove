@@ -147,7 +147,12 @@ impl Engine {
 
     pub fn dep_tree(&self, a: DepTreeArgs) -> Result<Value, String> {
         let id = parse_id(&a.id)?;
-        ops::dep_tree(&self.store(), &id, a.depth.unwrap_or(5) as usize).map_err(stringify)
+        let shaping = shaping(&a.shape);
+        // Compaction recurses, so every leaf sheds its `children: []` — the
+        // single most repetitive payload in the read surface.
+        ops::dep_tree(&self.store(), &id, a.depth.unwrap_or(5) as usize)
+            .map(|v| shape::apply(v, &shaping))
+            .map_err(stringify)
     }
 
     pub fn stats(&self, a: StatsArgs) -> Result<Value, String> {

@@ -96,6 +96,8 @@ pub struct DepTreeArgs {
     pub id: String,
     /// Maximum depth (default 5).
     pub depth: Option<u64>,
+    #[serde(flatten)]
+    pub shape: ShapeArgs,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]

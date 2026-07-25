@@ -116,8 +116,8 @@ impl CloveServer {
     }
 
     #[tool(
-        description = "Show one work item in full: all fields, the Markdown body, \
-                       comment count, and computed `ready`/`blocked_by`."
+        description = "Show one work item: its fields, the Markdown body, comment \
+                       count, and computed `ready`/`blocked_by`."
     )]
     async fn clove_show(
         &self,
@@ -278,7 +278,12 @@ impl ServerHandler for CloveServer {
              discussion thread — clove_show gives only a count), clove_blocked, \
              and clove_dep_tree; clove_stats for an overview; clove_dep_add / \
              clove_dep_remove / clove_set_parent to wire the graph. Ids look like \
-             `proj-7af3q2k9`. Two live resources — clove://ready and \
+             `proj-7af3q2k9`. Read results are compacted: keys that are null or \
+             an empty list are omitted, so a missing `assignee`, `labels`, or \
+             `blocked_by` means unset or empty, never unknown. When scanning \
+             many items pass `fields` to project to just what you need (e.g. \
+             {\"fields\": [\"id\", \"title\", \"status\"]}), which is far \
+             smaller; pass `compact: false` if you need every key present. Two live resources — clove://ready and \
              clove://stats — mirror the ready queue and the repo overview; \
              subscribe to be pushed resources/updated whenever the work graph \
              changes."

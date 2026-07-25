@@ -1,10 +1,12 @@
 //! `clove show` (T-CLI04).
 //!
-//! Fast path (human, no graph fields): read only the item file and its comment
-//! dir. Full path (JSON, `--verbose`, or `--fields` requesting `ready`/
-//! `blocked_by`): scan all frontmatter and build the graph to compute them.
+//! Reads the item file and its comment dir, then derives `ready`/`blocked_by`
+//! from the item's own dependency closure via `ops::graph_terms` — the same
+//! helper the MCP tool and the daemon RPC use. That used to be a whole-store
+//! scan here, which is why the fields were gated behind `--verbose`; they are
+//! now always computed.
 
-use clove_core::{list_comments, GraphStore, OutputFormat};
+use clove_core::{list_comments, OutputFormat};
 use clove_types::CloveError;
 use serde_json::{json, Value};
 
@@ -22,41 +24,20 @@ pub fn run(ctx: &Ctx, format: OutputFormat, args: ShowArgs) -> Result<(), CloveE
         .unwrap_or(0);
 
     let fields = args.fields.as_deref().map(parse_fields);
-    let wants_graph = matches!(format, OutputFormat::Json | OutputFormat::Jsonl)
-        || args.verbose
-        || fields
-            .as_ref()
-            .map(|f| f.iter().any(|k| k == "ready" || k == "blocked_by"))
-            .unwrap_or(false);
 
     let mut obj = item_object(&item);
     obj.insert("body".to_owned(), json!(item.body));
     obj.insert("comment_count".to_owned(), json!(comment_count));
 
-    let mut warnings: Vec<String> = Vec::new();
-    if wants_graph {
-        let (frontmatters, _errors) = ctx.store.scan_frontmatter()?;
-        let (graph, _dangling) = GraphStore::build(&frontmatters);
-        let ready = graph.ready_items().contains(&id);
-        let blocked_by: Vec<String> = graph
-            .blocked_items()
-            .into_iter()
-            .find(|b| b.id == id)
-            .map(|b| {
-                b.blocking_deps
-                    .iter()
-                    .chain(b.dangling_deps.iter())
-                    .map(|x| x.to_string())
-                    .collect()
-            })
-            .unwrap_or_default();
-        obj.insert("ready".to_owned(), json!(ready));
-        obj.insert("blocked_by".to_owned(), json!(blocked_by));
-    } else {
-        obj.insert("ready".to_owned(), Value::Null);
-        obj.insert("blocked_by".to_owned(), Value::Null);
-        warnings.push("pass --verbose for ready/blocked_by".to_owned());
-    }
+    // `ready`/`blocked_by` are always computed now. They used to be gated behind
+    // `--verbose` (with a "pass --verbose" warning and `null` placeholders)
+    // purely because deriving them meant scanning and parsing the whole store;
+    // `ops::graph_terms` answers from the item's own closure instead, so the
+    // gate bought nothing but a degraded default. Same helper as the MCP tool
+    // and the daemon RPC — one implementation, not three.
+    let (ready, blocked_by) = clove_core::ops::graph_terms(&ctx.store, &item.frontmatter)?;
+    obj.insert("ready".to_owned(), json!(ready));
+    obj.insert("blocked_by".to_owned(), json!(blocked_by));
 
     let projected = match &fields {
         Some(f) => project(obj, f),
@@ -65,7 +46,7 @@ pub fn run(ctx: &Ctx, format: OutputFormat, args: ShowArgs) -> Result<(), CloveE
 
     match format {
         OutputFormat::Json | OutputFormat::Jsonl => {
-            print_json_success(Value::Object(projected), json!({ "warnings": warnings }))
+            print_json_success(Value::Object(projected), json!({ "warnings": [] }))
         }
         OutputFormat::Human => print_human(&item, comment_count, &projected),
     }

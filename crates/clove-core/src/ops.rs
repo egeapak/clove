@@ -372,6 +372,40 @@ fn local_graph_terms(
     Ok((ready, blocked_by))
 }
 
+/// The computed `(ready, blocked_by)` pair for one item.
+///
+/// Prefers the item-local computation ([`local_graph_terms`]) and falls back to
+/// a whole-store graph build only when the item's closure is too large, so the
+/// answer is always exactly what `GraphStore` would say — see
+/// `local_terms_match_the_graph_oracle`.
+///
+/// Shared by [`show`] and the CLI's `clove show`, which used to carry its own
+/// copy of the whole-store version.
+pub fn graph_terms(
+    store: &ItemStore,
+    fm: &ItemFrontmatter,
+) -> Result<(bool, Vec<String>), CloveError> {
+    if let Ok(terms) = local_graph_terms(store, fm) {
+        return Ok(terms);
+    }
+    let (frontmatters, _errors) = store.scan_frontmatter()?;
+    let (graph, _dangling) = GraphStore::build(&frontmatters);
+    let ready = graph.ready_items().contains(&fm.id);
+    let blocked_by: Vec<String> = graph
+        .blocked_items()
+        .into_iter()
+        .find(|b| b.id == fm.id)
+        .map(|b| {
+            b.blocking_deps
+                .iter()
+                .chain(b.dangling_deps.iter())
+                .map(CloveId::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok((ready, blocked_by))
+}
+
 /// The full §7.4 item object for `id`: frontmatter + body + comment_count +
 /// computed `ready`/`blocked_by` (the same shape as `clove show --format json`).
 pub fn show(store: &ItemStore, id: &CloveId) -> Result<Value, CloveError> {
@@ -384,31 +418,7 @@ pub fn show(store: &ItemStore, id: &CloveId) -> Result<Value, CloveError> {
     obj.insert("body".to_owned(), json!(item.body));
     obj.insert("comment_count".to_owned(), json!(comment_count));
 
-    // Prefer the item-local computation: showing one item used to scan and parse
-    // every file in the store purely to derive two fields (~57ms at 10k items).
-    // The whole-store path remains the fallback, so the answer is identical
-    // either way — `local_terms_match_the_graph_oracle` pins that.
-    let (ready, blocked_by) = match local_graph_terms(store, &item.frontmatter) {
-        Ok(terms) => terms,
-        Err(BudgetExceeded) => {
-            let (frontmatters, _errors) = store.scan_frontmatter()?;
-            let (graph, _dangling) = GraphStore::build(&frontmatters);
-            let ready = graph.ready_items().contains(id);
-            let blocked_by: Vec<String> = graph
-                .blocked_items()
-                .into_iter()
-                .find(|b| &b.id == id)
-                .map(|b| {
-                    b.blocking_deps
-                        .iter()
-                        .chain(b.dangling_deps.iter())
-                        .map(CloveId::to_string)
-                        .collect()
-                })
-                .unwrap_or_default();
-            (ready, blocked_by)
-        }
-    };
+    let (ready, blocked_by) = graph_terms(store, &item.frontmatter)?;
     obj.insert("ready".to_owned(), json!(ready));
     obj.insert("blocked_by".to_owned(), json!(blocked_by));
     Ok(Value::Object(obj))
