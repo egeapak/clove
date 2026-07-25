@@ -310,6 +310,28 @@ Three consequences revision 1 missed:
   cross builds". That arm now links TLS; the comment stating the intent must be
   amended.
 
+**Measured cost — the design's number is low.** The design records +1.011 MB
+(+15.9%) on a 6.349 MB baseline. Measured A/B on this branch (release profile:
+fat LTO, `codegen-units=1`, `panic=abort`, `strip`; `CLOVE_SKIP_WEB_BUILD=1` on
+both sides), each binary confirmed by the presence/absence of the `crates.io/api`
+string:
+
+| Config | master (`cdea402`) | with the registry client | delta |
+|---|---|---|---|
+| `--no-default-features` (lean) | 6.817 MB | 8.358 MB | **+1.541 MB (+22.6%)** |
+| default (`mcp`) | 8.237 MB | 9.769 MB | **+1.532 MB (+18.6%)** |
+
+So the real cost is **~1.54 MB**, about 52% above the design's figure, and it is
+stable across feature configs. This does not overturn the decision — the design
+accepted ~1 MB for always-on discovery and 1.5 MB is the same order — but the
+recorded number was a decision input, so it is corrected here rather than left
+to be rediscovered.
+
+(A first attempt at this measurement was wrong: the shell stayed in the baseline
+worktree, so both "sides" rebuilt master and came out byte-identical. The
+`crates.io/api` string count is the check that caught it and is why it is
+recorded as part of the method.)
+
 **TLS root store.** Bundled `webpki-roots` ignores `SSL_CERT_FILE`/`SSL_CERT_DIR`
 and the platform store, so in any environment with a TLS-intercepting egress
 proxy — *including the one this plan was written in* — discovery fails with an
