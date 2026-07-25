@@ -125,6 +125,13 @@ fn close_sets_then_clears_closed_timestamp() {
     let closed = json_ok(clove(dir.path()).arg("close").arg(&id));
     assert_eq!(closed["data"]["status"], "closed");
     assert!(closed["data"]["closed"].is_string());
+    // The transition samples the clock once and uses that single timestamp for
+    // both the `closed` field and the write's `updated`. Sampling twice (as the
+    // pre-`update_with` code did) let them land a second apart.
+    assert_eq!(
+        closed["data"]["closed"], closed["data"]["updated"],
+        "closed and updated must come from one clock sample"
+    );
 
     let reopened = json_ok(clove(dir.path()).args(["status", &id, "open"]));
     assert_eq!(reopened["data"]["status"], "open");

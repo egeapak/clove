@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Silent lost updates in `clove status`/`start`/`close`, `clove set`, and
+  `clove edit --field`.** These read the item without the store write lock and
+  only took it for the write, so a concurrent writer — the web UI, an MCP agent,
+  or the daemon — could commit in between and have its change silently
+  overwritten, with no error. They now perform the whole read-modify-write under
+  one lock via `ItemStore::update_with`, matching `clove_core::ops`. Only
+  concurrent writers were affected; a single user running one command at a time
+  never was. Each command also samples the clock once now, so a close writes the
+  same timestamp to `closed` and `updated`.
+
 ## [0.1.0] - 2026-07-20
 
 The initial feature set (milestones M0–M4). First tagged public release.

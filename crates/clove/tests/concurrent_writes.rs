@@ -12,7 +12,7 @@
 //! `concurrent_dep_adds_do_not_lose_updates` already covers the in-process case.
 
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use assert_cmd::prelude::*;
 use serde_json::Value;
@@ -39,7 +39,9 @@ fn init_repo() -> TempDir {
 fn json_ok(cmd: &mut Command) -> Value {
     let out = cmd.arg("--format").arg("json").output().unwrap();
     assert!(out.status.success(), "command failed: {out:?}");
-    serde_json::from_slice(&out.stdout).expect("valid JSON")
+    let v: Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    assert_eq!(v["ok"], true, "envelope not ok: {v}");
+    v
 }
 
 fn new_item(dir: &Path, title: &str) -> String {
@@ -51,11 +53,24 @@ fn show(dir: &Path, id: &str) -> Value {
     json_ok(clove(dir).args(["show", id]))["data"].clone()
 }
 
-/// Run `count` `clove` invocations concurrently and assert every one succeeded.
+/// Spawn every invocation before waiting on any, so they genuinely contend, and
+/// assert each one succeeded.
+///
+/// Stdio must be piped: `spawn` otherwise *inherits* it, which both empties the
+/// `wait_with_output` buffers (making the failure message below blank, exactly
+/// when it is needed) and dumps every child's JSON straight into the cargo-test
+/// log, bypassing its per-test capture.
 fn run_concurrently(dir: &Path, args_per_child: Vec<Vec<String>>) {
     let children: Vec<_> = args_per_child
         .into_iter()
-        .map(|args| clove(dir).args(&args).spawn().expect("spawn clove"))
+        .map(|args| {
+            clove(dir)
+                .args(&args)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn clove")
+        })
         .collect();
     for child in children {
         let out = child.wait_with_output().unwrap();
@@ -102,6 +117,8 @@ fn concurrent_set_label_adds_do_not_lose_updates() {
             "label {want} was lost by a concurrent `clove set` (got {labels:?})"
         );
     }
+    // Exact count, so a duplicated or spurious label is caught too.
+    assert_eq!(labels.len(), WRITERS, "unexpected label set: {labels:?}");
 }
 
 #[test]
@@ -139,6 +156,7 @@ fn concurrent_edit_field_adds_do_not_lose_updates() {
             "label {want} was lost by a concurrent `clove edit --field` (got {labels:?})"
         );
     }
+    assert_eq!(labels.len(), WRITERS, "unexpected label set: {labels:?}");
 }
 
 #[test]

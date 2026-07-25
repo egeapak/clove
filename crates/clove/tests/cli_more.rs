@@ -570,15 +570,21 @@ fn quiet_suppresses_human_dependent_warning_on_close() {
     let dir = init_repo();
     // `dep` is depended on by `dependent`; closing `dep` would warn.
     let dep = new_item(dir.path(), "Dep", &[]);
-    new_item(dir.path(), "Dependent", &["--dep", &dep]);
+    let dependent = new_item(dir.path(), "Dependent", &["--dep", &dep]);
 
-    // Without --quiet, human mode emits a warning to stderr.
+    // Without --quiet, human mode emits a warning to stderr. Assert the actual
+    // message and the offending id, not just the word "warning" — this is the
+    // only guard on a scan that now runs inside the store write lock.
     let noisy = clove(dir.path()).arg("close").arg(&dep).output().unwrap();
     assert!(noisy.status.success());
     let noisy_err = String::from_utf8_lossy(&noisy.stderr);
     assert!(
-        noisy_err.contains("warning"),
+        noisy_err.contains("still has open dependents"),
         "expected a dependent warning, got: {noisy_err:?}"
+    );
+    assert!(
+        noisy_err.contains(&dependent),
+        "warning must name the open dependent {dependent}, got: {noisy_err:?}"
     );
 
     // Reopen, then close again with --quiet: stderr must be silent.
