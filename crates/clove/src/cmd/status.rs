@@ -1,18 +1,12 @@
 //! `clove status`/`start`/`close` (T-CLI06).
 
 use clove_core::OutputFormat;
-use clove_types::{CloveError, ItemFrontmatter, ItemStatus};
+use clove_types::{CloveError, ItemStatus};
 use serde_json::Map;
 
 use crate::context::Ctx;
 use crate::item_json::print_item;
 use crate::util::{now_seconds, parse_id};
-
-/// Apply a status transition to frontmatter, maintaining the closed-timestamp
-/// invariant (delegates to the shared [`clove_types::set_status`]).
-pub fn set_status(fm: &mut ItemFrontmatter, status: ItemStatus) {
-    clove_types::set_status(fm, status, now_seconds());
-}
 
 pub fn run(
     ctx: &Ctx,
@@ -22,22 +16,29 @@ pub fn run(
     quiet: bool,
 ) -> Result<(), CloveError> {
     let id = parse_id(id)?;
-    let mut item = ctx.store.get(&id)?;
-    set_status(&mut item.frontmatter, status);
+    let now = now_seconds();
 
-    // Closing an item that others depend on is allowed, but warned about.
-    if status == ItemStatus::Closed && !quiet {
-        let dependents = dependents_of(ctx, &id);
-        if !dependents.is_empty() {
-            eprintln!(
-                "warning: {} still has open dependents: {}",
-                id.as_str(),
-                dependents.join(", ")
-            );
+    // The read-modify-write runs under one store-wide lock (`update_with`), not
+    // a lock-free `get` followed by a locking `update`: the latter leaves a
+    // window in which a concurrent writer (web, MCP, daemon) can commit between
+    // the read and the write, and have its update silently clobbered. Extra
+    // *reads* inside the closure are covered by the same lock (DESIGN §4).
+    let saved = ctx.store.update_with(&id, now, |item| {
+        clove_types::set_status(&mut item.frontmatter, status, now);
+
+        // Closing an item that others depend on is allowed, but warned about.
+        if status == ItemStatus::Closed && !quiet {
+            let dependents = dependents_of(ctx, &id);
+            if !dependents.is_empty() {
+                eprintln!(
+                    "warning: {} still has open dependents: {}",
+                    id.as_str(),
+                    dependents.join(", ")
+                );
+            }
         }
-    }
-
-    let saved = ctx.store.update(&item, now_seconds())?;
+        Ok(())
+    })?;
     print_item(format, &saved, Map::new());
     Ok(())
 }
