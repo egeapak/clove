@@ -296,6 +296,16 @@ impl GraphStore {
     /// dependencies closed, no dangling deps, and not excluded by a cycle or a
     /// malformed parent. Sorted by `(priority, topological_rank, id)`.
     pub fn ready_items(&self) -> Vec<CloveId> {
+        self.ready_items_with(false)
+    }
+
+    /// [`Self::ready_items`], optionally admitting items whose *only* obstacle is
+    /// a dangling (missing) hard dependency.
+    ///
+    /// The mirror of `blocked --include-warnings`: a dangling ref is a data
+    /// problem rather than real work outstanding, so `--include-warnings`
+    /// surfaces those items instead of letting them vanish from both lists.
+    pub fn ready_items_with(&self, include_dangling: bool) -> Vec<CloveId> {
         let excluded = self.excluded_node_set();
         let ranks = self.topological_ranks_internal();
 
@@ -305,7 +315,7 @@ impl GraphStore {
             .filter(|&node| {
                 let meta = &self.graph[node];
                 meta.status.is_active()
-                    && !meta.has_dangling_deps()
+                    && (include_dangling || !meta.has_dangling_deps())
                     && !excluded.contains(&node)
                     && self.hard_deps_all_closed(node)
             })

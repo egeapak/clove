@@ -91,7 +91,7 @@ pub fn run(
     let (graph, _ranks) = ranks_of(&frontmatters);
     // ready_items() is already ordered by (priority, topo rank, id).
     let mut ordered: Vec<ItemFrontmatter> = graph
-        .ready_items()
+        .ready_items_with(args.include_warnings)
         .iter()
         .filter_map(|id| by_id.get(id).cloned())
         .collect();

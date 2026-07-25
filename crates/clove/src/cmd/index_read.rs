@@ -15,7 +15,7 @@ use crate::context::{index_error, Ctx};
 
 /// Above this many out-of-date items, skip the incremental refresh and fall back
 /// to a file scan (DESIGN §6.4).
-const STALE_REFRESH_LIMIT: usize = 20;
+pub const STALE_REFRESH_LIMIT: usize = 20;
 
 /// The index read result: the (already page-limited) lean rows, the full
 /// unpaginated match count, and any warnings to surface.

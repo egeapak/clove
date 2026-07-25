@@ -672,3 +672,59 @@ fn cli_compact_matches_the_mcp_shaping() {
     assert_eq!(compact_row["title"], "shape me");
     assert_eq!(compact_row["status"], "open");
 }
+
+/// `clove search` must not answer from a stale index. It previously queried the
+/// index with no freshness check at all, so an item created since the last
+/// reindex was silently absent from results — and after a schema change, where
+/// the index is dropped and recreated empty, every query returned nothing.
+#[test]
+fn search_does_not_answer_from_a_stale_index() {
+    let dir = init_repo();
+    new_item(dir.path(), "findable alpha", &[]);
+    clove(dir.path()).arg("reindex").assert().success();
+
+    // Created after the reindex: the index does not know about it.
+    new_item(dir.path(), "findable beta", &[]);
+
+    let v = json_ok(clove(dir.path()).args(["search", "findable"]));
+    let titles: Vec<&str> = v["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["title"].as_str().unwrap())
+        .collect();
+    assert!(
+        titles.contains(&"findable beta"),
+        "an item added after the last reindex must still be found (got {titles:?})"
+    );
+    assert_eq!(titles.len(), 2, "both items match (got {titles:?})");
+}
+
+/// `--include-warnings` is documented on `ready` (DESIGN §7.2) but was accepted
+/// and silently ignored: an item whose only obstacle is a dangling dependency
+/// appeared in neither `ready` nor `blocked`.
+#[test]
+fn ready_include_warnings_surfaces_dangling_only_items() {
+    let dir = init_repo();
+    let id = new_item(dir.path(), "dangling dep", &[]);
+    // A well-formed id with no backing item — only reachable by hand-editing,
+    // which is exactly how dangling refs arise (bad merge, partial import).
+    let path = dir.path().join(".clove/issues").join(format!("{id}.md"));
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, text.replace("deps: []", "deps: [proj-ZZZZZZZZ]")).unwrap();
+
+    // Excluded from `ready` by default: it is not actually workable.
+    let plain = json_ok(clove(dir.path()).args(["ready"]));
+    assert!(
+        ids_of(&plain).is_empty(),
+        "a dangling dep keeps an item out of ready by default"
+    );
+
+    // ...but `--include-warnings` surfaces it, mirroring `blocked`.
+    let with = json_ok(clove(dir.path()).args(["ready", "--include-warnings"]));
+    assert_eq!(
+        ids_of(&with),
+        vec![id],
+        "--include-warnings must admit dangling-only items"
+    );
+}

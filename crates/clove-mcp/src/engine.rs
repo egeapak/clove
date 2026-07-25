@@ -88,9 +88,14 @@ impl Engine {
     pub fn ready(&self, a: FilterArgs) -> Result<Value, String> {
         let filters = a.to_filters()?;
         let shaping = shaping(&a.shape);
-        ops::ready(&self.store(), &filters, limit(a.limit, 50))
-            .map(|v| shape::apply(v, &shaping))
-            .map_err(stringify)
+        ops::ready(
+            &self.store(),
+            &filters,
+            a.include_warnings.unwrap_or(false),
+            limit(a.limit, 50),
+        )
+        .map(|v| shape::apply(v, &shaping))
+        .map_err(stringify)
     }
 
     pub fn blocked(&self, a: BlockedArgs) -> Result<Value, String> {
@@ -99,7 +104,7 @@ impl Engine {
         ops::blocked(
             &self.store(),
             &filters,
-            a.include_warnings.unwrap_or(false),
+            a.filter.include_warnings.unwrap_or(false),
             limit(a.filter.limit, 50),
         )
         .map(|v| shape::apply(v, &shaping))

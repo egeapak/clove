@@ -35,6 +35,10 @@ pub struct FilterArgs {
     pub priority: Option<u8>,
     /// Max results (0 = no limit; default 50).
     pub limit: Option<u64>,
+    /// Also include items whose only obstacle is a dangling (missing)
+    /// dependency. On `clove_blocked` this admits them to the blocked list; on
+    /// `clove_ready` it admits them to the ready list.
+    pub include_warnings: Option<bool>,
     #[serde(flatten)]
     pub shape: ShapeArgs,
 }
@@ -44,8 +48,6 @@ pub struct FilterArgs {
 pub struct BlockedArgs {
     #[serde(flatten)]
     pub filter: FilterArgs,
-    /// Also include items blocked only by dangling (missing) deps.
-    pub include_warnings: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]

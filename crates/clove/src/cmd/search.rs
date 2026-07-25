@@ -11,6 +11,38 @@ use crate::cli::SearchArgs;
 use crate::cmd::listing::{effective_limit, emit, objects_from_frontmatters, ListOpts};
 use crate::context::{index_error, Ctx};
 
+/// Whether the index may answer a search, freshening it in place if it is only
+/// slightly behind.
+///
+/// `search` previously queried the index with no staleness check at all, so any
+/// item created since the last reindex was silently missing from results — and
+/// after a schema change `Index::open_or_create` drops and recreates the file
+/// *empty*, which read as "no matches" for every query rather than "index
+/// unavailable". Mirrors the gate the list commands use (`cmd/index_read.rs`),
+/// including the `auto_refresh` opt-out and the too-far-behind bail.
+fn usable_index(ctx: &Ctx) -> Result<Option<clove_index::Index>, CloveError> {
+    let Ok(mut index) = clove_index::Index::open_or_create(&ctx.db_path) else {
+        return Ok(None); // a broken index is non-fatal
+    };
+    if !ctx.config.index.auto_refresh {
+        // The repo opted out of inline refresh; an unverified index must not
+        // answer a search, because "no rows" is indistinguishable from "no hits".
+        return Ok(None);
+    }
+    let report = index
+        .check_staleness_fast(&ctx.issues_dir)
+        .map_err(|e| index_error(e, &ctx.db_path))?;
+    if report.change_count() > crate::cmd::index_read::STALE_REFRESH_LIMIT {
+        return Ok(None); // too far behind to freshen inline
+    }
+    if !report.is_clean() {
+        index
+            .apply_staleness(&report, &ctx.issues_dir)
+            .map_err(|e| index_error(e, &ctx.db_path))?;
+    }
+    Ok(Some(index))
+}
+
 pub fn run(
     ctx: &Ctx,
     format: OutputFormat,
@@ -55,8 +87,8 @@ pub fn run(
     }
 
     let (ordered, source) = if !no_index && ctx.db_path.exists() {
-        match clove_index::Index::open_or_create(&ctx.db_path) {
-            Ok(index) => {
+        match usable_index(ctx)? {
+            Some(index) => {
                 let rows = index
                     .search(&text, None)
                     .map_err(|e| index_error(e, &ctx.db_path))?;
@@ -70,8 +102,9 @@ pub fn run(
                 }
                 (rank_title_first(frontmatters, &text), "index")
             }
-            // A broken index is non-fatal: fall back to files.
-            Err(_) => (file_search(ctx, &text)?, "files"),
+            // A broken, stale, or freshly-rebuilt (empty) index is non-fatal:
+            // fall back to files.
+            None => (file_search(ctx, &text)?, "files"),
         }
     } else {
         (file_search(ctx, &text)?, "files")

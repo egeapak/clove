@@ -533,6 +533,7 @@ pub fn list(
 pub fn ready(
     store: &ItemStore,
     filters: &crate::Filters,
+    include_warnings: bool,
     limit: Option<usize>,
 ) -> Result<Value, CloveError> {
     let (frontmatters, _errors) = store.scan_frontmatter()?;
@@ -543,7 +544,7 @@ pub fn ready(
         .collect();
     let (graph, _dangling) = GraphStore::build(&frontmatters);
     let objects: Vec<Value> = graph
-        .ready_items()
+        .ready_items_with(include_warnings)
         .iter()
         .filter_map(|id| by_id.get(id))
         .filter(|fm| filters.matches(fm))
@@ -1080,7 +1081,7 @@ mod tests {
         assert_eq!(all["total"], 2);
         assert_eq!(all["items"].as_array().unwrap().len(), 2);
 
-        let ready_v = ready(&store, &crate::Filters::default(), None).unwrap();
+        let ready_v = ready(&store, &crate::Filters::default(), false, None).unwrap();
         let ready_ids: Vec<&str> = ready_v["items"]
             .as_array()
             .unwrap()

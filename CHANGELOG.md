@@ -77,6 +77,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`clove search` could answer from a stale index.** It queried the index with
+  no freshness check at all, so any item created since the last `clove reindex`
+  was silently absent from results. After a schema change the effect was total:
+  `Index::open_or_create` drops and recreates the file *empty*, which read as "no
+  matches" for every query rather than "index unavailable". It now applies the
+  same staleness gate the list commands use, falling back to a file scan when the
+  index cannot be trusted.
+- **`clove ready --include-warnings` was accepted and ignored.** The flag is
+  documented (DESIGN §7.2) but never read, so an item whose only obstacle was a
+  dangling dependency appeared in neither `ready` nor `blocked` — invisible in
+  both directions. It now admits those items, mirroring
+  `blocked --include-warnings`. Also available as `include_warnings` on the
+  `clove_ready` MCP tool.
 - **Silent lost updates in `clove status`/`start`/`close`, `clove set`, and
   `clove edit --field`.** These read the item without the store write lock and
   only took it for the write, so a concurrent writer — the web UI, an MCP agent,
