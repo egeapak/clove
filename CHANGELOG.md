@@ -21,7 +21,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are unaffected — shaping is applied at the MCP boundary only.
 - **`clove_comments`** reads an item's comment thread. `clove_comment` could
   write comments that no MCP tool could read back; `clove_show` reported only a
-  count.
+  count. `limit` keeps the most recent; `skip_newest` pages back through older
+  ones — named for its direction, since it anchors at the opposite end from the
+  list tools' `offset`.
+- **`clove ls`/`ready`/`blocked` accept `--compact`**, applying the same
+  null/empty-key omission the MCP read tools use, so the same query shapes
+  identically on either surface.
 
 ### Changed
 
@@ -37,6 +42,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   "pass --verbose for ready/blocked_by" warning otherwise — solely because
   deriving them meant scanning the store. `--verbose` remains accepted and is
   now a no-op for this purpose.
+- **`clove daemon` failures now exit 7, not 5.** Communication failures were
+  reported as `CloveError::Io` against a fabricated `"daemon"` path, classifying
+  them as `IO_ERROR` — a filesystem problem. They now use `DAEMON_ERROR`/exit 7,
+  which the exit table has published since M0 without anything producing it.
+- **`GET /api/v1/items/:id/comments?limit=` keeps the newest N**, matching
+  `clove comments --limit` and the `clove_comments` tool. It previously kept the
+  *oldest* N — the same parameter name with the opposite meaning. The bundled web
+  UI never sent the parameter, so it is unaffected.
 - **Daemon-reported errors now use clove's standard error codes.** `cloved`
   emitted a private code set (`not_found`, `self_loop`, `cycle`,
   `already_exists`, `invalid_field`, `op_failed`) that neither matched the
@@ -57,10 +70,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The IPC wire is otherwise unchanged: the error reply gains a self-describing
   `exit` field that defaults compatibly in both directions, so there is no
   protocol bump and a mixed-version `clove`/`cloved` pair keeps working. The
-  numeric `exit` has no consumer yet — every surface still reports daemon
-  failures as text — so today this change is visible as the error *strings*
-  above, with the classification in place for the write routing that will use
-  it.
+  numeric `exit` from a *remote* failure still has no consumer — MCP reports
+  daemon errors as text — so over IPC this change is visible as the error
+  *strings* above, with the classification in place for the write routing that
+  will use it.
 
 ### Fixed
 

@@ -84,9 +84,10 @@ pub struct CommentsArgs {
     pub id: String,
     /// Max comments, keeping the most recent (0 = no limit; default 50).
     pub limit: Option<u64>,
-    /// Skip this many of the most recent comments, to page back through
-    /// older ones.
-    pub offset: Option<u64>,
+    /// Skip this many of the *newest* comments, to page back through older
+    /// ones. Named for its direction: unlike `offset` on the list tools, this
+    /// window is anchored at the newest end, not the start.
+    pub skip_newest: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]

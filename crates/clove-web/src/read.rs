@@ -4,7 +4,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use axum::extract::{Path, Query, State};
-use clove_core::{compute_stats, list_comments, GraphStore, StatsOptions};
+use clove_core::{compute_stats, GraphStore, StatsOptions};
 use clove_types::{CloveId, ItemFrontmatter};
 use serde_json::{json, Value};
 
@@ -179,20 +179,16 @@ pub async fn get_comments(
     Query(params): Query<HashMap<String, String>>,
 ) -> ApiResult {
     let id = parse_id(&id)?;
-    if !state.store.exists(&id) {
-        return Err(ApiError::from(clove_types::CloveError::NotFound {
-            id: id.to_string(),
-        }));
-    }
-    let mut comments = list_comments(&state.issues_dir, &id)?;
-    if let Some(limit) = params.get("limit").and_then(|s| s.parse::<usize>().ok()) {
-        comments.truncate(limit);
-    }
-    let data: Vec<Value> = comments
-        .into_iter()
-        .map(|c| json!({ "timestamp": c.timestamp.to_rfc3339(), "author": c.author, "body": c.body }))
-        .collect();
-    Ok(ok_data(json!(data)))
+    let limit = params.get("limit").and_then(|s| s.parse::<usize>().ok());
+    // Shared with `clove comments` and the `clove_comments` MCP tool. This
+    // endpoint used to `truncate`, keeping the *oldest* n while both other
+    // surfaces kept the newest — the same flag name with the opposite meaning.
+    let page = clove_core::ops::comments(&state.store, &id, 0, limit)?;
+    let data = page
+        .get("items")
+        .cloned()
+        .unwrap_or_else(|| Value::Array(Vec::new()));
+    Ok(ok_data(data))
 }
 
 /// `GET /api/v1/items/:id/deptree?depth=`.

@@ -139,7 +139,7 @@ impl Engine {
         ops::comments(
             &self.store(),
             &id,
-            a.offset.unwrap_or(0) as usize,
+            a.skip_newest.unwrap_or(0) as usize,
             limit(a.limit, 50),
         )
         .map_err(stringify)

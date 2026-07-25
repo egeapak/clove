@@ -171,10 +171,17 @@ fn emit(
     Ok(ExitCode::Success)
 }
 
+/// A daemon-communication failure.
+///
+/// These used to be reported as `CloveError::Io` against a fake `"daemon"`
+/// path, which classified them as `IO_ERROR` / exit 5 — the code for a
+/// filesystem problem. They are exactly what exit 7 (`DAEMON_ERROR`) is for;
+/// it was published in the exit table from M0 but never actually produced.
 fn daemon_err(msg: &str) -> CloveError {
-    CloveError::Io {
-        path: camino::Utf8PathBuf::from("daemon"),
-        source: std::io::Error::other(msg.to_owned()),
+    CloveError::Remote {
+        code: "DAEMON_ERROR".to_owned(),
+        exit: 7,
+        message: msg.to_owned(),
     }
 }
 
@@ -215,4 +222,27 @@ fn signal_shutdown(clove_dir: &Utf8Path, _pid: u32) -> Result<(), CloveError> {
         CloseHandle(handle);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::daemon_err;
+
+    /// Daemon-communication failures classify as `DAEMON_ERROR` / exit 7, not
+    /// the `IO_ERROR` / exit 5 they used to borrow from a fabricated path.
+    ///
+    /// Pinned here rather than end-to-end because the six call sites are a spawn
+    /// timeout, a shutdown timeout, a signal failure, and an RPC failure against
+    /// a *live* daemon — none reproducible cheaply or deterministically in a
+    /// test. This asserts the mapping; the call sites are covered by inspection.
+    #[test]
+    fn daemon_failures_classify_as_exit_7() {
+        let err = daemon_err("status query failed");
+        assert_eq!(
+            clove_types::error_code(&err),
+            ("DAEMON_ERROR", 7),
+            "daemon failures must not be reported as filesystem errors"
+        );
+        assert_eq!(crate::exit::classify(&err).0.code(), 7);
+    }
 }

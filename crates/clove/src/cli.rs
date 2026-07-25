@@ -390,6 +390,10 @@ pub struct FilterArgs {
     /// Comma-separated field projection.
     #[arg(long, value_name = "LIST")]
     pub fields: Option<String>,
+    /// Omit null and empty-list keys from JSON output (as the MCP read tools do
+    /// by default).
+    #[arg(long)]
+    pub compact: bool,
     /// Include items with dangling dependencies (ready/blocked).
     #[arg(long)]
     pub include_warnings: bool,

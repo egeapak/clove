@@ -442,12 +442,16 @@ pub fn show(store: &ItemStore, id: &CloveId) -> Result<Value, CloveError> {
 /// each element in the published `comment-list.json` element shape.
 ///
 /// `limit` keeps the **newest** comments (the tail), not the first: a capped
-/// thread is being sampled for what happened most recently. `offset` counts back
-/// from that newest end, so paging walks backwards through history.
+/// thread is being sampled for what happened most recently. `skip_newest` then
+/// walks backwards through history.
+///
+/// Deliberately *not* called `offset`: `ops::list`'s offset counts forward from
+/// the start, and reusing the name for a window anchored at the opposite end
+/// would let the usual paging idiom read history backwards without erroring.
 pub fn comments(
     store: &ItemStore,
     id: &CloveId,
-    offset: usize,
+    skip_newest: usize,
     limit: Option<usize>,
 ) -> Result<Value, CloveError> {
     if !store.exists(id) {
@@ -456,10 +460,10 @@ pub fn comments(
     let all = list_comments(store.issues_dir(), id)?;
     let total = all.len();
 
-    // Window from the newest end: `offset` skips the most recent, `limit` caps
-    // how many older ones follow. Saturating throughout so an over-large offset
-    // yields an empty page rather than panicking.
-    let end = total.saturating_sub(offset);
+    // Window from the newest end: `skip_newest` skips the most recent, `limit`
+    // caps how many older ones follow. Saturating throughout so an over-large
+    // skip yields an empty page rather than panicking.
+    let end = total.saturating_sub(skip_newest);
     let start = limit.map_or(0, |n| end.saturating_sub(n));
     let items: Vec<Value> = all[start..end]
         .iter()
@@ -475,7 +479,7 @@ pub fn comments(
     Ok(json!({
         "total": total,
         "returned": items.len(),
-        "offset": offset,
+        "skip_newest": skip_newest,
         "items": items,
     }))
 }
@@ -1385,12 +1389,12 @@ mod tests {
         assert_eq!(last2["items"][1]["body"], "note 4");
         assert_eq!(last2["total"], 5, "total is the unpaginated count");
 
-        // Offset walks backwards through history from the newest end.
+        // `skip_newest` walks backwards through history from the newest end.
         let older = comments(&store, &id, 2, Some(2)).unwrap();
         assert_eq!(older["items"][0]["body"], "note 1");
         assert_eq!(older["items"][1]["body"], "note 2");
 
-        // Edge: an offset past the end is an empty page, not a panic.
+        // Edge: skipping past the end is an empty page, not a panic.
         let past = comments(&store, &id, 99, Some(2)).unwrap();
         assert_eq!(past["returned"], 0);
         assert_eq!(past["total"], 5);

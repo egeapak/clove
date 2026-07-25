@@ -38,6 +38,9 @@ pub struct ListOpts<'a> {
     pub offset: usize,
     pub limit: Option<usize>,
     pub fields: Option<&'a [String]>,
+    /// Drop null/empty-list keys from JSON output. Matches the MCP read tools'
+    /// `compact`, so the same request shapes the same on either surface.
+    pub compact: bool,
     /// `"files"` or `"index"`.
     pub source: &'a str,
     pub warnings: Vec<String>,
@@ -107,6 +110,11 @@ pub fn emit(format: OutputFormat, objects: Vec<ListObject>, opts: ListOpts<'_>) 
                     let obj = match opts.fields {
                         Some(f) => project((*obj).clone(), f),
                         None => (*obj).clone(),
+                    };
+                    let obj = if opts.compact {
+                        clove_core::view::compact(obj)
+                    } else {
+                        obj
                     };
                     Value::Object(obj)
                 })

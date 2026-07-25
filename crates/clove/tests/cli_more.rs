@@ -644,3 +644,31 @@ fn init_accepts_valid_prefix() {
         clove(dir.path()).arg("ls").assert().success();
     }
 }
+
+/// `--compact` on the CLI drops the same keys the MCP read tools drop by
+/// default, so the same query shapes identically on either surface.
+#[test]
+fn cli_compact_matches_the_mcp_shaping() {
+    let dir = init_repo();
+    new_item(dir.path(), "shape me", &[]);
+
+    let full = json_ok(clove(dir.path()).args(["ls"]));
+    let compact = json_ok(clove(dir.path()).args(["ls", "--compact"]));
+
+    let full_row = &full["data"][0];
+    let compact_row = &compact["data"][0];
+
+    // Null/empty keys are gone; informative ones survive.
+    for absent in ["assignee", "parent", "closed", "labels", "deps", "relates"] {
+        assert!(
+            full_row.get(absent).is_some(),
+            "{absent} present by default"
+        );
+        assert!(
+            compact_row.get(absent).is_none(),
+            "{absent} should be compacted away"
+        );
+    }
+    assert_eq!(compact_row["title"], "shape me");
+    assert_eq!(compact_row["status"], "open");
+}
