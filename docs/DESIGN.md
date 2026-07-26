@@ -1115,9 +1115,13 @@ is query-driven: a view declares what it needs (`store.setQuery(…)`) and the
 server answers it. The list route asks for one page at a time (`limit=100` plus
 an offset derived from a 1-based `?page=` in the browser URL) and renders the
 response as-is — no client-side filtering, ordering or slicing. The board and
-the timeline, which genuinely render every item, ask for `limit=0`. `_meta.total`
-is what the pager and the active tab's count both read, so neither can state a
-number the visible rows contradict. Startup loads `/meta` alone.
+the timeline, which genuinely render every item, ask for `limit=0`. The pager's
+range and the active tab's count both come from the **response** — its
+`_meta.offset` and `_meta.total`, not the URL — so neither can state a number
+the visible rows contradict. Deriving the range from `?page=` instead was
+briefly how it worked, and it labelled the *previous* page's rows with the new
+page's range whenever a fetch was slow, and permanently whenever one failed.
+Startup loads `/meta` alone.
 
 The **API** default is nevertheless still unlimited (`view::defaults::WEB_LIMIT
 = 0`), and deliberately: that one constant is the default for `GET /items`, the

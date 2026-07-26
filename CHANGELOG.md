@@ -153,7 +153,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - **The list's tab counts changed shape.** All/Ready/Blocked used to count a
     browser copy of the whole store. Only the **active** tab now carries a
     number, and it is `_meta.total` for the query that produced the visible
-    rows — the same field the pager's "101–200 of 412" reads, so the two cannot
+    rows. The pager reads its range from that same response (`_meta.offset` plus
+    the row count) rather than from the URL, so the two cannot
     disagree. A count sourced from anywhere else would be a full total standing
     over a partial list.
   - **The API default is unchanged and stays unlimited.** `view::defaults::

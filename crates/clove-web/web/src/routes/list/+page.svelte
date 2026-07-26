@@ -114,8 +114,13 @@
   /** Matches for this query before the window — the server's `_meta.total`. */
   const total = $derived(store.total);
   const pageCount = $derived(Math.max(1, Math.ceil(total / PAGE_SIZE)));
-  const firstShown = $derived(rows.length ? offset + 1 : 0);
-  const lastShown = $derived(offset + rows.length);
+  // From the **response**, not the URL. `offset` above is derived from `?page=`
+  // and updates synchronously with navigation, so pairing it with `rows` — which
+  // lag until the fetch lands — labelled the old rows with the new page's range.
+  // Transient on a click; permanent when the fetch fails, which is how you get
+  // "101–102 of 412" printed over rows 1–2 with no error shown.
+  const firstShown = $derived(rows.length ? store.offset + 1 : 0);
+  const lastShown = $derived(store.offset + rows.length);
 
   function gotoPage(n: number) {
     const clamped = Math.min(Math.max(1, n), pageCount);
@@ -286,7 +291,10 @@
   {/each}
 </div>
 
-{#if store.loadError && !store.loaded}
+<!-- A failed load is worth showing even when a previous page succeeded: without
+     this, a failed jump to page 51 left page 1's rows on screen under page 51's
+     range label, with no error and no way to retry. -->
+{#if store.loadError}
   <div class="panel loaderr" role="alert">
     <div class="loaderr-title">Couldn’t reach the backend</div>
     <p class="dim">{store.loadError}</p>

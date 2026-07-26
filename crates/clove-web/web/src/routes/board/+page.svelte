@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { cmp } from '$lib/filter';
   import type { Item, Status } from '$lib/types';
   import { store, retryLoad } from '$lib/store.svelte';
   import { api } from '$lib/api';
@@ -30,7 +31,11 @@
       ...c,
       items: store.all
         .filter((i) => i.status === c.key)
-        .sort((a, b) => a.priority - b.priority || b.updated.localeCompare(a.updated))
+        // `cmp`, not `localeCompare`: collation is locale-dependent and this runs
+        // in the user's browser, so the column order could differ between two
+        // people looking at the same board. Timestamps are canonical RFC3339,
+        // where byte order *is* chronological order.
+        .sort((a, b) => a.priority - b.priority || cmp(b.updated, a.updated))
     }))
   );
 

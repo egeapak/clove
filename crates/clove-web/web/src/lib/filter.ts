@@ -88,7 +88,7 @@ export function defaultDir(sort: string): 'asc' | 'desc' {
  * disagreement about the tiebreak silently repeats and skips rows across a page
  * boundary.
  */
-function cmp(a: string, b: string): number {
+export function cmp(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 

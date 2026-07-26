@@ -56,7 +56,10 @@ Three notes for whoever picks up §2/§4:
   this section claimed the opposite and deferred it to §3 — it was wrong, and §3
   is smaller than it looked because of it.
 
-**Left alone deliberately: two client-side sorters remain.** Neither is on a
+**Left alone deliberately: client-side sorters remain.** (This inventory listed
+two and missed the board route's inline `.sort()`, which sorted by
+`localeCompare` — locale-dependent collation in the user's browser — until §5
+moved it onto the shared byte-order `cmp`.) Neither remaining one is on a
 read path this section covers, but both will drift when a sort field is added:
 
 - `clove-tui`'s `app::mod::apply_sort` carries its own `SortField`

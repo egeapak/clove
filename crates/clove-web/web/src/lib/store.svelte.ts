@@ -89,6 +89,13 @@ class Store {
     const next = new Map(this.items);
     next.delete(id);
     this.items = next;
+    // Keep the window's own bookkeeping honest. `order` is what `all` reads and
+    // `total` is what the pager prints, so dropping only from `items` left a
+    // deleted row counted: delete from the detail route, return to the list, and
+    // `setQuery`'s idempotency check suppressed the correcting refetch, so the
+    // pager read "1–2 of 3" over two rows until a live event happened to arrive.
+    this.order = this.order.filter((x) => x !== id);
+    if (this.total > 0) this.total -= 1;
   }
 
   /**
@@ -224,7 +231,11 @@ class Store {
   async ensureMeta() {
     if (this.meta) return;
     this.meta = await api.meta();
-    this.loadError = null;
+    // Deliberately does NOT clear `loadError`: this call knows only that
+    // `/meta` succeeded. Clearing it erased a *list* failure that had already
+    // been recorded — routes mount before the layout's `onMount`, so a deep
+    // link to /list with a failing `/items` and a healthy `/meta` ran exactly
+    // that order and left the view spinning forever with no error and no Retry.
     if (isMockMode()) this.conn = 'mock';
   }
 

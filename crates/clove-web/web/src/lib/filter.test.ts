@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { applyFilters, sortItems } from './filter';
+import { applyFilters, sortItems, cmp } from './filter';
 import type { Item } from './types';
 
 // A "lean" list item, as served by GET /api/v1/items — note: NO `body` key
@@ -156,5 +156,38 @@ describe('matchesTab partitions the way the server does', () => {
     expect(applyFilters(items, { mode: 'ready' }).map((i) => i.id)).toEqual([]);
     // …and 'list' still constrains nothing.
     expect(applyFilters(items, { mode: 'list' })).toHaveLength(3);
+  });
+});
+
+describe('id comparison is byte order, not collation', () => {
+  // `cmp` replaced `localeCompare` because collation is locale-dependent and
+  // this code runs in the *user's* browser: two people could see the same list
+  // in different orders. The pair below is the proof that the hazard is real
+  // rather than theoretical — both are legal clove ids (lowercase prefix, `-`,
+  // 8 Crockford chars), and Hungarian sorts `cs` as a digraph after every other
+  // `c`+X, so a Hungarian collator reverses them.
+  const A = 'czz-00000000';
+  const B = 'cs0-00000000';
+
+  it('orders ids by byte value', () => {
+    // 's'(0x73) < 'z'(0x7A), so B precedes A.
+    expect(cmp(A, B)).toBeGreaterThan(0);
+    expect(cmp(B, A)).toBeLessThan(0);
+    expect(cmp(A, A)).toBe(0);
+  });
+
+  it('does not agree with every collator, which is the point', () => {
+    // A real collator disagrees. This is what makes the change meaningful; it is
+    // *not* a regression guard against reintroducing `localeCompare`, which
+    // under the CI host locale agrees with byte order for every legal id pair.
+    // The guard is that `cmp` is asserted directly above.
+    expect(A.localeCompare(B, 'hu')).toBeLessThan(0);
+    expect(Math.sign(cmp(A, B))).not.toBe(Math.sign(A.localeCompare(B, 'hu')));
+  });
+
+  it('breaks sort ties by that same byte order', () => {
+    const tied = (id: string) => lean({ id, title: 't', priority: 1 });
+    const out = sortItems([tied(A), tied(B)], 'priority', 'asc', () => 0);
+    expect(out.map((i) => i.id)).toEqual([B, A]);
   });
 });
