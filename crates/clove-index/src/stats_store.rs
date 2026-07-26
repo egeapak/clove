@@ -177,27 +177,16 @@ pub struct StatsSnapshot {
     pub report: StatsReport,
 }
 
-/// The 19-char `YYYY-MM-DDTHH:MM:SS` prefix every RFC 3339 spelling of a UTC
-/// instant shares — the part that is *identical* whether the row was written as
-/// `…:00Z`, `…:00+00:00`, or `…:00.904816670+00:00`.
-///
-/// `captured_at` is compared and ordered as TEXT, and the `snapshots` table is
-/// **durable**: it is carried verbatim across every reindex and schema-version
-/// rebuild (that is the whole point of the module), so rows written by an older
-/// clove in a different spelling outlive any index bump and coexist with
-/// canonical ones. Comparing on the shared prefix makes both the `since` bound
-/// and the `ORDER BY` spelling-agnostic, instead of resting on the accident that
-/// `'+' < '.' < 'Z'`. Every stored value is UTC (it is rendered from a
-/// `DateTime<Utc>`), so the prefix is directly comparable.
-const CAPTURED_AT_KEY: &str = "substr(captured_at, 1, 19)";
-
 impl Index {
     /// Append one analytics snapshot stamped `captured_at` to the index's history.
     ///
     /// The timestamp is written in the one canonical spelling
     /// ([`clove_types::canonical_rfc3339`]). Rows left by an older clove are
-    /// re-spelled in the same transaction — the roadmap's "rewrite on the next
+    /// re-spelled on the way past — the roadmap's "rewrite on the next
     /// mutation", which for an append-only history table is the next append.
+    /// (The rewrite and the append are separate autocommit statements, not one
+    /// transaction; the rewrite is idempotent, so a crash between them costs
+    /// nothing.)
     pub fn record_snapshot(
         &self,
         captured_at: DateTime<Utc>,
@@ -231,14 +220,22 @@ impl Index {
     /// Read recorded snapshots, most recent first. `since` (an RFC3339 lower
     /// bound, inclusive) and `limit` are optional; `None`/`0` mean unbounded.
     ///
-    /// Both the `since` comparison and the ordering run over
-    /// [`CAPTURED_AT_KEY`], the spelling-agnostic second-precision prefix, so a
-    /// bound given in any equivalent RFC 3339 form (`Z`, `+00:00`, a non-UTC
-    /// offset, any sub-second precision) selects the same rows — and rows a
-    /// previous clove wrote in a different spelling sort alongside canonical
-    /// ones by instant rather than by suffix byte. `since` is canonicalized
-    /// first so its own prefix is in UTC; an unparseable `since` is used
-    /// verbatim (best effort).
+    /// Both the `since` comparison and the ordering run over the **parsed
+    /// instant**, in Rust, not over the stored string.
+    ///
+    /// An earlier version compared `substr(captured_at, 1, 19)` in SQL, which is
+    /// the *local wallclock* prefix: a legacy row spelled `…T10:00:00+02:00`
+    /// (08:00Z) sorted as though it were 10:00, so history came back visibly
+    /// unsorted, `--since` selected too many rows, and `--limit` dropped the
+    /// wrong ones. The read path canonicalized the returned *value* while
+    /// ordering on the raw prefix, so the output contradicted itself rather than
+    /// failing loudly. Only clove's own writes are guaranteed UTC; this table is
+    /// carried verbatim across every reindex and schema bump, so it can hold
+    /// anything an older clove or a foreign writer left.
+    ///
+    /// The table holds one row per `clove stats --snapshot`, so reading it whole
+    /// and ordering in memory is cheap and unconditionally correct. Unparseable
+    /// rows sort last, deterministically, rather than being dropped.
     ///
     /// The returned `captured_at` is always canonical, whatever the row holds.
     pub fn snapshot_history(
@@ -247,39 +244,53 @@ impl Index {
         limit: Option<usize>,
     ) -> Result<Vec<StatsSnapshot>, IndexError> {
         ensure_table(self.conn())?;
-        let since_canonical: Option<String> = since.map(clove_types::canonicalize_rfc3339);
-
-        let mut sql = String::from("SELECT captured_at, detail_json FROM snapshots");
-        if since_canonical.is_some() {
-            sql.push_str(&format!(" WHERE {CAPTURED_AT_KEY} >= substr(?1, 1, 19)"));
-        }
-        sql.push_str(&format!(" ORDER BY {CAPTURED_AT_KEY} DESC, id DESC"));
-        if let Some(n) = limit.filter(|&n| n > 0) {
-            sql.push_str(&format!(" LIMIT {n}"));
-        }
+        let since_instant = since.and_then(clove_types::parse_rfc3339);
 
         let conn = self.conn();
-        let mut stmt = conn.prepare(&sql)?;
-        let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(String, String)> {
-            Ok((row.get(0)?, row.get(1)?))
-        };
-        let rows = match &since_canonical {
-            Some(s) => stmt.query_map([s], map_row)?,
-            None => stmt.query_map([], map_row)?,
-        };
+        let mut stmt =
+            conn.prepare("SELECT id, captured_at, detail_json FROM snapshots ORDER BY id DESC")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
 
-        let mut out = Vec::new();
+        let mut parsed = Vec::new();
         for row in rows {
-            let (captured_at, detail_json) = row?;
+            let (id, captured_at, detail_json) = row?;
             let report: StatsReport = serde_json::from_str(&detail_json).map_err(|e| {
                 IndexError::CorruptIndex(format!("corrupt snapshot at {captured_at}: {e}"))
             })?;
-            out.push(StatsSnapshot {
+            let instant = clove_types::parse_rfc3339(&captured_at);
+            if let (Some(bound), Some(at)) = (since_instant, instant) {
+                if at < bound {
+                    continue;
+                }
+            }
+            parsed.push((instant, id, captured_at, report));
+        }
+
+        // Newest first, by instant. `None` (unparseable) sorts last rather than
+        // being dropped; `id` breaks ties so the order is total.
+        parsed.sort_by(|a, b| match (a.0, b.0) {
+            (Some(x), Some(y)) => y.cmp(&x).then_with(|| b.1.cmp(&a.1)),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => b.1.cmp(&a.1),
+        });
+        if let Some(n) = limit.filter(|&n| n > 0) {
+            parsed.truncate(n);
+        }
+
+        Ok(parsed
+            .into_iter()
+            .map(|(_, _, captured_at, report)| StatsSnapshot {
                 captured_at: clove_types::canonicalize_rfc3339(&captured_at),
                 report,
-            });
-        }
-        Ok(out)
+            })
+            .collect())
     }
 
     /// Number of recorded snapshots (diagnostic / test helper).
@@ -438,7 +449,7 @@ mod tests {
         // Rows 0-2 are one second apart in three different spellings. Rows 3-4
         // are the case that actually discriminates: two rows *inside the same
         // second*, where the suffix byte is what a raw `ORDER BY captured_at`
-        // would compare ('.' < '+' < 'Z'), and where canonical semantics say the
+        // would compare ('+' < '.' < 'Z'), and where canonical semantics say the
         // two are the same instant and the `id DESC` tiebreak decides. Written
         // canonical-first so the two orders disagree.
         let (_dir, path) = tmp_db();
@@ -457,6 +468,60 @@ mod tests {
             .map(|s| s.report.total)
             .collect();
         assert_eq!(totals, vec![4, 3, 2, 1, 0], "newest first, by instant");
+    }
+
+    /// A non-UTC offset sorts and filters by its *instant*, not its wallclock.
+    ///
+    /// Ordering used to compare `substr(captured_at, 1, 19)` — which is the
+    /// local wallclock prefix, not a UTC one. A row spelled `…T10:00:00+02:00`
+    /// is 08:00Z, but sorted as though it were 10:00: history came back visibly
+    /// unsorted, `--since` selected too many rows, and `--limit` dropped the
+    /// wrong ones. Worse, the returned *value* was canonicalized while the
+    /// ordering was not, so the output contradicted itself instead of failing.
+    ///
+    /// Only clove's own writes are guaranteed UTC; this table is carried
+    /// verbatim across every reindex and schema bump, so it can hold whatever an
+    /// older clove or a foreign writer left.
+    #[test]
+    fn a_non_utc_offset_orders_by_instant_not_wallclock() {
+        let (_dir, path) = tmp_db();
+        let index = Index::open(&path).unwrap();
+        ensure_table(index.conn()).unwrap();
+        // 08:00Z, but spelled with a +02:00 offset: its wallclock prefix (10:00)
+        // sorts it above rows that are genuinely later.
+        insert_verbatim(&index, "2026-06-01T10:00:00+02:00", 0); // = 08:00Z
+        insert_verbatim(&index, "2026-06-01T08:30:00Z", 1);
+        insert_verbatim(&index, "2026-06-01T09:00:00Z", 2);
+
+        let totals: Vec<u64> = index
+            .snapshot_history(None, None)
+            .unwrap()
+            .iter()
+            .map(|s| s.report.total)
+            .collect();
+        assert_eq!(totals, vec![2, 1, 0], "newest first, by instant");
+
+        // `--since` uses the instant too: 08:30Z excludes the 08:00Z row.
+        let since: Vec<u64> = index
+            .snapshot_history(Some("2026-06-01T08:30:00Z"), None)
+            .unwrap()
+            .iter()
+            .map(|s| s.report.total)
+            .collect();
+        assert_eq!(
+            since,
+            vec![2, 1],
+            "the +02:00 row is 08:00Z, below the bound"
+        );
+
+        // ...and `limit` keeps the genuinely-newest, not the wallclock-newest.
+        let newest: Vec<u64> = index
+            .snapshot_history(None, Some(1))
+            .unwrap()
+            .iter()
+            .map(|s| s.report.total)
+            .collect();
+        assert_eq!(newest, vec![2]);
     }
 
     #[test]

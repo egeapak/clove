@@ -251,7 +251,7 @@ spelling clove writes — `clove_types::canonical_rfc3339` (UTC, whole seconds,
 `Z`) — and every read accepts any parseable RFC 3339 and normalizes it.
 `ItemFrontmatter` does the normalizing at the *type* boundary
 (`clove_types::time::{serde_ts, serde_ts_opt}`), so YAML frontmatter, `import
-json`, the daemon wire and web request bodies all get it and no surface can be
+json` get it — the surfaces that carry an `ItemFrontmatter` — and neither can be
 forgotten. No flag day, no `clove migrate`: a store is re-spelled as it is
 written.
 

@@ -172,7 +172,8 @@ detection, `stats --history` ordering). So there is exactly one spelling clove e
 **UTC, whole seconds, `Z` suffix** (`2026-06-02T10:00:00Z`), rendered by
 `clove_types::canonical_rfc3339`. Every **read** accepts any parseable RFC 3339 and normalizes
 it — `ItemFrontmatter` does this at the type boundary (`clove_types::time::serde_ts`), so YAML
-frontmatter, `import json`, the daemon wire and web request bodies cannot diverge, and a
+frontmatter and `import json` — the two surfaces that carry an `ItemFrontmatter` —
+cannot diverge, and a
 hand-edited or foreign-written value is simply re-spelled on the next write. **There is no
 migration step and no flag day** (no `clove migrate` pass, no index-schema bump): the store is
 files, and files are rewritten as they are touched. Two deliberate exceptions, both because
@@ -576,7 +577,12 @@ CREATE TABLE labels (
 -- change the bytes of every row in every existing index — only safe behind a SCHEMA_VERSION
 -- bump, i.e. a full rebuild for every user, to change a string no surface shows. The *values*
 -- they are written from are canonical (ItemFrontmatter normalizes on deserialize), so the index
--- and file paths can never rank two items differently. Pinned by
+-- and file paths cannot rank two items differently for anything written since.
+An index built *before* canonicalization can still hold a sub-second value where
+the file now parses to a truncated one, and staleness is mtime/hash-based, so an
+untouched file is never re-indexed: `clove reindex` is the remedy. Not worth a
+forced rebuild for everyone, since reaching it needs a hand-edited sub-second
+timestamp *and* a pre-upgrade index. Pinned by
 -- `timestamp_columns_keep_their_stored_spelling` in clove-index.
 
 -- Staleness oracle (exactly one row enforced by the CHECK constraint)

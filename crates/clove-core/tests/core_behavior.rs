@@ -1009,8 +1009,27 @@ fn a_mutation_rewrites_a_non_canonical_timestamp() {
     // Migration on read, rewrite on next mutation — no flag day, no `clove
     // migrate`. `created`/`closed` are untouched by the edit itself, so what is
     // asserted here is purely the re-spelling.
+    //
+    // Note the read-side assertion below: the *writer* has always rendered
+    // whole seconds, so asserting only on the rewritten file passes with the
+    // type-boundary normalization entirely reverted. What that normalization
+    // adds is the in-memory value being truncated at parse time, which is what
+    // `import json` and every comparison against a stored timestamp see.
     for spelling in TIMESTAMP_SPELLINGS {
         let (_tmp, store, id) = store_with_timestamp_spelling(spelling);
+
+        // Parsed, before any mutation: the instant is normalized on the way in.
+        let parsed = store.get(&id).unwrap().frontmatter;
+        assert_eq!(
+            parsed.created.timestamp_subsec_nanos(),
+            0,
+            "`{spelling}` must lose sub-second precision at parse time"
+        );
+        assert_eq!(
+            clove_types::canonical_rfc3339(parsed.created),
+            "2026-06-02T10:00:00Z",
+            "`{spelling}` must parse to the same instant"
+        );
         clove_core::apply_edit(
             &store,
             &id,

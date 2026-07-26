@@ -56,9 +56,25 @@ pub fn canonical_rfc3339(ts: DateTime<Utc>) -> String {
 /// hand-edited or foreign-written timestamp compares equal to the canonical one
 /// rather than looking like a change.
 pub fn parse_rfc3339(s: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(s.trim())
+    let s = s.trim();
+    // `parse_from_rfc3339` is *stricter* than the `FromStr` impl these fields
+    // used before canonicalization existed, and narrowing what clove can read is
+    // not a normalization — it is a store that stops opening. Spellings only
+    // `FromStr` accepts, all of which appear in real files:
+    //
+    //   2026-06-02 10:00:00 +00:00   ← YAML's own timestamp form
+    //   2026-06-02T10:00:00+0000     ← no colon in the offset
+    //   2026-06-02T10:00:00UTC
+    //   2026-6-2T10:00:00Z           ← unpadded
+    //
+    // Rejecting those made a hand-edited item vanish from every list with a
+    // `PARSE_ERROR` that `clove doctor` reported as unfixable. Read permissively,
+    // write canonically.
+    DateTime::parse_from_rfc3339(s)
+        .map(|dt| dt.with_timezone(&Utc))
+        .or_else(|_| s.parse::<DateTime<Utc>>())
         .ok()
-        .map(|dt| truncate_to_seconds(dt.with_timezone(&Utc)))
+        .map(truncate_to_seconds)
 }
 
 /// Re-spell any parseable RFC 3339 string canonically.
@@ -123,6 +139,48 @@ pub mod serde_ts_opt {
 
 #[cfg(test)]
 mod tests {
+
+    /// Reading must stay at least as permissive as it was before
+    /// canonicalization existed, or a store an older clove opened stops opening.
+    ///
+    /// These four spellings are accepted by chrono's `FromStr` — the impl these
+    /// fields used before — and rejected by `parse_from_rfc3339`. The first is
+    /// YAML's own timestamp form, which is what a hand-edit most plausibly
+    /// produces. Rejecting them made the item vanish from every list with a
+    /// `PARSE_ERROR` that `clove doctor` called unfixable.
+    #[test]
+    fn reading_is_at_least_as_permissive_as_it_was() {
+        let want = "2026-06-02T10:00:00Z";
+        for spelling in [
+            "2026-06-02 10:00:00 +00:00",
+            "2026-06-02T10:00:00+0000",
+            "2026-06-02T10:00:00UTC",
+            "2026-6-2T10:00:00Z",
+        ] {
+            let parsed = parse_rfc3339(spelling)
+                .unwrap_or_else(|| panic!("`{spelling}` must still be readable"));
+            assert_eq!(canonical_rfc3339(parsed), want, "from `{spelling}`");
+        }
+
+        // The strict spellings keep working, including offsets and fractions.
+        for spelling in [
+            "2026-06-02T10:00:00Z",
+            "2026-06-02T10:00:00+00:00",
+            "2026-06-02T12:00:00+02:00",
+            "2026-06-02T10:00:00.904816670Z",
+        ] {
+            assert_eq!(
+                canonical_rfc3339(parse_rfc3339(spelling).unwrap()),
+                want,
+                "from `{spelling}`"
+            );
+        }
+
+        // Genuinely unparseable input is still `None` — permissive, not credulous.
+        for junk in ["", "not a timestamp", "2026-13-45T99:99:99Z"] {
+            assert!(parse_rfc3339(junk).is_none(), "`{junk}` must not parse");
+        }
+    }
     use super::*;
 
     /// Every spelling of the same instant that must survive canonicalization as

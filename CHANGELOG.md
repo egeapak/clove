@@ -93,7 +93,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Everything clove writes now goes through `clove_types::canonical_rfc3339`
   (UTC, whole seconds, `Z`), and every read accepts any parseable spelling and
   normalizes it — `ItemFrontmatter` does so at the type boundary, so YAML
-  frontmatter, `export`/`import json`, the daemon wire, and web request bodies
+  frontmatter and `export`/`import json` (the surfaces that actually carry an
+  `ItemFrontmatter`; the daemon wire sends a lean projection and the web write
+  surface takes `NewSpec`/`EditRequest`, neither of which has a timestamp field)
   cannot diverge. **There is no migration and no flag day:** an existing store is
   re-spelled the next time each item is written, and stats history the next time
   a snapshot is recorded.

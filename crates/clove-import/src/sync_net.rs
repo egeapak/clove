@@ -15,7 +15,7 @@
 //! transient blip or rate-limit doesn't abort a whole sync. `--dry-run` never
 //! enters this module's apply path — it stops at the plan.
 
-use chrono::{DateTime, Timelike, Utc};
+use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
 
 use clove_core::write::write_item_file;
@@ -771,7 +771,7 @@ fn value_updated(value: &Value) -> Option<DateTime<Utc>> {
 
 /// Truncate to whole seconds (the canonical on-disk timestamp precision).
 fn truncate(ts: DateTime<Utc>) -> DateTime<Utc> {
-    ts.with_nanosecond(0).expect("zero nanos is valid")
+    clove_types::truncate_to_seconds(ts)
 }
 
 /// The base backoff delay between network retries. Overridable via
