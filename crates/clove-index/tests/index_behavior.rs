@@ -509,7 +509,7 @@ fn list_filters_by_each_field() {
 
     let by_type = index
         .query_items(&Filter {
-            item_type: Some(ItemType::Bug),
+            item_type: vec![ItemType::Bug],
             ..Default::default()
         })
         .unwrap();
@@ -517,7 +517,7 @@ fn list_filters_by_each_field() {
 
     let by_priority = index
         .query_items(&Filter {
-            priority: Some(Priority(1)),
+            priority: vec![Priority(1)],
             ..Default::default()
         })
         .unwrap();
@@ -533,7 +533,7 @@ fn list_filters_by_each_field() {
 
     let by_label = index
         .query_items(&Filter {
-            label: Some("area:ui".to_owned()),
+            labels: vec!["area:ui".to_owned()],
             ..Default::default()
         })
         .unwrap();
@@ -544,7 +544,7 @@ fn list_filters_by_each_field() {
     // status is a Vec: match several statuses at once.
     let by_status = index
         .query_items(&Filter {
-            status: Some(vec![ItemStatus::Open, ItemStatus::InProgress]),
+            status: vec![ItemStatus::Open, ItemStatus::InProgress],
             ..Default::default()
         })
         .unwrap();

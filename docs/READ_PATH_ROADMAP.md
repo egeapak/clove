@@ -17,7 +17,7 @@ Status of what shipped, for context:
 | Per-surface defaults | **Done** — `clove_core::view::defaults` |
 | Result shaping (`fields`/`compact`) | **Done** on CLI + MCP; **absent on the web API** (§5) |
 | Ordering (`sort`/`dir`) | **Done** — `clove_core::view::Order`, all surfaces (§1) |
-| Filters | Web has a superset — §2 |
+| Filters | **Done** — `clove_core::view::Filters`, all surfaces (§2) |
 | Read tiering (daemon → index → files) | CLI only; MCP always reads files — §4 |
 | Search match set + ranking | Labels: **done**; substring-vs-token still diverges — §6.1 |
 | Index rebuild on schema bump | **Done** — `Index::open_or_rebuild` |
@@ -141,7 +141,45 @@ relevance-first.
 
 ---
 
-## 2. `Filters` — one filter set, and an exhaustive push-down
+## 2. `Filters` — one filter set, and an exhaustive push-down — **DONE**
+
+Shipped as specified, with two deviations noted below. `clove_core::view::Filters`
+is the single filter set on every surface: sets for `status`/`item_type`/
+`priority` (any-of), `labels` (all-of), plus `assignee` and `q`, with an empty
+set meaning unconstrained. `Filters::parse` keeps the single-value spelling;
+`Filters::parse_multi` takes repeated/csv values. `--status/--type/--priority/
+--label` repeat on the CLI, the MCP tools take `string | string[]` through an
+untagged wrapper, and `clove query`'s JSON filter does too. `clove_index::
+push_down` is the exhaustive split, `_meta.filters` echoes the parsed set, and
+`clove_ipc::PROTOCOL_VERSION` is 5.
+
+Notes for whoever picks up §4:
+
+- **The wire carries `Filters` whole**, as `QueryRequest.filters`, rather than
+  the flat vectors this section described. Same information; the difference is
+  that there is no per-field packing/unpacking left on either side of the RPC,
+  so a newly-added filter cannot be forgotten in a translation that still
+  compiles. `GraphRequest::Blocked` lost `include_warnings` and gained `order`
+  in the same bump (§7's first bullet, folded in here as planned).
+- **`q` is the only residue, and it is a design decision, not a gap.** SQLite's
+  `LIKE`/`lower()` case-fold ASCII only while `str::to_lowercase` is full
+  Unicode, so pushing `q` into SQL would reintroduce §6.1's file-vs-index
+  divergence on a *filter* rather than a search. A residue changes the query
+  mechanics too — the `LIMIT` may not be pushed down and `COUNT(*)` is not the
+  total — and `clove_index::query_filtered` is the one place that knows it. The
+  residue path also has to select full rows, since `q` reads labels and the lean
+  projection does not carry them.
+- **`clove blocked` no longer re-sorts locally.** The daemon orders the blocked
+  set by running the index's own `ORDER BY` over the whole store and retaining
+  the blocked ids from that sequence — reusing `order_by_sql` rather than adding
+  a third comparator. The graph cache's `ItemMeta` has no timestamps, so sorting
+  from the graph alone was never going to cover `created`/`updated`.
+- **One behaviour change on the web**, beyond gaining nothing it did not have:
+  an unparseable filter value is now a `VALIDATION_ERROR` instead of a filter
+  that matches nothing, and `?q=` matches id/title/labels separately rather than
+  concatenated into one haystack.
+
+The original write-up follows.
 
 **Problem.** The web API accepts strictly more than `clove_core::Filters`:
 multi-valued (csv) `status`/`type`/`priority`, AND-ed multi-label, and a `q`
@@ -391,9 +429,9 @@ came back; `_meta.per_column` marks the difference from a flat list.
 
 ## 7. Smaller items
 
-- **`GraphRequest::Blocked { include_warnings }`** (`clove-ipc/src/protocol.rs`)
-  is dead: no surface can set it and the only caller hard-codes `true`. Remove
-  it with the §2 protocol bump rather than on its own.
+- ~~**`GraphRequest::Blocked { include_warnings }`**~~ — **done**, removed with
+  the §2 protocol bump (v4 → v5) as planned. The variant now carries `order`
+  instead.
 - **Malformed query values on the web** (`?limit=abc`, `?limit=-1`) fall through
   to the default via `.ok()`. The CLI rejects the same input with a clap error.
   Either reject with a `VALIDATION_ERROR` or document the leniency.

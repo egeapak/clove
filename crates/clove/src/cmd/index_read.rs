@@ -6,7 +6,7 @@
 //! transparently refreshed (≤ the threshold) or bypassed. Staleness uses the
 //! fast O(readdir) check by default; `--deep` forces the thorough per-file pass.
 
-use clove_index::{Filter, Index, ItemListRow, QueryMode};
+use clove_index::{Index, ItemListRow, QueryMode};
 use clove_ipc::{DaemonClient, QueryKind, QueryRequest};
 use clove_types::CloveError;
 
@@ -53,11 +53,11 @@ pub fn list_via_daemon(
     };
     let request = QueryRequest {
         kind,
-        status: filters.status,
-        item_type: filters.item_type,
-        priority: filters.priority,
-        assignee: filters.assignee.clone(),
-        label: filters.label.clone(),
+        // The whole shared filter set rides the wire as one field, so a filter
+        // added to `view::Filters` cannot be dropped in a per-field translation
+        // on the way to the daemon — the failure that would look like the flag
+        // simply not applying whenever `cloved` happens to be running.
+        filters: filters.clone(),
         order,
         offset: window.offset,
         limit: window.limit,
@@ -121,27 +121,19 @@ pub fn list_via_index(
         }
     }
 
-    let filter = Filter {
-        mode,
-        status: filters.status.map(|s| vec![s]),
-        item_type: filters.item_type,
-        priority: filters.priority,
-        assignee: filters.assignee.clone(),
-        label: filters.label.clone(),
-        parent: None,
-        // The SQL `ORDER BY` must match the file path's comparator exactly: the
-        // limit below is pushed into SQL, so a mismatched order returns the
-        // wrong *rows*, not just the wrong sequence.
-        order,
-        // Fetch only the rows the page needs; the shared window knows how many
-        // that is (offset + limit) and keeps it inside SQLite's i64 range.
-        limit: window.sql_fetch(),
-    };
-    let total = index
-        .count_items(&filter)
-        .map_err(|e| index_error(e, &ctx.db_path))?;
-    let rows = index
-        .query_list(&filter)
+    // The exhaustive push-down: SQL for what SQLite can express, an in-memory
+    // residue for what it cannot. Building the `Filter` by hand here is what
+    // let `--label` and friends drift from the file path in the first place.
+    let (mut filter, residue) = clove_index::push_down(filters);
+    filter.mode = mode;
+    // The SQL `ORDER BY` must match the file path's comparator exactly: with no
+    // residue the limit is pushed into SQL, so a mismatched order returns the
+    // wrong *rows*, not just the wrong sequence.
+    filter.order = order;
+    // `query_filtered` owns the limit/count decision, because a residue changes
+    // both (it may not slice before filtering, and `COUNT(*)` is not the total).
+    let (rows, total) = index
+        .query_filtered(&filter, residue.as_ref(), window)
         .map_err(|e| index_error(e, &ctx.db_path))?;
     Ok(Some((rows, total, Vec::new())))
 }

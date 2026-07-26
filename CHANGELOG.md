@@ -41,6 +41,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `--compact` on `clove show` and `clove query`. Each already existed on the
   matching MCP tool or on a sibling CLI command, so the same query shaped
   differently depending on which surface asked.
+- **Multi-valued filters on every list read.** `--status`, `--type` and
+  `--priority` repeat as *any of* (`clove ls --status open --status
+  in_progress`); `--label` repeats as *all of* (`--label area:core --label
+  area:ios` needs both). The MCP `clove_ready`/`clove_blocked`/`clove_list`
+  tools take the same fields as either a string or a list of strings, and
+  `clove query`'s JSON filter does too. Only the web API could express any of
+  this before, so "open or in progress, labelled `area:core` **and**
+  `area:ios`" was a question you could ask in the browser and nowhere else.
+- **`--q TEXT` / `"q"` — a substring filter over id, title, and labels.** Also
+  web-only until now (`?q=`). It is a *filter*, not a search: it never reads the
+  body, which is what distinguishes `clove ls --q login` from `clove search
+  login`.
+- **`_meta.filters` echoes the parsed filter set** on every list read (and the
+  `filters` key on the MCP page object), for the same reason `_meta.sort` and
+  `_meta.limit` are echoed. The values are canonicalized and multi-valued, so
+  the echo is what tells a client that `--status started` was applied as
+  `in_progress` and `--label AREA:Core` as `area:core`. `search` omits the key —
+  it takes no field filters.
+
 - **`--sort`/`--desc` on every list read**, and `sort`/`desc` on the
   `clove_ready`, `clove_blocked`, `clove_list`, and `clove_search` MCP tools.
   Sorting previously existed only on the web API (`?sort=`), so an agent asking
@@ -61,6 +80,60 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ranking rather than being silently dropped.
 
 ### Changed
+
+- **One filter contract, shared by every surface.** `clove_core::view::Filters`
+  is now the single filter set behind the CLI flags, the MCP tool arguments, the
+  web query string, and `cloved`'s query RPC. Its fields are sets
+  (`status`/`item_type`/`priority`/`labels`) plus `assignee` and `q`, with an
+  empty set meaning *unconstrained* — so every existing single-value caller is
+  unchanged, and the web's predicate (the only multi-value one there was) is
+  deleted in favour of the shared type rather than reimplemented twice more.
+
+  Three properties come with it:
+
+  - **The index push-down is exhaustive.** `clove_index::push_down(&Filters)`
+    splits the set into a SQL `Filter` and an optional in-memory `PostFilter`
+    residue, destructuring `Filters` with **no `..` rest pattern** — so adding a
+    filter field is a compile error rather than a constraint that quietly stops
+    applying whenever `.clove/index.db` happens to exist. That is the bug class
+    `--include-warnings` and `?limit=0` already demonstrated. Filter values are
+    always bound parameters; nothing user-supplied reaches the statement text.
+  - **`q` is deliberately held back as residue.** SQLite's `LIKE`/`lower()`
+    case-fold ASCII only while `str::to_lowercase` is full Unicode, so a
+    pushed-down `q=Ünicode` would miss a stored `ünicode-tag` the file path
+    finds. A residue also changes the query mechanics — the `LIMIT` may no
+    longer be pushed into SQL, and `COUNT(*)` is no longer `_meta.total` —
+    which `clove_index::query_filtered` owns in one place.
+  - **The file, index, and daemon paths return identical results for every
+    filter combination**, pinned by `crates/clove/tests/filter_parity.rs`
+    against a fixture built so each specific way of getting a filter wrong (a
+    dropped field, OR-ed labels, a list truncated to its first element, a `q`
+    that reaches the body) changes the answer.
+
+- **`clove blocked`'s ordering moved into the daemon.** `GraphRequest::Blocked`
+  now carries the `Order`, and `cloved` applies it through the index's own
+  `ORDER BY`. The CLI used to re-sort the returned ids locally — a second
+  implementation of the comparator that could only approximate `rank`, since it
+  had no topological ranks of its own and had to special-case that field. That
+  local sort is gone.
+
+- **An unrecognized filter value on the web API is now a `VALIDATION_ERROR`.**
+  `?status=bogus` used to compare raw strings and return `[]`, which a client
+  cannot distinguish from "there are no open bugs" — the same treatment
+  `?sort=nope` already gets. Relatedly, `?q=` now matches id, title, and each
+  label *separately* rather than against the three concatenated into one
+  haystack, so a needle containing a space can no longer match across a field
+  boundary. That was an artefact of the concatenation, not a feature.
+
+- **`clove_ipc::PROTOCOL_VERSION` is 4 → 5.** `QueryRequest`'s five scalar
+  filter fields collapse into one `filters: view::Filters`, and
+  `GraphRequest::Blocked` gains `order` while dropping the dead
+  `include_warnings` (no surface could set it; the only caller hard-coded
+  `true`). The codec is JSON, so a v4 frame still *decodes* — which is precisely
+  why this needs a version rather than a compatible field: a v4 client's
+  `"status": "open"` lands nowhere and the daemon answers the **unfiltered**
+  list, silently. The handshake rejects the mismatch instead; restarting
+  `clove daemon` is cheap and the daemon is a cache, not a source of truth.
 
 - **One sort contract, shared by every surface.** `clove_core::view::Order`
   (`SortField` + a direction) is the single comparator behind `--sort`/`--desc`,

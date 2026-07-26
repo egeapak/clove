@@ -17,18 +17,10 @@ fn parse_id(raw: &str) -> Result<CloveId, ApiError> {
     CloveId::new(raw).map_err(ApiError::from)
 }
 
-/// Split a repeated/csv query value (`a,b,c`) into trimmed, non-empty parts.
+/// Split a repeated/csv query value (`a,b,c`) into trimmed, non-empty parts,
+/// through the shared splitter so the CLI/MCP/web spellings decode alike.
 fn csv(params: &HashMap<String, String>, key: &str) -> Vec<String> {
-    params
-        .get(key)
-        .map(|v| {
-            v.split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default()
+    clove_core::view::Filters::split_csv(params.get(key).map(String::as_str))
 }
 
 /// Parse `?offset=`/`?limit=` through the shared contract.
@@ -54,49 +46,42 @@ fn load(state: &AppState) -> Result<(Vec<ItemFrontmatter>, GraphContext), ApiErr
     Ok((frontmatters, ctx))
 }
 
-/// Whether `fm` passes the query filters (status/type/priority OR within a field;
-/// labels AND; assignee exact; `q` substring over id/title/labels).
-fn matches(fm: &ItemFrontmatter, params: &HashMap<String, String>) -> bool {
-    let statuses = csv(params, "status");
-    if !statuses.is_empty() && !statuses.iter().any(|s| s == fm.status.as_str()) {
-        return false;
-    }
-    let types = csv(params, "type");
-    if !types.is_empty() && !types.iter().any(|t| t == fm.item_type.as_str()) {
-        return false;
-    }
-    let priorities = csv(params, "priority");
-    if !priorities.is_empty()
-        && !priorities
-            .iter()
-            .any(|p| p == &fm.priority.get().to_string())
-    {
-        return false;
-    }
-    if let Some(assignee) = params.get("assignee").filter(|s| !s.is_empty()) {
-        if fm.assignee.as_deref() != Some(assignee.as_str()) {
-            return false;
-        }
-    }
-    // Labels are AND: every requested label must be present.
-    for label in csv(params, "label") {
-        if !fm.labels.iter().any(|l| l == &label) {
-            return false;
-        }
-    }
-    if let Some(q) = params.get("q").filter(|s| !s.is_empty()) {
-        let needle = q.to_lowercase();
-        let hay = format!(
-            "{} {} {}",
-            fm.id.as_str().to_lowercase(),
-            fm.title.to_lowercase(),
-            fm.labels.join(" ").to_lowercase()
-        );
-        if !hay.contains(&needle) {
-            return false;
-        }
-    }
-    true
+/// The requested `?status=`/`?type=`/`?priority=`/`?label=`/`?assignee=`/`?q=`,
+/// through the shared contract.
+///
+/// This endpoint had the *only* multi-value filter implementation in the project
+/// — a private predicate here comparing raw strings — while the CLI and MCP took
+/// one value per field. It is now `clove_core::view::Filters`, which every
+/// surface shares; the accepted spellings (csv values, AND-ed labels, `q` over
+/// id/title/labels) are unchanged, and the CLI/MCP gained them rather than the
+/// web losing anything.
+///
+/// Two deliberate differences from the predicate this replaces:
+///
+/// - an unrecognized value is a `VALIDATION_ERROR` rather than a filter that
+///   matches nothing (`?status=bogus` used to return `[]`, indistinguishable
+///   from "no open bugs"), the same treatment `?sort=` already gets;
+/// - `q` is matched against id, title, and each label *separately*, where the
+///   old code concatenated the three into one haystack — so a needle containing
+///   a space can no longer match across a field boundary (`?q=x%20y` matching an
+///   id ending `x` beside a title starting `y`). That was an artefact of the
+///   concatenation, not a feature.
+fn filters_of(params: &HashMap<String, String>) -> Result<clove_core::view::Filters, ApiError> {
+    let present = |key: &str| {
+        params
+            .get(key)
+            .filter(|s| !s.is_empty())
+            .map(String::as_str)
+    };
+    clove_core::view::Filters::parse_multi(
+        &csv(params, "status"),
+        &csv(params, "type"),
+        &csv(params, "label"),
+        present("assignee"),
+        &csv(params, "priority"),
+        present("q"),
+    )
+    .map_err(ApiError::from)
 }
 
 /// The requested `?sort=`/`?dir=`, through the shared contract.
@@ -138,11 +123,12 @@ pub async fn list_items(
 ) -> ApiResult {
     let (frontmatters, ctx) = load(&state)?;
     let order = order_of(&params)?;
+    let filters = filters_of(&params)?;
     let mode = params.get("mode").map(String::as_str).unwrap_or("list");
 
     let mut selected: Vec<ItemFrontmatter> = frontmatters
         .into_iter()
-        .filter(|fm| matches(fm, &params))
+        .filter(|fm| filters.matches(fm))
         .filter(|fm| match mode {
             "ready" => ctx.is_ready(&fm.id),
             "blocked" => ctx.is_blocked(&fm.id),
@@ -169,6 +155,7 @@ pub async fn list_items(
             "limit": window.reported_limit(),
             "sort": order.field.as_str(),
             "dir": order.dir_str(),
+            "filters": serde_json::to_value(&filters).unwrap_or(Value::Null),
             "source": state.source,
         }),
     ))
@@ -264,9 +251,10 @@ pub async fn get_board(
 ) -> ApiResult {
     let (frontmatters, ctx) = load(&state)?;
     let order = order_of(&params)?;
+    let filters = filters_of(&params)?;
     let mut selected: Vec<ItemFrontmatter> = frontmatters
         .into_iter()
-        .filter(|fm| matches(fm, &params))
+        .filter(|fm| filters.matches(fm))
         .collect();
     sort_items(&mut selected, order, ctx.graph());
 
@@ -303,6 +291,7 @@ pub async fn get_board(
             "limit": window.reported_limit(),
             "sort": order.field.as_str(),
             "dir": order.dir_str(),
+            "filters": serde_json::to_value(&filters).unwrap_or(Value::Null),
             "per_column": true,
         }),
     ))

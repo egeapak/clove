@@ -369,21 +369,26 @@ pub struct DepCycleArgs {
 /// Shared filter/pagination flags for `ls`, `ready`, `blocked`.
 #[derive(Debug, Args, Default)]
 pub struct FilterArgs {
-    /// Filter by status (`open|in_progress|closed`).
+    /// Filter by status (`open|in_progress|closed`). Repeatable: any of them.
     #[arg(long)]
-    pub status: Option<String>,
-    /// Filter by type.
+    pub status: Vec<String>,
+    /// Filter by type. Repeatable: any of them.
     #[arg(long = "type", value_name = "TYPE")]
-    pub item_type: Option<String>,
-    /// Filter by label (canonicalized before matching).
+    pub item_type: Vec<String>,
+    /// Filter by label (canonicalized before matching). Repeatable: the item
+    /// must carry **all** of them.
     #[arg(long)]
-    pub label: Option<String>,
+    pub label: Vec<String>,
     /// Filter by assignee.
     #[arg(long)]
     pub assignee: Option<String>,
-    /// Filter by priority.
+    /// Filter by priority. Repeatable: any of them.
     #[arg(long)]
-    pub priority: Option<u8>,
+    pub priority: Vec<u8>,
+    /// Keep only items whose id, title, or labels contain this text
+    /// (case-insensitive). A filter, not a search — it never reads the body.
+    #[arg(long, value_name = "TEXT")]
+    pub q: Option<String>,
     /// Sort by `rank|priority|created|updated|id|status|type` (default `rank`:
     /// priority, then dependency order, then id).
     #[arg(long, value_name = "FIELD")]
@@ -410,6 +415,26 @@ impl FilterArgs {
     /// The requested ordering, through the shared contract.
     pub fn order(&self) -> Result<clove_core::view::Order, clove_types::CloveError> {
         order_of(self.sort.as_deref(), self.desc)
+    }
+
+    /// The requested filter set, through the shared contract.
+    ///
+    /// One place rather than four: `ls`/`ready`/`blocked` all built their own
+    /// `Filters::parse(...)` call, so a new filter flag had to be wired into
+    /// each of them and `query` besides.
+    pub fn filters(&self) -> Result<clove_core::view::Filters, clove_types::CloveError> {
+        // `--priority` is a clap `u8` (so `--priority abc` is still a clap
+        // error, exit 2, as it has always been); the shared parser takes words,
+        // so the validated numbers are spelled back out.
+        let priority: Vec<String> = self.priority.iter().map(u8::to_string).collect();
+        clove_core::view::Filters::parse_multi(
+            &self.status,
+            &self.item_type,
+            &self.label,
+            self.assignee.as_deref(),
+            &priority,
+            self.q.as_deref(),
+        )
     }
 }
 

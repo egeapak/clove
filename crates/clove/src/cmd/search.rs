@@ -100,6 +100,9 @@ pub fn run(
                 source: "daemon",
                 sort: order.reported_sort(),
                 dir: order.dir_str(),
+                // `search` takes no field filters, so it echoes none — an empty
+                // `filters` object would advertise a surface it does not have.
+                filters: None,
                 warnings: Vec::new(),
             },
         );
@@ -154,6 +157,7 @@ pub fn run(
             source,
             sort: order.reported_sort(),
             dir: order.dir_str(),
+            filters: None,
             warnings: Vec::new(),
         },
     );

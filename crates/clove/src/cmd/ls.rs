@@ -8,7 +8,7 @@ use crate::cli::FilterArgs;
 use crate::cmd::index_read::{list_via_daemon, list_via_index};
 use crate::cmd::listing::{
     emit, lean_can_serve, objects_from_frontmatters, objects_from_lean_rows, ranks_of, window,
-    Filters, ListOpts,
+    ListOpts,
 };
 use crate::context::Ctx;
 use crate::item_json::parse_fields;
@@ -20,13 +20,7 @@ pub fn run(
     no_index: bool,
     deep: bool,
 ) -> Result<(), CloveError> {
-    let filters = Filters::parse(
-        args.status.as_deref(),
-        args.item_type.as_deref(),
-        args.label.as_deref(),
-        args.assignee.as_deref(),
-        args.priority,
-    )?;
+    let filters = args.filters()?;
     let order = args.order()?;
     let fields = args.fields.as_deref().map(parse_fields);
     let window = window(args.offset, args.limit);
@@ -49,6 +43,7 @@ pub fn run(
                 source: "daemon",
                 sort: order.field.as_str(),
                 dir: order.dir_str(),
+                filters: Some(&filters),
                 warnings,
             },
         );
@@ -79,6 +74,7 @@ pub fn run(
                 source: "index",
                 sort: order.field.as_str(),
                 dir: order.dir_str(),
+                filters: Some(&filters),
                 warnings,
             },
         );
@@ -104,6 +100,7 @@ pub fn run(
             source: "files",
             sort: order.field.as_str(),
             dir: order.dir_str(),
+            filters: Some(&filters),
             warnings: Vec::new(),
         },
     );

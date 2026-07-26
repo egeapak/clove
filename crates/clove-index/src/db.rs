@@ -279,6 +279,22 @@ impl ItemListRow {
             title: row.get(4)?,
         })
     }
+
+    /// Project a full [`ItemRow`] onto the lean shape.
+    ///
+    /// Used by the residue path in `query::query_filtered`: a `q` filter reads
+    /// labels, which [`LIST_COLUMNS`] does not select, so that query has to ask
+    /// for full rows and narrow afterwards. The projection lives here so the
+    /// lean shape has exactly one definition.
+    pub fn from_item_row(row: &ItemRow) -> ItemListRow {
+        ItemListRow {
+            id: SmolStr::new(&row.id),
+            status: SmolStr::new(&row.status),
+            item_type: SmolStr::new(&row.item_type),
+            priority: row.priority,
+            title: row.title.clone(),
+        }
+    }
 }
 
 /// A handle to an opened SQLite index.

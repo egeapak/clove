@@ -18,21 +18,69 @@ pub struct ShapeArgs {
     pub compact: Option<bool>,
 }
 
+/// One value or a list of them.
+///
+/// The filter arguments accept `"open"` and `["open","in_progress"]` alike, so
+/// every agent already calling these tools with a single string is unaffected —
+/// the published `inputSchema` gains an `anyOf` branch rather than changing
+/// type. `#[serde(untagged)]` is what makes the string form keep working; the
+/// `JsonSchema` derive mirrors it into the schema agents read.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(crate = "rmcp::serde", untagged)]
+pub enum OneOrMany {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl OneOrMany {
+    /// The values as a list; `None` (the argument was absent) is unconstrained.
+    pub fn values(this: &Option<OneOrMany>) -> Vec<String> {
+        match this {
+            None => Vec::new(),
+            Some(OneOrMany::One(v)) => vec![v.clone()],
+            Some(OneOrMany::Many(v)) => v.clone(),
+        }
+    }
+}
+
+/// One priority or a list of them (`2` or `[0,1]`). Numeric, as it always was.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(crate = "rmcp::serde", untagged)]
+pub enum Priorities {
+    One(u8),
+    Many(Vec<u8>),
+}
+
+impl Priorities {
+    /// The values as priority words; `None` is unconstrained.
+    pub fn values(this: &Option<Priorities>) -> Vec<String> {
+        match this {
+            None => Vec::new(),
+            Some(Priorities::One(p)) => vec![p.to_string()],
+            Some(Priorities::Many(v)) => v.iter().map(u8::to_string).collect(),
+        }
+    }
+}
+
 /// Shared filter fields for `clove_ready` / `clove_list` / `clove_blocked`.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[serde(crate = "rmcp::serde")]
 pub struct FilterArgs {
-    /// Filter by status (`open|in_progress|closed`).
-    pub status: Option<String>,
-    /// Filter by item type (`bug|feature|chore|docs|epic`).
+    /// Filter by status (`open|in_progress|closed`). A list matches any of them.
+    pub status: Option<OneOrMany>,
+    /// Filter by item type (`bug|feature|chore|docs|epic`). A list matches any
+    /// of them.
     #[serde(rename = "type")]
-    pub item_type: Option<String>,
-    /// Filter by a single label (case-insensitive).
-    pub label: Option<String>,
+    pub item_type: Option<OneOrMany>,
+    /// Filter by label (case-insensitive). A list requires **all** of them.
+    pub label: Option<OneOrMany>,
     /// Filter by assignee.
     pub assignee: Option<String>,
-    /// Filter by priority (0=highest .. 4).
-    pub priority: Option<u8>,
+    /// Filter by priority (0=highest .. 4). A list matches any of them.
+    pub priority: Option<Priorities>,
+    /// Keep only items whose id, title, or labels contain this text
+    /// (case-insensitive). A filter, not a search: it never reads the body.
+    pub q: Option<String>,
     /// Sort by `rank|priority|created|updated|id|status|type`. Default `rank`:
     /// priority, then dependency order, then id.
     pub sort: Option<String>,

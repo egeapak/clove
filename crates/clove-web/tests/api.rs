@@ -741,3 +741,115 @@ async fn list_sorts_through_the_shared_order() {
     let (status, _) = get(addr, "/api/v1/items?dir=sideways").await;
     assert!(status.contains("422"), "{status}");
 }
+
+/// Read-path §2 on the web: the endpoint keeps every filter spelling it had
+/// (csv values, AND-ed labels, `?q=`), now through the shared
+/// `clove_core::view::Filters` that the CLI and MCP also use.
+///
+/// The fixture is the two-item store above: `Dependency` (bug, p0,
+/// `area:core`) and `Add webhook handler` (feature, p1, `area:payments`).
+#[tokio::test]
+async fn item_filters_keep_the_webs_multi_value_spellings() {
+    let (_tmp, addr, _id) = spawn().await;
+    let titles = |path: &'static str| async move {
+        let (status, body) = get(addr, path).await;
+        assert!(status.contains("200"), "{path}: {status} {body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let mut out: Vec<String> = v["data"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{path}: {v}"))
+            .iter()
+            .map(|i| i["title"].as_str().unwrap().to_owned())
+            .collect();
+        out.sort();
+        out
+    };
+
+    // Single values.
+    assert_eq!(titles("/api/v1/items?type=bug").await, ["Dependency"]);
+    assert_eq!(
+        titles("/api/v1/items?priority=1").await,
+        ["Add webhook handler"]
+    );
+    assert_eq!(
+        titles("/api/v1/items?label=area:core").await,
+        ["Dependency"]
+    );
+    // Csv = any-of, the spelling the SPA sends.
+    assert_eq!(
+        titles("/api/v1/items?type=bug,feature").await,
+        ["Add webhook handler", "Dependency"]
+    );
+    assert_eq!(
+        titles("/api/v1/items?priority=0,1").await,
+        ["Add webhook handler", "Dependency"]
+    );
+    assert_eq!(titles("/api/v1/items?status=open,closed").await.len(), 2);
+    // Csv labels are all-of: no item carries both, so the intersection is empty.
+    assert!(titles("/api/v1/items?label=area:core,area:payments")
+        .await
+        .is_empty());
+    // `q` over title and labels, case-insensitively; never the body (only the
+    // webhook item has one, and it says "Do the thing").
+    assert_eq!(
+        titles("/api/v1/items?q=WEBHOOK").await,
+        ["Add webhook handler"]
+    );
+    assert_eq!(
+        titles("/api/v1/items?q=area:payments").await,
+        ["Add webhook handler"]
+    );
+    assert!(titles("/api/v1/items?q=Do%20the%20thing").await.is_empty());
+    // An empty parameter does not constrain (the SPA clears a filter by sending
+    // it empty rather than dropping the key).
+    assert_eq!(titles("/api/v1/items?q=&status=&label=").await.len(), 2);
+
+    // `_meta.filters` echoes the parsed set, canonicalized.
+    let (_status, body) = get(addr, "/api/v1/items?status=open&label=AREA:Core&priority=0").await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let filters = &v["_meta"]["filters"];
+    assert_eq!(filters["status"], serde_json::json!(["open"]), "{filters}");
+    assert_eq!(
+        filters["labels"],
+        serde_json::json!(["area:core"]),
+        "{filters}"
+    );
+    assert_eq!(filters["priority"], serde_json::json!([0]), "{filters}");
+    assert_eq!(filters["q"], serde_json::Value::Null, "{filters}");
+
+    // The board shares the predicate and echoes it too.
+    let (_status, body) = get(addr, "/api/v1/board?type=bug").await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["_meta"]["filters"]["type"], serde_json::json!(["bug"]));
+    let total: i64 = v["data"]["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["count"].as_i64().unwrap())
+        .sum();
+    assert_eq!(total, 1, "the board filters, it does not just echo: {v}");
+}
+
+/// An unparseable filter value is a `VALIDATION_ERROR`, not a filter that
+/// silently matches nothing.
+///
+/// This is the one behaviour change on this endpoint: `?status=bogus` used to
+/// compare raw strings and return `[]`, which a client cannot tell from "there
+/// are no open bugs". It is the same treatment `?sort=nope` already gets.
+#[tokio::test]
+async fn an_unknown_filter_value_is_a_validation_error() {
+    let (_tmp, addr, _id) = spawn().await;
+    for path in [
+        "/api/v1/items?status=bogus",
+        "/api/v1/items?status=open,bogus",
+        "/api/v1/items?type=saga",
+        "/api/v1/items?priority=9",
+        "/api/v1/items?priority=abc",
+        "/api/v1/board?status=bogus",
+    ] {
+        let (status, body) = get(addr, path).await;
+        assert!(status.contains("422"), "{path}: {status}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["error"]["code"], "VALIDATION_ERROR", "{path}: {body}");
+    }
+}

@@ -8,7 +8,6 @@
 
 use clove_core::graph::DepTreeNode;
 use clove_core::view::Order;
-use clove_types::{ItemStatus, ItemType, Priority};
 use serde::{Deserialize, Serialize};
 
 /// Wire-protocol version, returned by `ping` so a client can detect a daemon
@@ -20,15 +19,39 @@ use serde::{Deserialize, Serialize};
 /// v4 (MCP resource-push): added the `change_generation()` query, letting the
 /// MCP server poll the cache's monotonic change counter to emit
 /// `resources/updated` notifications when the work graph mutates.
-pub const PROTOCOL_VERSION: u32 = 4;
+///
+/// v5 (read-path §2, shared filters): `QueryRequest`'s five scalar filter fields
+/// collapsed into one `filters: clove_core::view::Filters`, whose status / type
+/// / priority are now **sets** and whose labels are AND-ed, plus a `q`
+/// substring. The codec is length-delimited JSON, so a mixed-version pair would
+/// still *decode* — which is exactly why this needs a version: a v4 client's
+/// `"status": "open"` silently drops against a v5 daemon (wrong field, wrong
+/// shape), and a v4 daemon ignores a v5 client's whole filter set. Both answer
+/// with the unfiltered list rather than an error. The handshake in `client.rs`
+/// turns that into a clean mismatch instead; `clove daemon` restarts are cheap
+/// and the daemon is a cache, not a source of truth.
+///
+/// The same bump removes the dead `GraphRequest::Blocked::include_warnings`
+/// (unreachable — no surface could set it, every caller hard-coded `true`) and
+/// gives `Blocked` the `order` it always needed.
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// A dependency-graph query (DESIGN §8.4 extension for `blocked`/`dep`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum GraphRequest {
-    /// Active items blocked by open or (with `include_warnings`) missing deps,
-    /// in `(priority, topological_rank, id)` order.
-    Blocked { include_warnings: bool },
+    /// Active items blocked by open or missing dependencies, in `order`.
+    ///
+    /// Ordering rides the request because the alternative was the client
+    /// re-sorting the returned ids — a second implementation of `Order`, living
+    /// in `cmd/blocked.rs`, that could only approximate `rank` (it has no
+    /// topological ranks of its own) and so special-cased it. The daemon has the
+    /// graph *and* the index, so it can answer in any order the shared
+    /// comparator defines.
+    Blocked {
+        #[serde(default)]
+        order: Order,
+    },
     /// All hard-dependency cycles.
     Cycles,
     /// The dependency tree rooted at `root`, to `depth` (use `usize::MAX` for full).
@@ -80,25 +103,17 @@ pub enum QueryKind {
 pub struct QueryRequest {
     /// Which lean list this is.
     pub kind: QueryKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<ItemStatus>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub item_type: Option<ItemType>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub priority: Option<Priority>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assignee: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
+    /// The filter set, carried whole rather than field by field.
+    ///
+    /// This was five scalars (`status`/`item_type`/`priority`/`assignee`/
+    /// `label`) that the client unpacked and the daemon repacked — a hand-written
+    /// translation on each side, and therefore two places a newly-added filter
+    /// could be forgotten while every test still passed. Sending
+    /// [`clove_core::view::Filters`] itself removes both.
+    #[serde(default)]
+    pub filters: clove_core::view::Filters,
     /// The result ordering (`--sort`/`--desc`). Defaults to `rank` ascending,
     /// which is what every client sent before the field existed.
-    ///
-    /// Deliberately **not** a protocol bump: the codec is length-delimited JSON,
-    /// so `#[serde(default)]` makes this compatible in both directions — a new
-    /// client's `order` is ignored by an old daemon (which answers in rank
-    /// order, its only order), and an old client's request decodes here as the
-    /// default. The semantics of the existing fields are unchanged, which is the
-    /// line a bump would have to cross.
     #[serde(default)]
     pub order: Order,
     /// Page offset (`--offset`).
@@ -179,7 +194,13 @@ mod tests {
     fn graph_payloads_round_trip() {
         let reqs = vec![
             GraphRequest::Blocked {
-                include_warnings: true,
+                order: Order::default(),
+            },
+            GraphRequest::Blocked {
+                order: Order {
+                    field: clove_core::view::SortField::Updated,
+                    descending: true,
+                },
             },
             GraphRequest::Cycles,
             GraphRequest::Tree {
@@ -218,11 +239,15 @@ mod tests {
         let cases = vec![
             QueryRequest {
                 kind: QueryKind::List,
-                status: Some(ItemStatus::Open),
-                item_type: Some(ItemType::Bug),
-                priority: None,
-                assignee: Some("alice".to_owned()),
-                label: Some("area:core".to_owned()),
+                filters: clove_core::view::Filters::parse_multi(
+                    &["open".to_owned(), "in_progress".to_owned()],
+                    &["bug".to_owned()],
+                    &["area:core".to_owned(), "area:ios".to_owned()],
+                    Some("alice"),
+                    &["1".to_owned(), "2".to_owned()],
+                    Some("needle"),
+                )
+                .unwrap(),
                 order: Order {
                     field: clove_core::view::SortField::Updated,
                     descending: true,
@@ -232,11 +257,7 @@ mod tests {
             },
             QueryRequest {
                 kind: QueryKind::Ready,
-                status: None,
-                item_type: None,
-                priority: None,
-                assignee: None,
-                label: None,
+                filters: clove_core::view::Filters::default(),
                 order: Order::default(),
                 offset: 20,
                 limit: None,
@@ -275,44 +296,57 @@ mod tests {
         assert_eq!(status, serde_json::from_str(&json).unwrap());
     }
 
-    /// `order` rides the wire without a `PROTOCOL_VERSION` bump, which is only
-    /// sound if it is compatible in **both** directions:
+    /// Why v5 is a *version bump* and not another compatible field.
     ///
-    /// - an old client's frame (no `order` key) must decode to the default here;
-    /// - a new client's frame (with `order`) must still decode against a schema
-    ///   that does not know the field — i.e. `QueryRequest` must not be
-    ///   `deny_unknown_fields`, which is what an old daemon relies on.
+    /// The codec is length-delimited JSON, so a v4 frame still **decodes** here
+    /// — and that is the hazard, not the reassurance. A v4 client sends
+    /// `"status": "open"` at the top level; this schema has no such field, so it
+    /// is dropped and the daemon answers the *unfiltered* list. Nothing errors,
+    /// nothing warns, and the client renders a result set that ignores its
+    /// filter. The `ping` handshake in `client.rs` is what turns this into a
+    /// clean mismatch, so the constant must stay ahead of the shape.
     #[test]
-    fn query_request_order_is_wire_compatible_both_ways() {
-        let old_frame = r#"{"kind":"list","offset":0}"#;
-        let decoded: QueryRequest = serde_json::from_str(old_frame).unwrap();
+    fn a_v4_frame_decodes_but_loses_its_filters_which_is_why_the_version_moved() {
+        const {
+            assert!(
+                PROTOCOL_VERSION >= 5,
+                "the filter shape changed; the handshake must reject a v4 peer"
+            )
+        };
+        let v4_frame = r#"{"kind":"list","status":"open","label":"area:core","offset":0}"#;
+        let decoded: QueryRequest = serde_json::from_str(v4_frame).unwrap();
+        assert_eq!(
+            decoded.filters,
+            clove_core::view::Filters::default(),
+            "a v4 filter decodes as *no filter* — silently, which is the point"
+        );
         assert_eq!(decoded.order, Order::default(), "absent order → rank asc");
 
-        // The stand-in for an old daemon: the same struct minus the new field.
-        #[derive(Deserialize)]
-        #[allow(dead_code)]
-        struct OldQueryRequest {
-            kind: QueryKind,
-            offset: usize,
-        }
-        let new_frame = serde_json::to_string(&QueryRequest {
+        // And the reverse: a v5 frame carries the filters somewhere a v4 daemon
+        // would never look.
+        let v5_frame = serde_json::to_string(&QueryRequest {
             kind: QueryKind::List,
-            status: None,
-            item_type: None,
-            priority: None,
-            assignee: None,
-            label: None,
-            order: Order {
-                field: clove_core::view::SortField::Id,
-                descending: true,
-            },
+            filters: clove_core::view::Filters::parse(Some("open"), None, None, None, None)
+                .unwrap(),
+            order: Order::default(),
             offset: 0,
             limit: None,
         })
         .unwrap();
-        assert!(new_frame.contains("\"order\""), "{new_frame}");
-        serde_json::from_str::<OldQueryRequest>(&new_frame)
-            .expect("an older daemon must still decode a newer client's frame");
+        assert!(v5_frame.contains("\"filters\""), "{v5_frame}");
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct V4QueryRequest {
+            kind: QueryKind,
+            #[serde(default)]
+            status: Option<String>,
+            offset: usize,
+        }
+        let old: V4QueryRequest = serde_json::from_str(&v5_frame).unwrap();
+        assert!(
+            old.status.is_none(),
+            "a v4 daemon reads no status from a v5 frame"
+        );
     }
 
     /// Edge: an empty search query and an absent limit still round-trip.

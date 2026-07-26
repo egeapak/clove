@@ -1073,3 +1073,168 @@ fn read_tools_sort_and_echo_the_order() {
 
     s.shutdown();
 }
+
+/// Read-path §2 on the MCP surface: the filter arguments take **one value or a
+/// list**, and the single-value spelling means exactly what it always did.
+///
+/// That compatibility is the whole point of the `#[serde(untagged)]` wrapper —
+/// an agent that has been sending `"status": "open"` since before multi-value
+/// existed must not start getting an argument error — so both spellings are
+/// driven here over the real JSON-RPC wire rather than unit-tested on the
+/// deserializer.
+#[test]
+fn filter_args_take_one_value_or_many() {
+    let dir = init_repo();
+    let mut s = Session::start(dir.path());
+
+    // Four items spanning two types, two priorities, and two labels. `alpha`
+    // carries both labels; `beta` carries one — the pair that separates AND-ed
+    // labels from OR-ed ones.
+    let mk = |s: &mut Session, id: i64, title: &str, ty: &str, pri: u8, labels: Value| {
+        let r = s.call(
+            id,
+            "clove_new",
+            json!({ "title": title, "type": ty, "priority": pri, "labels": labels }),
+        );
+        assert_ne!(r["isError"], true, "create failed: {r}");
+        r["structuredContent"]["id"].as_str().unwrap().to_owned()
+    };
+    let alpha = mk(
+        &mut s,
+        2,
+        "alpha widget",
+        "bug",
+        0,
+        json!(["area:core", "area:ios"]),
+    );
+    let beta = mk(&mut s, 3, "beta gizmo", "feature", 1, json!(["area:core"]));
+    let gamma = mk(&mut s, 4, "gamma widget", "chore", 2, json!(["area:ios"]));
+    let delta = mk(&mut s, 5, "delta thing", "docs", 3, json!([]));
+
+    let titles = |s: &mut Session, args: Value| -> Vec<String> {
+        let r = s.call(9, "clove_list", args);
+        assert_ne!(r["isError"], true, "clove_list failed: {r}");
+        let mut out: Vec<String> = r["structuredContent"]["items"]
+            .as_array()
+            .expect("items array")
+            .iter()
+            .map(|i| i["title"].as_str().unwrap().to_owned())
+            .collect();
+        out.sort();
+        out
+    };
+
+    // The scalar spellings, unchanged.
+    assert_eq!(titles(&mut s, json!({ "type": "bug" })), ["alpha widget"]);
+    assert_eq!(titles(&mut s, json!({ "priority": 1 })), ["beta gizmo"]);
+    assert_eq!(
+        titles(&mut s, json!({ "label": "area:ios" })),
+        ["alpha widget", "gamma widget"]
+    );
+    assert_eq!(titles(&mut s, json!({ "status": "open" })).len(), 4);
+
+    // ...and the list spellings, which are new.
+    assert_eq!(
+        titles(&mut s, json!({ "type": ["bug", "docs"] })),
+        ["alpha widget", "delta thing"]
+    );
+    assert_eq!(
+        titles(&mut s, json!({ "priority": [0, 3] })),
+        ["alpha widget", "delta thing"]
+    );
+    assert_eq!(
+        titles(&mut s, json!({ "label": ["area:core", "area:ios"] })),
+        ["alpha widget"],
+        "labels are AND-ed: only the item carrying both survives"
+    );
+    assert_eq!(
+        titles(&mut s, json!({ "status": ["open", "closed"] })).len(),
+        4
+    );
+
+    // `q` filters id/title/labels, never the body.
+    assert_eq!(
+        titles(&mut s, json!({ "q": "widget" })),
+        ["alpha widget", "gamma widget"]
+    );
+    assert_eq!(
+        titles(&mut s, json!({ "q": "area:core" })),
+        ["alpha widget", "beta gizmo"],
+        "`q` sees labels"
+    );
+    assert!(titles(&mut s, json!({ "q": "nothing-here" })).is_empty());
+
+    // Combined across fields, all-of.
+    assert_eq!(
+        titles(
+            &mut s,
+            json!({ "type": ["bug", "chore"], "label": "area:ios", "q": "widget" })
+        ),
+        ["alpha widget", "gamma widget"]
+    );
+
+    // `_meta`-equivalent echo: the page object reports the parsed filter set,
+    // canonicalized (the shouted label comes back lowercased).
+    let page = s.call(
+        10,
+        "clove_list",
+        json!({ "label": ["AREA:Core"], "status": "started" }),
+    );
+    let filters = &page["structuredContent"]["filters"];
+    assert_eq!(filters["labels"], json!(["area:core"]), "{filters}");
+    assert_eq!(
+        filters["status"],
+        json!(["in_progress"]),
+        "the `started` alias is echoed canonically: {filters}"
+    );
+
+    // `clove_blocked` and `clove_ready` share the same argument struct.
+    for tool in ["clove_ready", "clove_blocked"] {
+        let r = s.call(
+            11,
+            tool,
+            json!({ "type": ["bug", "docs"], "label": "area:core" }),
+        );
+        assert_ne!(r["isError"], true, "{tool} rejected a list filter: {r}");
+    }
+
+    // An invalid element is an error, not a filter that quietly matches nothing.
+    let bad = s.call(12, "clove_list", json!({ "status": ["open", "paused"] }));
+    assert_eq!(bad["isError"], true, "{bad}");
+
+    // The published schema advertises both shapes, so an agent reading
+    // `tools/list` knows the list form is legal.
+    let resp = s.request(json!({ "jsonrpc": "2.0", "id": 13, "method": "tools/list" }));
+    let tools = resp["result"]["tools"].as_array().unwrap();
+    let list = tools.iter().find(|t| t["name"] == "clove_list").unwrap();
+    let schema = &list["inputSchema"];
+    assert!(schema["properties"]["q"].is_object(), "q is published");
+    // The multi-value fields are published as `$ref`s to a shared definition,
+    // so the reference has to resolve *inside this document* — a `$ref` with no
+    // matching `$defs` entry is a schema an agent cannot use.
+    for field in ["status", "type", "label"] {
+        let reference = schema["properties"][field]["anyOf"][0]["$ref"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{field} is not a $ref: {schema}"));
+        let name = reference.strip_prefix("#/$defs/").unwrap();
+        let def = &schema["$defs"][name];
+        assert!(!def.is_null(), "{field}: dangling $ref {reference}");
+        let branches: Vec<&str> = def["anyOf"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{field}: {def}"))
+            .iter()
+            .map(|b| b["type"].as_str().unwrap_or(""))
+            .collect();
+        assert!(
+            branches.contains(&"string"),
+            "{field} must still admit a bare string: {def}"
+        );
+        assert!(
+            branches.contains(&"array"),
+            "{field} must admit a list: {def}"
+        );
+    }
+
+    let _ = (alpha, beta, gamma, delta);
+    s.shutdown();
+}

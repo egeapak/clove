@@ -49,6 +49,15 @@ pub struct ListOpts<'a> {
     /// `"relevance"` here, which is not a `SortField`, so these are plain words.
     pub sort: &'a str,
     pub dir: &'a str,
+    /// The filter set in force, echoed as `_meta.filters` for the same reason
+    /// `_meta.sort` is echoed: a multi-valued filter set has several spellings
+    /// (`--label a --label b`, MCP's `["a","b"]`, the web's `?label=a,b`) and
+    /// they all canonicalize, so a client should be able to read back what was
+    /// applied rather than assume its input survived.
+    ///
+    /// `None` for `search`, which takes no field filters — an empty `filters`
+    /// object there would claim a surface the command does not have.
+    pub filters: Option<&'a Filters>,
     pub warnings: Vec<String>,
 }
 
@@ -62,6 +71,7 @@ impl Default for ListOpts<'_> {
             source: "",
             sort: clove_core::view::SortField::Rank.as_str(),
             dir: "asc",
+            filters: None,
             warnings: Vec::new(),
         }
     }
@@ -159,19 +169,23 @@ pub fn emit(format: OutputFormat, objects: Vec<ListObject>, opts: ListOpts<'_>) 
             if matches!(format, OutputFormat::Jsonl) {
                 print_jsonl_items(&values);
             } else {
-                print_json_list(
-                    values,
-                    json!({
-                        "limit": opts.window.reported_limit(),
-                        "total": opts.total,
-                        "returned": page.len(),
-                        "offset": opts.window.offset,
-                        "sort": opts.sort,
-                        "dir": opts.dir,
-                        "source": opts.source,
-                        "warnings": opts.warnings,
-                    }),
-                );
+                let mut meta = json!({
+                    "limit": opts.window.reported_limit(),
+                    "total": opts.total,
+                    "returned": page.len(),
+                    "offset": opts.window.offset,
+                    "sort": opts.sort,
+                    "dir": opts.dir,
+                    "source": opts.source,
+                    "warnings": opts.warnings,
+                });
+                if let (Some(filters), Some(map)) = (opts.filters, meta.as_object_mut()) {
+                    map.insert(
+                        "filters".to_owned(),
+                        serde_json::to_value(filters).unwrap_or(Value::Null),
+                    );
+                }
+                print_json_list(values, meta);
             }
         }
         OutputFormat::Human => {

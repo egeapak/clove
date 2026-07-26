@@ -16,16 +16,62 @@ use crate::cmd::listing::{
 use crate::context::Ctx;
 use crate::item_json::parse_fields;
 
+/// One filter value or several — `"open"` and `["open","in_progress"]` are both
+/// accepted, so every filter JSON written before multi-value existed still
+/// parses to the same thing.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum OneOrMany {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl OneOrMany {
+    /// The values as a list; `None` (the field was absent) is unconstrained.
+    fn values(this: &Option<OneOrMany>) -> Vec<String> {
+        match this {
+            None => Vec::new(),
+            Some(OneOrMany::One(v)) => vec![v.clone()],
+            Some(OneOrMany::Many(v)) => v.clone(),
+        }
+    }
+}
+
+/// One priority or several — `2` and `[0,1]` are both accepted.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum Priorities {
+    One(u8),
+    Many(Vec<u8>),
+}
+
+impl Priorities {
+    fn values(this: &Option<Priorities>) -> Vec<String> {
+        match this {
+            None => Vec::new(),
+            Some(Priorities::One(p)) => vec![p.to_string()],
+            Some(Priorities::Many(v)) => v.iter().map(u8::to_string).collect(),
+        }
+    }
+}
+
 /// The JSON filter object accepted on `--filter` or stdin.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct QueryFilter {
-    status: Option<String>,
+    /// `"open"` or `["open","in_progress"]` — any of them.
+    status: Option<OneOrMany>,
+    /// `"bug"` or `["bug","chore"]` — any of them.
     #[serde(rename = "type")]
-    item_type: Option<String>,
-    label: Option<String>,
+    item_type: Option<OneOrMany>,
+    /// `"area:core"` or `["area:core","area:ios"]` — **all** of them.
+    label: Option<OneOrMany>,
     assignee: Option<String>,
-    priority: Option<u8>,
+    /// `2` or `[0,1]` — any of them. Stays numeric (it was `Option<u8>`), so a
+    /// filter written before multi-value parses byte for byte as it did.
+    priority: Option<Priorities>,
+    /// Substring over id/title/labels, matching `--q`.
+    q: Option<String>,
     /// `rank|priority|created|updated|id|status|type`, matching `--sort`.
     sort: Option<String>,
     /// Reverse the order, matching `--desc`.
@@ -54,12 +100,15 @@ pub fn run(
         })?
     };
 
-    let filters = Filters::parse(
-        qf.status.as_deref(),
-        qf.item_type.as_deref(),
-        qf.label.as_deref(),
+    // The JSON filter and the flags describe the same filter set, so both go
+    // through `Filters::parse_multi` rather than each growing its own decoding.
+    let filters = Filters::parse_multi(
+        &OneOrMany::values(&qf.status),
+        &OneOrMany::values(&qf.item_type),
+        &OneOrMany::values(&qf.label),
         qf.assignee.as_deref(),
-        qf.priority,
+        &Priorities::values(&qf.priority),
+        qf.q.as_deref(),
     )?;
 
     // The flag wins over the JSON filter, exactly as `--limit`/`--offset` do.
@@ -86,6 +135,7 @@ pub fn run(
                 source: "daemon",
                 sort: order.field.as_str(),
                 dir: order.dir_str(),
+                filters: Some(&filters),
                 warnings,
             },
         );
@@ -115,6 +165,7 @@ pub fn run(
                 source: "index",
                 sort: order.field.as_str(),
                 dir: order.dir_str(),
+                filters: Some(&filters),
                 warnings,
             },
         );
@@ -139,6 +190,7 @@ pub fn run(
             source: "files",
             sort: order.field.as_str(),
             dir: order.dir_str(),
+            filters: Some(&filters),
             warnings: Vec::new(),
         },
     );

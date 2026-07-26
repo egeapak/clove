@@ -14,18 +14,71 @@ use crate::{
     normalize_label, CloveError, CloveId, Item, ItemFrontmatter, ItemStatus, ItemType, Priority,
 };
 
-/// Parsed list filters. A `None` field does not constrain.
-#[derive(Debug, Default, Clone)]
+/// The `q` predicate: a case-insensitive substring over an item's **id, title,
+/// and labels** (never its body — `q` is a list filter, not a search).
+///
+/// The single definition, so the file path, the index path's residue
+/// ([`crate::view::Filters`] → `clove_index::PostFilter`), and the web's `?q=`
+/// are the same function rather than three that happen to agree.
+///
+/// Deliberately *not* pushed into SQL. `LIKE`/`lower()` in SQLite case-fold
+/// ASCII only, while `str::to_lowercase` is full Unicode, so a `?q=Ünicode`
+/// against a stored `ünicode-tag` matches here and would silently miss in SQL —
+/// exactly the file-vs-index divergence roadmap §6.1 records for search. The
+/// index path therefore keeps `q` as an in-memory residue.
+pub fn q_matches(needle: &str, id: &str, title: &str, labels: &[String]) -> bool {
+    let needle = needle.to_lowercase();
+    id.to_lowercase().contains(&needle)
+        || title.to_lowercase().contains(&needle)
+        || labels.iter().any(|l| l.to_lowercase().contains(&needle))
+}
+
+/// Parsed list filters — **the** filter set, shared by the CLI, the MCP tools,
+/// the web API, and `cloved`'s query RPC.
+///
+/// Semantics: **any-of within a field, all-of across fields**, with `labels` the
+/// one exception (all-of *within* the field too, because "labelled `area:core`
+/// and `area:ios`" is the useful question and a label OR is spelled by asking
+/// twice). An **empty vector does not constrain**, so `Filters::default()`
+/// matches everything and every pre-existing single-value caller keeps its
+/// answer.
+///
+/// This was five scalars until read-path §2. The web API had always accepted
+/// strictly more — csv `status`/`type`/`priority`, AND-ed multi-label, and `q` —
+/// so "open or in_progress, labelled `area:core` and `area:ios`" was expressible
+/// in the browser and nowhere else. Widening the shared type is what removes the
+/// asymmetry rather than porting the web's predicate to two more places.
+///
+/// `Serialize`/`Deserialize` are load-bearing twice over: the struct rides the
+/// daemon wire whole (`clove_ipc::QueryRequest::filters`), and it is echoed back
+/// as `_meta.filters` so a client can read what was actually applied.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Filters {
-    pub status: Option<ItemStatus>,
-    pub item_type: Option<ItemType>,
-    pub label: Option<String>,
+    /// Any-of. Empty does not constrain.
+    #[serde(default)]
+    pub status: Vec<ItemStatus>,
+    /// Any-of. Empty does not constrain.
+    #[serde(default, rename = "type")]
+    pub item_type: Vec<ItemType>,
+    /// Any-of. Empty does not constrain.
+    #[serde(default)]
+    pub priority: Vec<Priority>,
+    /// **All**-of: the item must carry every one of these (canonicalized) labels.
+    #[serde(default)]
+    pub labels: Vec<String>,
+    /// Exact match. This one field stays scalar — an item has at most one
+    /// assignee, so "any of" over a set has no established spelling on any
+    /// surface, and inventing one here would be a filter nothing sends.
+    #[serde(default)]
     pub assignee: Option<String>,
-    pub priority: Option<Priority>,
+    /// Case-insensitive substring over id/title/labels (see [`q_matches`]).
+    #[serde(default)]
+    pub q: Option<String>,
 }
 
 impl Filters {
-    /// Build filters from raw strings, validating and canonicalizing each
+    /// Build filters from single raw values — the historical spelling, kept so
+    /// every one-value caller reads unchanged. Validates and canonicalizes each
     /// (status/type words, the label via [`normalize_label`], priority 0–4).
     pub fn parse(
         status: Option<&str>,
@@ -35,43 +88,128 @@ impl Filters {
         priority: Option<u8>,
     ) -> Result<Filters, CloveError> {
         Ok(Filters {
-            status: status.map(ItemStatus::parse).transpose()?,
-            item_type: item_type.map(ItemType::parse).transpose()?,
-            label: label.map(normalize_label).transpose()?,
+            status: status
+                .map(ItemStatus::parse)
+                .transpose()?
+                .into_iter()
+                .collect(),
+            item_type: item_type
+                .map(ItemType::parse)
+                .transpose()?
+                .into_iter()
+                .collect(),
+            priority: priority
+                .map(Priority::new)
+                .transpose()?
+                .into_iter()
+                .collect(),
+            labels: label
+                .map(normalize_label)
+                .transpose()?
+                .into_iter()
+                .collect(),
             assignee: assignee.map(str::to_owned),
-            priority: priority.map(Priority::new).transpose()?,
+            q: None,
         })
+    }
+
+    /// Build filters from repeated/csv raw values — the multi-value spelling
+    /// behind `--status open --status in_progress`, MCP's `"status": [...]`, and
+    /// the web's `?status=open,in_progress`.
+    ///
+    /// Every element is validated: an unknown status word or an out-of-range
+    /// priority is a [`CloveError::InvalidField`], not a filter that silently
+    /// matches nothing. (The web used to compare raw strings, so `?status=bogus`
+    /// returned an empty list instead of a 422.)
+    pub fn parse_multi(
+        status: &[String],
+        item_type: &[String],
+        labels: &[String],
+        assignee: Option<&str>,
+        priority: &[String],
+        q: Option<&str>,
+    ) -> Result<Filters, CloveError> {
+        Ok(Filters {
+            status: status
+                .iter()
+                .map(|s| ItemStatus::parse(s))
+                .collect::<Result<_, _>>()?,
+            item_type: item_type
+                .iter()
+                .map(|t| ItemType::parse(t))
+                .collect::<Result<_, _>>()?,
+            priority: priority
+                .iter()
+                .map(|p| parse_priority(p))
+                .collect::<Result<_, _>>()?,
+            labels: labels
+                .iter()
+                .map(|l| normalize_label(l))
+                .collect::<Result<_, _>>()?,
+            assignee: assignee.map(str::to_owned),
+            q: q.map(str::to_owned),
+        })
+    }
+
+    /// Split one repeated/csv query value (`a,b,c`) into trimmed, non-empty
+    /// parts — the web's `?status=open,closed` spelling, in the same place the
+    /// values are parsed so the two cannot drift.
+    pub fn split_csv(raw: Option<&str>) -> Vec<String> {
+        raw.map(|v| {
+            v.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    /// Whether nothing is constrained (every item matches).
+    pub fn is_unconstrained(&self) -> bool {
+        *self == Filters::default()
     }
 
     /// Whether `fm` satisfies every set constraint.
     pub fn matches(&self, fm: &ItemFrontmatter) -> bool {
-        if let Some(s) = self.status {
-            if fm.status != s {
-                return false;
-            }
+        if !self.status.is_empty() && !self.status.contains(&fm.status) {
+            return false;
         }
-        if let Some(t) = self.item_type {
-            if fm.item_type != t {
-                return false;
-            }
+        if !self.item_type.is_empty() && !self.item_type.contains(&fm.item_type) {
+            return false;
         }
-        if let Some(p) = self.priority {
-            if fm.priority != p {
-                return false;
-            }
+        if !self.priority.is_empty() && !self.priority.contains(&fm.priority) {
+            return false;
         }
         if let Some(a) = &self.assignee {
             if fm.assignee.as_deref() != Some(a.as_str()) {
                 return false;
             }
         }
-        if let Some(l) = &self.label {
+        // Labels are all-of: every requested label must be present.
+        for l in &self.labels {
             if !fm.labels.iter().any(|x| x == l) {
+                return false;
+            }
+        }
+        if let Some(q) = &self.q {
+            if !q_matches(q, fm.id.as_str(), &fm.title, &fm.labels) {
                 return false;
             }
         }
         true
     }
+}
+
+/// Parse a priority word (`"0"`..`"4"`) with the same error the typed
+/// [`Priority::new`] raises, so `--priority 9` and `?priority=9` read alike.
+fn parse_priority(raw: &str) -> Result<Priority, CloveError> {
+    let raw = raw.trim();
+    let value: u8 = raw.parse().map_err(|_| CloveError::InvalidField {
+        field: "priority".to_owned(),
+        reason: format!("must be 0–{}, got `{raw}`", Priority::MAX),
+    })?;
+    Priority::new(value)
 }
 
 /// Per-surface page-size defaults.
@@ -701,6 +839,196 @@ mod tests {
         assert!(!Filters::parse(None, None, None, Some("alic"), None)
             .unwrap()
             .matches(&f));
+    }
+
+    /// Multi-value is **any-of within a field, all-of across fields** — the
+    /// semantics the web already had, now shared. The single-value spelling is
+    /// the one-element case of the same rule, which is why `Filters::parse`
+    /// callers are unaffected.
+    #[test]
+    fn multi_value_is_any_of_within_a_field() {
+        let open_bug = fm("a", ItemStatus::Open, ItemType::Bug, 1, &[]);
+        let started_docs = fm("b", ItemStatus::InProgress, ItemType::Docs, 3, &[]);
+        let closed_epic = fm("c", ItemStatus::Closed, ItemType::Epic, 4, &[]);
+
+        let f = Filters::parse_multi(
+            &["open".to_owned(), "in_progress".to_owned()],
+            &[],
+            &[],
+            None,
+            &[],
+            None,
+        )
+        .unwrap();
+        assert!(f.matches(&open_bug));
+        assert!(f.matches(&started_docs));
+        assert!(!f.matches(&closed_epic));
+
+        // Across fields it is all-of: `status in (open, in_progress)` AND
+        // `type in (docs)` keeps only the second.
+        let f = Filters::parse_multi(
+            &["open".to_owned(), "in_progress".to_owned()],
+            &["docs".to_owned()],
+            &[],
+            None,
+            &[],
+            None,
+        )
+        .unwrap();
+        assert!(!f.matches(&open_bug));
+        assert!(f.matches(&started_docs));
+
+        // Priorities are any-of too, and parse from words.
+        let f = Filters::parse_multi(&[], &[], &[], None, &["1".to_owned(), "4".to_owned()], None)
+            .unwrap();
+        assert!(f.matches(&open_bug));
+        assert!(!f.matches(&started_docs));
+        assert!(f.matches(&closed_epic));
+    }
+
+    /// Labels are the exception: **all**-of within the field. This is the filter
+    /// that was expressible only in the browser.
+    #[test]
+    fn multiple_labels_are_anded() {
+        let both = fm(
+            "a",
+            ItemStatus::Open,
+            ItemType::Bug,
+            1,
+            &["area:core", "area:ios"],
+        );
+        let one = fm("b", ItemStatus::Open, ItemType::Bug, 1, &["area:core"]);
+        let f = Filters::parse_multi(
+            &[],
+            &[],
+            &["area:core".to_owned(), "AREA:iOS".to_owned()],
+            None,
+            &[],
+            None,
+        )
+        .unwrap();
+        assert!(f.matches(&both), "both labels present");
+        assert!(!f.matches(&one), "AND, not OR — one label is not enough");
+        // Each label is canonicalized before matching, as the single-value
+        // spelling already did.
+        assert_eq!(
+            f.labels,
+            vec!["area:core".to_owned(), "area:ios".to_owned()]
+        );
+    }
+
+    /// `q` is a substring over id, title, and labels — and **not** the body,
+    /// which is what separates it from `search`.
+    #[test]
+    fn q_matches_id_title_and_labels_but_not_the_body() {
+        let mut item = fm("Widget rendering", ItemStatus::Open, ItemType::Bug, 1, &[]);
+        item.labels = vec!["area:payments".to_owned()];
+        let q = |needle: &str| {
+            Filters::parse_multi(&[], &[], &[], None, &[], Some(needle))
+                .unwrap()
+                .matches(&item)
+        };
+        assert!(q("widget"), "title");
+        assert!(q("WIDGET"), "case-insensitive");
+        assert!(q("payments"), "label");
+        assert!(q("0000000A"), "id");
+        assert!(!q("nothing here"));
+
+        // Unicode case folding is why `q` is never pushed into SQL: SQLite's
+        // LIKE/lower() fold ASCII only, so this row would silently vanish on the
+        // index path if the predicate moved into the query.
+        assert!(q_matches("Ünicode", "x", "y", &["ünicode-tag".to_owned()]));
+    }
+
+    /// An empty vector does not constrain — the property that makes widening the
+    /// type invisible to every existing caller.
+    #[test]
+    fn empty_vectors_do_not_constrain() {
+        let f = fm("a", ItemStatus::Closed, ItemType::Epic, 4, &[]);
+        assert!(Filters::default().is_unconstrained());
+        assert!(Filters::default().matches(&f));
+        assert!(Filters::parse_multi(&[], &[], &[], None, &[], None)
+            .unwrap()
+            .matches(&f));
+        assert!(Filters::parse_multi(&[], &[], &[], None, &[], None)
+            .unwrap()
+            .is_unconstrained());
+        // The single-value parser produces one-element vectors, so the two
+        // spellings are the same filter.
+        assert_eq!(
+            Filters::parse(Some("open"), Some("bug"), Some("A:B"), None, Some(1)).unwrap(),
+            Filters::parse_multi(
+                &["open".to_owned()],
+                &["bug".to_owned()],
+                &["a:b".to_owned()],
+                None,
+                &["1".to_owned()],
+                None
+            )
+            .unwrap(),
+        );
+    }
+
+    /// Every element of a multi-value filter is validated. The web compared raw
+    /// strings, so `?status=bogus` was an empty list rather than an error.
+    #[test]
+    fn parse_multi_rejects_invalid_elements() {
+        let bad = |s: &[&str], t: &[&str], l: &[&str], p: &[&str]| {
+            let own = |v: &[&str]| v.iter().map(|x| (*x).to_owned()).collect::<Vec<_>>();
+            Filters::parse_multi(&own(s), &own(t), &own(l), None, &own(p), None)
+        };
+        assert!(bad(&["open", "paused"], &[], &[], &[]).is_err());
+        assert!(bad(&[], &["bug", "saga"], &[], &[]).is_err());
+        assert!(bad(&[], &[], &["   "], &[]).is_err());
+        assert!(bad(&[], &[], &[], &["1", "9"]).is_err());
+        assert!(bad(&[], &[], &[], &["abc"]).is_err());
+        // ...and the valid combination of the same shape is accepted.
+        assert!(bad(&["open"], &["bug"], &["a:b"], &["1"]).is_ok());
+    }
+
+    /// The csv splitter the web's query string rides, trimming and dropping
+    /// empties so `?status=open,` is one value rather than two.
+    #[test]
+    fn split_csv_trims_and_drops_empties() {
+        assert_eq!(Filters::split_csv(None), Vec::<String>::new());
+        assert_eq!(Filters::split_csv(Some("")), Vec::<String>::new());
+        assert_eq!(
+            Filters::split_csv(Some(" open , in_progress ,")),
+            vec!["open".to_owned(), "in_progress".to_owned()]
+        );
+    }
+
+    /// `Filters` rides the daemon wire whole and is echoed as `_meta.filters`,
+    /// so its JSON spelling is part of two contracts.
+    #[test]
+    fn filters_round_trip_through_json() {
+        let f = Filters::parse_multi(
+            &["open".to_owned()],
+            &["bug".to_owned()],
+            &["area:core".to_owned()],
+            Some("alice"),
+            &["1".to_owned()],
+            Some("needle"),
+        )
+        .unwrap();
+        let json = serde_json::to_value(&f).unwrap();
+        assert_eq!(json["status"], serde_json::json!(["open"]));
+        assert_eq!(
+            json["type"],
+            serde_json::json!(["bug"]),
+            "renamed for the wire"
+        );
+        assert_eq!(json["priority"], serde_json::json!([1]));
+        assert_eq!(json["labels"], serde_json::json!(["area:core"]));
+        assert_eq!(json["assignee"], "alice");
+        assert_eq!(json["q"], "needle");
+        assert_eq!(serde_json::from_value::<Filters>(json).unwrap(), f);
+
+        // Every field defaults, so `{}` is the unconstrained filter.
+        assert_eq!(
+            serde_json::from_str::<Filters>("{}").unwrap(),
+            Filters::default()
+        );
     }
 
     #[test]

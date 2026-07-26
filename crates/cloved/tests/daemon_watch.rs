@@ -103,11 +103,7 @@ fn sigterm(pid: u32) {
 fn list_all() -> QueryRequest {
     QueryRequest {
         kind: QueryKind::List,
-        status: None,
-        item_type: None,
-        priority: None,
-        assignee: None,
-        label: None,
+        filters: Default::default(),
         order: Default::default(),
         offset: 0,
         limit: None,

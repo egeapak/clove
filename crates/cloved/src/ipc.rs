@@ -7,12 +7,14 @@
 //! rebuilds and reopens the index. The transport (tarpc over a local socket) is
 //! wired in `lifecycle::accept_loop`.
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use camino::Utf8PathBuf;
+use clove_core::view::Order;
 use clove_core::ItemStore;
-use clove_index::{Filter, Index, ItemListRow, QueryMode};
+use clove_index::{Filter, Index, ItemListRow, PostFilter, QueryMode};
 use clove_ipc::{
     CloveRpc, GraphRequest, GraphResponse, LeanRow, QueryKind, QueryListResponse, QueryRequest,
     ReindexDone, RpcError, SearchRequest, StatusResponse, PROTOCOL_VERSION,
@@ -300,49 +302,94 @@ impl Dispatcher {
     }
 
     /// Serve a dependency-graph query from the daemon's cached graph (Tier 2).
+    ///
+    /// Dispatched per variant rather than inside one `with_graph` closure,
+    /// because `blocked` needs the index as well and the arms must stay
+    /// exhaustive — a catch-all `unreachable!()` in an RPC handler turns a future
+    /// variant into a daemon panic instead of a compile error.
     fn handle_graph(&self, req: GraphRequest) -> Result<GraphResponse, RpcError> {
-        let resp = self.graph.with_graph(|graph, ranks| match req {
-            GraphRequest::Cycles => GraphResponse::Cycles {
-                cycles: graph
-                    .all_cycles()
-                    .iter()
-                    .map(|c| c.iter().map(|id| id.to_string()).collect())
-                    .collect(),
-            },
-            GraphRequest::Tree { root, depth } => {
-                let node = CloveId::new(&root)
-                    .ok()
-                    .and_then(|id| graph.dep_tree(&id, depth));
-                GraphResponse::Tree { node }
-            }
-            GraphRequest::WouldCycle { from, to } => {
-                let would = match (CloveId::new(&from), CloveId::new(&to)) {
-                    (Ok(f), Ok(t)) => graph.check_would_cycle(&f, &t),
-                    _ => false,
-                };
-                GraphResponse::WouldCycle { would }
-            }
-            GraphRequest::Blocked { include_warnings } => {
-                // Same set + (priority, topological_rank, id) order as the CLI's
-                // file path (`clove blocked`), computed from the graph alone.
-                let mut keyed: Vec<(u8, usize, CloveId)> = graph
-                    .blocked_items()
-                    .into_iter()
-                    .filter(|b| include_warnings || !b.blocking_deps.is_empty())
-                    .filter_map(|b| {
-                        graph.meta(&b.id).map(|m| {
-                            let rank = ranks.get(&b.id).copied().unwrap_or(usize::MAX);
-                            (m.priority.0, rank, b.id.clone())
-                        })
+        let unreadable = || RpcError::new("graph_failed", "could not read index");
+        match req {
+            // Two steps: the *set* comes from the graph, but the *order* comes
+            // from the index, which is the only place `created`/`updated` and
+            // the lifecycle order live (the cached graph's `ItemMeta` carries
+            // neither timestamp). Reading the id set out of `with_graph` first
+            // also keeps the documented graph→index lock order without nesting
+            // the two.
+            GraphRequest::Blocked { order } => {
+                let blocked: Vec<CloveId> = self
+                    .graph
+                    .with_graph(|graph, _ranks| {
+                        graph
+                            .blocked_items()
+                            .into_iter()
+                            .map(|b| b.id)
+                            .collect::<Vec<_>>()
                     })
-                    .collect();
-                keyed.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
-                GraphResponse::Blocked {
-                    ids: keyed.into_iter().map(|(_, _, id)| id.to_string()).collect(),
-                }
+                    .ok_or_else(unreadable)?;
+                Ok(GraphResponse::Blocked {
+                    ids: self.order_ids(&blocked, order)?,
+                })
             }
-        });
-        resp.ok_or_else(|| RpcError::new("graph_failed", "could not read index"))
+            GraphRequest::Cycles => self
+                .graph
+                .with_graph(|graph, _ranks| GraphResponse::Cycles {
+                    cycles: graph
+                        .all_cycles()
+                        .iter()
+                        .map(|c| c.iter().map(|id| id.to_string()).collect())
+                        .collect(),
+                })
+                .ok_or_else(unreadable),
+            GraphRequest::Tree { root, depth } => self
+                .graph
+                .with_graph(|graph, _ranks| GraphResponse::Tree {
+                    node: CloveId::new(&root)
+                        .ok()
+                        .and_then(|id| graph.dep_tree(&id, depth)),
+                })
+                .ok_or_else(unreadable),
+            GraphRequest::WouldCycle { from, to } => self
+                .graph
+                .with_graph(|graph, _ranks| GraphResponse::WouldCycle {
+                    would: match (CloveId::new(&from), CloveId::new(&to)) {
+                        (Ok(f), Ok(t)) => graph.check_would_cycle(&f, &t),
+                        _ => false,
+                    },
+                })
+                .ok_or_else(unreadable),
+        }
+    }
+
+    /// Put `ids` into `order`, using the index's `ORDER BY` as the comparator.
+    ///
+    /// The index is asked for **every** id in the requested order and the subset
+    /// is retained from that sequence, rather than sorting the subset directly.
+    /// That is deliberate: it reuses `clove_index::query::order_by_sql` — the
+    /// same clause `ls`/`ready` run and the same one `sort_order.rs` already
+    /// pins against the file path — so `blocked` cannot become a third
+    /// implementation of the comparator. It is one indexed scan of a table the
+    /// daemon holds open, which is cheaper than the whole-store file read the
+    /// CLI is avoiding by asking at all.
+    fn order_ids(&self, ids: &[CloveId], order: Order) -> Result<Vec<String>, RpcError> {
+        let wanted: HashSet<&str> = ids.iter().map(CloveId::as_str).collect();
+        let mut index = self
+            .index
+            .lock()
+            .map_err(|_| RpcError::new("internal", "index lock poisoned"))?;
+        self.refresh(&mut index);
+        let rows = index
+            .query_list(&Filter {
+                mode: QueryMode::List,
+                order,
+                ..Default::default()
+            })
+            .map_err(|e| RpcError::new("graph_failed", e.to_string()))?;
+        Ok(rows
+            .into_iter()
+            .filter(|row| wanted.contains(row.id.as_str()))
+            .map(|row| row.id.to_string())
+            .collect())
     }
 
     /// Run an FTS search over the hot index (freshening first) and return matched
@@ -371,13 +418,17 @@ impl Dispatcher {
             .map_err(|_| RpcError::new("internal", "index lock poisoned"))?;
         self.refresh(&mut index);
 
-        let filter = build_filter(&q);
-        let total = index
-            .count_items(&filter)
-            .map_err(|e| RpcError::new("query_failed", e.to_string()))? as u64;
-        let rows = index
-            .query_list(&filter)
+        let (filter, residue) = build_filter(&q);
+        // The wire values go through the shared `Page` so a client that is not
+        // the `clove` CLI gets the documented contract rather than a raw
+        // pass-through: `limit: Some(0)` means *unlimited* here as it does
+        // everywhere else, not "zero rows". `query_filtered` owns the rest of
+        // the limit/count decision, which a residue changes.
+        let window = clove_core::view::Page::new(q.offset, q.limit, 0);
+        let (rows, total) = index
+            .query_filtered(&filter, residue.as_ref(), window)
             .map_err(|e| RpcError::new("query_failed", e.to_string()))?;
+        let total = total as u64;
 
         if let Ok(mut state) = self.state.lock() {
             state.set_items_indexed(index.item_count().unwrap_or(0) as u64);
@@ -447,34 +498,25 @@ impl Dispatcher {
     }
 }
 
-/// Build a `clove_index::Filter` from the wire request (mirrors the CLI's
-/// `list_via_index`: fetch `offset + limit` rows; `total` is reported separately).
+/// Split the wire request's filter set into the SQL half and the in-memory
+/// residue, through the *same* [`clove_index::push_down`] the CLI's own index
+/// path uses — so the daemon cannot answer a filter differently from the index
+/// tier it is standing in for.
 ///
-/// The wire values go through the shared [`clove_core::view::Page`] so a client
-/// that is not the `clove` CLI gets the documented contract rather than a raw
-/// pass-through: `limit: Some(0)` means *unlimited* here as it does everywhere
-/// else, not "zero rows".
-fn build_filter(q: &QueryRequest) -> Filter {
-    let window = clove_core::view::Page::new(q.offset, q.limit, 0);
-    Filter {
-        mode: match q.kind {
-            QueryKind::List => QueryMode::List,
-            QueryKind::Ready => QueryMode::Ready,
-        },
-        status: q.status.map(|s| vec![s]),
-        item_type: q.item_type,
-        priority: q.priority,
-        assignee: q.assignee.clone(),
-        label: q.label.clone(),
-        parent: None,
-        // The requested ordering, carried over the wire. Without this the daemon
-        // answered every query in `rank` order while the client's `_meta.sort`
-        // claimed otherwise — and, because the SQL `LIMIT` is `offset + limit`,
-        // a sorted page would have been the wrong *rows*, not merely the wrong
-        // order.
-        order: q.order,
-        limit: window.sql_fetch(),
-    }
+/// This used to unpack five scalar fields by hand, which is precisely where a
+/// newly-added filter would have gone missing.
+fn build_filter(q: &QueryRequest) -> (Filter, Option<PostFilter>) {
+    let (mut filter, residue) = clove_index::push_down(&q.filters);
+    filter.mode = match q.kind {
+        QueryKind::List => QueryMode::List,
+        QueryKind::Ready => QueryMode::Ready,
+    };
+    // The requested ordering, carried over the wire. Without this the daemon
+    // answered every query in `rank` order while the client's `_meta.sort`
+    // claimed otherwise — and, because the SQL `LIMIT` is `offset + limit`, a
+    // sorted page would have been the wrong *rows*, not merely the wrong order.
+    filter.order = q.order;
+    (filter, residue)
 }
 
 /// The current time for daemon-side writes (the store truncates to seconds).

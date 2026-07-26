@@ -728,14 +728,15 @@ clove dep add <id> <dep-id>
 clove dep rm <id> <dep-id>
 clove dep tree <id> [--depth N] [--full] [--flat] [--format json]
 clove dep cycle [--fail-on-cycle] [--format json]
-clove ready [--status open|in_progress] [--type T] [--label L]
-            [--assignee A] [--priority N] [--sort FIELD] [--desc]
-            [--limit N] [--offset N]
+clove ready [--status S ...] [--type T ...] [--label L ...]
+            [--assignee A] [--priority N ...] [--q TEXT]
+            [--sort FIELD] [--desc] [--limit N] [--offset N]
             [--format json] [--fields F,...] [--compact]
+            # --status/--type/--priority repeat as "any of"; --label repeats as
+            # "all of"; --q is a substring over id/title/labels (never the body)
 clove blocked [same filters] [--sort FIELD] [--desc] [--limit N] [--offset N]
               [--format json] [--fields F,...] [--compact]
-clove ls [--status S] [--type T] [--label L] [--assignee A]
-         [--priority N] [--sort FIELD] [--desc] [--limit N] [--offset N]
+clove ls [same filters] [--sort FIELD] [--desc] [--limit N] [--offset N]
          [--format json] [--fields F,...] [--compact]
 clove query [--filter EXPR] [--sort FIELD] [--desc] [--limit N] [--offset N]
             [--format json] [--fields F,...] [--compact]
@@ -743,7 +744,9 @@ clove query [--filter EXPR] [--sort FIELD] [--desc] [--limit N] [--offset N]
             # (the JSON object accepts `sort`/`desc` too. `--sort` overrides the
             #  JSON's field; `--desc` is a bare bool flag so it ORs with the
             #  JSON's direction — there is no way to force ascending from the
-            #  flag side once the JSON asked for descending)
+            #  flag side once the JSON asked for descending. Its filter fields
+            #  each take one value or a list: {"status": ["open","in_progress"],
+            #  "label": ["area:core","area:ios"], "priority": [0,1], "q": "..."})
 clove search <text> [--sort FIELD] [--desc] [--limit N] [--offset N]
              [--format json] [--fields F,...] [--compact]
              # --sort FIELD is rank|priority|created|updated|id|status|type
@@ -861,10 +864,21 @@ regardless of warnings.
     "returned": 100,
     "offset": 0,
     "limit": 100,
+    "sort": "rank",
+    "dir": "asc",
+    "filters": {
+      "status": ["open"], "type": [], "priority": [],
+      "labels": ["area:core"], "assignee": null, "q": null
+    },
     "warnings": []
   }
 }
 ```
+
+`_meta.filters` is the **parsed** filter set (§7.8), echoed for the same reason
+`limit`/`sort` are: the values are canonicalized (label case, status aliases)
+and multi-valued, so a client should read back what was applied rather than
+assume its input survived. `search` omits the key — it takes no field filters.
 
 `total` is the match count *before* the window — the number of items the filters
 selected, not the number returned. `returned` is `len(data)` after `--limit`, and
@@ -956,7 +970,7 @@ CI to get exit 3.
 Clap's default exit code (2 for argument errors) is overridden to match this table. Use
 `std::process::ExitCode` (stable since Rust 1.61), never `process::exit()` directly.
 
-### 7.8 Pagination and ordering
+### 7.8 Pagination, ordering, and filtering
 
 Every list read on every surface — the CLI (file, index, and daemon paths), the
 MCP tools, the web API, and `cloved`'s query RPC — decodes `offset`/`limit`
@@ -1032,6 +1046,55 @@ field: the index pushes `LIMIT offset + limit` into SQL, so a clause that
 disagrees with the in-memory comparator returns the wrong *rows*, not merely the
 wrong sequence. That triple comparison is pinned by
 `crates/clove/tests/sort_order.rs`.
+
+**Filtering** is one type as well, `clove_core::view::Filters`, spelled
+`--status/--type/--label/--priority/--assignee/--q` on the CLI, the same names
+on the MCP read tools, `?status=…` (csv) on the web API, and carried whole on
+`clove_ipc::QueryRequest.filters` for the daemon. The semantics are **any-of
+within a field, all-of across fields**, with `labels` the exception:
+
+| filter | shape | rule |
+|---|---|---|
+| `status` | `open\|in_progress\|closed` (aliases `started`/`done` accepted) | any of |
+| `type` | `bug\|feature\|chore\|docs\|epic` | any of |
+| `priority` | `0`–`4` | any of |
+| `label` | canonical `key:value` (§2.2) | **all** of |
+| `assignee` | exact string | equals |
+| `q` | free text | case-insensitive substring over **id, title, and labels** — never the body |
+
+An **empty set does not constrain**, so a request with no filters matches
+everything and a single value is just the one-element case. Each surface spells
+"several values" in its own idiom and they all mean the same thing:
+
+```
+clove ls --status open --status in_progress --label area:core --label area:ios
+{"status": ["open","in_progress"], "label": ["area:core","area:ios"]}   # clove query, MCP
+GET /api/v1/items?status=open,in_progress&label=area:core,area:ios      # web
+```
+
+Every element is validated and canonicalized before matching: an unknown status
+word or an out-of-range priority is a `VALIDATION_ERROR` on every surface,
+including the web API (which previously compared raw strings, so `?status=bogus`
+returned an empty list a client could not distinguish from "no matches").
+
+**The push-down is exhaustive.** `clove_index::push_down(&Filters)` splits the
+set into a SQL `Filter` and an optional in-memory `PostFilter` residue, and it
+destructures `Filters` with **no `..` rest pattern** — so adding a filter field
+is a compile error rather than a constraint that quietly stops applying whenever
+`.clove/index.db` happens to exist. Filter values are always *bound* parameters,
+never formatted into the statement text.
+
+`q` is the one field held back as residue, deliberately: SQLite's `LIKE` and
+`lower()` case-fold ASCII only while `str::to_lowercase` is full Unicode, so a
+pushed-down `q=Ünicode` would miss a stored `ünicode-tag` that the file path
+finds. A residue also changes the *mechanics* of the query — the `LIMIT` may no
+longer be pushed into SQL (it would slice before the residue removes rows) and
+`COUNT(*)` is no longer `_meta.total` — which `clove_index::query_filtered`
+owns in one place.
+
+`_meta.filters` echoes the parsed set (§7.5). The file, index, and daemon paths
+must return identical results for every filter combination, pinned by
+`crates/clove/tests/filter_parity.rs`.
 
 ### 7.9 `clove agent-doc`
 
@@ -1109,6 +1172,23 @@ QUERY { filter, format, fields } → { ok, data, _meta }
 REINDEX → REINDEX_DONE { items_indexed, duration_ms, warnings }
 STATUS → { uptime_s, items_indexed, watcher_state, last_event_ms }
 ```
+
+**`PROTOCOL_VERSION`** (returned by `PING`) gates a mixed-version pair; the
+client fails a mismatch and falls back, which is safe because the daemon is a
+cache, not a source of truth. It is **5**:
+
+| v | change |
+|---|---|
+| 3 | `apply_edit(EditRequest)` / `dep_remove` / `set_parent` mutations |
+| 4 | `change_generation()` for MCP `resources/updated` push |
+| 5 | `QueryRequest`'s five scalar filter fields → one `filters: view::Filters`; `GraphRequest::Blocked` carries an `order` and drops the dead `include_warnings` |
+
+The v5 bump is worth spelling out because the codec is JSON and a v4 frame still
+*decodes*: its `"status": "open"` simply lands nowhere, and the daemon answers
+the **unfiltered** list. Nothing errors. A shape change whose failure mode is a
+silently wrong answer is exactly what the handshake exists for. Additive fields
+that only *widen* behaviour (e.g. `QueryRequest.order` in §7.8) stay compatible
+and do not bump.
 
 ### 8.5 File-Watcher
 

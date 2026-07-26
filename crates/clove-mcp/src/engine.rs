@@ -327,12 +327,13 @@ fn dir_of(desc: Option<bool>) -> Option<&'static str> {
 
 impl FilterArgs {
     fn to_filters(&self) -> Result<Filters, String> {
-        Filters::parse(
-            self.status.as_deref(),
-            self.item_type.as_deref(),
-            self.label.as_deref(),
+        Filters::parse_multi(
+            &OneOrMany::values(&self.status),
+            &OneOrMany::values(&self.item_type),
+            &OneOrMany::values(&self.label),
             self.assignee.as_deref(),
-            self.priority,
+            &Priorities::values(&self.priority),
+            self.q.as_deref(),
         )
         .map_err(stringify_core)
     }

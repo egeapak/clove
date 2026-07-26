@@ -24,7 +24,10 @@ pub mod stats_store;
 pub mod write;
 
 pub use db::{Index, IndexError, ItemListRow, ItemRow, SCHEMA_VERSION};
-pub use query::{count_items, query_items, query_list, search, Filter, QueryMode};
+pub use query::{
+    count_items, push_down, query_filtered, query_items, query_list, search, Filter, PostFilter,
+    QueryMode,
+};
 pub use reindex::{reindex, ReindexReport};
 pub use stale::{apply_staleness, check_staleness, check_staleness_fast, StalenessReport};
 pub use stats_store::StatsSnapshot;

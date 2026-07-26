@@ -75,11 +75,7 @@ fn spawn_ready(clove_dir: &Utf8Path) -> Child {
 fn list_request(kind: QueryKind) -> QueryRequest {
     QueryRequest {
         kind,
-        status: None,
-        item_type: None,
-        priority: None,
-        assignee: None,
-        label: None,
+        filters: Default::default(),
         order: Default::default(),
         offset: 0,
         limit: None,
@@ -135,14 +131,8 @@ fn query_matches_direct_index_read() {
     let direct = index
         .query_list(&Filter {
             mode: QueryMode::List,
-            status: None,
-            item_type: None,
-            priority: None,
-            assignee: None,
-            label: None,
-            parent: None,
             order: Default::default(),
-            limit: None,
+            ..Default::default()
         })
         .unwrap();
 
@@ -400,7 +390,7 @@ fn search_and_graph_over_ipc() {
     }
     match client
         .graph(GraphRequest::Blocked {
-            include_warnings: false,
+            order: Default::default(),
         })
         .unwrap()
     {

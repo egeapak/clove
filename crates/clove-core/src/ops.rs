@@ -527,7 +527,7 @@ pub fn list(
         .iter()
         .map(|fm| Value::Object(crate::view::frontmatter_object(fm)))
         .collect();
-    Ok(page(objects, order, window))
+    Ok(page(objects, filters, order, window))
 }
 
 /// Items ready to work on now (open/in_progress, all hard deps closed, no
@@ -561,7 +561,7 @@ pub fn ready(
         .iter()
         .map(|fm| Value::Object(crate::view::frontmatter_object(fm)))
         .collect();
-    Ok(page(objects, order, window))
+    Ok(page(objects, filters, order, window))
 }
 
 /// Items blocked by open or (with `include_warnings`) missing deps, each with a
@@ -610,7 +610,7 @@ pub fn blocked(
             Value::Object(obj)
         })
         .collect();
-    Ok(page(objects, order, window))
+    Ok(page(objects, filters, order, window))
 }
 
 /// Case-insensitive substring search over title/labels/body. Ordered by
@@ -678,8 +678,24 @@ fn tree_to_json(node: &crate::DepTreeNode) -> Value {
 /// in). `sort`/`dir` are echoed for the same reason: the ordering in force is
 /// then readable from the response rather than being folklore about which
 /// surface defaults to what.
-fn page(objects: Vec<Value>, order: crate::view::Order, window: crate::view::Page) -> Value {
-    page_with_sort(objects, order.field.as_str(), order.dir_str(), window)
+fn page(
+    objects: Vec<Value>,
+    filters: &crate::Filters,
+    order: crate::view::Order,
+    window: crate::view::Page,
+) -> Value {
+    let mut out = page_with_sort(objects, order.field.as_str(), order.dir_str(), window);
+    // Echo the parsed filter set, for the same reason `sort`/`limit` are echoed:
+    // a multi-valued filter has several accepted spellings (`"open"` vs
+    // `["open"]`) and every value is canonicalized, so a caller should be able
+    // to read back what was applied rather than assume its input survived.
+    if let Some(map) = out.as_object_mut() {
+        map.insert(
+            "filters".to_owned(),
+            serde_json::to_value(filters).unwrap_or(Value::Null),
+        );
+    }
+    out
 }
 
 /// [`page`] for search, whose default sort is `relevance` rather than a
@@ -689,6 +705,8 @@ fn search_page(
     order: crate::view::SearchOrder,
     window: crate::view::Page,
 ) -> Value {
+    // No `filters` key: `search` takes no field filters, and an empty object
+    // would advertise a surface the tool does not have.
     page_with_sort(objects, order.reported_sort(), order.dir_str(), window)
 }
 
