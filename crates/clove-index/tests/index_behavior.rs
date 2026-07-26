@@ -212,7 +212,9 @@ fn open_then_reopen_persists_data() {
     // Reopen via open_or_create: schema already present, the row survives.
     let index = Index::open_or_create(&repo.db).unwrap();
     assert_eq!(index.item_count().unwrap(), 1);
-    let rows = index.search("persisted", None).unwrap();
+    let rows = index
+        .search("persisted", &Default::default(), None)
+        .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, "proj-AAAAAAAA");
 }
@@ -287,7 +289,13 @@ fn a_schema_bump_rebuilds_from_the_files_not_to_empty() {
     }
     let index = Index::open_or_rebuild(&repo.db, &repo.issues).unwrap();
     assert_eq!(index.item_count().unwrap(), 1, "rebuilt from the files");
-    assert_eq!(index.search("persisted", None).unwrap().len(), 1);
+    assert_eq!(
+        index
+            .search("persisted", &Default::default(), None)
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 /// A healthy index is opened as-is, with no rebuild.
@@ -383,11 +391,11 @@ fn search_finds_by_title_and_body_and_replaces_on_reupsert() {
     assert_eq!(index.item_count().unwrap(), 2);
 
     // Found by a title term...
-    let by_title = index.search("widget", None).unwrap();
+    let by_title = index.search("widget", &Default::default(), None).unwrap();
     assert_eq!(by_title.len(), 1);
     assert_eq!(by_title[0].id, "proj-AAAAAAAA");
     // ...and by a body term.
-    let by_body = index.search("quokka", None).unwrap();
+    let by_body = index.search("quokka", &Default::default(), None).unwrap();
     assert_eq!(by_body.len(), 1);
     assert_eq!(by_body[0].id, "proj-AAAAAAAA");
 
@@ -399,10 +407,13 @@ fn search_finds_by_title_and_body_and_replaces_on_reupsert() {
     index.upsert_item(&item_from_spec(&a2)).unwrap();
     assert_eq!(index.item_count().unwrap(), 2, "no duplicate row");
     assert!(
-        index.search("quokka", None).unwrap().is_empty(),
+        index
+            .search("quokka", &Default::default(), None)
+            .unwrap()
+            .is_empty(),
         "old term gone"
     );
-    let narwhal = index.search("narwhal", None).unwrap();
+    let narwhal = index.search("narwhal", &Default::default(), None).unwrap();
     assert_eq!(narwhal.len(), 1);
     assert_eq!(narwhal[0].id, "proj-AAAAAAAA");
 }
@@ -685,7 +696,13 @@ fn staleness_detects_new_deleted_modified_and_apply_resyncs() {
     assert_eq!(index.item_count().unwrap(), 3, "C removed, D added");
 
     // The new item is searchable; the deleted one is gone.
-    assert_eq!(index.search("searchterm", None).unwrap().len(), 1);
+    assert_eq!(
+        index
+            .search("searchterm", &Default::default(), None)
+            .unwrap()
+            .len(),
+        1
+    );
     // A subsequent check no longer reports the resynced rows as stale/deleted.
     let after = index.check_staleness(&repo.issues).unwrap();
     assert!(
@@ -775,9 +792,27 @@ fn search_limit_is_honored() {
             ))
             .unwrap();
     }
-    assert_eq!(index.search("shared", None).unwrap().len(), 4);
-    assert_eq!(index.search("shared", Some(2)).unwrap().len(), 2);
-    assert_eq!(index.search("shared", Some(0)).unwrap().len(), 0);
+    assert_eq!(
+        index
+            .search("shared", &Default::default(), None)
+            .unwrap()
+            .len(),
+        4
+    );
+    assert_eq!(
+        index
+            .search("shared", &Default::default(), Some(2))
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        index
+            .search("shared", &Default::default(), Some(0))
+            .unwrap()
+            .len(),
+        0
+    );
 }
 
 #[test]
@@ -798,7 +833,7 @@ fn search_is_quoting_safe_and_empty_on_no_match() {
         "(unbalanced",
         "co-lon: semi; comma,",
     ] {
-        let res = index.search(tricky, None).unwrap();
+        let res = index.search(tricky, &Default::default(), None).unwrap();
         assert!(
             res.is_empty(),
             "tricky input matched unexpectedly: {tricky:?}"
@@ -806,5 +841,8 @@ fn search_is_quoting_safe_and_empty_on_no_match() {
     }
 
     // A clean non-matching term is also empty.
-    assert!(index.search("absentword", None).unwrap().is_empty());
+    assert!(index
+        .search("absentword", &Default::default(), None)
+        .unwrap()
+        .is_empty());
 }

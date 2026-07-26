@@ -353,8 +353,11 @@ impl Dispatcher {
             .lock()
             .map_err(|_| RpcError::new("internal", "index lock poisoned"))?;
         self.refresh(&mut index);
+        // The FTS is a candidate prefilter; the client re-ranks (relevance, or an
+        // explicit `--sort`) over the full items, so the SQL order here only
+        // decides which rows an explicit `limit` would keep.
         index
-            .search(&req.text, req.limit)
+            .search(&req.text, &clove_core::view::Order::default(), req.limit)
             .map(|rows| rows.into_iter().map(|r| r.id).collect())
             .map_err(|e| RpcError::new("search_failed", e.to_string()))
     }
@@ -464,6 +467,12 @@ fn build_filter(q: &QueryRequest) -> Filter {
         assignee: q.assignee.clone(),
         label: q.label.clone(),
         parent: None,
+        // The requested ordering, carried over the wire. Without this the daemon
+        // answered every query in `rank` order while the client's `_meta.sort`
+        // claimed otherwise — and, because the SQL `LIMIT` is `offset + limit`,
+        // a sorted page would have been the wrong *rows*, not merely the wrong
+        // order.
+        order: q.order,
         limit: window.sql_fetch(),
     }
 }

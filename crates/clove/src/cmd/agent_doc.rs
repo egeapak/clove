@@ -86,11 +86,12 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
 - `clove status <id> <open|in_progress|closed>` (aliases `start`, `close`).\n\
 - `clove label <id> <add|rm> <label>`, `clove assign <id> <who|--clear>`, `clove priority <id> <0-4>`.\n\
 - `clove dep add <id> <dep-id>` / `dep rm` / `dep tree <id> [--depth N|--full] [--flat]` / `dep cycle [--fail-on-cycle]`.\n\
-- `clove ready` / `clove blocked` — work queues (filters: `--status --type --label --assignee --priority`; also `--limit --offset --fields --compact`).\n\
-- `clove ls` / `clove query [--filter JSON]` — list/query (`--fields`, `--limit`, `--offset`).\n\
+- `clove ready` / `clove blocked` — work queues (filters: `--status --type --label --assignee --priority`; also `--sort --desc --limit --offset --fields --compact`).\n\
+- `clove ls` / `clove query [--filter JSON]` — list/query (`--sort`, `--desc`, `--fields`, `--limit`, `--offset`).\n\
 - Every list read (`ls`, `query`, `ready`, `blocked`, `search`) takes the same `--limit`/`--offset`: no flag caps at 100, `--limit 0` returns everything, `_meta.total` is always the full match count and `_meta.limit` echoes the one in force.\n\
+- They also take the same `--sort <rank|priority|created|updated|id|status|type>` and `--desc`. The default is `rank` — priority, then dependency order, then id — except on `search`, whose default is relevance (title hits, then labels, then body); naming a field there replaces that ranking entirely. `status` sorts open → in_progress → closed and `type` sorts bug → feature → chore → docs → epic (declared order, not alphabetical). Every order ends in an id tiebreak, so paging with `--offset` is stable. `_meta.sort`/`_meta.dir` echo what was applied. Prefer `--sort updated --desc --limit N` over pulling the store and sorting yourself.\n\
 - `clove comment <id> <message>` / `clove comments <id> [--limit N] [--skip-newest N]` — `--limit` keeps the *newest* N (default 100, `--limit 0` for all); `--skip-newest` pages back into older ones. `_meta.total` is the full thread length.\n\
-- `clove search <text> [--limit N] [--offset N] [--fields LIST] [--compact]` — full-text (index) or substring (files) search.\n\
+- `clove search <text> [--sort FIELD] [--desc] [--limit N] [--offset N] [--fields LIST] [--compact]` — full-text (index) or substring (files) search, relevance-ranked by default.\n\
 - `clove stats [--top N] [--no-epics] [--snapshot] [--history [--since RFC3339] [--limit N]]` — work-item analytics (counts by status/type/priority/assignee/label, ready/blocked, cycles, epic rollups, throughput) plus daemon/index telemetry. `--snapshot` persists to the index's durable history (`.clove/index.db`); `--history` replays the series.\n\
 - `clove reindex` — rebuild the SQLite index. `clove doctor [--fix] [--strict]` — health check.\n\
 - `clove version` — `{{ clove, schema, git_hash, build_date }}`.\n\
@@ -159,6 +160,10 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
 - `fields` and `compact` are accepted by every read tool, and by `clove ls`,\n\
   `ready`, `blocked`, `query`, `search`, and `show` as `--fields`/`--compact`.\n\
   Use them: a two-field projection cuts a list result by roughly 80%.\n\
+- `sort` and `desc` are accepted by `clove_ready`, `clove_blocked`, `clove_list`,\n\
+  and `clove_search`, with the same vocabulary and defaults as the CLI's\n\
+  `--sort`/`--desc`. `{{\"sort\": \"updated\", \"desc\": true, \"limit\": 10}}` answers\n\
+  \"what changed most recently\" in one call instead of pulling the store.\n\
 - Writes are coordinated through a running daemon when present (so concurrent\n\
   agents share one writer) and fall back to direct file writes otherwise.\n\
 \n\

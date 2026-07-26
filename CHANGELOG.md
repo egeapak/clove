@@ -41,8 +41,62 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `--compact` on `clove show` and `clove query`. Each already existed on the
   matching MCP tool or on a sibling CLI command, so the same query shaped
   differently depending on which surface asked.
+- **`--sort`/`--desc` on every list read**, and `sort`/`desc` on the
+  `clove_ready`, `clove_blocked`, `clove_list`, and `clove_search` MCP tools.
+  Sorting previously existed only on the web API (`?sort=`), so an agent asking
+  "what changed most recently" had to pull the whole store and sort client-side
+  — exactly the payload the shaping work was about cutting.
+  `clove ls --sort updated --desc --limit 10` now answers it in one call.
+
+  The fields are `rank` (the default: priority, then dependency order, then id),
+  `priority`, `created`, `updated`, `id`, `status`, and `type`. `status` sorts
+  open → in_progress → closed and `type` sorts bug → feature → chore → docs →
+  epic — the declared order, not the alphabetical order a bare `ORDER BY` on the
+  stored words would give. `clove query`'s JSON filter object accepts `sort`/
+  `desc` too.
+
+  `clove search` keeps *relevance* as its default (title hits, then labels, then
+  body). An explicit `--sort` there replaces that key entirely rather than
+  tie-breaking within it, and `--desc` with no `--sort` reverses the relevance
+  ranking rather than being silently dropped.
 
 ### Changed
+
+- **One sort contract, shared by every surface.** `clove_core::view::Order`
+  (`SortField` + a direction) is the single comparator behind `--sort`/`--desc`,
+  the MCP `sort`/`desc` arguments, the web's `?sort=`/`?dir=`, and the SQL
+  `ORDER BY` the index and daemon paths run. `clove-web`'s private `sort_items`
+  — which was the only sort implementation in the project — is gone, and its
+  accepted spellings are unchanged.
+
+  Three properties come with it:
+
+  - **Every order is total, ending in an id tiebreak**, and `--desc` reverses
+    the whole key rather than only its head. Paging over a partial order
+    silently repeats and skips rows, because ties resolve to whatever the input
+    order happened to be — raw `read_dir` order on the file paths.
+  - **The file, index, and daemon paths return identical id sequences for every
+    field.** `crates/clove-index/src/query.rs` had two hardcoded `ORDER BY`
+    clauses that were *not* identical (the search one carried an extra, dead
+    `topological_rank IS NULL ASC` term); both are now generated from one
+    `match` on the enum, so a new sort field is a compile error rather than a
+    path that silently keeps the old order. No user string is ever interpolated
+    into SQL. Pinned by `crates/clove/tests/sort_order.rs`, which compares all
+    three paths against a fixture where every field orders the store
+    differently.
+  - **`_meta.sort` and `_meta.dir` echo the ordering applied**, for the same
+    reason `_meta.limit` echoes the effective limit. `search` reports
+    `"relevance"` when no field was named.
+
+  `clove_ipc::QueryRequest` gains an `order` field. `PROTOCOL_VERSION` is
+  deliberately *not* bumped: the codec is length-delimited JSON and the field is
+  `#[serde(default)]`, so a mixed-version `clove`/`cloved` pair keeps working in
+  both directions and no existing field changes meaning.
+
+- **An unrecognized `?sort=`/`?dir=` on the web API is now a `VALIDATION_ERROR`**
+  rather than a silent fall back to `rank`, matching what `clove ls --sort nope`
+  has always done. (`?limit=abc` remains lenient; making the whole query string
+  strict is a separate item.)
 
 - **One limit contract, shared by every surface.** `clove_core::view::Page`
   decodes `offset`/`limit` once — *absent → that surface's default, `0` →

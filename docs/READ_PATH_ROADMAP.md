@@ -16,7 +16,7 @@ Status of what shipped, for context:
 | `offset`/`limit` decoding | **Done** — `clove_core::view::Page`, all surfaces |
 | Per-surface defaults | **Done** — `clove_core::view::defaults` |
 | Result shaping (`fields`/`compact`) | **Done** on CLI + MCP; **absent on the web API** (§5) |
-| Ordering (`sort`/`dir`) | Web only — §1 |
+| Ordering (`sort`/`dir`) | **Done** — `clove_core::view::Order`, all surfaces (§1) |
 | Filters | Web has a superset — §2 |
 | Read tiering (daemon → index → files) | CLI only; MCP always reads files — §4 |
 | Search match set + ranking | Labels: **done**; substring-vs-token still diverges — §6.1 |
@@ -25,7 +25,49 @@ Status of what shipped, for context:
 
 ---
 
-## 1. `Order` — one sort contract, every surface
+## 1. `Order` — one sort contract, every surface — **DONE**
+
+Shipped as specified. `clove_core::view::{SortField, Order}` is the single
+comparator; `clove-web`'s `sort_items` is a thin wrapper over it and
+`view::sort_by_rank` is gone (`Order::default()` is the same key). `--sort`/
+`--desc` on `ls`/`ready`/`blocked`/`query`/`search`, `sort`/`desc` on the MCP
+`FilterArgs`/`SearchArgs`, `?sort=`/`?dir=` unchanged on the web, and
+`clove_ipc::QueryRequest.order` on the wire (no `PROTOCOL_VERSION` bump — a
+`#[serde(default)]` field over length-delimited JSON is compatible both ways).
+Both hardcoded `ORDER BY` clauses in `clove-index` are generated from one
+`match` on the enum. `_meta.sort`/`_meta.dir` echo what was applied.
+
+Three notes for whoever picks up §2/§4:
+
+- Search ordering is a separate type, `view::SearchOrder` (`field: Option<
+  SortField>`), because relevance is not a `SortField` and `--desc` alone had to
+  stay meaningful. `_meta.sort` reads `relevance` in the default case.
+- `clove blocked` is the one list with no index tier: its daemon RPC returns ids
+  in rank order and carries no sort, so `cmd/blocked.rs` reorders locally
+  (reversing for `rank --desc`, re-sorting for every other field). §4's engine
+  extraction is the natural place to fold that away.
+- `created`/`updated` on the index path compare as TEXT. Every row is written
+  with `DateTime<Utc>::to_rfc3339()`, one `+00:00` spelling, so lexicographic
+  order is chronological — but a non-canonical timestamp arriving by hand-edit
+  would break the file/index agreement. That is §3.
+
+**Left alone deliberately: two client-side sorters remain.** Neither is on a
+read path this section covers, but both will drift when a sort field is added:
+
+- `clove-tui`'s `app::mod::apply_sort` carries its own `SortField`
+  (`Default|Priority|Created|Updated|Id`) over the in-memory view.
+  *Behaviourally* identical to `view::Order` today — same keys, same id
+  tiebreak, same whole-key reverse — so duplication rather than divergence, but
+  it has no `status`/`type`. Folding it in is cheap; it was skipped because it
+  churns the render snapshots.
+- The SPA's `web/src/lib/filter.ts::sortItems` sorts the fetched store
+  client-side and never sends `?sort=` at all. Its tiebreak is the *server's
+  insertion order*, not the id, which is equivalent only while the SPA fetches
+  everything in one unpaginated request — i.e. it stops being equivalent the
+  moment §5 makes the SPA page. Sending `?sort=`/`?dir=` to the server is the
+  natural fix and belongs with §5.
+
+The original write-up follows.
 
 **Problem.** `sort` and `dir` exist only on the web API
 (`crates/clove-web/src/read.rs::sort_items`, fields `rank|priority|created|

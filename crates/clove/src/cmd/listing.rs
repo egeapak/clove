@@ -11,10 +11,9 @@ use serde_json::{json, Map, Value};
 use crate::item_json::{frontmatter_object, project};
 use crate::output::{print_json_list, print_jsonl_items};
 
-// `Filters` and the canonical `(priority, topo, id)` ordering live in
-// `clove_core::view`, shared by the CLI, MCP server, and web UI.
-pub use clove_core::view::sort_by_rank as sort_by_priority_topo;
-pub use clove_core::view::Filters;
+// `Filters` and the ordering contract live in `clove_core::view`, shared by the
+// CLI, MCP server, daemon, and web UI.
+pub use clove_core::view::{Filters, Order};
 
 /// Default cap on list output, so `ls` on a large repo stays snappy (the index
 /// steps only this many rows). `_meta.total` still reports the full match count.
@@ -27,7 +26,7 @@ pub fn window(offset: Option<usize>, limit: Option<usize>) -> clove_core::view::
 }
 
 /// Pagination, projection, and metadata options for [`emit`].
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ListOpts<'a> {
     /// Match count before pagination.
     pub total: usize,
@@ -44,7 +43,28 @@ pub struct ListOpts<'a> {
     pub compact: bool,
     /// `"files"` or `"index"`.
     pub source: &'a str,
+    /// The ordering in force, echoed as `_meta.sort`/`_meta.dir` for the same
+    /// reason `_meta.limit` is echoed: so a client can read what was applied
+    /// instead of memorizing each surface's default. `search` reports
+    /// `"relevance"` here, which is not a `SortField`, so these are plain words.
+    pub sort: &'a str,
+    pub dir: &'a str,
     pub warnings: Vec<String>,
+}
+
+impl Default for ListOpts<'_> {
+    fn default() -> Self {
+        ListOpts {
+            total: 0,
+            window: clove_core::view::Page::default(),
+            fields: None,
+            compact: false,
+            source: "",
+            sort: clove_core::view::SortField::Rank.as_str(),
+            dir: "asc",
+            warnings: Vec::new(),
+        }
+    }
 }
 
 /// The JSON object for one item in a list. Built either from full frontmatter
@@ -146,6 +166,8 @@ pub fn emit(format: OutputFormat, objects: Vec<ListObject>, opts: ListOpts<'_>) 
                         "total": opts.total,
                         "returned": page.len(),
                         "offset": opts.window.offset,
+                        "sort": opts.sort,
+                        "dir": opts.dir,
                         "source": opts.source,
                         "warnings": opts.warnings,
                     }),

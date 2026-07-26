@@ -676,3 +676,68 @@ async fn remove_dep_is_idempotent() {
         "second remove should be a no-op 200: {status2}"
     );
 }
+
+/// `?sort=`/`?dir=` now go through `clove_core::view::Order`, the same
+/// comparator the CLI, MCP, and daemon use — this endpoint used to own the only
+/// sort implementation in the project. The historical spellings still work, the
+/// shared enum adds `status`/`type`, and the applied order is echoed in `_meta`.
+#[tokio::test]
+async fn list_sorts_through_the_shared_order() {
+    let (_tmp, addr, _id) = spawn().await;
+
+    let ids = |body: &str| -> Vec<String> {
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        v["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+
+    // The fixture: "Dependency" is p0, "Add webhook handler" is p1 and depends
+    // on it, so priority puts the dependency first.
+    let (_, by_priority) = get(addr, "/api/v1/items?sort=priority").await;
+    let by_priority = ids(&by_priority);
+    let (_, desc) = get(addr, "/api/v1/items?sort=priority&dir=desc").await;
+    let mut want = by_priority.clone();
+    want.reverse();
+    assert_eq!(ids(&desc), want, "dir=desc reverses the whole key");
+
+    // `sort=id` is a pure id sort — a different sequence from priority here.
+    let (_, by_id) = get(addr, "/api/v1/items?sort=id").await;
+    let mut sorted = by_priority.clone();
+    sorted.sort();
+    assert_eq!(ids(&by_id), sorted);
+
+    // `status`/`type` arrived with the shared enum.
+    let (status, body) = get(addr, "/api/v1/items?sort=status").await;
+    assert!(status.contains("200"), "{status} {body}");
+    let (status, body) = get(addr, "/api/v1/items?sort=type").await;
+    assert!(status.contains("200"), "{status} {body}");
+
+    // `_meta` echoes what was applied, including the default.
+    let (_, body) = get(addr, "/api/v1/items").await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["_meta"]["sort"], "rank");
+    assert_eq!(v["_meta"]["dir"], "asc");
+    let (_, body) = get(addr, "/api/v1/items?sort=updated&dir=desc").await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["_meta"]["sort"], "updated");
+    assert_eq!(v["_meta"]["dir"], "desc");
+
+    // The board shares the sorter, so it echoes the same pair.
+    let (_, body) = get(addr, "/api/v1/board?sort=id&dir=desc").await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["_meta"]["sort"], "id");
+    assert_eq!(v["_meta"]["dir"], "desc");
+
+    // Negative: an unrecognized value is a validation error rather than a
+    // silent fall back to `rank` (which is what the old comparator did).
+    let (status, body) = get(addr, "/api/v1/items?sort=nope").await;
+    assert!(status.contains("422"), "{status} {body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["error"]["code"], "VALIDATION_ERROR", "{body}");
+    let (status, _) = get(addr, "/api/v1/items?dir=sideways").await;
+    assert!(status.contains("422"), "{status}");
+}

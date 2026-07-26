@@ -729,17 +729,21 @@ clove dep rm <id> <dep-id>
 clove dep tree <id> [--depth N] [--full] [--flat] [--format json]
 clove dep cycle [--fail-on-cycle] [--format json]
 clove ready [--status open|in_progress] [--type T] [--label L]
-            [--assignee A] [--priority N] [--limit N] [--offset N]
+            [--assignee A] [--priority N] [--sort FIELD] [--desc]
+            [--limit N] [--offset N]
             [--format json] [--fields F,...] [--compact]
-clove blocked [same filters] [--limit N] [--offset N] [--format json]
-              [--fields F,...] [--compact]
+clove blocked [same filters] [--sort FIELD] [--desc] [--limit N] [--offset N]
+              [--format json] [--fields F,...] [--compact]
 clove ls [--status S] [--type T] [--label L] [--assignee A]
-         [--priority N] [--limit N] [--offset N]
+         [--priority N] [--sort FIELD] [--desc] [--limit N] [--offset N]
          [--format json] [--fields F,...] [--compact]
-clove query [--filter EXPR] [--limit N] [--offset N]
+clove query [--filter EXPR] [--sort FIELD] [--desc] [--limit N] [--offset N]
             [--format json] [--fields F,...] [--compact]
             # also reads JSON filter object from stdin when stdin is non-TTY
-clove search <text> [--limit N] [--offset N] [--format json] [--fields F,...] [--compact]
+            # (the JSON object accepts `sort`/`desc` too; the flags win)
+clove search <text> [--sort FIELD] [--desc] [--limit N] [--offset N]
+             [--format json] [--fields F,...] [--compact]
+             # --sort FIELD is rank|priority|created|updated|id|status|type
 clove stats [--top N] [--no-epics] [--snapshot]      # work-item analytics + daemon/index telemetry
             [--history [--since RFC3339] [--limit N] [--offset N]] [--format json]
 clove comment <id> <message> [--format json]
@@ -949,7 +953,7 @@ CI to get exit 3.
 Clap's default exit code (2 for argument errors) is overridden to match this table. Use
 `std::process::ExitCode` (stable since Rust 1.61), never `process::exit()` directly.
 
-### 7.8 Pagination
+### 7.8 Pagination and ordering
 
 Every list read on every surface — the CLI (file, index, and daemon paths), the
 MCP tools, the web API, and `cloved`'s query RPC — decodes `offset`/`limit`
@@ -983,6 +987,48 @@ before the window) and `returned`; `_meta.per_column` marks the difference from
 a flat list.
 
 Cursor-based pagination is deferred to post-v1; offset is sufficient for M0–M2.
+
+**Ordering** decodes through one implementation too, `clove_core::view::Order`
+(`SortField` + a direction), spelled `--sort FIELD` / `--desc` on the CLI,
+`sort` / `desc` on the MCP read tools, `?sort=` / `?dir=asc|desc` on the web API,
+and carried on `clove_ipc::QueryRequest.order` for the daemon. The fields are:
+
+| `--sort` | key |
+|---|---|
+| `rank` *(default)* | `(priority, topological rank, id)` |
+| `priority` | `(priority, id)` |
+| `created` | `(created, id)` |
+| `updated` | `(updated, id)` |
+| `id` | `(id)` |
+| `status` | `(open → in_progress → closed, id)` |
+| `type` | `(bug → feature → chore → docs → epic, id)` |
+
+Three properties are load-bearing:
+
+- **Every key is a total order, ending in an id tiebreak**, and `--desc`
+  reverses the whole key (id included) rather than only its head. Paging over a
+  partial order silently repeats and skips rows, because ties resolve to
+  whatever the input order happened to be — raw `read_dir` order for the file
+  paths, scan order for SQLite.
+- **`status` and `type` sort in declared order, not alphabetically.** The index
+  path builds a SQL `CASE` from the same arrays the file path ranks by
+  (`SortField::{STATUS_ORDER, TYPE_ORDER}`), because `ORDER BY status` on the
+  stored words would give `closed < in_progress < open`.
+- **`search` is the exception**: its default is *relevance* (match class, then
+  priority, then id — §6.1). An explicit `--sort` replaces that key entirely
+  rather than tie-breaking within it, and `--desc` with no `--sort` reverses the
+  relevance ranking. `_meta.sort` reads `relevance` in the default case.
+
+`_meta.sort` and `_meta.dir` echo the ordering actually applied, for the same
+reason `_meta.limit` echoes the effective limit. An unrecognized field or
+direction is a `VALIDATION_ERROR` on every surface, including the web API (which
+previously fell back to `rank` silently).
+
+The file, index, and daemon paths must return identical id sequences for every
+field: the index pushes `LIMIT offset + limit` into SQL, so a clause that
+disagrees with the in-memory comparator returns the wrong *rows*, not merely the
+wrong sequence. That triple comparison is pinned by
+`crates/clove/tests/sort_order.rs`.
 
 ### 7.9 `clove agent-doc`
 

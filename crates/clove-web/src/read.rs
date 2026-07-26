@@ -99,40 +99,36 @@ fn matches(fm: &ItemFrontmatter, params: &HashMap<String, String>) -> bool {
     true
 }
 
-/// Sort frontmatter in place by the requested `sort`/`dir` (default `rank`).
-fn sort_items(items: &mut [ItemFrontmatter], params: &HashMap<String, String>, graph: &GraphStore) {
-    let field = params.get("sort").map(String::as_str).unwrap_or("rank");
-    let desc = params.get("dir").map(String::as_str) == Some("desc");
-    let ranks = graph.topological_ranks();
+/// The requested `?sort=`/`?dir=`, through the shared contract.
+///
+/// This endpoint had the *only* sort implementation in the project — a private
+/// comparator here, and no sort argument at all on the CLI or MCP. It is now
+/// `clove_core::view::Order`, which every surface shares; the accepted spellings
+/// (`rank|priority|created|updated|id`, `dir=desc`) are unchanged, and
+/// `status`/`type` come along with the shared enum.
+///
+/// Unlike the old comparator, an unrecognized value is a `VALIDATION_ERROR`
+/// rather than a silent fall-back to `rank` — the same answer `clove ls --sort
+/// nope` gives. (`?limit=abc` is still lenient; making the *whole* query string
+/// strict is roadmap §7.)
+fn order_of(params: &HashMap<String, String>) -> Result<clove_core::view::Order, ApiError> {
+    clove_core::view::Order::parse(
+        params.get("sort").map(String::as_str),
+        params.get("dir").map(String::as_str),
+    )
+    .map_err(ApiError::from)
+}
 
-    items.sort_by(|a, b| {
-        let ord = match field {
-            "priority" => a
-                .priority
-                .get()
-                .cmp(&b.priority.get())
-                .then_with(|| a.id.cmp(&b.id)),
-            "created" => a.created.cmp(&b.created).then_with(|| a.id.cmp(&b.id)),
-            "updated" => a.updated.cmp(&b.updated).then_with(|| a.id.cmp(&b.id)),
-            "id" => a.id.cmp(&b.id),
-            // "rank" (default): (priority, topo rank, id).
-            _ => a
-                .priority
-                .get()
-                .cmp(&b.priority.get())
-                .then_with(|| {
-                    let ra = ranks.get(&a.id).copied().unwrap_or(usize::MAX);
-                    let rb = ranks.get(&b.id).copied().unwrap_or(usize::MAX);
-                    ra.cmp(&rb)
-                })
-                .then_with(|| a.id.cmp(&b.id)),
-        };
-        if desc {
-            ord.reverse()
-        } else {
-            ord
-        }
-    });
+/// Sort frontmatter in place by `order`.
+fn sort_items(items: &mut [ItemFrontmatter], order: clove_core::view::Order, graph: &GraphStore) {
+    // `rank` is the only field that reads the graph, and the caller has already
+    // built it; every other field keys off the frontmatter alone.
+    let ranks = if order.needs_ranks() {
+        graph.topological_ranks()
+    } else {
+        HashMap::new()
+    };
+    order.apply(items, &ranks);
 }
 
 /// `GET /api/v1/items` — filtered, sorted, paginated list.
@@ -141,6 +137,7 @@ pub async fn list_items(
     Query(params): Query<HashMap<String, String>>,
 ) -> ApiResult {
     let (frontmatters, ctx) = load(&state)?;
+    let order = order_of(&params)?;
     let mode = params.get("mode").map(String::as_str).unwrap_or("list");
 
     let mut selected: Vec<ItemFrontmatter> = frontmatters
@@ -153,7 +150,7 @@ pub async fn list_items(
         })
         .collect();
 
-    sort_items(&mut selected, &params, ctx.graph());
+    sort_items(&mut selected, order, ctx.graph());
 
     let window = page_window(&params);
     let rows: Vec<Value> = selected
@@ -170,6 +167,8 @@ pub async fn list_items(
             "returned": returned,
             "offset": window.offset,
             "limit": window.reported_limit(),
+            "sort": order.field.as_str(),
+            "dir": order.dir_str(),
             "source": state.source,
         }),
     ))
@@ -264,11 +263,12 @@ pub async fn get_board(
     Query(params): Query<HashMap<String, String>>,
 ) -> ApiResult {
     let (frontmatters, ctx) = load(&state)?;
+    let order = order_of(&params)?;
     let mut selected: Vec<ItemFrontmatter> = frontmatters
         .into_iter()
         .filter(|fm| matches(fm, &params))
         .collect();
-    sort_items(&mut selected, &params, ctx.graph());
+    sort_items(&mut selected, order, ctx.graph());
 
     let mut columns: Vec<(&str, &str, Vec<Value>)> = vec![
         ("open", "Open", Vec::new()),
@@ -301,6 +301,8 @@ pub async fn get_board(
             "source": state.source,
             "offset": window.offset,
             "limit": window.reported_limit(),
+            "sort": order.field.as_str(),
+            "dir": order.dir_str(),
             "per_column": true,
         }),
     ))

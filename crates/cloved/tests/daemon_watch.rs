@@ -108,6 +108,7 @@ fn list_all() -> QueryRequest {
         priority: None,
         assignee: None,
         label: None,
+        order: Default::default(),
         offset: 0,
         limit: None,
     }

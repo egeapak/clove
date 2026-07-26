@@ -506,11 +506,13 @@ pub fn stats(
 
 // ---- Read-list operations (file-based; always correct) -----------------------
 
-/// List items matching `filters`, ordered by `(priority, topo, id)`, paginated.
-/// Returns `{ total, returned, offset, items: [full objects] }`.
+/// List items matching `filters`, ordered by `order` (default `(priority, topo,
+/// id)`), paginated. Returns `{ total, returned, offset, limit, sort, dir,
+/// items: [full objects] }`.
 pub fn list(
     store: &ItemStore,
     filters: &crate::Filters,
+    order: crate::view::Order,
     window: crate::view::Page,
 ) -> Result<Value, CloveError> {
     let (frontmatters, _errors) = store.scan_frontmatter()?;
@@ -520,19 +522,20 @@ pub fn list(
         .into_iter()
         .filter(|fm| filters.matches(fm))
         .collect();
-    crate::view::sort_by_rank(&mut matched, &ranks);
+    order.apply(&mut matched, &ranks);
     let objects: Vec<Value> = matched
         .iter()
         .map(|fm| Value::Object(crate::view::frontmatter_object(fm)))
         .collect();
-    Ok(page(objects, window))
+    Ok(page(objects, order, window))
 }
 
 /// Items ready to work on now (open/in_progress, all hard deps closed, no
-/// dangling), ordered `(priority, topo, id)`, filtered + paginated.
+/// dangling), ordered by `order`, filtered + paginated.
 pub fn ready(
     store: &ItemStore,
     filters: &crate::Filters,
+    order: crate::view::Order,
     window: crate::view::Page,
 ) -> Result<Value, CloveError> {
     let (frontmatters, _errors) = store.scan_frontmatter()?;
@@ -542,21 +545,31 @@ pub fn ready(
         .map(|fm| (fm.id.clone(), fm))
         .collect();
     let (graph, _dangling) = GraphStore::build(&frontmatters);
-    let objects: Vec<Value> = graph
+    let ranks = graph.topological_ranks();
+    // `ready_items()` is already in `(priority, topo, id)` order, but the sort is
+    // applied unconditionally so a non-default `order` is honoured — and so the
+    // default order goes through the *same* comparator every other surface uses.
+    let mut ordered: Vec<ItemFrontmatter> = graph
         .ready_items()
         .iter()
         .filter_map(|id| by_id.get(id))
         .filter(|fm| filters.matches(fm))
+        .cloned()
+        .collect();
+    order.apply(&mut ordered, &ranks);
+    let objects: Vec<Value> = ordered
+        .iter()
         .map(|fm| Value::Object(crate::view::frontmatter_object(fm)))
         .collect();
-    Ok(page(objects, window))
+    Ok(page(objects, order, window))
 }
 
 /// Items blocked by open or (with `include_warnings`) missing deps, each with a
-/// `blocked_by` list, ordered `(priority, topo, id)`, filtered + paginated.
+/// `blocked_by` list, ordered by `order`, filtered + paginated.
 pub fn blocked(
     store: &ItemStore,
     filters: &crate::Filters,
+    order: crate::view::Order,
     window: crate::view::Page,
 ) -> Result<Value, CloveError> {
     let (frontmatters, _errors) = store.scan_frontmatter()?;
@@ -588,14 +601,7 @@ pub fn blocked(
         })
         .collect();
     rows.retain(|(fm, _)| filters.matches(fm));
-    rows.sort_by(|a, b| {
-        a.0.priority
-            .cmp(&b.0.priority)
-            .then_with(|| {
-                crate::view::rank_of(&ranks, &a.0.id).cmp(&crate::view::rank_of(&ranks, &b.0.id))
-            })
-            .then_with(|| a.0.id.cmp(&b.0.id))
-    });
+    order.apply_by(&mut rows, &ranks, |(fm, _)| fm);
     let objects: Vec<Value> = rows
         .into_iter()
         .map(|(fm, blocked_by)| {
@@ -604,26 +610,40 @@ pub fn blocked(
             Value::Object(obj)
         })
         .collect();
-    Ok(page(objects, window))
+    Ok(page(objects, order, window))
 }
 
-/// Case-insensitive substring search over title/labels/body; title matches rank
-/// first, then labels, then body. Returns full item objects, paginated.
+/// Case-insensitive substring search over title/labels/body. Ordered by
+/// relevance — title matches first, then labels, then body — unless `order`
+/// names a field, which replaces that key entirely. Returns full item objects,
+/// paginated.
 pub fn search(
     store: &ItemStore,
     text: &str,
+    order: crate::view::SearchOrder,
     window: crate::view::Page,
 ) -> Result<Value, CloveError> {
     // Matching and ranking are `view::rank_search_hits`, shared with the CLI's
     // file and index paths so the three cannot disagree on what counts as a hit.
     // (The web has no search route; its `?q=` is a separate, narrower predicate
     // — see the roadmap.)
-    let ranked = crate::view::rank_search_hits(store.list()?, text);
+    let items = store.list()?;
+    // Only `--sort rank` needs the graph; every other key (including the
+    // relevance default) reads straight off the frontmatter.
+    let ranks = if order.needs_ranks() {
+        let frontmatters: Vec<ItemFrontmatter> =
+            items.iter().map(|i| i.frontmatter.clone()).collect();
+        let (graph, _dangling) = GraphStore::build(&frontmatters);
+        graph.topological_ranks()
+    } else {
+        std::collections::HashMap::new()
+    };
+    let ranked = crate::view::rank_search_hits(items, text, order, &ranks);
     let objects: Vec<Value> = ranked
         .iter()
         .map(|item| Value::Object(item_object(item)))
         .collect();
-    Ok(page(objects, window))
+    Ok(search_page(objects, order, window))
 }
 
 /// The dependency tree rooted at `id` to `depth`, as a nested JSON object.
@@ -655,14 +675,32 @@ fn tree_to_json(node: &crate::DepTreeNode) -> Value {
 ///
 /// `limit` is echoed back so a caller can see the effective page size without
 /// knowing the surface's default (`0` = unlimited, the same encoding it passes
-/// in).
-fn page(objects: Vec<Value>, window: crate::view::Page) -> Value {
+/// in). `sort`/`dir` are echoed for the same reason: the ordering in force is
+/// then readable from the response rather than being folklore about which
+/// surface defaults to what.
+fn page(objects: Vec<Value>, order: crate::view::Order, window: crate::view::Page) -> Value {
+    page_with_sort(objects, order.field.as_str(), order.dir_str(), window)
+}
+
+/// [`page`] for search, whose default sort is `relevance` rather than a
+/// [`crate::view::SortField`].
+fn search_page(
+    objects: Vec<Value>,
+    order: crate::view::SearchOrder,
+    window: crate::view::Page,
+) -> Value {
+    page_with_sort(objects, order.reported_sort(), order.dir_str(), window)
+}
+
+fn page_with_sort(objects: Vec<Value>, sort: &str, dir: &str, window: crate::view::Page) -> Value {
     let (items, total) = window.apply(objects);
     json!({
         "total": total,
         "returned": items.len(),
         "offset": window.offset,
         "limit": window.reported_limit(),
+        "sort": sort,
+        "dir": dir,
         "items": items,
     })
 }
@@ -684,7 +722,7 @@ pub fn reload(store: &ItemStore, id: &CloveId) -> Result<Item, CloveError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::view::Page;
+    use crate::view::{Order, Page, SearchOrder, SortField};
     use tempfile::TempDir;
 
     fn store() -> (TempDir, ItemStore) {
@@ -1076,11 +1114,23 @@ mod tests {
         let b = new_id(&store, "b");
         dep_add(&store, &a, &b, Utc::now()).unwrap(); // a blocked by open b
 
-        let all = list(&store, &crate::Filters::default(), Page::unlimited()).unwrap();
+        let all = list(
+            &store,
+            &crate::Filters::default(),
+            Order::default(),
+            Page::unlimited(),
+        )
+        .unwrap();
         assert_eq!(all["total"], 2);
         assert_eq!(all["items"].as_array().unwrap().len(), 2);
 
-        let ready_v = ready(&store, &crate::Filters::default(), Page::unlimited()).unwrap();
+        let ready_v = ready(
+            &store,
+            &crate::Filters::default(),
+            Order::default(),
+            Page::unlimited(),
+        )
+        .unwrap();
         let ready_ids: Vec<&str> = ready_v["items"]
             .as_array()
             .unwrap()
@@ -1089,7 +1139,13 @@ mod tests {
             .collect();
         assert_eq!(ready_ids, vec![b.as_str()], "only b is ready");
 
-        let blocked_v = blocked(&store, &crate::Filters::default(), Page::unlimited()).unwrap();
+        let blocked_v = blocked(
+            &store,
+            &crate::Filters::default(),
+            Order::default(),
+            Page::unlimited(),
+        )
+        .unwrap();
         let items = blocked_v["items"].as_array().unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["id"], a.as_str());
@@ -1103,18 +1159,172 @@ mod tests {
             new_id(&store, &format!("t{i}"));
         }
         // Edge: limit caps the page but total reflects the full match count.
-        let v = list(&store, &crate::Filters::default(), Page::new(0, Some(2), 0)).unwrap();
+        let v = list(
+            &store,
+            &crate::Filters::default(),
+            Order::default(),
+            Page::new(0, Some(2), 0),
+        )
+        .unwrap();
         assert_eq!(v["total"], 5);
         assert_eq!(v["returned"], 2);
         // Filter that matches nothing → empty page, total 0.
         let none = list(
             &store,
             &crate::Filters::parse(Some("closed"), None, None, None, None).unwrap(),
+            Order::default(),
             Page::unlimited(),
         )
         .unwrap();
         assert_eq!(none["total"], 0);
         assert!(none["items"].as_array().unwrap().is_empty());
+    }
+
+    /// Every read op honours `Order`, and every page echoes what it applied.
+    ///
+    /// These are the functions the MCP tools and the web call, so a `sort`
+    /// argument dropped here is invisible to the CLI's own tests. The fixture
+    /// ties two items on priority and separates them by dependency, so `rank`
+    /// and `priority` disagree and an ignored order cannot pass by coincidence.
+    #[test]
+    fn read_ops_apply_and_echo_the_order() {
+        let (_d, store) = store();
+        // Ids are random, so the dependency is wired *after* sorting them: the
+        // id-larger item depends on the id-smaller one, which puts the larger id
+        // first topologically and last by id. `rank` and `priority` then
+        // disagree on every run rather than on roughly half of them — with the
+        // edge fixed in advance this test passed or failed by coin flip.
+        // The two titles share a token the blocker's does not, so a search can
+        // address exactly this pair.
+        let mut pair = [new_id(&store, "task one"), new_id(&store, "task two")];
+        pair.sort();
+        let [lo, hi] = pair;
+        let blocker = new_id(&store, "gate");
+        dep_add(&store, &lo, &blocker, Utc::now()).unwrap();
+        dep_add(&store, &hi, &blocker, Utc::now()).unwrap();
+        dep_add(&store, &hi, &lo, Utc::now()).unwrap();
+
+        let ids = |v: &Value| -> Vec<String> {
+            v["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|o| o["id"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let order = |field| Order {
+            field,
+            descending: false,
+        };
+        let filters = crate::Filters::default();
+
+        // Every item is at the default priority, so `rank` is pure topological
+        // order — `hi` depends on both, `lo` on `blocker` — while `priority`
+        // falls through to the id tiebreak. The two are opposite by construction.
+        let topo = vec![hi.to_string(), lo.to_string(), blocker.to_string()];
+        let mut by_id = topo.clone();
+        by_id.sort();
+        assert_ne!(topo, by_id, "fixture must separate rank from priority");
+
+        let by_rank = list(&store, &filters, order(SortField::Rank), Page::unlimited()).unwrap();
+        let by_priority = list(
+            &store,
+            &filters,
+            order(SortField::Priority),
+            Page::unlimited(),
+        )
+        .unwrap();
+        assert_eq!(ids(&by_rank), topo);
+        assert_eq!(ids(&by_priority), by_id);
+        assert_eq!(by_rank["sort"], "rank");
+        assert_eq!(by_rank["dir"], "asc");
+        assert_eq!(by_priority["sort"], "priority");
+
+        // `id` ascending, and `--desc` reverses the whole key.
+        let asc = ids(&list(&store, &filters, order(SortField::Id), Page::unlimited()).unwrap());
+        let desc = list(
+            &store,
+            &filters,
+            Order {
+                field: SortField::Id,
+                descending: true,
+            },
+            Page::unlimited(),
+        )
+        .unwrap();
+        let mut want = asc.clone();
+        want.reverse();
+        assert_eq!(ids(&desc), want);
+        assert_eq!(desc["dir"], "desc");
+
+        // `blocked` — `lo` and `hi`, ordered by the same keys, still opposite.
+        let blocked_rank =
+            blocked(&store, &filters, order(SortField::Rank), Page::unlimited()).unwrap();
+        let blocked_priority = blocked(
+            &store,
+            &filters,
+            order(SortField::Priority),
+            Page::unlimited(),
+        )
+        .unwrap();
+        assert_eq!(ids(&blocked_rank), vec![hi.to_string(), lo.to_string()]);
+        assert_eq!(
+            ids(&blocked_priority),
+            vec![lo.to_string(), hi.to_string()],
+            "blocked must apply the requested order, not a fixed one"
+        );
+        assert_eq!(blocked_priority["sort"], "priority");
+
+        // `ready` — only `blocker` is ready, so check the echo rather than a
+        // sequence; the sequence is covered end-to-end in the CLI tests.
+        let r = ready(
+            &store,
+            &filters,
+            order(SortField::Updated),
+            Page::unlimited(),
+        )
+        .unwrap();
+        assert_eq!(r["sort"], "updated");
+        assert_eq!(ids(&r), vec![blocker.to_string()]);
+
+        // `search` — relevance by default, and the echo says so. The needle hits
+        // `lo` and `hi` (only), both title matches at the same priority, so
+        // relevance resolves to its id tiebreak and `--sort id --desc` inverts it.
+        let relevance = search(&store, "task", SearchOrder::default(), Page::unlimited()).unwrap();
+        assert_eq!(relevance["sort"], "relevance");
+        assert_eq!(relevance["dir"], "asc");
+        assert_eq!(ids(&relevance), vec![lo.to_string(), hi.to_string()]);
+
+        let explicit = search(
+            &store,
+            "task",
+            SearchOrder::parse(Some("id"), Some("desc")).unwrap(),
+            Page::unlimited(),
+        )
+        .unwrap();
+        assert_eq!(explicit["sort"], "id");
+        assert_eq!(explicit["dir"], "desc");
+        assert_eq!(
+            ids(&explicit),
+            vec![hi.to_string(), lo.to_string()],
+            "explicit id sort, descending"
+        );
+
+        // `--sort rank` on a search is the one field that needs the topological
+        // ranks, and `search` does not otherwise build the graph. Without them
+        // `rank` silently degenerates to `(priority, id)` — the `id` answer above.
+        let by_rank = search(
+            &store,
+            "task",
+            SearchOrder::parse(Some("rank"), None).unwrap(),
+            Page::unlimited(),
+        )
+        .unwrap();
+        assert_eq!(
+            ids(&by_rank),
+            vec![hi.to_string(), lo.to_string()],
+            "rank: the dependent leads, which id order does not"
+        );
     }
 
     #[test]
@@ -1143,7 +1353,7 @@ mod tests {
             Utc::now(),
         )
         .unwrap();
-        let v = search(&store, "WIDGET", Page::unlimited()).unwrap();
+        let v = search(&store, "WIDGET", SearchOrder::default(), Page::unlimited()).unwrap();
         let titles: Vec<&str> = v["items"]
             .as_array()
             .unwrap()
@@ -1153,7 +1363,7 @@ mod tests {
         assert_eq!(titles, vec!["widget", "other"], "title hit ranks first");
         // Negative: a needle present nowhere returns nothing.
         assert_eq!(
-            search(&store, "zzzzz", Page::unlimited()).unwrap()["total"],
+            search(&store, "zzzzz", SearchOrder::default(), Page::unlimited()).unwrap()["total"],
             0
         );
     }
@@ -1177,7 +1387,7 @@ mod tests {
             .unwrap();
         }
         let ids = |p: Page| -> Vec<String> {
-            search(&store, "widget", p).unwrap()["items"]
+            search(&store, "widget", SearchOrder::default(), p).unwrap()["items"]
                 .as_array()
                 .unwrap()
                 .iter()

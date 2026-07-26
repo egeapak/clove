@@ -45,7 +45,9 @@ pub use stats::{
     Throughput, TypeCounts,
 };
 pub use store::{ItemStore, NewItem, RestoreOutcome, ScanError};
-pub use view::{frontmatter_object, item_object, project, rank_of, sort_by_rank, Filters};
+pub use view::{
+    frontmatter_object, item_object, project, rank_of, Filters, Order, SearchOrder, SortField,
+};
 
 // Bring the `clove-types` data types the lib uses into this crate's namespace
 // for internal use (`crate::CloveError`, `crate::Item`, …). Crate-internal only —

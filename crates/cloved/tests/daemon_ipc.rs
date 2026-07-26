@@ -80,6 +80,7 @@ fn list_request(kind: QueryKind) -> QueryRequest {
         priority: None,
         assignee: None,
         label: None,
+        order: Default::default(),
         offset: 0,
         limit: None,
     }
@@ -140,6 +141,7 @@ fn query_matches_direct_index_read() {
             assignee: None,
             label: None,
             parent: None,
+            order: Default::default(),
             limit: None,
         })
         .unwrap();

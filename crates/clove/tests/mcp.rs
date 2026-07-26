@@ -954,3 +954,120 @@ fn subscribed_resource_updated_on_mutation() {
         }
     }
 }
+
+/// The MCP read tools take the same `sort`/`desc` the CLI and web take, and
+/// echo the applied ordering back in the page payload.
+///
+/// `clove_list` reads files directly (no index, no daemon), so this is a third
+/// implementation path over the same `view::Order`; without the argument an
+/// agent asking "what changed most recently" had to pull the whole store and
+/// sort client-side.
+#[test]
+fn read_tools_sort_and_echo_the_order() {
+    let dir = init_repo();
+    let mut s = Session::start(dir.path());
+
+    // Three items whose id order, priority order, and title order all differ.
+    let mut ids = Vec::new();
+    for (title, priority) in [("gamma", 0u8), ("alpha", 4), ("beta", 2)] {
+        let created = s.call(
+            ids.len() as i64 + 2,
+            "clove_new",
+            json!({ "title": title, "priority": priority }),
+        );
+        ids.push((
+            title,
+            created["structuredContent"]["id"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        ));
+    }
+    let titles = |result: &Value| -> Vec<String> {
+        result["structuredContent"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["title"].as_str().unwrap().to_owned())
+            .collect()
+    };
+
+    // Default: rank — priority first.
+    let listed = s.call(10, "clove_list", json!({}));
+    assert_eq!(titles(&listed), vec!["gamma", "beta", "alpha"]);
+    assert_eq!(listed["structuredContent"]["sort"], "rank");
+    assert_eq!(listed["structuredContent"]["dir"], "asc");
+
+    // `sort: id` — the ids were minted in gamma, alpha, beta order, so this is
+    // creation order, and it differs from the priority order above.
+    let by_id = s.call(11, "clove_list", json!({ "sort": "id" }));
+    let mut want: Vec<String> = ids.iter().map(|(_, id)| id.clone()).collect();
+    want.sort();
+    let got: Vec<String> = by_id["structuredContent"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(got, want);
+    assert_eq!(by_id["structuredContent"]["sort"], "id");
+
+    // `desc` reverses.
+    let desc = s.call(
+        12,
+        "clove_list",
+        json!({ "sort": "priority", "desc": true }),
+    );
+    assert_eq!(titles(&desc), vec!["alpha", "beta", "gamma"]);
+    assert_eq!(desc["structuredContent"]["dir"], "desc");
+
+    // `clove_ready` takes it too.
+    let ready = s.call(
+        13,
+        "clove_ready",
+        json!({ "sort": "priority", "desc": true }),
+    );
+    assert_eq!(titles(&ready), vec!["alpha", "beta", "gamma"]);
+
+    // Search keeps relevance as its default and reports it as such.
+    //
+    // The two extra items are arranged so relevance and priority *disagree*: a
+    // title hit at the lowest priority against a body hit at the highest. With
+    // the needle in every title the two orders coincide, and an ignored `sort`
+    // would pass unnoticed.
+    s.call(
+        20,
+        "clove_new",
+        json!({ "title": "zeta needle", "priority": 4 }),
+    );
+    s.call(
+        21,
+        "clove_new",
+        json!({ "title": "omega", "priority": 0, "body": "mentions needle here" }),
+    );
+
+    let found = s.call(22, "clove_search", json!({ "text": "needle" }));
+    assert_eq!(found["structuredContent"]["sort"], "relevance");
+    assert_eq!(
+        titles(&found),
+        vec!["zeta needle", "omega"],
+        "relevance: the title hit leads despite the lower priority"
+    );
+    let sorted = s.call(
+        23,
+        "clove_search",
+        json!({ "text": "needle", "sort": "priority" }),
+    );
+    assert_eq!(sorted["structuredContent"]["sort"], "priority");
+    assert_eq!(
+        titles(&sorted),
+        vec!["omega", "zeta needle"],
+        "an explicit sort replaces the relevance key entirely"
+    );
+
+    // Negative: an unknown field is an error, not a silent default.
+    let bad = s.call(16, "clove_list", json!({ "sort": "nope" }));
+    assert_eq!(bad["isError"], true);
+
+    s.shutdown();
+}

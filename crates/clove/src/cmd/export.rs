@@ -20,7 +20,6 @@ use serde_json::{json, Value};
 use tempfile::NamedTempFile;
 
 use crate::cli::{ExportArgs, ExportFormat};
-use crate::cmd::listing::sort_by_priority_topo;
 use crate::context::Ctx;
 use crate::exit::ExitCode;
 use crate::item_json::export_object;
@@ -65,8 +64,10 @@ fn shaped_objects(ctx: &Ctx) -> Result<Vec<serde_json::Map<String, Value>>, Clov
         .map(|b| (b.id, (b.blocking_deps, b.dangling_deps)))
         .collect();
 
+    // Export is not a user-facing list: its order is fixed to the canonical
+    // `(priority, topo, id)` so an export → import round-trip is byte-stable.
     let mut order = frontmatters.clone();
-    sort_by_priority_topo(&mut order, &ranks);
+    clove_core::view::Order::default().apply(&mut order, &ranks);
     let by_id: HashMap<&CloveId, &clove_types::Item> =
         items.iter().map(|i| (&i.frontmatter.id, i)).collect();
 

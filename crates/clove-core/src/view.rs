@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::{
@@ -223,32 +224,297 @@ pub fn sort_by_match<T>(hits: &mut [(MatchClass, T)], key: impl Fn(&T) -> (Prior
 ///
 /// The whole shared search pipeline, so every surface's ranking is the same
 /// function and not three that happen to agree.
-pub fn rank_search_hits(items: Vec<Item>, text: &str) -> Vec<Item> {
+///
+/// `order` defaults to relevance (`(match class, priority, id)`); an explicit
+/// [`SortField`] replaces that key entirely. `ranks` is consulted only for
+/// [`SortField::Rank`] — pass an empty map when [`SearchOrder::needs_ranks`] is
+/// false.
+pub fn rank_search_hits(
+    items: Vec<Item>,
+    text: &str,
+    order: SearchOrder,
+    ranks: &HashMap<CloveId, usize>,
+) -> Vec<Item> {
     let needle = text.to_lowercase();
     let mut hits: Vec<(MatchClass, Item)> = items
         .into_iter()
         .filter_map(|item| match_class(&item, &needle).map(|class| (class, item)))
         .collect();
-    sort_by_match(&mut hits, |item| {
-        (item.frontmatter.priority, item.frontmatter.id.clone())
-    });
+    match order.explicit() {
+        Some(explicit) => explicit.apply_by(&mut hits, ranks, |(_, item)| &item.frontmatter),
+        None => {
+            sort_by_match(&mut hits, |item| {
+                (item.frontmatter.priority, item.frontmatter.id.clone())
+            });
+            // Reverse the *whole* relevance key (class, priority, id), which is
+            // still a total order — the same thing `Order::descending` does.
+            if order.descending {
+                hits.reverse();
+            }
+        }
+    }
     hits.into_iter().map(|(_, item)| item).collect()
-}
-
-/// Sort frontmatter in place by `(priority, topological_rank, id)` — the
-/// canonical list order shared by the file and index paths.
-pub fn sort_by_rank(items: &mut [ItemFrontmatter], ranks: &HashMap<CloveId, usize>) {
-    items.sort_by(|a, b| {
-        a.priority
-            .cmp(&b.priority)
-            .then_with(|| rank_of(ranks, &a.id).cmp(&rank_of(ranks, &b.id)))
-            .then_with(|| a.id.cmp(&b.id))
-    });
 }
 
 /// A topological rank lookup that sorts unknown ids last.
 pub fn rank_of(ranks: &HashMap<CloveId, usize>, id: &CloveId) -> usize {
     ranks.get(id).copied().unwrap_or(usize::MAX)
+}
+
+/// What a list is ordered by. The single sort vocabulary, shared by the CLI, the
+/// MCP tools, the web API, `cloved`'s query RPC, and the SQL the index path runs
+/// — so `--sort updated` on one surface and `?sort=updated` on another are the
+/// same question with the same answer.
+///
+/// [`SortField::Rank`] is the default and reproduces clove's historical list
+/// order, `(priority, topological rank, id)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SortField {
+    /// `(priority, topological rank, id)` — the work-order default: the most
+    /// urgent item whose dependencies come first.
+    #[default]
+    Rank,
+    /// Priority 0 (highest) → 4.
+    Priority,
+    /// Creation timestamp, oldest first.
+    Created,
+    /// Last-modified timestamp, oldest first.
+    Updated,
+    /// Lexicographic by id — arbitrary, but stable and cheap.
+    Id,
+    /// Lifecycle order: `open` → `in_progress` → `closed` (see
+    /// [`SortField::STATUS_ORDER`]).
+    Status,
+    /// Declaration order: `bug` → `feature` → `chore` → `docs` → `epic` (see
+    /// [`SortField::TYPE_ORDER`]).
+    Type,
+}
+
+impl SortField {
+    /// `status` values in the order [`SortField::Status`] sorts them.
+    ///
+    /// Lifecycle order, *not* the alphabetical order a bare SQL `ORDER BY
+    /// status` would give (`closed` < `in_progress` < `open`). It is the same
+    /// order the board columns and `GET /api/v1/meta` already advertise, and the
+    /// index path builds its `CASE` from this very array so the two cannot
+    /// drift.
+    pub const STATUS_ORDER: [ItemStatus; 3] =
+        [ItemStatus::Open, ItemStatus::InProgress, ItemStatus::Closed];
+
+    /// `type` values in the order [`SortField::Type`] sorts them — again the
+    /// declared/displayed order rather than alphabetical.
+    pub const TYPE_ORDER: [ItemType; 5] = [
+        ItemType::Bug,
+        ItemType::Feature,
+        ItemType::Chore,
+        ItemType::Docs,
+        ItemType::Epic,
+    ];
+
+    /// Parse a sort-field word (case-insensitive).
+    pub fn parse(raw: &str) -> Result<SortField, CloveError> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "rank" => Ok(SortField::Rank),
+            "priority" => Ok(SortField::Priority),
+            "created" => Ok(SortField::Created),
+            "updated" => Ok(SortField::Updated),
+            "id" => Ok(SortField::Id),
+            "status" => Ok(SortField::Status),
+            "type" => Ok(SortField::Type),
+            other => Err(CloveError::InvalidField {
+                field: "sort".to_owned(),
+                reason: format!(
+                    "expected rank|priority|created|updated|id|status|type, got `{other}`"
+                ),
+            }),
+        }
+    }
+
+    /// The canonical wire word, as echoed in `_meta.sort`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SortField::Rank => "rank",
+            SortField::Priority => "priority",
+            SortField::Created => "created",
+            SortField::Updated => "updated",
+            SortField::Id => "id",
+            SortField::Status => "status",
+            SortField::Type => "type",
+        }
+    }
+}
+
+/// Position of `status` in [`SortField::STATUS_ORDER`].
+pub fn status_rank(status: ItemStatus) -> usize {
+    SortField::STATUS_ORDER
+        .iter()
+        .position(|s| *s == status)
+        .unwrap_or(SortField::STATUS_ORDER.len())
+}
+
+/// Position of `item_type` in [`SortField::TYPE_ORDER`].
+pub fn type_rank(item_type: ItemType) -> usize {
+    SortField::TYPE_ORDER
+        .iter()
+        .position(|t| *t == item_type)
+        .unwrap_or(SortField::TYPE_ORDER.len())
+}
+
+/// A complete list ordering: a [`SortField`] plus a direction.
+///
+/// `Order::default()` is `rank` ascending — exactly the order every list read
+/// returned before sorting was configurable, which is why threading this through
+/// changes nothing for a caller that does not ask for a sort.
+///
+/// **Every variant is a total order**, ending in an id tiebreak; `descending`
+/// reverses the *whole* comparison, id included, so it is a total order too.
+/// This is not a nicety: `offset`/`limit` paging over a partial order silently
+/// repeats and skips rows between requests, because ties resolve to whatever the
+/// input order happened to be (for the file paths, raw `read_dir` order). See
+/// [`sort_by_match`], which documents the same hazard for search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Order {
+    #[serde(default)]
+    pub field: SortField,
+    #[serde(default)]
+    pub descending: bool,
+}
+
+impl Order {
+    /// Build an order from raw `--sort`/`?sort=` and `--desc`/`?dir=` values.
+    /// Absent field → [`SortField::Rank`]; absent direction → ascending.
+    pub fn parse(field: Option<&str>, dir: Option<&str>) -> Result<Order, CloveError> {
+        let descending = match dir.map(|d| d.trim().to_ascii_lowercase()) {
+            None => false,
+            Some(d) => match d.as_str() {
+                "asc" | "ascending" => false,
+                "desc" | "descending" => true,
+                other => {
+                    return Err(CloveError::InvalidField {
+                        field: "dir".to_owned(),
+                        reason: format!("expected asc|desc, got `{other}`"),
+                    })
+                }
+            },
+        };
+        Ok(Order {
+            field: field.map(SortField::parse).transpose()?.unwrap_or_default(),
+            descending,
+        })
+    }
+
+    /// The direction word, as echoed in `_meta.dir`.
+    pub fn dir_str(self) -> &'static str {
+        if self.descending {
+            "desc"
+        } else {
+            "asc"
+        }
+    }
+
+    /// Whether [`Order::apply`] consults the topological ranks. Only
+    /// [`SortField::Rank`] does, so a caller with no graph in hand can skip
+    /// building one for every other field.
+    pub fn needs_ranks(self) -> bool {
+        self.field == SortField::Rank
+    }
+
+    /// Sort frontmatter in place.
+    pub fn apply(&self, items: &mut [ItemFrontmatter], ranks: &HashMap<CloveId, usize>) {
+        self.apply_by(items, ranks, |fm| fm);
+    }
+
+    /// Sort rows that *carry* frontmatter (e.g. `blocked`'s `(frontmatter,
+    /// blocked_by)` pairs, or full [`Item`]s) in place, by the same key.
+    pub fn apply_by<T>(
+        &self,
+        rows: &mut [T],
+        ranks: &HashMap<CloveId, usize>,
+        fm: impl Fn(&T) -> &ItemFrontmatter,
+    ) {
+        rows.sort_by(|a, b| {
+            let (a, b) = (fm(a), fm(b));
+            let ord = match self.field {
+                SortField::Rank => a
+                    .priority
+                    .cmp(&b.priority)
+                    .then_with(|| rank_of(ranks, &a.id).cmp(&rank_of(ranks, &b.id))),
+                SortField::Priority => a.priority.cmp(&b.priority),
+                SortField::Created => a.created.cmp(&b.created),
+                SortField::Updated => a.updated.cmp(&b.updated),
+                SortField::Id => std::cmp::Ordering::Equal,
+                SortField::Status => status_rank(a.status).cmp(&status_rank(b.status)),
+                SortField::Type => type_rank(a.item_type).cmp(&type_rank(b.item_type)),
+            }
+            // The tiebreak that makes every variant a total order.
+            .then_with(|| a.id.cmp(&b.id));
+            if self.descending {
+                ord.reverse()
+            } else {
+                ord
+            }
+        });
+    }
+}
+
+/// How a *search* result set is ordered.
+///
+/// Search is the one list whose default key is not [`SortField::Rank`]: it ranks
+/// by relevance, `(match class, priority, id)`. An explicit sort field replaces
+/// that key **entirely** rather than extending it — "sort by updated" means the
+/// newest item first, not the newest within each match class — so the two are
+/// spelled as one type with `field: None` meaning relevance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SearchOrder {
+    /// `None` → relevance-first (the default).
+    pub field: Option<SortField>,
+    pub descending: bool,
+}
+
+impl SearchOrder {
+    /// Build a search order from raw `--sort`/`sort` and `--desc`/`dir` values.
+    ///
+    /// An absent field keeps relevance — but a direction still applies to it, so
+    /// `--desc` alone reverses the ranking rather than being silently dropped.
+    pub fn parse(field: Option<&str>, dir: Option<&str>) -> Result<SearchOrder, CloveError> {
+        let order = Order::parse(field, dir)?;
+        Ok(SearchOrder {
+            field: field.map(|_| order.field),
+            descending: order.descending,
+        })
+    }
+
+    /// The explicit order, if one was requested.
+    pub fn explicit(self) -> Option<Order> {
+        self.field.map(|field| Order {
+            field,
+            descending: self.descending,
+        })
+    }
+
+    /// Whether ranking consults the topological ranks (only an explicit
+    /// `--sort rank` does; relevance does not).
+    pub fn needs_ranks(self) -> bool {
+        self.explicit().is_some_and(Order::needs_ranks)
+    }
+
+    /// The sort word for `_meta.sort` — `"relevance"` when no field was given.
+    pub fn reported_sort(self) -> &'static str {
+        match self.field {
+            Some(field) => field.as_str(),
+            None => "relevance",
+        }
+    }
+
+    /// The direction word for `_meta.dir`.
+    pub fn dir_str(self) -> &'static str {
+        if self.descending {
+            "desc"
+        } else {
+            "asc"
+        }
+    }
 }
 
 /// The JSON object for an item's frontmatter alone (the list fast path, which
@@ -451,7 +717,7 @@ mod tests {
         ranks.insert(c.id.clone(), 1usize); // a's rank is intentionally absent
 
         let mut items = vec![a.clone(), b.clone(), c.clone()];
-        sort_by_rank(&mut items, &ranks);
+        Order::default().apply(&mut items, &ranks);
         // priority 1 before priority 2; within p1, lower rank (c) before b.
         let order: Vec<&str> = items.iter().map(|f| f.id.as_str()).collect();
         assert_eq!(
@@ -461,6 +727,253 @@ mod tests {
         // Edge: a missing rank sorts last (usize::MAX) — a is p2 anyway, but
         // rank_of must report MAX for the absent id.
         assert_eq!(rank_of(&ranks, &a.id), usize::MAX);
+    }
+
+    /// The default order is the historical one: `rank` ascending.
+    #[test]
+    fn order_defaults_to_rank_ascending() {
+        let order = Order::default();
+        assert_eq!(order.field, SortField::Rank);
+        assert!(!order.descending);
+        assert_eq!(order.dir_str(), "asc");
+        assert_eq!(Order::parse(None, None).unwrap(), order);
+        // The web's historical spellings still parse.
+        assert_eq!(Order::parse(Some("rank"), Some("asc")).unwrap(), order);
+        assert_eq!(
+            Order::parse(Some("updated"), Some("desc")).unwrap(),
+            Order {
+                field: SortField::Updated,
+                descending: true
+            }
+        );
+        // Case-insensitive, whitespace-tolerant.
+        assert_eq!(
+            Order::parse(Some(" Created "), Some("DESC")).unwrap().field,
+            SortField::Created
+        );
+        // Negative: an unknown field or direction is a validation error, not a
+        // silent fallback to the default.
+        assert!(Order::parse(Some("nope"), None).is_err());
+        assert!(Order::parse(None, Some("sideways")).is_err());
+    }
+
+    /// Every `SortField` is a **total** order: an input permutation must not
+    /// change the output. A missing id tiebreak leaves ties in input order, and
+    /// paging over that silently repeats and skips rows.
+    #[test]
+    fn every_sort_field_is_a_total_order() {
+        // Four items that tie on *every* non-id key in at least one pair —
+        // including the timestamps, which `fm` would otherwise stamp with
+        // distinct `Utc::now()` values and hide the missing tiebreak.
+        let mk = |raw: &str, status, t, p| {
+            let mut f = fm("t", status, t, p, &[]);
+            f.id = CloveId::new(raw).unwrap();
+            f.created = "2026-01-01T00:00:00Z".parse().unwrap();
+            f.updated = "2026-01-02T00:00:00Z".parse().unwrap();
+            f
+        };
+        let items = vec![
+            mk("proj-0000000D", ItemStatus::Open, ItemType::Bug, 1),
+            mk("proj-0000000A", ItemStatus::Open, ItemType::Bug, 1),
+            mk("proj-0000000C", ItemStatus::Closed, ItemType::Epic, 1),
+            mk("proj-0000000B", ItemStatus::Closed, ItemType::Epic, 1),
+        ];
+        // All four share a rank, so `Rank` also falls through to the tiebreak.
+        let ranks: HashMap<CloveId, usize> = items.iter().map(|f| (f.id.clone(), 7usize)).collect();
+
+        for field in [
+            SortField::Rank,
+            SortField::Priority,
+            SortField::Created,
+            SortField::Updated,
+            SortField::Id,
+            SortField::Status,
+            SortField::Type,
+        ] {
+            for descending in [false, true] {
+                let order = Order { field, descending };
+                let mut forward = items.clone();
+                order.apply(&mut forward, &ranks);
+                let mut reversed: Vec<_> = items.iter().rev().cloned().collect();
+                order.apply(&mut reversed, &ranks);
+                let ids = |v: &[ItemFrontmatter]| -> Vec<String> {
+                    v.iter().map(|f| f.id.to_string()).collect()
+                };
+                assert_eq!(
+                    ids(&forward),
+                    ids(&reversed),
+                    "{field:?} desc={descending} is not a total order — \
+                     a permuted input sorted differently"
+                );
+                // Reversing must actually reverse, id tiebreak included.
+                let mut ascending = items.clone();
+                Order {
+                    field,
+                    descending: false,
+                }
+                .apply(&mut ascending, &ranks);
+                let mut expect = ids(&ascending);
+                if descending {
+                    expect.reverse();
+                }
+                assert_eq!(ids(&forward), expect, "{field:?} desc={descending}");
+            }
+        }
+    }
+
+    /// Only `rank` reads the topological ranks — callers rely on this to skip a
+    /// whole-store graph build for every other field. Getting it wrong is silent:
+    /// `rank` with an empty rank map degenerates to `(priority, id)`, i.e. the
+    /// `priority` order, with no error anywhere.
+    #[test]
+    fn only_rank_consults_the_topological_ranks() {
+        assert!(Order::default().needs_ranks());
+        for field in [
+            SortField::Priority,
+            SortField::Created,
+            SortField::Updated,
+            SortField::Id,
+            SortField::Status,
+            SortField::Type,
+        ] {
+            for descending in [false, true] {
+                assert!(
+                    !Order { field, descending }.needs_ranks(),
+                    "{field:?} must not force a graph build"
+                );
+            }
+        }
+        assert!(Order {
+            field: SortField::Rank,
+            descending: true
+        }
+        .needs_ranks());
+
+        // And the degeneracy is real, so the flag is load-bearing: the same
+        // items sorted by `rank` with and without ranks differ.
+        let mut a = fm("a", ItemStatus::Open, ItemType::Bug, 1, &[]);
+        a.id = CloveId::new("proj-0000000A").unwrap();
+        let mut b = fm("b", ItemStatus::Open, ItemType::Bug, 1, &[]);
+        b.id = CloveId::new("proj-0000000B").unwrap();
+        let ranks = HashMap::from([(a.id.clone(), 9usize), (b.id.clone(), 1usize)]);
+
+        let mut with = vec![a.clone(), b.clone()];
+        Order::default().apply(&mut with, &ranks);
+        let mut without = vec![a, b];
+        Order::default().apply(&mut without, &HashMap::new());
+        assert_ne!(
+            with.iter().map(|f| f.id.to_string()).collect::<Vec<_>>(),
+            without.iter().map(|f| f.id.to_string()).collect::<Vec<_>>(),
+        );
+    }
+
+    /// The enum-valued fields sort in lifecycle/declaration order, not the
+    /// alphabetical order a bare SQL `ORDER BY` would produce. The index path
+    /// builds its `CASE` from these same arrays.
+    #[test]
+    fn status_and_type_sort_in_declared_order() {
+        assert_eq!(status_rank(ItemStatus::Open), 0);
+        assert_eq!(status_rank(ItemStatus::InProgress), 1);
+        assert_eq!(status_rank(ItemStatus::Closed), 2);
+        assert_eq!(type_rank(ItemType::Bug), 0);
+        assert_eq!(type_rank(ItemType::Feature), 1);
+        assert_eq!(type_rank(ItemType::Epic), 4);
+
+        let mk = |raw: &str, status| {
+            let mut f = fm("t", status, ItemType::Bug, 2, &[]);
+            f.id = CloveId::new(raw).unwrap();
+            f
+        };
+        let mut items = vec![
+            mk("proj-0000000A", ItemStatus::Closed),
+            mk("proj-0000000B", ItemStatus::Open),
+            mk("proj-0000000C", ItemStatus::InProgress),
+        ];
+        Order {
+            field: SortField::Status,
+            descending: false,
+        }
+        .apply(&mut items, &HashMap::new());
+        let order: Vec<&str> = items.iter().map(|f| f.status.as_str()).collect();
+        assert_eq!(
+            order,
+            vec!["open", "in_progress", "closed"],
+            "lifecycle order — alphabetical would put `closed` first"
+        );
+    }
+
+    /// `SearchOrder` keeps relevance as the default and lets an explicit field
+    /// replace the whole key.
+    #[test]
+    fn search_order_defaults_to_relevance() {
+        let default = SearchOrder::parse(None, None).unwrap();
+        assert_eq!(default.field, None);
+        assert_eq!(default.reported_sort(), "relevance");
+        assert_eq!(default.explicit(), None);
+        assert!(!default.needs_ranks());
+
+        // `--desc` alone reverses relevance rather than being dropped.
+        let desc = SearchOrder::parse(None, Some("desc")).unwrap();
+        assert_eq!(desc.field, None);
+        assert!(desc.descending);
+        assert_eq!(desc.dir_str(), "desc");
+
+        let explicit = SearchOrder::parse(Some("updated"), None).unwrap();
+        assert_eq!(explicit.reported_sort(), "updated");
+        assert_eq!(
+            explicit.explicit(),
+            Some(Order {
+                field: SortField::Updated,
+                descending: false
+            })
+        );
+        assert!(SearchOrder::parse(Some("rank"), None)
+            .unwrap()
+            .needs_ranks());
+    }
+
+    /// An explicit sort on a search replaces the relevance key rather than
+    /// extending it: a body hit that is newer outranks a title hit that is older.
+    #[test]
+    fn explicit_search_sort_replaces_the_relevance_key() {
+        let mut old_title = fm("widget", ItemStatus::Open, ItemType::Bug, 1, &[]);
+        old_title.id = CloveId::new("proj-0000000A").unwrap();
+        old_title.updated = "2020-01-01T00:00:00Z".parse().unwrap();
+        let mut new_body = fm("other", ItemStatus::Open, ItemType::Bug, 1, &[]);
+        new_body.id = CloveId::new("proj-0000000B").unwrap();
+        new_body.updated = "2030-01-01T00:00:00Z".parse().unwrap();
+
+        let items = vec![
+            Item {
+                frontmatter: old_title,
+                body: String::new(),
+            },
+            Item {
+                frontmatter: new_body,
+                body: "widget".to_owned(),
+            },
+        ];
+
+        // Default: relevance — the title hit wins despite being older.
+        let ranked = rank_search_hits(
+            items.clone(),
+            "widget",
+            SearchOrder::default(),
+            &HashMap::new(),
+        );
+        assert_eq!(ranked[0].frontmatter.title, "widget");
+
+        // Explicit `updated desc`: the newer body hit wins.
+        let by_updated = rank_search_hits(
+            items,
+            "widget",
+            SearchOrder::parse(Some("updated"), Some("desc")).unwrap(),
+            &HashMap::new(),
+        );
+        assert_eq!(
+            by_updated[0].frontmatter.title, "other",
+            "an explicit sort replaces the match-class key, not just its tail"
+        );
     }
 
     #[test]

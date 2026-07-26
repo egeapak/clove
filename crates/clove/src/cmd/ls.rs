@@ -7,8 +7,8 @@ use clove_types::CloveError;
 use crate::cli::FilterArgs;
 use crate::cmd::index_read::{list_via_daemon, list_via_index};
 use crate::cmd::listing::{
-    emit, lean_can_serve, objects_from_frontmatters, objects_from_lean_rows, ranks_of,
-    sort_by_priority_topo, window, Filters, ListOpts,
+    emit, lean_can_serve, objects_from_frontmatters, objects_from_lean_rows, ranks_of, window,
+    Filters, ListOpts,
 };
 use crate::context::Ctx;
 use crate::item_json::parse_fields;
@@ -27,6 +27,7 @@ pub fn run(
         args.assignee.as_deref(),
         args.priority,
     )?;
+    let order = args.order()?;
     let fields = args.fields.as_deref().map(parse_fields);
     let window = window(args.offset, args.limit);
 
@@ -34,7 +35,7 @@ pub fn run(
     // index (the CLI skips its own staleness scan — the daemon owns freshness).
     let lean_ok = lean_can_serve(fields.as_deref());
     if let Some((objects, total, warnings)) = lean_ok
-        .then(|| list_via_daemon(ctx, no_index, QueryMode::List, &filters, window))
+        .then(|| list_via_daemon(ctx, no_index, QueryMode::List, &filters, order, window))
         .flatten()
     {
         emit(
@@ -46,6 +47,8 @@ pub fn run(
                 fields: fields.as_deref(),
                 compact: args.compact,
                 source: "daemon",
+                sort: order.field.as_str(),
+                dir: order.dir_str(),
                 warnings,
             },
         );
@@ -54,7 +57,15 @@ pub fn run(
 
     // Index fast path: the DB serves the lean projection directly.
     if let Some((rows, total, warnings)) = match lean_ok {
-        true => list_via_index(ctx, no_index, deep, QueryMode::List, &filters, window)?,
+        true => list_via_index(
+            ctx,
+            no_index,
+            deep,
+            QueryMode::List,
+            &filters,
+            order,
+            window,
+        )?,
         false => None,
     } {
         emit(
@@ -66,6 +77,8 @@ pub fn run(
                 fields: fields.as_deref(),
                 compact: args.compact,
                 source: "index",
+                sort: order.field.as_str(),
+                dir: order.dir_str(),
                 warnings,
             },
         );
@@ -76,7 +89,7 @@ pub fn run(
     let (mut frontmatters, _errors) = ctx.store.scan_frontmatter()?;
     let (_graph, ranks) = ranks_of(&frontmatters);
     frontmatters.retain(|fm| filters.matches(fm));
-    sort_by_priority_topo(&mut frontmatters, &ranks);
+    order.apply(&mut frontmatters, &ranks);
 
     let objects = objects_from_frontmatters(&frontmatters);
     let total = objects.len();
@@ -89,6 +102,8 @@ pub fn run(
             fields: fields.as_deref(),
             compact: args.compact,
             source: "files",
+            sort: order.field.as_str(),
+            dir: order.dir_str(),
             warnings: Vec::new(),
         },
     );

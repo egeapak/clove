@@ -20,7 +20,7 @@ use serde_json::Value;
 use crate::args::*;
 use crate::shape::{self, Shape};
 use clove_core::view::defaults::{DEP_TREE_DEPTH, STATS_TOP};
-use clove_core::view::Page;
+use clove_core::view::{Order, Page, SearchOrder};
 
 /// Shared, cheap-to-clone context for the tools.
 #[derive(Clone)]
@@ -89,18 +89,21 @@ impl Engine {
 
     pub fn ready(&self, a: FilterArgs) -> Result<Value, String> {
         let filters = a.to_filters()?;
+        let order = a.to_order()?;
         let shaping = shaping(&a.shape);
-        ops::ready(&self.store(), &filters, window(a.offset, a.limit))
+        ops::ready(&self.store(), &filters, order, window(a.offset, a.limit))
             .map(|v| shape::apply(v, &shaping))
             .map_err(stringify_core)
     }
 
     pub fn blocked(&self, a: BlockedArgs) -> Result<Value, String> {
         let filters = a.filter.to_filters()?;
+        let order = a.filter.to_order()?;
         let shaping = shaping(&a.filter.shape);
         ops::blocked(
             &self.store(),
             &filters,
+            order,
             window(a.filter.offset, a.filter.limit),
         )
         .map(|v| shape::apply(v, &shaping))
@@ -109,10 +112,12 @@ impl Engine {
 
     pub fn list(&self, a: ListArgs) -> Result<Value, String> {
         let filters = a.filter.to_filters()?;
+        let order = a.filter.to_order()?;
         let shaping = shaping(&a.filter.shape);
         ops::list(
             &self.store(),
             &filters,
+            order,
             window(a.filter.offset, a.filter.limit),
         )
         .map(|v| shape::apply(v, &shaping))
@@ -129,7 +134,9 @@ impl Engine {
 
     pub fn search(&self, a: SearchArgs) -> Result<Value, String> {
         let shaping = shaping(&a.shape);
-        ops::search(&self.store(), &a.text, window(a.offset, a.limit))
+        let order =
+            SearchOrder::parse(a.sort.as_deref(), dir_of(a.desc)).map_err(stringify_core)?;
+        ops::search(&self.store(), &a.text, order, window(a.offset, a.limit))
             .map(|v| shape::apply(v, &shaping))
             .map_err(stringify_core)
     }
@@ -313,6 +320,11 @@ fn author() -> String {
         .unwrap_or_else(|| "unknown".to_owned())
 }
 
+/// `desc: true` → the shared `dir` word; `false`/absent → no direction (ascending).
+fn dir_of(desc: Option<bool>) -> Option<&'static str> {
+    desc.unwrap_or(false).then_some("desc")
+}
+
 impl FilterArgs {
     fn to_filters(&self) -> Result<Filters, String> {
         Filters::parse(
@@ -323,5 +335,10 @@ impl FilterArgs {
             self.priority,
         )
         .map_err(stringify_core)
+    }
+
+    /// The requested ordering, through the same parser the CLI and web use.
+    fn to_order(&self) -> Result<Order, String> {
+        Order::parse(self.sort.as_deref(), dir_of(self.desc)).map_err(stringify_core)
     }
 }

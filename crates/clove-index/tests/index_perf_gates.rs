@@ -123,7 +123,10 @@ fn m1_index_perf_gates() {
     // bodies in the medium-size class — the case the FTS index exists for.
     let mut hits = 0;
     let search_elapsed = best_of(20, || {
-        hits = index.search("medium", None).unwrap().len();
+        hits = index
+            .search("medium", &Default::default(), None)
+            .unwrap()
+            .len();
     });
     assert!(
         hits > 0 && hits < n,
@@ -138,7 +141,12 @@ fn m1_index_perf_gates() {
     // Broad match ("benchmark" is in every body): informational. Shares ls's
     // row-materialization cost, so it exceeds 20ms at 10k — the same known gap.
     let broad = best_of(5, || {
-        std::hint::black_box(index.search("benchmark", None).unwrap().len());
+        std::hint::black_box(
+            index
+                .search("benchmark", &Default::default(), None)
+                .unwrap()
+                .len(),
+        );
     });
     eprintln!("m1 perf gate search_broad_all_rows: {broad:?} (informational — see report)");
 

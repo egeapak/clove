@@ -7,6 +7,7 @@
 //! type) lives in [`crate::service`].
 
 use clove_core::graph::DepTreeNode;
+use clove_core::view::Order;
 use clove_types::{ItemStatus, ItemType, Priority};
 use serde::{Deserialize, Serialize};
 
@@ -89,6 +90,17 @@ pub struct QueryRequest {
     pub assignee: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// The result ordering (`--sort`/`--desc`). Defaults to `rank` ascending,
+    /// which is what every client sent before the field existed.
+    ///
+    /// Deliberately **not** a protocol bump: the codec is length-delimited JSON,
+    /// so `#[serde(default)]` makes this compatible in both directions — a new
+    /// client's `order` is ignored by an old daemon (which answers in rank
+    /// order, its only order), and an old client's request decodes here as the
+    /// default. The semantics of the existing fields are unchanged, which is the
+    /// line a bump would have to cross.
+    #[serde(default)]
+    pub order: Order,
     /// Page offset (`--offset`).
     pub offset: usize,
     /// Page cap (`--limit`); `None` = unlimited.
@@ -211,6 +223,10 @@ mod tests {
                 priority: None,
                 assignee: Some("alice".to_owned()),
                 label: Some("area:core".to_owned()),
+                order: Order {
+                    field: clove_core::view::SortField::Updated,
+                    descending: true,
+                },
                 offset: 0,
                 limit: Some(100),
             },
@@ -221,6 +237,7 @@ mod tests {
                 priority: None,
                 assignee: None,
                 label: None,
+                order: Order::default(),
                 offset: 20,
                 limit: None,
             },
@@ -256,6 +273,46 @@ mod tests {
         };
         let json = serde_json::to_string(&status).unwrap();
         assert_eq!(status, serde_json::from_str(&json).unwrap());
+    }
+
+    /// `order` rides the wire without a `PROTOCOL_VERSION` bump, which is only
+    /// sound if it is compatible in **both** directions:
+    ///
+    /// - an old client's frame (no `order` key) must decode to the default here;
+    /// - a new client's frame (with `order`) must still decode against a schema
+    ///   that does not know the field — i.e. `QueryRequest` must not be
+    ///   `deny_unknown_fields`, which is what an old daemon relies on.
+    #[test]
+    fn query_request_order_is_wire_compatible_both_ways() {
+        let old_frame = r#"{"kind":"list","offset":0}"#;
+        let decoded: QueryRequest = serde_json::from_str(old_frame).unwrap();
+        assert_eq!(decoded.order, Order::default(), "absent order → rank asc");
+
+        // The stand-in for an old daemon: the same struct minus the new field.
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OldQueryRequest {
+            kind: QueryKind,
+            offset: usize,
+        }
+        let new_frame = serde_json::to_string(&QueryRequest {
+            kind: QueryKind::List,
+            status: None,
+            item_type: None,
+            priority: None,
+            assignee: None,
+            label: None,
+            order: Order {
+                field: clove_core::view::SortField::Id,
+                descending: true,
+            },
+            offset: 0,
+            limit: None,
+        })
+        .unwrap();
+        assert!(new_frame.contains("\"order\""), "{new_frame}");
+        serde_json::from_str::<OldQueryRequest>(&new_frame)
+            .expect("an older daemon must still decode a newer client's frame");
     }
 
     /// Edge: an empty search query and an absent limit still round-trip.

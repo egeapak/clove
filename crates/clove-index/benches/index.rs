@@ -104,7 +104,7 @@ fn bench_index(c: &mut Criterion) {
     // realistically broad match.
     c.bench_function(&format!("search_{n}"), |b| {
         b.iter(|| {
-            let rows = index.search("fox", None).unwrap();
+            let rows = index.search("fox", &Default::default(), None).unwrap();
             criterion::black_box(rows.len());
         });
     });

@@ -10,7 +10,7 @@ use clove_index::{Filter, Index, ItemListRow, QueryMode};
 use clove_ipc::{DaemonClient, QueryKind, QueryRequest};
 use clove_types::CloveError;
 
-use crate::cmd::listing::{objects_from_wire_rows, Filters, ListObject};
+use crate::cmd::listing::{objects_from_wire_rows, Filters, ListObject, Order};
 use crate::context::{index_error, Ctx};
 
 /// Above this many out-of-date items, skip the incremental refresh and fall back
@@ -39,6 +39,7 @@ pub fn list_via_daemon(
     no_index: bool,
     mode: QueryMode,
     filters: &Filters,
+    order: Order,
     window: clove_core::view::Page,
 ) -> Option<DaemonList> {
     if no_index {
@@ -57,6 +58,7 @@ pub fn list_via_daemon(
         priority: filters.priority,
         assignee: filters.assignee.clone(),
         label: filters.label.clone(),
+        order,
         offset: window.offset,
         limit: window.limit,
     };
@@ -86,6 +88,7 @@ pub fn list_via_index(
     deep: bool,
     mode: QueryMode,
     filters: &Filters,
+    order: Order,
     window: clove_core::view::Page,
 ) -> Result<Option<IndexList>, CloveError> {
     if no_index || !ctx.db_path.exists() {
@@ -126,6 +129,10 @@ pub fn list_via_index(
         assignee: filters.assignee.clone(),
         label: filters.label.clone(),
         parent: None,
+        // The SQL `ORDER BY` must match the file path's comparator exactly: the
+        // limit below is pushed into SQL, so a mismatched order returns the
+        // wrong *rows*, not just the wrong sequence.
+        order,
         // Fetch only the rows the page needs; the shared window knows how many
         // that is (offset + limit) and keeps it inside SQLite's i64 range.
         limit: window.sql_fetch(),

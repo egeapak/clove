@@ -33,6 +33,11 @@ pub struct FilterArgs {
     pub assignee: Option<String>,
     /// Filter by priority (0=highest .. 4).
     pub priority: Option<u8>,
+    /// Sort by `rank|priority|created|updated|id|status|type`. Default `rank`:
+    /// priority, then dependency order, then id.
+    pub sort: Option<String>,
+    /// Reverse the sort order (newest-first, lowest-priority-first, ...).
+    pub desc: Option<bool>,
     /// Max results (0 = no limit; default 50).
     pub limit: Option<u64>,
     /// Skip this many results.
@@ -69,6 +74,12 @@ pub struct IdArgs {
 pub struct SearchArgs {
     /// The text to search for (case-insensitive substring).
     pub text: String,
+    /// Sort by `rank|priority|created|updated|id|status|type`. Omitted, hits are
+    /// ranked by relevance (title, then label, then body); naming a field
+    /// replaces that ranking entirely.
+    pub sort: Option<String>,
+    /// Reverse the order (or, with no `sort`, the relevance ranking).
+    pub desc: Option<bool>,
     /// Max results (0 = no limit; default 50).
     pub limit: Option<u64>,
     /// Skip this many results.

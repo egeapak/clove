@@ -7,7 +7,7 @@ use clove_ipc::{DaemonClient, GraphRequest, GraphResponse};
 use clove_types::{CloveError, CloveId, ItemFrontmatter};
 
 use crate::cli::FilterArgs;
-use crate::cmd::listing::{emit, ranks_of, sort_by_priority_topo, window, Filters, ListOpts};
+use crate::cmd::listing::{emit, ranks_of, window, Filters, ListOpts};
 use crate::context::Ctx;
 use crate::item_json::parse_fields;
 
@@ -25,6 +25,7 @@ pub fn run(
         args.assignee.as_deref(),
         args.priority,
     )?;
+    let order = args.order()?;
     let fields = args.fields.as_deref().map(parse_fields);
     let window = window(args.offset, args.limit);
 
@@ -51,14 +52,28 @@ pub fn run(
     // id)` order from its cached graph and returns ordered ids; we read those
     // files for full detail (filters preserve the daemon's order). Same output as
     // the file path bar `_meta.source = "daemon"`.
+    //
+    // The blocked RPC returns *rank* order and nothing else — unlike `query`, it
+    // carries no sort on the wire. Reordering therefore happens here: `rank`
+    // needs the topological ranks the daemon computed and we did not, so the
+    // ascending case keeps the daemon's sequence and the descending case
+    // reverses it (reversing a total order stays total); every other field reads
+    // straight off the frontmatter we just loaded, so it sorts locally.
     if let Some(ids) = blocked_via_daemon(ctx, no_index) {
-        let ordered: Vec<ItemFrontmatter> = ids
+        let mut ordered: Vec<ItemFrontmatter> = ids
             .iter()
             .filter_map(|id| CloveId::new(id).ok())
             .filter_map(|id| ctx.store.get(&id).ok())
             .map(|item| item.frontmatter)
             .filter(|fm| filters.matches(fm))
             .collect();
+        if order.needs_ranks() {
+            if order.descending {
+                ordered.reverse();
+            }
+        } else {
+            order.apply(&mut ordered, &HashMap::new());
+        }
         let objects = with_blocked_by(ctx, &ordered);
         let total = objects.len();
         emit(
@@ -70,6 +85,8 @@ pub fn run(
                 fields: fields.as_deref(),
                 compact: args.compact,
                 source: "daemon",
+                sort: order.field.as_str(),
+                dir: order.dir_str(),
                 warnings: Vec::new(),
             },
         );
@@ -91,7 +108,7 @@ pub fn run(
         .collect();
 
     ordered.retain(|fm| filters.matches(fm));
-    sort_by_priority_topo(&mut ordered, &ranks);
+    order.apply(&mut ordered, &ranks);
 
     let objects = with_blocked_by(ctx, &ordered);
     let total = objects.len();
@@ -104,6 +121,8 @@ pub fn run(
             fields: fields.as_deref(),
             compact: args.compact,
             source: "files",
+            sort: order.field.as_str(),
+            dir: order.dir_str(),
             warnings: Vec::new(),
         },
     );

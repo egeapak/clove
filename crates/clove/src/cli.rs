@@ -384,6 +384,13 @@ pub struct FilterArgs {
     /// Filter by priority.
     #[arg(long)]
     pub priority: Option<u8>,
+    /// Sort by `rank|priority|created|updated|id|status|type` (default `rank`:
+    /// priority, then dependency order, then id).
+    #[arg(long, value_name = "FIELD")]
+    pub sort: Option<String>,
+    /// Reverse the sort order.
+    #[arg(long)]
+    pub desc: bool,
     /// Maximum number of results (default 100; use `--limit 0` for no limit).
     #[arg(long)]
     pub limit: Option<usize>,
@@ -399,6 +406,24 @@ pub struct FilterArgs {
     pub compact: bool,
 }
 
+impl FilterArgs {
+    /// The requested ordering, through the shared contract.
+    pub fn order(&self) -> Result<clove_core::view::Order, clove_types::CloveError> {
+        order_of(self.sort.as_deref(), self.desc)
+    }
+}
+
+/// Decode `--sort`/`--desc` into the shared [`clove_core::view::Order`].
+///
+/// `--desc` is a boolean flag rather than `--dir <asc|desc>`; it maps onto the
+/// same parser the web's `?dir=` uses so there is one validator, not two.
+pub fn order_of(
+    sort: Option<&str>,
+    desc: bool,
+) -> Result<clove_core::view::Order, clove_types::CloveError> {
+    clove_core::view::Order::parse(sort, desc.then_some("desc"))
+}
+
 #[derive(Debug, Args)]
 pub struct QueryArgs {
     /// A JSON filter object. If omitted and stdin is not a TTY, read it there.
@@ -410,6 +435,12 @@ pub struct QueryArgs {
     /// Omit null and empty-list keys from JSON output.
     #[arg(long)]
     pub compact: bool,
+    /// Sort by `rank|priority|created|updated|id|status|type` (default `rank`).
+    #[arg(long, value_name = "FIELD")]
+    pub sort: Option<String>,
+    /// Reverse the sort order.
+    #[arg(long)]
+    pub desc: bool,
     /// Maximum number of results (default 100; use `--limit 0` for no limit).
     #[arg(long)]
     pub limit: Option<usize>,
@@ -444,6 +475,14 @@ pub struct CommentsArgs {
 pub struct SearchArgs {
     /// The search text.
     pub text: String,
+    /// Sort by `rank|priority|created|updated|id|status|type`. Omitted, results
+    /// are ranked by relevance (title hits, then labels, then body); naming a
+    /// field replaces that ranking entirely.
+    #[arg(long, value_name = "FIELD")]
+    pub sort: Option<String>,
+    /// Reverse the sort order (or, with no `--sort`, the relevance ranking).
+    #[arg(long)]
+    pub desc: bool,
     /// Maximum number of results (default 100; use `--limit 0` for no limit).
     #[arg(long)]
     pub limit: Option<usize>,
