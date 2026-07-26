@@ -23,6 +23,12 @@ fn clove(dir: &Path) -> Command {
     cmd
 }
 
+/// The id from a `clove new --format json` stdout.
+fn new_id(out: &[u8]) -> String {
+    let v: Value = serde_json::from_slice(out).unwrap();
+    v["data"]["id"].as_str().unwrap().to_owned()
+}
+
 fn init_repo() -> TempDir {
     let dir = tempfile::tempdir().unwrap();
     clove(dir.path())
@@ -1237,4 +1243,109 @@ fn filter_args_take_one_value_or_many() {
 
     let _ = (alpha, beta, gamma, delta);
     s.shutdown();
+}
+
+/// The MCP read tools are tiered, and they say which tier answered.
+///
+/// Before read-path §4 every `clove_list`/`clove_ready`/`clove_blocked` call
+/// scanned and parsed the whole store, even with a hot `.clove/index.db` beside
+/// it — the roadmap's "the MCP server pays a full store scan per call while a
+/// hot daemon sits idle". The tools now share `clove-engine`'s cascade with the
+/// CLI, and report the tier in `source` (the MCP page has no `_meta`).
+///
+/// The output must not have changed shape: a tier answers the *query* in SQL and
+/// the engine then reads back only the page's item files, so the rows are still
+/// full items, not the five-column lean projection the CLI's `ls` renders.
+#[test]
+fn read_tools_use_the_index_tier_and_report_it() {
+    let dir = init_repo();
+    let a = new_id(
+        &clove(dir.path())
+            .args(["new", "alpha", "--format", "json"])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    let b = new_id(
+        &clove(dir.path())
+            .args(["new", "beta", "--format", "json"])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    clove(dir.path())
+        .args(["dep", "add", &a, &b])
+        .assert()
+        .success();
+    clove(dir.path()).arg("reindex").assert().success();
+
+    let mut s = Session::start(dir.path());
+
+    for (id, tool) in [(2, "clove_list"), (3, "clove_ready"), (4, "clove_blocked")] {
+        let out = s.call(id, tool, json!({ "compact": false }));
+        let page = &out["structuredContent"];
+        assert_eq!(
+            page["source"], "index",
+            "{tool} must answer from the index when one is live: {page}"
+        );
+        // A full row, hydrated per page — the lean projection carries none of
+        // these, so this is what proves the tier did not change the shape.
+        if let Some(row) = page["items"].get(0) {
+            assert!(row.get("created").is_some(), "{tool} row: {row}");
+            assert_eq!(row["schema"], 1, "{tool} row: {row}");
+        }
+    }
+
+    // `clove_blocked` still carries `blocked_by` on the tiered path.
+    let blocked = s.call(5, "clove_blocked", json!({}));
+    assert_eq!(blocked["structuredContent"]["items"][0]["id"], json!(a));
+    assert_eq!(
+        blocked["structuredContent"]["items"][0]["blocked_by"],
+        json!([b])
+    );
+
+    // `clove_search` has one tier by design (read-path §6.1), and says so even
+    // with the index sitting right there.
+    let found = s.call(6, "clove_search", json!({ "text": "alph" }));
+    assert_eq!(found["structuredContent"]["source"], "files");
+    assert_eq!(found["structuredContent"]["total"], 1, "substring match");
+
+    s.shutdown();
+}
+
+/// The tiered answer is the *same* answer: every item the file path returns,
+/// in the same order, with the same fields.
+#[test]
+fn the_index_tier_agrees_with_the_file_tier_for_the_mcp_tools() {
+    let dir = init_repo();
+    for title in ["alpha widget", "beta gizmo", "gamma widget"] {
+        clove(dir.path())
+            .args(["new", title, "--format", "json"])
+            .assert()
+            .success();
+    }
+
+    // No index yet: the file tier answers.
+    let mut s = Session::start(dir.path());
+    let files = s.call(2, "clove_list", json!({ "compact": false, "limit": 0 }));
+    assert_eq!(files["structuredContent"]["source"], "files");
+    s.shutdown();
+
+    clove(dir.path()).arg("reindex").assert().success();
+    let mut s = Session::start(dir.path());
+    let indexed = s.call(2, "clove_list", json!({ "compact": false, "limit": 0 }));
+    assert_eq!(
+        indexed["structuredContent"]["source"], "index",
+        "the index must answer, or this comparison is vacuous"
+    );
+    s.shutdown();
+
+    assert_eq!(
+        indexed["structuredContent"]["items"], files["structuredContent"]["items"],
+        "the tier must not change a single field"
+    );
+    assert_eq!(
+        indexed["structuredContent"]["total"],
+        files["structuredContent"]["total"]
+    );
 }

@@ -1,11 +1,8 @@
 //! Shared filtering, ordering, pagination, and rendering for the list commands
 //! (`ls`, `ready`, `blocked`, `query`).
 
-use std::collections::HashMap;
-
-use clove_core::{GraphStore, OutputFormat};
-use clove_index::ItemListRow;
-use clove_types::{CloveId, ItemFrontmatter};
+use clove_core::OutputFormat;
+use clove_engine::{ListAnswer, Rows};
 use serde_json::{json, Map, Value};
 
 use crate::item_json::{frontmatter_object, project};
@@ -13,7 +10,7 @@ use crate::output::{print_json_list, print_jsonl_items};
 
 // `Filters` and the ordering contract live in `clove_core::view`, shared by the
 // CLI, MCP server, daemon, and web UI.
-pub use clove_core::view::{Filters, Order};
+pub use clove_core::view::Filters;
 
 /// Default cap on list output, so `ls` on a large repo stays snappy (the index
 /// steps only this many rows). `_meta.total` still reports the full match count.
@@ -30,8 +27,8 @@ pub fn window(offset: Option<usize>, limit: Option<usize>) -> clove_core::view::
 pub struct ListOpts<'a> {
     /// Match count before pagination.
     pub total: usize,
-    /// The requested window. `emit` applies it, so the page and the `_meta` it
-    /// reports can't disagree.
+    /// The requested window, echoed into `_meta`. The engine has already
+    /// applied it — see [`emit`].
     pub window: clove_core::view::Page,
     pub fields: Option<&'a [String]>,
     /// Drop null/empty-list keys (and `schema`) from JSON output, through the
@@ -39,9 +36,11 @@ pub struct ListOpts<'a> {
     ///
     /// Note this is the *file* path's shape. The index and daemon paths select a
     /// lean five-column row, so `--compact` there yields fewer keys still —
-    /// see `LEAN_FIELDS`.
+    /// see `clove_engine::LEAN_FIELDS`.
     pub compact: bool,
-    /// `"files"` or `"index"`.
+    /// Which tier answered: `"daemon"`, `"index"`, or `"files"`. Always
+    /// `clove_engine::Source::as_str`, never a literal, so the reported tier
+    /// cannot drift from the one that ran.
     pub source: &'a str,
     /// The ordering in force, echoed as `_meta.sort`/`_meta.dir` for the same
     /// reason `_meta.limit` is echoed: so a client can read what was applied
@@ -82,11 +81,6 @@ impl Default for ListOpts<'_> {
 /// title so the human renderer works uniformly.
 pub type ListObject = Map<String, Value>;
 
-/// Build list objects from full frontmatter (the file-scan path).
-pub fn objects_from_frontmatters(fms: &[ItemFrontmatter]) -> Vec<ListObject> {
-    fms.iter().map(frontmatter_object).collect()
-}
-
 /// The single lean-object builder, shared by the index path and the daemon path
 /// so their output is byte-identical. The lean shape is
 /// `{ id, status, type, priority, title }` — the columns `ls` renders.
@@ -101,53 +95,46 @@ fn lean_object(id: &str, status: &str, item_type: &str, priority: u8, title: &st
 }
 
 /// The keys [`lean_object`] carries — the only fields the index and daemon fast
-/// paths can answer from.
-pub const LEAN_FIELDS: &[&str] = &["id", "status", "type", "priority", "title"];
+/// paths can answer from. Defined by `clove-engine`, which is what decides
+/// whether a tier may answer at all.
+pub use clove_engine::lean_can_serve;
 
-/// Whether the lean projection can satisfy a `--fields` request.
+/// Build the renderable list objects from an engine answer.
 ///
-/// It cannot serve what it does not select: `--fields id,created` against the
-/// index returned `[{"id": …}]` with `created` silently absent, while the same
-/// command with `--no-index` returned both — so the answer depended on whether
-/// `.clove/index.db` happened to exist. A request reaching outside the lean set
-/// falls back to the file scan instead.
-pub fn lean_can_serve(fields: Option<&[String]>) -> bool {
-    match fields {
-        None => true,
-        Some(requested) => requested.iter().all(|k| LEAN_FIELDS.contains(&k.as_str())),
+/// The engine has already chosen the tier and applied the window, so this is a
+/// pure shape decision: a lean tier answer becomes the five-column object, and
+/// full rows become the whole frontmatter (plus `blocked_by`, which only
+/// `blocked` carries). Both go through the *same* [`lean_object`] /
+/// [`crate::item_json::frontmatter_object`] builders the file path uses, so the
+/// tiers cannot render differently.
+pub fn objects_from_answer(answer: &ListAnswer) -> Vec<ListObject> {
+    match &answer.rows {
+        Rows::Lean(rows) => rows
+            .iter()
+            .map(|r| lean_object(&r.id, &r.status, &r.item_type, r.priority, &r.title))
+            .collect(),
+        Rows::Full(rows) => rows
+            .iter()
+            .map(|r| {
+                let mut obj = frontmatter_object(&r.frontmatter);
+                if let Some(blocked_by) = &r.blocked_by {
+                    obj.insert("blocked_by".to_owned(), json!(blocked_by));
+                }
+                obj
+            })
+            .collect(),
     }
 }
 
-/// Build list objects from lean index rows (the index fast path).
-pub fn objects_from_lean_rows(rows: &[ItemListRow]) -> Vec<ListObject> {
-    rows.iter()
-        .map(|r| {
-            lean_object(
-                r.id.as_str(),
-                r.status.as_str(),
-                r.item_type.as_str(),
-                r.priority,
-                &r.title,
-            )
-        })
-        .collect()
-}
-
-/// Build list objects from daemon-returned wire rows (the daemon fast path).
-/// Uses the same [`lean_object`] builder as the index path, guaranteeing parity.
-pub fn objects_from_wire_rows(rows: &[clove_ipc::LeanRow]) -> Vec<ListObject> {
-    rows.iter()
-        .map(|r| lean_object(&r.id, &r.status, &r.item_type, r.priority, &r.title))
-        .collect()
-}
-
-/// Emit a list: apply offset/limit, project fields, and render in `format`.
-/// Objects are pre-built so the index path can pass a lean projection and the
-/// file path the full frontmatter, through one renderer.
+/// Emit a list: project fields and render in `format`.
+///
+/// `objects` is **already the requested page** — the engine windows before it
+/// returns, because with a filter residue the window and the residue have to be
+/// reasoned about together (read-path roadmap §5). `opts.window` is therefore
+/// only echoed into `_meta`, never re-applied; applying it twice would skip
+/// `offset` rows a second time.
 pub fn emit(format: OutputFormat, objects: Vec<ListObject>, opts: ListOpts<'_>) {
-    let (page, _) = opts
-        .window
-        .apply(objects.iter().collect::<Vec<&ListObject>>());
+    let page: Vec<&ListObject> = objects.iter().collect();
 
     match format {
         OutputFormat::Json | OutputFormat::Jsonl => {
@@ -203,11 +190,4 @@ pub fn emit(format: OutputFormat, objects: Vec<ListObject>, opts: ListOpts<'_>) 
             }
         }
     }
-}
-
-/// Build the dependency graph and its topological ranks from a frontmatter set.
-pub fn ranks_of(frontmatters: &[ItemFrontmatter]) -> (GraphStore, HashMap<CloveId, usize>) {
-    let (graph, _dangling) = GraphStore::build(frontmatters);
-    let ranks = graph.topological_ranks();
-    (graph, ranks)
 }

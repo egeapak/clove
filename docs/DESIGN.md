@@ -15,6 +15,7 @@ clove/                          (workspace root)
   crates/
     clove-core/                 lib — item model, file store, DAG engine, ID gen
     clove-index/                lib — SQLite index, staleness, reindex
+    clove-engine/               lib — the read tier: one daemon -> index -> files cascade (§6.8)
     clove-import/               lib — json/jsonl export, merge driver, tk/beads importer logic, pure GitHub mapping
     clove-plugin/               lib — cargo-style plugin support (PluginContext + envelope harness)
     clove-sync-github/          bin — the `clove-sync-github` plugin (two-way GitHub sync, octocrab)
@@ -35,8 +36,10 @@ clove/                          (workspace root)
 clove-core   (no SQLite, no async, no IPC, no clap)
     ↑
 clove-index  (rusqlite bundled, depends on clove-core)
-    ↑         ↑
-clove        cloved        (both depend on clove-core + clove-index)
+    ↑
+clove-engine (clove-core + clove-index + clove-ipc; the read cascade, §6.8)
+    ↑         ↑          ↑
+clove      clove-mcp   clove-web        cloved (clove-core + clove-index, serves the cascade)
     ↑
 clove-import (depends on clove-core; also tokio + octocrab for GitHub import/export)
 ```
@@ -737,7 +740,54 @@ Missing `index.db`:
   no index — it has no index tier and no daemon tier to degrade from. See §7.8 "Search
   semantics" and read-path roadmap §6.1; its `_meta.source` is therefore always `"files"`.
 
-All JSON responses include `"_meta": { "source": "files" | "index", "took_ms": N }`.
+All JSON responses include `"_meta": { "source": "daemon" | "index" | "files", "took_ms": N }`.
+
+### 6.8 The read tier (`clove-engine`)
+
+Every read has the same three possible answers — a running `cloved`, the local
+`index.db`, or a scan of the files — and `clove-engine` owns that choice **once
+per method** (`list`, `ready`, `blocked`, `search`, `show`, `comments`,
+`dep_tree`, `stats`). The CLI's `ls`/`ready`/`blocked`/`query`/`search`,
+`clove-mcp`'s tool engine, and `clove-web`'s `read.rs` are adapters over it:
+parse arguments → call the engine → render. `_meta.source` (`source` on the MCP
+page, which has no `_meta`) names the tier that answered.
+
+Before this, the CLI re-implemented the cascade per command with slightly
+different fallback conditions, the MCP server always read files — paying a full
+store scan per tool call while a hot daemon sat idle — and the web always read
+files *and* rebuilt the whole dependency graph per request while reporting its
+**serving mode** (`"standalone"`/`"daemon"`) in the field that names a tier
+everywhere else.
+
+**Projection decides whether a tier may answer at all.**
+
+| `Projection` | Meaning | Used by |
+|---|---|---|
+| `Lean` | The five columns `ls` renders suffice, so an index/daemon row is returned as-is and **no** item file is read. | `clove ls`/`ready`/`query` |
+| `Full` | Full frontmatter is required. A tier still answers the *query* — filtering, ordering, and counting stay in SQL — and only the returned page is read back from disk (frontmatter only, in parallel above 500 rows). | `clove blocked`, the MCP read tools, the web |
+| `Files` | Full frontmatter required **and** no tier may answer. A caller policy, not a property of the store. | `clove ls --fields id,created` (a field outside the lean row) |
+
+**Fallback conditions**, all in one place: `--no-index` (which disables the
+daemon tier too — the flag promises a file scan, and a daemon answering from its
+hot index is no more of one); no daemon or any IPC error; a missing, broken, or
+too-stale index (> 20 changed items); and a query SQLite cannot *shape*
+(`Expression tree is too large`, `too many SQL variables`, `parser stack
+overflow` — the index is a cache, so "too big for SQLite" selects the other path
+rather than failing).
+
+**The engine applies the window before it returns**, so a caller renders what it
+is given and cannot double-page. `total` is always the pre-window match count,
+including on the residue path where `COUNT(*)` is not the total.
+
+**`search` has one tier by design** — see §6.7 and read-path roadmap §6.1 — so
+its `Source` is always `files`, honestly rather than as a fallback.
+
+**`blocked` has an index tier** (`clove_index::QueryMode::Blocked`): the `ready`
+clause with its last conjuncts negated as a disjunction, so
+`ready ⊎ blocked = active ∧ ¬excluded` holds in SQL as it does in the graph. It
+is `Projection::Full` on every tier because `blocked_by` — the point of the list
+— is not a lean column; it is derived per page row from the item's own dependency
+closure (`ops::graph_terms`), not from a second whole-store graph build.
 
 ---
 

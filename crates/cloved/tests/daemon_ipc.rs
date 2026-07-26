@@ -398,3 +398,74 @@ fn graph_over_ipc_and_no_search_rpc() {
     sigterm(child.id());
     let _ = child.wait();
 }
+
+/// A filter residue must not ship the whole match set over the wire.
+///
+/// `q` is the one filter SQL cannot express (SQLite case-folds ASCII only, where
+/// `str::to_lowercase` is full Unicode), so `query_filtered` applies it in memory
+/// — and therefore cannot push the `LIMIT` down, because slicing before the
+/// residue removes rows returns too few. Locally that is right: it returns every
+/// match and the caller windows. Across a socket it was not: `clove ls --q x
+/// --limit 1` transferred the entire match set for one row (read-path roadmap §5,
+/// left open by §2).
+///
+/// The fix is to window on the daemon side of the wire *after* the residue. The
+/// observable is the frame: `rows` is capped at `offset + limit` while `total`
+/// still reports every match, so nothing about the caller's answer changes.
+#[test]
+fn a_residue_does_not_ship_the_whole_match_set() {
+    // 12 items, all titled "item N" — so `q: "item"` matches every one and a
+    // truncation bug cannot hide behind a small fixture.
+    let (_tmp, clove_dir) = init_repo_with_items(12);
+    let mut child = spawn_ready(&clove_dir);
+    let mut client = DaemonClient::probe(&clove_dir).expect("daemon alive");
+
+    let residue =
+        clove_core::view::Filters::parse_multi(&[], &[], &[], None, &[], Some("item")).unwrap();
+
+    // Baseline: unwindowed, the residue path returns everything.
+    let all = client
+        .query_list(QueryRequest {
+            kind: QueryKind::List,
+            filters: residue.clone(),
+            order: Default::default(),
+            offset: 0,
+            limit: None,
+        })
+        .unwrap();
+    assert_eq!(all.total, 12, "the residue matches every item");
+    assert_eq!(all.rows.len(), 12, "no window, so no truncation");
+
+    // Windowed: only what the window can reach crosses the wire.
+    for (offset, limit) in [(0, 1), (0, 3), (5, 2)] {
+        let resp = client
+            .query_list(QueryRequest {
+                kind: QueryKind::List,
+                filters: residue.clone(),
+                order: Default::default(),
+                offset,
+                limit: Some(limit),
+            })
+            .unwrap();
+        assert_eq!(
+            resp.total, 12,
+            "total stays the pre-window match count (offset={offset} limit={limit})"
+        );
+        assert_eq!(
+            resp.rows.len(),
+            offset + limit,
+            "only `offset + limit` rows cross the wire (offset={offset} limit={limit})"
+        );
+        // …and they are the *right* rows: the caller skips `offset` locally, so
+        // the frame must start at row 0 of the ordered match set.
+        let ids: Vec<&str> = resp.rows.iter().map(|r| r.id.as_str()).collect();
+        let want: Vec<&str> = all.rows[..offset + limit]
+            .iter()
+            .map(|r| r.id.as_str())
+            .collect();
+        assert_eq!(ids, want, "offset={offset} limit={limit}");
+    }
+
+    sigterm(child.id());
+    let _ = child.wait();
+}

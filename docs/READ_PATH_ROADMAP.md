@@ -18,7 +18,7 @@ Status of what shipped, for context:
 | Result shaping (`fields`/`compact`) | **Done** on CLI + MCP; **absent on the web API** (§5) |
 | Ordering (`sort`/`dir`) | **Done** — `clove_core::view::Order`, all surfaces (§1) |
 | Filters | **Done** — `clove_core::view::Filters`, all surfaces (§2) |
-| Read tiering (daemon → index → files) | CLI only; MCP always reads files — §4 |
+| Read tiering (daemon → index → files) | **Done** — `clove-engine`, all surfaces (§4) |
 | Search match set + ranking | **Done** — one substring matcher, no index tier (§6.1) |
 | Canonical timestamp spelling | **Done** — `clove_types::canonical_rfc3339`, no index bump (§3) |
 | Index rebuild on schema bump | **Done** — `Index::open_or_rebuild` |
@@ -346,7 +346,62 @@ leaving only the canonicalization itself.
 
 ---
 
-## 4. `clove-engine` — the read tier as one crate
+## 4. `clove-engine` — the read tier as one crate — **DONE**
+
+Shipped as specified. `crates/clove-engine` owns the daemon → index → files
+cascade once per method (`list`, `ready`, `blocked`, `search`, `show`,
+`comments`, `dep_tree`, `stats`); the CLI's `cmd/{ls,ready,blocked,query,
+search}`, `clove-mcp`'s tool engine, and `clove-web`'s `read.rs` are adapters
+(parse → call → render). `cmd/index_read.rs` is gone. `_meta.source` — plain
+`source` on the MCP page, which has no `_meta` — is always
+`clove_engine::Source::as_str`, never a literal. DESIGN §6.8 is the spec.
+
+**Six notes for whoever comes next.**
+
+- **`Projection` is what makes a tier usable by a full-object surface.** `Lean`
+  returns the index/daemon row as-is (no file reads at all) — `clove ls`'s fast
+  path. `Full` lets a tier answer the *query* (filtering, ordering, and counting
+  stay in SQL) and reads back only the returned page, frontmatter-only and in
+  parallel above 500 rows. That is what let the MCP tools and the web gain the
+  tiers without changing a single field of their output. `Files` is a caller
+  *policy* — `clove ls --fields id,created` uses it, because the CLI's contract
+  is that a field outside the lean row falls back to the files rather than
+  quietly arriving from a different projection.
+- **The engine windows before it returns.** `emit` (CLI) and
+  `ops::page_payload` (MCP/core) therefore must not re-page; `total` is always
+  the pre-window count. This is what made §5's residue question answerable.
+- **The file tier hands back the graph it built** (`ListAnswer::graph`). Without
+  it the web scanned and built a *second* whole-store graph on top of the one
+  `ops::list_rows` had just discarded — a regression the extraction would
+  otherwise have introduced. A tiered answer has no graph and derives the same
+  `ready`/`blocked_by`/`dangling_deps` per item from
+  `ops::graph_terms_detailed`, whose agreement with the whole-store partition is
+  pinned by `detailed_terms_report_the_dangling_subset_like_the_graph`.
+- **`--no-index` disables the daemon tier too**, as it always did — the flag
+  promises a file scan, and a daemon answering from its hot index is no more of
+  one. Nothing tested this: every parity test spends the flag on establishing
+  ground truth *before* spawning a daemon. `no_index_bypasses_a_live_daemon`
+  (daemon_routing) now pins it.
+- **`search` still has exactly one tier**, and `Engine::search` is the one place
+  that could change it. `search_reports_files_even_with_a_live_index` guards the
+  engine; the CLI additionally builds its engine with the tiers off, so both
+  halves are covered.
+- **The web's `_meta.source` changed meaning** — the one deliberate behaviour
+  change here. It used to report the *serving mode* (`"standalone"`/`"daemon"`),
+  so a `cloved`-hosted server claimed `"daemon"` for an answer it had just
+  scanned off disk. It now names the tier. The serving mode is still `source` in
+  `GET /api/v1/meta`'s payload, which is where the SPA reads it.
+
+**Not done, deliberately.** `clove show`, `clove comments`, `clove dep tree`, and
+`clove stats` on the **CLI** still call `ops`/`cmd` code directly rather than the
+engine; the engine methods exist and the MCP and web surfaces use them, but the
+CLI's renderers for those four differ enough from `ops::show`/`dep_tree` that
+routing them would be a behaviour change, not a refactor. `clove blocked`'s
+daemon tier still fetches every blocked id before filtering (`GraphRequest::
+Blocked` carries no filter or window); giving it one is a protocol bump and was
+out of scope. `clove-tui` reads the store directly and is untouched.
+
+The original write-up follows.
 
 **Problem, precisely stated.** Reads are not tiered consistently:
 
@@ -425,16 +480,35 @@ is exactly why `GET /items/:id/comments` kept the unlimited web default.
 
 ---
 
-**Two things §2 left for this section.**
+**Two things §2 left for this section — both done in §4.**
 
-- **A filter residue ships the whole match set over the RPC.** When a filter
-  cannot be expressed in SQL (`q` is the only one today), `query_filtered`
-  ignores the window and returns every matching row, `cloved` sends all of them,
-  and the CLI windows locally. Correct, but `clove ls --q x --limit 1` transfers
-  the entire match set. The engine is where the window and the residue can be
-  reasoned about together.
-- **`clove blocked` has no index tier at all**, so it is the one list that
-  cannot answer from SQL even when the index is hot.
+- ~~**A filter residue ships the whole match set over the RPC.**~~ **Fixed**, at
+  the wire rather than in `query_filtered`. The local contract is right as it
+  stands: with a residue the `LIMIT` may not be pushed into SQL (slicing before
+  the residue removes rows returns too few, and with an offset the wrong ones),
+  so `query_filtered` returns every match and the caller windows —
+  `query_filtered_defers_the_limit_and_count_when_a_residue_applies` pins
+  exactly that, and changing it would have been a behaviour change to fix a
+  transfer problem. What was wrong was only what crossed the socket, so
+  `cloved`'s `handle_query` truncates to `offset + limit` *after* the residue.
+  The client windows what it receives, so the answer is byte-identical, and
+  `total` is still the pre-window count. Pinned by
+  `a_residue_does_not_ship_the_whole_match_set` (crates/cloved).
+  The request side had the same shape and no observable at all — an engine that
+  asks for the whole store still renders the right page, because it re-windows
+  locally — so it is pinned by a unit test on the request builder
+  (`the_query_request_carries_the_window_the_filters_and_the_order`).
+- ~~**`clove blocked` has no index tier at all.**~~ **Fixed**:
+  `clove_index::QueryMode::Blocked` is the `ready` clause with its last conjuncts
+  negated as a disjunction (`has_dangling_deps OR EXISTS(unclosed dep)`, both
+  inside `active AND NOT excluded`), so the two modes partition the store exactly
+  as `GraphStore` does. The disjunction matters: a dangling-only item has no
+  unclosed dep at all, so negating just the `EXISTS` would lose it — and "not
+  ready" is not "blocked", since a closed item and a cycle member are neither.
+  Pinned by `blocked_set_matches_the_graph_and_partitions_with_ready`
+  (clove-index), which asserts the set equals `GraphStore::blocked_items`, that
+  the two modes are disjoint, and that their union is exactly the active,
+  non-excluded items.
 
 
 ## 6. Divergences addressed

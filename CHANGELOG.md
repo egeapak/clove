@@ -8,6 +8,46 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`clove-engine`: the read tier, once.** Every clove read has three possible
+  answers — a running `cloved`, the local SQLite index, or a scan of the files —
+  and each surface used to choose for itself. The new crate owns that decision
+  **once per method** (`list`, `ready`, `blocked`, `search`, `show`, `comments`,
+  `dep_tree`, `stats`); the CLI's `ls`/`ready`/`blocked`/`query`/`search`,
+  `clove-mcp`'s tool engine, and `clove-web`'s `read.rs` are now adapters over
+  it. `_meta.source` is unchanged on the CLI and is always the engine's own
+  report, never a literal.
+  - **The MCP read tools gained the daemon and index tiers.** They previously
+    read files unconditionally, so the server paid a full store scan per tool
+    call while a hot daemon sat idle beside it — the read half of "CLI should use
+    the daemon if available and fall back if not; MCP too; both the same", whose
+    write half shipped as topology B. The output shape is unchanged: a tier
+    answers the *query* (filtering, ordering, and counting stay in SQL) and only
+    the returned page is read back from disk, so the rows are still full items.
+    The MCP page gains a `source` key — the `_meta.source` of the other surfaces,
+    carried plainly because that payload has no `_meta`. `clove_show`,
+    `clove_dep_tree`, and `clove_stats` route to the daemon's own RPCs, which
+    call the same `clove_core::ops`.
+  - **The web gained the index tier** and stopped rebuilding the whole
+    dependency graph per request: `GET /api/v1/items/:id`, the write responses,
+    and a tier-served list derive `ready`/`blocked_by`/`dangling_deps` from the
+    item's own dependency closure instead of scanning and parsing every file in
+    the repo. `?mode=ready|blocked` now runs the corresponding engine query
+    rather than a fourth in-memory copy of the partition. A `cloved`-hosted
+    server does not call itself; a standalone `clove serve` does route to a
+    running daemon.
+  - **`clove blocked` gained an index tier** (`clove_index::QueryMode::Blocked`)
+    — it was the one list that could not answer from SQL even with a hot index,
+    so it scanned every file in the store. The new clause is the `ready` clause
+    with its last conjuncts negated as a disjunction, so
+    `ready ⊎ blocked = active ∧ ¬excluded` holds in SQL exactly as it does in the
+    in-memory graph. Rows still carry `blocked_by`, derived per page item.
+  - **A filter residue no longer ships the whole match set over the RPC.** `q` is
+    the one filter SQL cannot express, so it is applied in memory and the `LIMIT`
+    cannot be pushed down; `cloved` returned *every* match and let the client
+    window it, so `clove ls --q x --limit 1` dragged the entire match set across
+    the socket for one row. The daemon now windows after the residue. Nothing
+    about the answer changes — `total` is still the pre-window count.
+
 - **MCP read tools take `fields` and `compact`.** `fields` projects each item to
   a named subset (`{"fields": ["id", "title"]}`); `compact` drops keys that are
   null or an empty list, plus `schema` (a per-file migration marker, not item
@@ -80,6 +120,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ranking rather than being silently dropped.
 
 ### Changed
+
+- **`_meta.source` on the web read endpoints names the tier that answered**
+  (`daemon`/`index`/`files`), matching the CLI. It previously reported
+  `state.source`, the *serving mode* — so a `cloved`-hosted server claimed
+  `"daemon"` for an answer it had just scanned off disk. The serving mode is
+  still `source` in `GET /api/v1/meta`'s payload, which is where the SPA reads
+  it.
 
 - **One canonical timestamp spelling, everywhere clove writes one.** Timestamps
   were stored as written, and RFC 3339 has several equivalent spellings of the

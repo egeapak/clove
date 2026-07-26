@@ -22,6 +22,17 @@ pub enum QueryMode {
     /// Only items eligible to start: active, no dangling hard deps, and every
     /// hard dependency closed (DESIGN §6.5).
     Ready,
+    /// The complement of [`QueryMode::Ready`] within the active, non-excluded
+    /// set: an item held up by an unclosed **or** a missing hard dependency
+    /// (DESIGN §5.3), which is exactly `GraphStore::blocked_items`.
+    ///
+    /// `blocked` had no index tier at all until this existed, so it was the one
+    /// list that fell back to a whole-store file scan even with a hot index
+    /// (read-path roadmap §5). The `WHERE` is the `Ready` clause with its last
+    /// three conjuncts negated as a disjunction, which is what makes
+    /// "ready ⊎ blocked = active ∧ ¬excluded" hold on the SQL path as it does in
+    /// the graph.
+    Blocked,
 }
 
 /// Filter criteria for an index query.
@@ -129,11 +140,23 @@ fn where_clause(filter: &Filter) -> (String, Vec<Box<dyn ToSql>>) {
     let mut where_clauses: Vec<String> = Vec::new();
     let mut params: Vec<Box<dyn ToSql>> = Vec::new();
 
+    // The `EXISTS` half of the ready/blocked partition: does this item have a
+    // hard dependency that is not closed? Spelled once so `Ready` (which negates
+    // it) and `Blocked` (which asserts it) cannot drift apart — the two modes
+    // must partition `active ∧ ¬excluded` exactly, as `GraphStore` does.
+    let open_dep_exists = || {
+        format!(
+            "EXISTS (SELECT 1 FROM edges e JOIN items dep ON e.to_id = dep.id \
+             WHERE e.from_id = items.id AND e.kind = {} AND dep.status != 'closed')",
+            EdgeKind::DependsOn as u8
+        )
+    };
     match filter.mode {
-        QueryMode::Ready => {
-            // The ready set is fixed to active statuses; an explicit --status
-            // filter narrows *within* it (`ready --status in_progress` must
-            // return the same rows the file path returns, not ignore the flag).
+        QueryMode::Ready | QueryMode::Blocked => {
+            // The ready/blocked sets are fixed to active statuses; an explicit
+            // --status filter narrows *within* them (`ready --status
+            // in_progress` must return the same rows the file path returns, not
+            // ignore the flag).
             let active: Vec<&ItemStatus> = filter
                 .status
                 .iter()
@@ -153,17 +176,25 @@ fn where_clause(filter: &Filter) -> (String, Vec<Box<dyn ToSql>>) {
             } else {
                 where_clauses.push("status IN ('open', 'in_progress')".to_owned());
             }
-            where_clauses.push("has_dangling_deps = FALSE".to_owned());
             // Exclude hard-cycle / malformed-parent members, matching the
-            // in-memory `GraphStore::ready_items` exactly (M4 P1). `excluded` is
-            // kept current by `recompute_derived` on every reindex/incremental
-            // apply.
+            // in-memory `GraphStore::{ready,blocked}_items` exactly (M4 P1).
+            // `excluded` is kept current by `recompute_derived` on every
+            // reindex/incremental apply.
             where_clauses.push("excluded = FALSE".to_owned());
-            where_clauses.push(format!(
-                "NOT EXISTS (SELECT 1 FROM edges e JOIN items dep ON e.to_id = dep.id \
-                 WHERE e.from_id = items.id AND e.kind = {} AND dep.status != 'closed')",
-                EdgeKind::DependsOn as u8
-            ));
+            match filter.mode {
+                QueryMode::Ready => {
+                    where_clauses.push("has_dangling_deps = FALSE".to_owned());
+                    where_clauses.push(format!("NOT {}", open_dep_exists()));
+                }
+                // Blocked is the complement: a missing hard dep *or* an unclosed
+                // one. `has_dangling_deps` alone is enough to be blocked, which
+                // is why this is a disjunction and not the negation of only the
+                // `EXISTS`.
+                _ => where_clauses.push(format!(
+                    "(has_dangling_deps = TRUE OR {})",
+                    open_dep_exists()
+                )),
+            }
         }
         QueryMode::List => {
             if !filter.status.is_empty() {

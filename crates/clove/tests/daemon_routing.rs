@@ -384,3 +384,62 @@ fn search_is_a_file_scan_even_with_a_live_daemon() {
 
     drop(daemon);
 }
+
+/// `--no-index` means a file scan — including past a *live* daemon.
+///
+/// The flag disables both accelerator tiers, not just the local `index.db`: a
+/// daemon answering from its own hot index is no more a file scan than the local
+/// one, and `--no-index` is the escape hatch users reach for when they suspect
+/// an accelerator is lying to them. Every existing parity test spends the flag
+/// on establishing ground truth *before* spawning a daemon, so nothing observed
+/// what it does with one running — and both the pre- and post-`clove-engine`
+/// implementations would have passed those with the daemon tier left on.
+#[test]
+fn no_index_bypasses_a_live_daemon() {
+    let Some(bin) = cloved_bin() else {
+        eprintln!("skipping: cloved binary not built (run via `cargo test --workspace`)");
+        return;
+    };
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    assert!(run_in(root, &["init"]).status.success());
+    let a = new_id(&run_in(root, &["new", "alpha", "-f", "json"]).stdout);
+    let b = new_id(&run_in(root, &["new", "beta", "-f", "json"]).stdout);
+    assert!(run_in(root, &["dep", "add", &a, &b]).status.success());
+    assert!(run_in(root, &["reindex"]).status.success());
+
+    let clove_dir = root.join(".clove");
+    let daemon = spawn_daemon(&clove_dir, &bin);
+
+    // The daemon is live and answering — without this the assertions below are
+    // vacuous, since "files" is also what a *dead* daemon produces.
+    for cmd in [
+        &["ls", "-f", "json"][..],
+        &["ready", "-f", "json"][..],
+        &["blocked", "-f", "json"][..],
+    ] {
+        let (_, src) = ids_and_source(&run_in(root, cmd).stdout);
+        assert_eq!(src, "daemon", "{cmd:?} routes while the daemon is alive");
+    }
+
+    // …and `--no-index` refuses it, with the same answer.
+    for cmd in [
+        &["ls", "-f", "json"][..],
+        &["ready", "-f", "json"][..],
+        &["blocked", "-f", "json"][..],
+        &["query", "-f", "json"][..],
+    ] {
+        let routed = ids_and_source(&run_in(root, cmd).stdout);
+        let mut args = vec!["--no-index"];
+        args.extend_from_slice(cmd);
+        let (ids, src) = ids_and_source(&run_in(root, &args).stdout);
+        assert_eq!(src, "files", "--no-index {cmd:?} must scan the files");
+        assert_eq!(
+            ids, routed.0,
+            "--no-index {cmd:?} must not change the answer"
+        );
+    }
+
+    drop(daemon);
+}

@@ -14,6 +14,7 @@ repository.workspace = true
 clove-types.workspace = true
 clove-core.workspace = true
 clove-ipc.workspace = true
+clove-engine.workspace = true
 rmcp.workspace = true
 tokio.workspace = true
 serde.workspace = true

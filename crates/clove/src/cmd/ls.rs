@@ -1,15 +1,16 @@
 //! `clove ls` (T-CLI11): list items with optional filters.
+//!
+//! A thin adapter: parse the flags, ask [`clove_engine::Engine`] (which owns the
+//! daemon → index → files cascade), render. The three-branch cascade that used
+//! to live here — duplicated, with slightly different fallback conditions, in
+//! `ready`/`blocked`/`query` too — is read-path roadmap §4.
 
 use clove_core::OutputFormat;
-use clove_index::QueryMode;
+use clove_engine::Projection;
 use clove_types::CloveError;
 
 use crate::cli::FilterArgs;
-use crate::cmd::index_read::{list_via_daemon, list_via_index};
-use crate::cmd::listing::{
-    emit, lean_can_serve, objects_from_frontmatters, objects_from_lean_rows, ranks_of, window,
-    ListOpts,
-};
+use crate::cmd::listing::{emit, lean_can_serve, objects_from_answer, window, ListOpts};
 use crate::context::Ctx;
 use crate::item_json::parse_fields;
 
@@ -25,83 +26,29 @@ pub fn run(
     let fields = args.fields.as_deref().map(parse_fields);
     let window = window(args.offset, args.limit);
 
-    // Daemon fast path: a running daemon serves the lean projection from its hot
-    // index (the CLI skips its own staleness scan — the daemon owns freshness).
-    let lean_ok = lean_can_serve(fields.as_deref());
-    if let Some((objects, total, warnings)) = lean_ok
-        .then(|| list_via_daemon(ctx, no_index, QueryMode::List, &filters, order, window))
-        .flatten()
-    {
-        emit(
-            format,
-            objects,
-            ListOpts {
-                total,
-                window,
-                fields: fields.as_deref(),
-                compact: args.compact,
-                source: "daemon",
-                sort: order.field.as_str(),
-                dir: order.dir_str(),
-                filters: Some(&filters),
-                warnings,
-            },
-        );
-        return Ok(());
-    }
+    // A `--fields` request reaching outside the lean row pins this to the file
+    // scan rather than quietly arriving from a different projection.
+    let projection = match lean_can_serve(fields.as_deref()) {
+        true => Projection::Lean,
+        false => Projection::Files,
+    };
+    let answer = ctx
+        .engine(no_index, deep)
+        .list(&filters, order, window, projection)?;
 
-    // Index fast path: the DB serves the lean projection directly.
-    if let Some((rows, total, warnings)) = match lean_ok {
-        true => list_via_index(
-            ctx,
-            no_index,
-            deep,
-            QueryMode::List,
-            &filters,
-            order,
-            window,
-        )?,
-        false => None,
-    } {
-        emit(
-            format,
-            objects_from_lean_rows(&rows),
-            ListOpts {
-                total,
-                window,
-                fields: fields.as_deref(),
-                compact: args.compact,
-                source: "index",
-                sort: order.field.as_str(),
-                dir: order.dir_str(),
-                filters: Some(&filters),
-                warnings,
-            },
-        );
-        return Ok(());
-    }
-
-    // File-scan fallback (full frontmatter objects).
-    let (mut frontmatters, _errors) = ctx.store.scan_frontmatter()?;
-    let (_graph, ranks) = ranks_of(&frontmatters);
-    frontmatters.retain(|fm| filters.matches(fm));
-    order.apply(&mut frontmatters, &ranks);
-
-    let objects = objects_from_frontmatters(&frontmatters);
-    let total = objects.len();
     emit(
         format,
-        objects,
+        objects_from_answer(&answer),
         ListOpts {
-            total,
+            total: answer.total,
             window,
             fields: fields.as_deref(),
             compact: args.compact,
-            source: "files",
+            source: answer.source.as_str(),
             sort: order.field.as_str(),
             dir: order.dir_str(),
             filters: Some(&filters),
-            warnings: Vec::new(),
+            warnings: answer.warnings,
         },
     );
     Ok(())

@@ -6,6 +6,7 @@ members = [
     "crates/clove-index",
     "crates/clove-import",
     "crates/clove-ipc",
+    "crates/clove-engine",
     "crates/clove-mcp",
     "crates/clove-tui",
     "crates/clove-web",
@@ -115,6 +116,7 @@ clove-core = { path = "crates/clove-core", version = "0.1.0" }
 clove-index = { path = "crates/clove-index", version = "0.1.0" }
 clove-import = { path = "crates/clove-import", version = "0.1.0", default-features = false }
 clove-ipc = { path = "crates/clove-ipc", version = "0.1.0" }
+clove-engine = { path = "crates/clove-engine", version = "0.1.0" }
 clove-mcp = { path = "crates/clove-mcp", version = "0.1.0" }
 clove-tui = { path = "crates/clove-tui", version = "0.1.0" }
 clove-web = { path = "crates/clove-web", version = "0.1.0" }

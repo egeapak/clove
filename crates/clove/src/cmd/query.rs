@@ -1,18 +1,18 @@
 //! `clove query` (T-CLI11): list via a JSON filter (flag or stdin).
+//!
+//! Same read path as `clove ls` — the JSON filter is just a second spelling of
+//! the same `view::Filters` — so both are thin adapters over
+//! [`clove_engine::Engine`].
 
 use std::io::{IsTerminal, Read};
 
 use clove_core::OutputFormat;
-use clove_index::QueryMode;
+use clove_engine::Projection;
 use clove_types::CloveError;
 use serde::Deserialize;
 
 use crate::cli::QueryArgs;
-use crate::cmd::index_read::{list_via_daemon, list_via_index};
-use crate::cmd::listing::{
-    emit, lean_can_serve, objects_from_frontmatters, objects_from_lean_rows, ranks_of, window,
-    Filters, ListOpts,
-};
+use crate::cmd::listing::{emit, lean_can_serve, objects_from_answer, window, Filters, ListOpts};
 use crate::context::Ctx;
 use crate::item_json::parse_fields;
 
@@ -119,79 +119,27 @@ pub fn run(
     let fields = args.fields.as_deref().map(parse_fields);
     let window = window(args.offset.or(qf.offset), args.limit.or(qf.limit));
 
-    let lean_ok = lean_can_serve(fields.as_deref());
-    if let Some((objects, total, warnings)) = lean_ok
-        .then(|| list_via_daemon(ctx, no_index, QueryMode::List, &filters, order, window))
-        .flatten()
-    {
-        emit(
-            format,
-            objects,
-            ListOpts {
-                total,
-                window,
-                fields: fields.as_deref(),
-                compact: args.compact,
-                source: "daemon",
-                sort: order.field.as_str(),
-                dir: order.dir_str(),
-                filters: Some(&filters),
-                warnings,
-            },
-        );
-        return Ok(());
-    }
+    let projection = match lean_can_serve(fields.as_deref()) {
+        true => Projection::Lean,
+        false => Projection::Files,
+    };
+    let answer = ctx
+        .engine(no_index, deep)
+        .list(&filters, order, window, projection)?;
 
-    if let Some((rows, total, warnings)) = match lean_ok {
-        true => list_via_index(
-            ctx,
-            no_index,
-            deep,
-            QueryMode::List,
-            &filters,
-            order,
-            window,
-        )?,
-        false => None,
-    } {
-        emit(
-            format,
-            objects_from_lean_rows(&rows),
-            ListOpts {
-                total,
-                window,
-                fields: fields.as_deref(),
-                compact: args.compact,
-                source: "index",
-                sort: order.field.as_str(),
-                dir: order.dir_str(),
-                filters: Some(&filters),
-                warnings,
-            },
-        );
-        return Ok(());
-    }
-
-    let (mut frontmatters, _errors) = ctx.store.scan_frontmatter()?;
-    let (_graph, ranks) = ranks_of(&frontmatters);
-    frontmatters.retain(|fm| filters.matches(fm));
-    order.apply(&mut frontmatters, &ranks);
-
-    let objects = objects_from_frontmatters(&frontmatters);
-    let total = objects.len();
     emit(
         format,
-        objects,
+        objects_from_answer(&answer),
         ListOpts {
-            total,
+            total: answer.total,
             window,
             fields: fields.as_deref(),
             compact: args.compact,
-            source: "files",
+            source: answer.source.as_str(),
             sort: order.field.as_str(),
             dir: order.dir_str(),
             filters: Some(&filters),
-            warnings: Vec::new(),
+            warnings: answer.warnings,
         },
     );
     Ok(())

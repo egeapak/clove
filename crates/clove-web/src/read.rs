@@ -1,16 +1,81 @@
-//! Read endpoints. All read from the file store + the in-memory graph (files are
-//! truth), so results match the CLI's `ls`/`ready`/`blocked`/`show` exactly.
+//! Read endpoints.
+//!
+//! The item lists go through [`clove_engine::Engine`], the single daemon → index
+//! → files cascade the CLI and MCP tools also use, so a result here matches
+//! `clove ls`/`ready`/`blocked` exactly and `_meta.source` names the tier that
+//! answered. This endpoint used to read files unconditionally *and* rebuild the
+//! whole dependency graph per request, while reporting the serving mode
+//! (`"standalone"`/`"daemon"`) in the field that everywhere else names a tier
+//! (read-path roadmap §4).
+//!
+//! Engine calls are blocking (SQLite, a daemon RPC on its own runtime, file
+//! parsing), so they run on `spawn_blocking` rather than on an axum worker.
 
 use std::collections::{BTreeSet, HashMap};
 
 use axum::extract::{Path, Query, State};
-use clove_core::{compute_stats, GraphStore, StatsOptions};
+use clove_core::StatsOptions;
+use clove_engine::{ListAnswer, Projection, Rows};
 use clove_types::{CloveId, ItemFrontmatter};
 use serde_json::{json, Value};
 
-use crate::dto::{frontmatter_value, item_value, GraphContext};
+use crate::dto::{frontmatter_value, item_value, with_terms, GraphContext};
 use crate::error::{ok, ok_data, ApiError, ApiResult};
 use crate::AppState;
+
+/// Run a blocking engine call off the axum worker threads.
+///
+/// The engine reads SQLite, may drive a daemon RPC on its own tokio runtime, and
+/// parses item files — none of which may happen on an async worker. (`cloved`
+/// hosts this server on a two-worker runtime, so one blocking read there would
+/// stall `ping`, the watcher, and every other request.)
+async fn blocking<T, F>(f: F) -> Result<T, ApiError>
+where
+    F: FnOnce() -> Result<T, ApiError> + Send + 'static,
+    T: Send + 'static,
+{
+    match tokio::task::spawn_blocking(f).await {
+        Ok(result) => result,
+        Err(e) => Err(ApiError::from(clove_types::CloveError::Io {
+            path: camino::Utf8PathBuf::from("<engine>"),
+            source: std::io::Error::other(e.to_string()),
+        })),
+    }
+}
+
+/// Render an engine answer as the web's item objects.
+///
+/// The three tiers produce the same row shape by different routes: the file tier
+/// hands back the graph it built, so `ready`/`blocked_by`/`dangling_deps` come
+/// from the whole-store partition as before, while an index or daemon answer has
+/// no graph and derives the same three values per item from its own dependency
+/// closure (`ops::graph_terms_detailed`). Both go through
+/// [`crate::dto::with_terms`], so the row cannot differ by tier.
+fn values_of(answer: ListAnswer, state: &AppState) -> Result<Vec<Value>, ApiError> {
+    let ListAnswer { rows, graph, .. } = answer;
+    let rows = match rows {
+        Rows::Full(rows) => rows,
+        // Unreachable: every read here asks for `Projection::Full`, because the
+        // lean five columns carry none of the graph terms this API renders.
+        Rows::Lean(_) => return Ok(Vec::new()),
+    };
+    match graph {
+        Some(graph) => {
+            let ctx = GraphContext::from_graph(graph);
+            Ok(rows
+                .iter()
+                .map(|row| Value::Object(frontmatter_value(&row.frontmatter, &ctx)))
+                .collect())
+        }
+        None => rows
+            .iter()
+            .map(|row| {
+                let terms = clove_core::ops::graph_terms_detailed(&state.store, &row.frontmatter)?;
+                Ok(Value::Object(with_terms(&row.frontmatter, &terms)))
+            })
+            .collect(),
+    }
+}
 
 /// Parse `?id=` style path segments into a validated [`CloveId`].
 fn parse_id(raw: &str) -> Result<CloveId, ApiError> {
@@ -104,46 +169,37 @@ fn order_of(params: &HashMap<String, String>) -> Result<clove_core::view::Order,
     .map_err(ApiError::from)
 }
 
-/// Sort frontmatter in place by `order`.
-fn sort_items(items: &mut [ItemFrontmatter], order: clove_core::view::Order, graph: &GraphStore) {
-    // `rank` is the only field that reads the graph, and the caller has already
-    // built it; every other field keys off the frontmatter alone.
-    let ranks = if order.needs_ranks() {
-        graph.topological_ranks()
-    } else {
-        HashMap::new()
-    };
-    order.apply(items, &ranks);
-}
-
 /// `GET /api/v1/items` — filtered, sorted, paginated list.
+///
+/// `?mode=ready|blocked` selects the corresponding engine query, so the three
+/// lists share one tiering decision with `clove ready`/`clove blocked` instead
+/// of being a fourth in-memory reimplementation of the partition.
 pub async fn list_items(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
 ) -> ApiResult {
-    let (frontmatters, ctx) = load(&state)?;
     let order = order_of(&params)?;
     let filters = filters_of(&params)?;
-    let mode = params.get("mode").map(String::as_str).unwrap_or("list");
-
-    let mut selected: Vec<ItemFrontmatter> = frontmatters
-        .into_iter()
-        .filter(|fm| filters.matches(fm))
-        .filter(|fm| match mode {
-            "ready" => ctx.is_ready(&fm.id),
-            "blocked" => ctx.is_blocked(&fm.id),
-            _ => true,
-        })
-        .collect();
-
-    sort_items(&mut selected, order, ctx.graph());
-
     let window = page_window(&params);
-    let rows: Vec<Value> = selected
-        .iter()
-        .map(|fm| Value::Object(frontmatter_value(fm, &ctx)))
-        .collect();
-    let (page, total) = window.apply(rows);
+    let mode = params.get("mode").cloned().unwrap_or_default();
+
+    let engine = state.engine.clone();
+    let (f, w) = (filters.clone(), window);
+    let answer = blocking(move || {
+        // Full frontmatter: this API renders every field plus the graph terms,
+        // which no lean row carries.
+        let answer = match mode.as_str() {
+            "ready" => engine.ready(&f, order, w, Projection::Full),
+            "blocked" => engine.blocked(&f, order, w, Projection::Full),
+            _ => engine.list(&f, order, w, Projection::Full),
+        };
+        answer.map_err(ApiError::from)
+    })
+    .await?;
+
+    let source = answer.source.as_str();
+    let total = answer.total;
+    let page = values_of(answer, &state)?;
     let returned = page.len();
 
     Ok(ok(
@@ -156,18 +212,31 @@ pub async fn list_items(
             "sort": order.field.as_str(),
             "dir": order.dir_str(),
             "filters": serde_json::to_value(&filters).unwrap_or(Value::Null),
-            "source": state.source,
+            "source": source,
         }),
     ))
 }
 
 /// `GET /api/v1/items/:id` — full item detail.
+///
+/// The graph terms come from the item's own dependency closure
+/// (`ops::graph_terms_detailed`), not from a whole-store graph: rendering one
+/// item used to scan and parse every file in the repo to learn whether *that*
+/// item was ready, which is the per-request rebuild read-path §4 names.
 pub async fn get_item(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
     let id = parse_id(&id)?;
-    let item = state.store.get(&id)?;
-    let (_frontmatters, ctx) = load(&state)?;
-    let obj = item_value(&item, &state.issues_dir, &ctx);
-    Ok(ok(Value::Object(obj), json!({ "source": state.source })))
+    let issues_dir = state.issues_dir.clone();
+    let store = state.store.clone();
+    let obj = blocking(move || {
+        let item = store.get(&id)?;
+        let terms = clove_core::ops::graph_terms_detailed(&store, &item.frontmatter)?;
+        Ok(item_value(&item, &issues_dir, &terms))
+    })
+    .await?;
+    Ok(ok(
+        Value::Object(obj),
+        json!({ "source": clove_engine::Source::Files.as_str() }),
+    ))
 }
 
 /// `GET /api/v1/items/:id/comments`.
@@ -194,7 +263,9 @@ pub async fn get_comments(
         params.get("limit").and_then(|s| s.parse::<usize>().ok()),
         clove_core::view::defaults::WEB_LIMIT,
     );
-    let page = clove_core::ops::comments(&state.store, &id, window)?;
+    let engine = state.engine.clone();
+    let page = blocking(move || engine.comments(&id, window).map_err(ApiError::from)).await?;
+    let page = page.value;
     let data = page
         .get("items")
         .cloned()
@@ -226,13 +297,14 @@ pub async fn get_deptree(
         0 => usize::MAX,
         n => n,
     };
-    let (_frontmatters, ctx) = load(&state)?;
-    let tree = ctx
-        .graph()
-        .dep_tree(&id, depth)
-        .ok_or_else(|| ApiError::from(clove_types::CloveError::NotFound { id: id.to_string() }))?;
-    let value = serde_json::to_value(tree).unwrap_or(Value::Null);
-    Ok(ok_data(value))
+    // Tiered: a live daemon answers from its cached graph, so the common case
+    // no longer scans the store to walk one item's subtree.
+    let engine = state.engine.clone();
+    let answer = blocking(move || engine.dep_tree(&id, depth).map_err(ApiError::from)).await?;
+    Ok(ok(
+        answer.value,
+        json!({ "source": answer.source.as_str() }),
+    ))
 }
 
 /// `GET /api/v1/board?group_by=status`.
@@ -249,23 +321,34 @@ pub async fn get_board(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
 ) -> ApiResult {
-    let (frontmatters, ctx) = load(&state)?;
     let order = order_of(&params)?;
     let filters = filters_of(&params)?;
-    let mut selected: Vec<ItemFrontmatter> = frontmatters
-        .into_iter()
-        .filter(|fm| filters.matches(fm))
-        .collect();
-    sort_items(&mut selected, order, ctx.graph());
+
+    // The board shows every matching item grouped into columns, so the query is
+    // unwindowed: `limit`/`offset` window each *column* below, not the query.
+    let engine = state.engine.clone();
+    let (f, unwindowed) = (filters.clone(), clove_core::view::Page::unlimited());
+    let answer = blocking(move || {
+        engine
+            .list(&f, order, unwindowed, Projection::Full)
+            .map_err(ApiError::from)
+    })
+    .await?;
+    let source = answer.source.as_str();
+    let selected = values_of(answer, &state)?;
 
     let mut columns: Vec<(&str, &str, Vec<Value>)> = vec![
         ("open", "Open", Vec::new()),
         ("in_progress", "In Progress", Vec::new()),
         ("closed", "Closed", Vec::new()),
     ];
-    for fm in &selected {
-        let value = Value::Object(frontmatter_value(fm, &ctx));
-        if let Some(col) = columns.iter_mut().find(|c| c.0 == fm.status.as_str()) {
+    for value in selected {
+        let status = value
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        if let Some(col) = columns.iter_mut().find(|c| c.0 == status) {
             col.2.push(value);
         }
     }
@@ -286,7 +369,7 @@ pub async fn get_board(
     Ok(ok(
         json!({ "columns": columns }),
         json!({
-            "source": state.source,
+            "source": source,
             "offset": window.offset,
             "limit": window.reported_limit(),
             "sort": order.field.as_str(),
@@ -302,7 +385,6 @@ pub async fn get_stats(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
 ) -> ApiResult {
-    let (frontmatters, ctx) = load(&state)?;
     let opts = StatsOptions {
         top: params
             .get("top")
@@ -310,9 +392,17 @@ pub async fn get_stats(
             .unwrap_or(clove_core::view::defaults::STATS_TOP),
         include_epics: params.get("no_epics").map(String::as_str) != Some("true"),
     };
-    let report = compute_stats(&frontmatters, ctx.graph(), chrono::Utc::now(), opts);
-    let value = serde_json::to_value(report).unwrap_or(Value::Null);
-    Ok(ok_data(value))
+    let engine = state.engine.clone();
+    let answer = blocking(move || {
+        engine
+            .stats(opts.top, opts.include_epics, chrono::Utc::now())
+            .map_err(ApiError::from)
+    })
+    .await?;
+    Ok(ok(
+        answer.value,
+        json!({ "source": answer.source.as_str() }),
+    ))
 }
 
 /// Recorded stats snapshots from `.clove/index.db`, mapped to history points

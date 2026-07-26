@@ -1,0 +1,29 @@
+[package]
+name = "clove-engine"
+description = "clove read tier: the one daemon -> index -> files cascade behind the CLI, MCP, and web read surfaces"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+clove-types.workspace = true
+clove-core.workspace = true
+clove-index.workspace = true
+clove-ipc.workspace = true
+camino.workspace = true
+chrono.workspace = true
+serde_json.workspace = true
+rayon.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+# Integration tests reach the store/index directly to build a fixture and to
+# prove the index tier really answered; a lib dependency is not in scope for a
+# `tests/` target, so they are declared here too.
+clove-core.workspace = true
+clove-index.workspace = true
+clove-types.workspace = true
+camino.workspace = true
+chrono.workspace = true

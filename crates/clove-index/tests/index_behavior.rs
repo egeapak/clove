@@ -826,3 +826,124 @@ fn ready_set_matches_clove_core_graph() {
     // Sanity: the fixture actually exercises readiness (non-empty, non-all).
     assert!(!graph_ready.is_empty() && graph_ready.len() < frontmatters.len());
 }
+
+/// The SQL `blocked` set equals `GraphStore::blocked_items`, and the two modes
+/// partition the store exactly as the graph does.
+///
+/// `blocked` had no index query at all until read-path §4, so `clove blocked`
+/// scanned every file even with a hot index. The new clause is the `ready`
+/// clause with its last conjuncts negated as a disjunction — which is a place a
+/// subtle disagreement could hide, since "not ready" is *not* the same as
+/// "blocked": a closed item is neither, and so is a hard-cycle member.
+///
+/// The fixture is deliberately built so each of those distinctions is load
+/// bearing: a closed item with an open dep (not blocked — inactive), a cycle
+/// pair (not blocked — excluded), a dangling-only item (blocked with no unclosed
+/// dep at all), an item whose only dep is closed (ready, not blocked), and a
+/// plain unblocked item.
+#[test]
+fn blocked_set_matches_the_graph_and_partitions_with_ready() {
+    let repo = Repo::new();
+    // ready: no deps
+    ItemSpec::new("proj-AAAAAAAA").write_to(&repo);
+    // blocked: dep on the open A
+    ItemSpec::new("proj-BBBBBBBB")
+        .deps(&["proj-AAAAAAAA"])
+        .write_to(&repo);
+    // ready: its only dep is closed
+    ItemSpec::new("proj-CCCCCCCC")
+        .deps(&["proj-DDDDDDDD"])
+        .write_to(&repo);
+    ItemSpec::new("proj-DDDDDDDD")
+        .status("closed")
+        .write_to(&repo);
+    // blocked by a *missing* id only — no unclosed dep exists, so a clause that
+    // only negated the `EXISTS` would lose this one.
+    ItemSpec::new("proj-EEEEEEEE")
+        .deps(&["proj-MISSING1"])
+        .write_to(&repo);
+    // closed *and* holding an open dep: not ready and not blocked (inactive).
+    ItemSpec::new("proj-FFFFFFFF")
+        .status("closed")
+        .deps(&["proj-AAAAAAAA"])
+        .write_to(&repo);
+    // a hard-dependency cycle: excluded from both partitions.
+    ItemSpec::new("proj-GGGGGGGG")
+        .deps(&["proj-HHHHHHHH"])
+        .write_to(&repo);
+    ItemSpec::new("proj-HHHHHHHH")
+        .deps(&["proj-GGGGGGGG"])
+        .write_to(&repo);
+    reindex(&repo.issues, &repo.db).unwrap();
+
+    let index = Index::open(&repo.db).unwrap();
+    let ids = |mode| -> HashSet<String> {
+        index
+            .query_items(&Filter {
+                mode,
+                ..Default::default()
+            })
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect()
+    };
+    let index_blocked = ids(QueryMode::Blocked);
+    let index_ready = ids(QueryMode::Ready);
+
+    let frontmatters = parse_frontmatters(&repo.issues);
+    let (graph, _dangling) = GraphStore::build(&frontmatters);
+    let graph_blocked: HashSet<String> = graph
+        .blocked_items()
+        .into_iter()
+        .map(|b| b.id.as_str().to_owned())
+        .collect();
+
+    assert_eq!(
+        index_blocked, graph_blocked,
+        "index blocked set must equal the clove-core graph blocked set"
+    );
+    // The fixture has to discriminate: both partitions non-empty and neither is
+    // simply "every active item".
+    assert_eq!(
+        graph_blocked,
+        HashSet::from(["proj-BBBBBBBB".to_owned(), "proj-EEEEEEEE".to_owned()])
+    );
+    assert_eq!(
+        index_ready,
+        HashSet::from(["proj-AAAAAAAA".to_owned(), "proj-CCCCCCCC".to_owned()])
+    );
+    assert!(
+        index_ready.is_disjoint(&index_blocked),
+        "ready and blocked must not overlap"
+    );
+    // …and together they are exactly the active, non-excluded items — which is
+    // what makes "the complement of ready" a correct reading of the clause.
+    let both: HashSet<String> = index_ready.union(&index_blocked).cloned().collect();
+    let excluded: HashSet<String> = graph
+        .excluded_ids()
+        .into_iter()
+        .map(|id| id.as_str().to_owned())
+        .collect();
+    let active_not_excluded: HashSet<String> = frontmatters
+        .iter()
+        .filter(|fm| fm.status.is_active())
+        .map(|fm| fm.id.as_str().to_owned())
+        .filter(|id| !excluded.contains(id))
+        .collect();
+    assert_eq!(both, active_not_excluded);
+
+    // A `--status` filter narrows *within* the blocked set rather than replacing
+    // it, exactly as it does for `ready`.
+    let in_progress = index
+        .query_items(&Filter {
+            mode: QueryMode::Blocked,
+            status: vec![ItemStatus::InProgress],
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(
+        in_progress.is_empty(),
+        "no blocked item is in_progress in this fixture"
+    );
+}

@@ -2,10 +2,19 @@
 //!
 //! Topology B: **writes** prefer the single `cloved` daemon (which serializes
 //! them and keeps its index/graph coherent) and fall back to direct `clove-core`
-//! ops when no daemon is reachable; **reads** compute directly from the file
-//! store via `clove-core::ops` (always correct, no daemon needed). Every method
-//! returns the §7.4 JSON shape or a human-readable error string for the tool
-//! result. Methods are blocking and meant to run on a blocking task.
+//! ops when no daemon is reachable. **Reads** now go through
+//! [`clove_engine::Engine`], which tiers them the same way — daemon, then the
+//! local SQLite index, then the files — so a hot daemon serves the MCP tools
+//! instead of sitting idle beside a full store scan per call (read-path roadmap
+//! §4). The tools keep their full-item output: a tier answers the *query* (the
+//! filtering, ordering, and counting happen in SQL) and only the returned page
+//! is read from disk.
+//!
+//! Every method returns the §7.4 JSON shape or a human-readable error string for
+//! the tool result, now with a `source` key naming the tier that answered — the
+//! `_meta.source` of the CLI and web, carried as a plain key because the MCP
+//! page has no `_meta`. Methods are blocking and meant to run on a blocking
+//! task.
 
 use std::sync::{Arc, Mutex};
 
@@ -13,6 +22,7 @@ use camino::Utf8PathBuf;
 use chrono::Utc;
 use clove_core::ops;
 use clove_core::{Filters, ItemStore};
+use clove_engine::{ListAnswer, Projection, Rows};
 use clove_ipc::{ClientError, DaemonClient};
 use clove_types::{CloveId, ItemStatus, ItemType, NewSpec};
 use serde_json::Value;
@@ -38,6 +48,10 @@ pub struct Engine {
     /// open connection) `ping` is repeated per call; a dead/restarted daemon
     /// drops the cache and re-probes.
     daemon: Arc<Mutex<Option<DaemonClient>>>,
+    /// The read tier. Holds its own cached daemon connection for the same
+    /// reason: this server is long-lived and re-probing per tool call would
+    /// cost more than the read it accelerates.
+    reads: clove_engine::Engine,
 }
 
 impl Engine {
@@ -47,12 +61,20 @@ impl Engine {
         id_prefix: String,
         default_type: ItemType,
     ) -> Self {
+        let reads = clove_engine::Engine::new(
+            ItemStore::new(repo_root.clone()),
+            clove_dir.clone(),
+            // Every tier, fast staleness check: the MCP server has no
+            // `--no-index` equivalent, and `--deep` is a CLI diagnostic.
+            clove_engine::Tiers::default(),
+        );
         Self {
             clove_dir,
             repo_root,
             id_prefix,
             default_type,
             daemon: Arc::new(Mutex::new(None)),
+            reads,
         }
     }
 
@@ -85,65 +107,105 @@ impl Engine {
         Some(call(client).map_err(stringify))
     }
 
-    // ---- Read tools (file-based via ops) ------------------------------------
+    // ---- Read tools (tiered through clove-engine) ---------------------------
 
     pub fn ready(&self, a: FilterArgs) -> Result<Value, String> {
         let filters = a.to_filters()?;
         let order = a.to_order()?;
-        let shaping = shaping(&a.shape);
-        ops::ready(&self.store(), &filters, order, window(a.offset, a.limit))
-            .map(|v| shape::apply(v, &shaping))
-            .map_err(stringify_core)
+        let window = window(a.offset, a.limit);
+        let answer = self
+            .reads
+            .ready(&filters, order, window, Projection::Full)
+            .map_err(stringify_core)?;
+        Ok(shape::apply(
+            page_of(
+                &answer,
+                window,
+                order.field.as_str(),
+                order.dir_str(),
+                Some(&filters),
+            ),
+            &shaping(&a.shape),
+        ))
     }
 
     pub fn blocked(&self, a: BlockedArgs) -> Result<Value, String> {
         let filters = a.filter.to_filters()?;
         let order = a.filter.to_order()?;
-        let shaping = shaping(&a.filter.shape);
-        ops::blocked(
-            &self.store(),
-            &filters,
-            order,
-            window(a.filter.offset, a.filter.limit),
-        )
-        .map(|v| shape::apply(v, &shaping))
-        .map_err(stringify_core)
+        let window = window(a.filter.offset, a.filter.limit);
+        let answer = self
+            .reads
+            .blocked(&filters, order, window, Projection::Full)
+            .map_err(stringify_core)?;
+        Ok(shape::apply(
+            page_of(
+                &answer,
+                window,
+                order.field.as_str(),
+                order.dir_str(),
+                Some(&filters),
+            ),
+            &shaping(&a.filter.shape),
+        ))
     }
 
     pub fn list(&self, a: ListArgs) -> Result<Value, String> {
         let filters = a.filter.to_filters()?;
         let order = a.filter.to_order()?;
-        let shaping = shaping(&a.filter.shape);
-        ops::list(
-            &self.store(),
-            &filters,
-            order,
-            window(a.filter.offset, a.filter.limit),
-        )
-        .map(|v| shape::apply(v, &shaping))
-        .map_err(stringify_core)
+        let window = window(a.filter.offset, a.filter.limit);
+        let answer = self
+            .reads
+            .list(&filters, order, window, Projection::Full)
+            .map_err(stringify_core)?;
+        Ok(shape::apply(
+            page_of(
+                &answer,
+                window,
+                order.field.as_str(),
+                order.dir_str(),
+                Some(&filters),
+            ),
+            &shaping(&a.filter.shape),
+        ))
     }
 
     pub fn show(&self, a: IdArgs) -> Result<Value, String> {
         let id = parse_id(&a.id)?;
         let shaping = shaping(&a.shape);
-        ops::show(&self.store(), &id)
-            .map(|v| shape::apply(v, &shaping))
+        self.reads
+            .show(&id)
+            .map(|answer| shape::apply(answer.value, &shaping))
             .map_err(stringify_core)
     }
 
     pub fn search(&self, a: SearchArgs) -> Result<Value, String> {
-        let shaping = shaping(&a.shape);
         let order =
             SearchOrder::parse(a.sort.as_deref(), dir_of(a.desc)).map_err(stringify_core)?;
-        ops::search(&self.store(), &a.text, order, window(a.offset, a.limit))
-            .map(|v| shape::apply(v, &shaping))
-            .map_err(stringify_core)
+        let window = window(a.offset, a.limit);
+        let answer = self
+            .reads
+            .search(&a.text, order, window)
+            .map_err(stringify_core)?;
+        Ok(shape::apply(
+            // No `filters` echo: `search` takes no field filters, and an empty
+            // object would advertise a surface the tool does not have.
+            page_of(
+                &answer,
+                window,
+                order.reported_sort(),
+                order.dir_str(),
+                None,
+            ),
+            &shaping(&a.shape),
+        ))
     }
 
     pub fn comments(&self, a: CommentsArgs) -> Result<Value, String> {
         let id = parse_id(&a.id)?;
-        ops::comments(&self.store(), &id, window(a.skip_newest, a.limit)).map_err(stringify_core)
+        self.reads
+            .comments(&id, window(a.skip_newest, a.limit))
+            .map(|answer| answer.value)
+            .map_err(stringify_core)
     }
 
     pub fn dep_tree(&self, a: DepTreeArgs) -> Result<Value, String> {
@@ -160,17 +222,21 @@ impl Engine {
             0 => usize::MAX,
             n => n,
         };
-        ops::dep_tree(&self.store(), &id, depth).map_err(stringify_core)
+        self.reads
+            .dep_tree(&id, depth)
+            .map(|answer| answer.value)
+            .map_err(stringify_core)
     }
 
     pub fn stats(&self, a: StatsArgs) -> Result<Value, String> {
-        ops::stats(
-            &self.store(),
-            a.top.unwrap_or(STATS_TOP as u64) as usize,
-            !a.no_epics.unwrap_or(false),
-            Utc::now(),
-        )
-        .map_err(stringify_core)
+        self.reads
+            .stats(
+                a.top.unwrap_or(STATS_TOP as u64) as usize,
+                !a.no_epics.unwrap_or(false),
+                Utc::now(),
+            )
+            .map(|answer| answer.value)
+            .map_err(stringify_core)
     }
 
     // ---- Write tools (daemon-preferred, ops fallback) -----------------------
@@ -271,6 +337,59 @@ impl Engine {
             }
         }
     }
+}
+
+/// Render an engine answer as the standard MCP page.
+///
+/// Goes through `clove_core::ops::page_payload`, the same builder the file-path
+/// `ops::list`/`ready`/`blocked`/`search` use, so a tier-served page and a
+/// file-served one cannot come back in different shapes. The rows are always
+/// [`Rows::Full`] here — the MCP tools' contract is full item objects, and
+/// `fields` is a projection applied afterwards by [`shape::apply`], not a change
+/// of source.
+fn page_of(
+    answer: &ListAnswer,
+    window: Page,
+    sort: &str,
+    dir: &str,
+    filters: Option<&Filters>,
+) -> Value {
+    let items: Vec<Value> = match &answer.rows {
+        Rows::Full(rows) => rows
+            .iter()
+            .map(|row| {
+                let mut obj = clove_core::view::frontmatter_object(&row.frontmatter);
+                if let Some(blocked_by) = &row.blocked_by {
+                    obj.insert("blocked_by".to_owned(), serde_json::json!(blocked_by));
+                }
+                Value::Object(obj)
+            })
+            .collect(),
+        // Unreachable: every read here asks for `Projection::Full`. Rendering
+        // the five columns rather than panicking keeps a future caller honest
+        // without turning a projection mistake into a crashed tool call.
+        Rows::Lean(rows) => rows
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "id": r.id,
+                    "status": r.status,
+                    "type": r.item_type,
+                    "priority": r.priority,
+                    "title": r.title,
+                })
+            })
+            .collect(),
+    };
+    ops::page_payload(
+        items,
+        answer.total,
+        window,
+        sort,
+        dir,
+        filters,
+        Some(answer.source.as_str()),
+    )
 }
 
 /// Translate the wire shaping args into the shaping request.

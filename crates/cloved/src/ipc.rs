@@ -403,10 +403,24 @@ impl Dispatcher {
         // everywhere else, not "zero rows". `query_filtered` owns the rest of
         // the limit/count decision, which a residue changes.
         let window = clove_core::view::Page::new(q.offset, q.limit, 0);
-        let (rows, total) = index
+        let (mut rows, total) = index
             .query_filtered(&filter, residue.as_ref(), window)
             .map_err(|e| RpcError::new("query_failed", e.to_string()))?;
         let total = total as u64;
+        // Send only what the window can reach.
+        //
+        // Without a residue this is already true — the `LIMIT` was pushed into
+        // SQL. With one, `query_filtered` cannot push it (it would slice before
+        // the residue removes rows), so it returns *every* match and leaves the
+        // window to the caller. That is right locally and wrong on a wire:
+        // `clove ls --q x --limit 1` shipped the entire match set across the
+        // socket for one row (read-path roadmap §5). The client windows what it
+        // receives, so truncating to `offset + limit` here is invisible to it —
+        // and `total` is already the pre-window count, so the caller still
+        // learns how many matched.
+        if let Some(keep) = window.sql_fetch() {
+            rows.truncate(keep);
+        }
 
         if let Ok(mut state) = self.state.lock() {
             state.set_items_indexed(index.item_count().unwrap_or(0) as u64);

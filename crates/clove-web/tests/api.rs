@@ -853,3 +853,90 @@ async fn an_unknown_filter_value_is_a_validation_error() {
         assert_eq!(v["error"]["code"], "VALIDATION_ERROR", "{path}: {body}");
     }
 }
+
+/// The web reads are tiered, and `_meta.source` names the tier that answered.
+///
+/// Two things changed here in read-path §4. The endpoint used to read files
+/// unconditionally — with a hot `.clove/index.db` beside it — and it used to
+/// report `state.source`, the *serving mode* (`"standalone"`/`"daemon"`), in the
+/// field the CLI uses for the tier. A `cloved`-hosted server therefore claimed
+/// `"daemon"` for an answer it had just scanned off disk.
+///
+/// The rows must be identical either way: the file tier reads `ready`/
+/// `blocked_by`/`dangling_deps` off the whole-store graph, while an index answer
+/// derives the same three per item from its own dependency closure.
+#[tokio::test]
+async fn list_answers_from_the_index_and_reports_the_tier() {
+    let (tmp, state, main_id, dep_id) = fixture();
+    let issues = state.issues_dir.clone();
+
+    // Before any index exists, the file tier answers.
+    let app = build_router(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let (_s, body) = get(addr, "/api/v1/items?sort=id").await;
+    let files: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(files["_meta"]["source"], "files", "body: {body}");
+
+    // Build the index, then a *fresh* state so the engine picks it up.
+    clove_index::reindex(&issues, &issues.parent().unwrap().join("index.db")).unwrap();
+    let indexed_state = AppState::new(
+        state.store.clone(),
+        issues,
+        "proj".to_owned(),
+        "test",
+        false,
+        ItemType::Feature,
+    );
+    let app = build_router(indexed_state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let (_s, body) = get(addr, "/api/v1/items?sort=id").await;
+    let indexed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        indexed["_meta"]["source"], "index",
+        "the index must answer, or the comparison below is vacuous: {body}"
+    );
+    assert_eq!(
+        indexed["data"], files["data"],
+        "the tier must not change a single field"
+    );
+    assert_eq!(indexed["_meta"]["total"], files["_meta"]["total"]);
+
+    // The graph terms specifically: these are what the tiered path has to
+    // recompute per item, having no whole-store graph to read them off.
+    let row = |v: &serde_json::Value, id: &str| -> serde_json::Value {
+        v["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == id)
+            .cloned()
+            .unwrap()
+    };
+    let main = row(&indexed, &main_id);
+    assert_eq!(main["ready"], false, "blocked by its open dependency");
+    assert_eq!(main["blocked_by"], serde_json::json!([dep_id]));
+    assert_eq!(main["dangling_deps"], serde_json::json!([]));
+    let dep = row(&indexed, &dep_id);
+    assert_eq!(dep["ready"], true);
+    assert_eq!(dep["blocked_by"], serde_json::json!([]));
+
+    // `?mode=` shares the same cascade rather than filtering in memory here.
+    let (_s, body) = get(addr, "/api/v1/items?mode=blocked").await;
+    let blocked: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(blocked["_meta"]["source"], "index", "body: {body}");
+    assert_eq!(blocked["_meta"]["total"], 1);
+    assert_eq!(blocked["data"][0]["id"], main_id);
+
+    let (_s, body) = get(addr, "/api/v1/items?mode=ready").await;
+    let ready: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(ready["_meta"]["source"], "index", "body: {body}");
+    assert_eq!(ready["data"][0]["id"], dep_id);
+
+    drop(tmp);
+}

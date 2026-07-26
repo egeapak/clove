@@ -1007,3 +1007,119 @@ fn env_clove_format_json_without_flag() {
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["ok"], true);
 }
+
+/// `clove blocked` answers from the index, and answers *identically*.
+///
+/// Until read-path §4 it was the one list with no index tier at all: with a hot
+/// `.clove/index.db` and no daemon it still scanned and parsed every file in the
+/// store. `clove_index` now has a `Blocked` query — the exact complement of the
+/// `ready` clause within the active, non-excluded set — so the SQL and the
+/// in-memory `GraphStore` partition the store the same way.
+///
+/// The comparison is against `--no-index`, and the `source` assertions are what
+/// keep it from being vacuous: without them this would pass with both runs on
+/// the file path.
+#[test]
+fn blocked_answers_from_the_index_and_agrees_with_the_files() {
+    let dir = init_repo();
+    let a = new_item(dir.path(), "alpha", &[]);
+    let b = new_item(dir.path(), "beta", &[]);
+    let c = new_item(dir.path(), "gamma", &[]);
+    // a is blocked by the open b; c is blocked by a missing id.
+    clove(dir.path())
+        .args(["dep", "add", &a, &b])
+        .assert()
+        .success();
+    clove(dir.path())
+        .args(["dep", "add", &c, &b])
+        .assert()
+        .success();
+    clove(dir.path()).arg("reindex").assert().success();
+
+    let files = json_ok(clove(dir.path()).args(["--no-index", "blocked"]));
+    assert_eq!(files["_meta"]["source"], "files");
+    let indexed = json_ok(clove(dir.path()).args(["blocked"]));
+    assert_eq!(
+        indexed["_meta"]["source"], "index",
+        "blocked must have an index tier, or the comparison below is vacuous"
+    );
+
+    assert_eq!(indexed["data"], files["data"], "row for row, tier for tier");
+    assert_eq!(indexed["_meta"]["total"], files["_meta"]["total"]);
+    // `blocked_by` is the point of the list and no lean row carries it, so the
+    // index tier has to hydrate the page rather than serve the projection.
+    assert_eq!(
+        indexed["data"][0]["blocked_by"],
+        serde_json::json!([b]),
+        "the index tier still reports what blocks each item: {indexed}"
+    );
+    // A hydrated row is a *full* row: the lean five columns would not have this.
+    assert!(
+        indexed["data"][0].get("created").is_some(),
+        "blocked rows are full items, not the lean projection: {indexed}"
+    );
+}
+
+/// `clove ready` warns about the items it silently left out.
+///
+/// An item whose `deps` name a missing id is excluded from `ready` — correctly,
+/// since nothing can say the dependency is done — and the only signal a user
+/// gets is this warning: `_meta.warnings` in JSON, stderr in human format. It is
+/// also the one warning the accelerator tiers cannot produce, because the SQL
+/// `ready` query never builds the dangling set, so the message must survive the
+/// hand-off from `clove_core::ops::ready_rows` all the way to `_meta`.
+///
+/// The `--no-index` run is what makes the check meaningful: the file tier is the
+/// only one that has the warning to give.
+#[test]
+fn ready_warns_about_items_excluded_for_dangling_deps() {
+    let dir = init_repo();
+    let ok = new_item(dir.path(), "unblocked", &[]);
+    let broken = new_item(dir.path(), "names a ghost", &[]);
+    // Hand-write a reference to an id that does not exist (`dep add` refuses).
+    let path = dir.path().join(format!(".clove/issues/{broken}.md"));
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, text.replace("deps: []", "deps: [proj-ZZZZZZZZ]")).unwrap();
+
+    let v = json_ok(clove(dir.path()).args(["--no-index", "ready"]));
+    let ids: Vec<&str> = v["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec![ok.as_str()], "the dangling item is not ready");
+
+    let warnings = v["_meta"]["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1, "exactly one warning: {v}");
+    let msg = warnings[0].as_str().unwrap();
+    assert!(
+        msg.contains("dangling") && msg.contains(&broken),
+        "the warning must name the excluded item: {msg}"
+    );
+
+    // Human format puts it on stderr, so an interactive run cannot miss it —
+    // and `--quiet` is what turns it off.
+    let out = clove(dir.path())
+        .args(["--no-index", "ready"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("dangling"), "stderr: {stderr}");
+    let quiet = clove(dir.path())
+        .args(["--no-index", "--quiet", "ready"])
+        .output()
+        .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&quiet.stderr).contains("dangling"),
+        "--quiet silences it"
+    );
+
+    // It is not lost: `blocked` is where the item went, with the broken id named.
+    let blocked = json_ok(clove(dir.path()).args(["--no-index", "blocked"]));
+    assert_eq!(blocked["data"][0]["id"], serde_json::json!(broken));
+    assert_eq!(
+        blocked["data"][0]["blocked_by"],
+        serde_json::json!(["proj-ZZZZZZZZ"])
+    );
+}

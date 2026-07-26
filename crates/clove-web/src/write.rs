@@ -13,7 +13,7 @@ use clove_types::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::dto::{item_value, GraphContext};
+use crate::dto::item_value;
 use crate::error::{ok, ApiError, ApiResult};
 use crate::AppState;
 
@@ -32,11 +32,14 @@ where
     Ok(Some(Option::deserialize(deserializer)?))
 }
 
-/// Build the updated-item response (full detail, with fresh graph context).
+/// Build the updated-item response (full detail, with fresh graph terms).
+///
+/// The terms come from the item's own dependency closure rather than a
+/// whole-store graph build: a write response used to re-scan and re-parse every
+/// file in the repo to report whether the one item just written was ready.
 fn respond_item(state: &AppState, item: &Item) -> ApiResult {
-    let (frontmatters, _errors) = state.store.scan_frontmatter()?;
-    let ctx = GraphContext::build(&frontmatters);
-    let obj = item_value(item, &state.issues_dir, &ctx);
+    let terms = clove_core::ops::graph_terms_detailed(&state.store, &item.frontmatter)?;
+    let obj = item_value(item, &state.issues_dir, &terms);
     Ok(ok(Value::Object(obj), json!({ "source": state.source })))
 }
 

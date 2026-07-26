@@ -28,14 +28,12 @@
 //! `--no-index`/`--deep` are accepted (they are global flags) and do nothing
 //! here: there is one path, so there is nothing for them to select.
 
-use std::collections::HashMap;
-
 use clove_core::view::SearchOrder;
 use clove_core::OutputFormat;
-use clove_types::{CloveError, ItemFrontmatter};
+use clove_types::CloveError;
 
 use crate::cli::SearchArgs;
-use crate::cmd::listing::{emit, objects_from_frontmatters, window, ListOpts};
+use crate::cmd::listing::{emit, objects_from_answer, window, ListOpts};
 use crate::context::Ctx;
 
 pub fn run(
@@ -46,67 +44,37 @@ pub fn run(
     _deep: bool,
 ) -> Result<(), CloveError> {
     let text = args.text;
-    // Same window contract as every other list command: no flag → default
-    // cap, `--limit 0` → unlimited.
+    // Same window contract as every other list command: no flag -> default
+    // cap, `--limit 0` -> unlimited.
     let window = window(args.offset, args.limit);
     // Search's default is relevance, not `rank`; naming a field replaces the
     // whole key.
     let order = SearchOrder::parse(args.sort.as_deref(), args.desc.then_some("desc"))?;
     let fields = args.fields.as_deref().map(crate::item_json::parse_fields);
 
-    let ordered = file_search(ctx, &text, order)?;
-    let objects = objects_from_frontmatters(&ordered);
-    let total = objects.len();
+    // `Engine::search` has exactly one tier, so `--no-index`/`--deep` have
+    // nothing to select and the engine is built without them.
+    let answer = ctx.engine(true, false).search(&text, order, window)?;
+
     emit(
         format,
-        objects,
+        objects_from_answer(&answer),
         ListOpts {
-            total,
+            total: answer.total,
             window,
             fields: fields.as_deref(),
             compact: args.compact,
             // Always `files`, and honestly so: an index or a live daemon cannot
             // change this command's answer, so there is no second source to
             // report.
-            source: "files",
+            source: answer.source.as_str(),
             sort: order.reported_sort(),
             dir: order.dir_str(),
             // `search` takes no field filters, so it echoes none — an empty
             // `filters` object would advertise a surface it does not have.
             filters: None,
-            warnings: Vec::new(),
+            warnings: answer.warnings,
         },
     );
     Ok(())
-}
-
-/// Parallel substring scan over file content.
-///
-/// Matching and ranking are `view::rank_search_hits`, the same function
-/// `ops::search` (the MCP tool) uses. This path previously had its own predicate
-/// that missed label matches entirely, and its own two-class ranking where the
-/// shared one has three.
-fn file_search(
-    ctx: &Ctx,
-    text: &str,
-    order: SearchOrder,
-) -> Result<Vec<ItemFrontmatter>, CloveError> {
-    // `search_hits` classifies during the scan and keeps only matches, so peak
-    // memory tracks the result size rather than the store size. Holding every
-    // body at once — which this did — put RSS at 399 MB on a 381 MB store even
-    // for a query that matched nothing.
-    let mut hits = clove_core::ops::search_hits(&ctx.store, text)?;
-    // Only `--sort rank` needs the graph, and a topological rank is only
-    // meaningful against the whole store, so it comes from a body-free
-    // frontmatter scan rather than from the hits.
-    let ranks = if order.needs_ranks() {
-        let (frontmatters, _errors) = ctx.store.scan_frontmatter()?;
-        crate::cmd::listing::ranks_of(&frontmatters).1
-    } else {
-        HashMap::new()
-    };
-    Ok(clove_core::view::rank_hits(&mut hits, order, &ranks)
-        .into_iter()
-        .cloned()
-        .collect())
 }
