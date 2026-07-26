@@ -846,12 +846,61 @@ async fn an_unknown_filter_value_is_a_validation_error() {
         "/api/v1/items?priority=9",
         "/api/v1/items?priority=abc",
         "/api/v1/board?status=bogus",
+        // `?mode=` was the last lenient parameter here: an unknown mode fell
+        // through to the unfiltered list with a 200, and `mode` is not echoed in
+        // `_meta`, so a client could not tell a typo from an unimplemented mode.
+        "/api/v1/items?mode=redy",
+        "/api/v1/items?mode=Ready",
     ] {
         let (status, body) = get(addr, path).await;
         assert!(status.contains("422"), "{path}: {status}");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["error"]["code"], "VALIDATION_ERROR", "{path}: {body}");
     }
+}
+
+/// `_meta.source` names a **tier** on every read endpoint, including this one.
+///
+/// `/stats/history` kept reporting `state.source` — the serving mode,
+/// `"standalone"`/`"daemon"` — after the rest of the API moved to naming the
+/// tier, so one endpoint returned a value outside the enum
+/// `docs/json-schema/v1/item-list.json` publishes.
+#[tokio::test]
+async fn stats_history_reports_a_tier_not_the_serving_mode() {
+    use clove_core::{compute_stats, GraphStore, StatsOptions};
+    use clove_index::Index;
+
+    let (tmp, addr, _main, _dep) = spawn_ids().await;
+
+    // Both branches, because they report different tiers and a test that hits
+    // only one cannot see the other regress: with no recorded snapshots the
+    // series is synthesized from the files, and with one it comes from the index.
+    let check = |body: &str, want: &str| {
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        let source = v["_meta"]["source"].as_str().unwrap_or_default().to_owned();
+        assert!(
+            matches!(source.as_str(), "daemon" | "index" | "files"),
+            "`{source}` is not a tier: {body}"
+        );
+        assert_eq!(source, want, "{body}");
+    };
+
+    let (status, body) = get(addr, "/api/v1/stats/history").await;
+    assert!(status.contains("200"), "status: {status}");
+    check(&body, "files");
+
+    // Record one, so the endpoint answers from `index.db` instead.
+    let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+    let store = ItemStore::new(root.clone());
+    let index = Index::open_or_create(&root.join(".clove").join("index.db")).unwrap();
+    let (fms, _) = store.scan_frontmatter().unwrap();
+    let (graph, _) = GraphStore::build(&fms);
+    let report = compute_stats(&fms, &graph, chrono::Utc::now(), StatsOptions::default());
+    index.record_snapshot(chrono::Utc::now(), &report).unwrap();
+
+    let (status, body) = get(addr, "/api/v1/stats/history").await;
+    assert!(status.contains("200"), "status: {status}");
+    check(&body, "index");
 }
 
 /// The web reads are tiered, and `_meta.source` names the tier that answered.

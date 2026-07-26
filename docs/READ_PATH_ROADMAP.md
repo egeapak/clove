@@ -713,6 +713,36 @@ came back; `_meta.per_column` marks the difference from a flat list.
 
 ---
 
+## 8. Known follow-ups (found by the final whole-branch review)
+
+None of these is a regression from this work — the first two are pre-existing on
+`master` — but they are the places a reader will otherwise rediscover as bugs.
+
+- **`--deep` does not stat every file.** `stale::check_staleness` opens with the
+  same directory-mtime + file-count short-circuit as the fast path, so an
+  in-place edit that leaves the directory mtime alone (truncate-and-rewrite, as
+  opposed to the replace-by-rename that clove's own writes, git, `sed -i` and vim
+  all use) is invisible to *both* paths. Measured: three edited items, then
+  `clove ls --q WWMARK` and `clove --deep ls --q WWMARK` both answer `total=0`
+  from the index while `--no-index` answers `total=3`. `--deep` is documented as
+  the escape hatch for exactly this, so it should either stat or stop claiming to.
+- **`clove dep tree --format json` omits `repeat_ref`**, which the MCP and web
+  renderers emit. Three `tree_to_json` implementations remain (`cmd/dep.rs`,
+  `ops.rs`, `clove-engine`). §7 marked the key optional in `dep-tree.json` rather
+  than unifying them, so this is the one place "same query, same answer
+  everywhere" is untrue on *shape*. Harmless, but it is an exception, not a
+  guarantee.
+- **The daemon tier is slower than the index tier for `blocked`.**
+  `GraphRequest::Blocked` carries no filter or window, so the engine hydrates the
+  whole blocked set before filtering and windowing. Measured at 700 items / 83
+  blocked, `blocked --limit 1`: daemon 29 ms, index 10 ms, files 33 ms — the
+  daemon tier is barely better than a full file scan, and degrades as the blocked
+  set grows. Fixing it is a protocol bump (`QueryKind::Blocked`).
+- **`DELETE /api/v1/items/:id?force=`** is still a lenient `== "true"`, so
+  `?force=1` — the spelling `?compact=1` accepts — is silently ignored. It fails
+  *safe* (a delete is refused, never forced), which is why §7 left it, but it is
+  the same defect class the rest of the API no longer has.
+
 ## 7. Smaller items — **DONE**
 
 - ~~**`GraphRequest::Blocked { include_warnings }`**~~ — **done**, removed with

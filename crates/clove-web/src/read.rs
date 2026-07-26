@@ -276,6 +276,14 @@ fn order_of(params: &HashMap<String, String>) -> Result<clove_core::view::Order,
     .map_err(ApiError::from)
 }
 
+/// Which list an `?mode=` request wants. Parsed strictly (see the call site).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ListMode {
+    All,
+    Ready,
+    Blocked,
+}
+
 /// `GET /api/v1/items` — filtered, sorted, paginated list.
 ///
 /// `?mode=ready|blocked` selects the corresponding engine query, so the three
@@ -289,17 +297,32 @@ pub async fn list_items(
     let filters = filters_of(&params)?;
     let shape = shape_of(&params)?;
     let window = page_window(&params)?;
-    let mode = params.get("mode").cloned().unwrap_or_default();
+    // Strict, like every other parameter on this endpoint. `?mode=redy` used to
+    // fall through to the unfiltered list with a 200 — and `mode` is not echoed
+    // in `_meta`, so a client could not tell a typo from a server that does not
+    // implement the mode it asked for. That is the exact defect the rest of this
+    // module was tightened to remove.
+    let mode = match params.get("mode").map(String::as_str) {
+        None | Some("") | Some("all") | Some("list") => ListMode::All,
+        Some("ready") => ListMode::Ready,
+        Some("blocked") => ListMode::Blocked,
+        Some(other) => {
+            return Err(ApiError::from(clove_types::CloveError::InvalidField {
+                field: "mode".to_owned(),
+                reason: format!("unknown mode `{other}` (expected ready, blocked, or all)"),
+            }))
+        }
+    };
 
     let engine = state.engine.clone();
     let (f, w) = (filters.clone(), window);
     let answer = blocking(move || {
         // Full frontmatter: this API renders every field plus the graph terms,
         // which no lean row carries.
-        let answer = match mode.as_str() {
-            "ready" => engine.ready(&f, order, w, Projection::Full),
-            "blocked" => engine.blocked(&f, order, w, Projection::Full),
-            _ => engine.list(&f, order, w, Projection::Full),
+        let answer = match mode {
+            ListMode::Ready => engine.ready(&f, order, w, Projection::Full),
+            ListMode::Blocked => engine.blocked(&f, order, w, Projection::Full),
+            ListMode::All => engine.list(&f, order, w, Projection::Full),
         };
         answer.map_err(ApiError::from)
     })
@@ -619,7 +642,12 @@ pub async fn get_stats_history(
         return Ok(ok(
             json!(points),
             json!({
-                "source": state.source,
+                // The tier that answered, like every other read endpoint —
+                // recorded snapshots live in `index.db`. This reported
+                // `state.source` (the serving mode, `standalone`/`daemon`) after
+                // the rest of the API moved to naming the tier, so one endpoint
+                // returned a value outside the enum the published schema lists.
+                "source": clove_engine::Source::Index.as_str(),
                 "synthesized": false,
                 "snapshots": recorded,
                 "total": total,
@@ -680,7 +708,8 @@ pub async fn get_stats_history(
 
     Ok(ok(
         json!(points),
-        json!({ "source": state.source, "synthesized": true }),
+        // Synthesized from the item files, so: `files`.
+        json!({ "source": clove_engine::Source::Files.as_str(), "synthesized": true }),
     ))
 }
 
