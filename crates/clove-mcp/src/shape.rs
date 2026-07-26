@@ -25,10 +25,6 @@ impl Shape {
     }
 }
 
-/// Keys that are never useful to an agent and are dropped whenever compaction
-/// is on. `schema` is a per-file migration marker, not item data.
-const NOISE: &[&str] = &["schema"];
-
 /// Shape a read result in place.
 ///
 /// Handles both result forms the read tools produce: a
@@ -53,7 +49,7 @@ pub fn apply(value: Value, shape: &Shape) -> Value {
 }
 
 fn one(value: Value, shape: &Shape) -> Value {
-    let Value::Object(mut obj) = value else {
+    let Value::Object(obj) = value else {
         return value;
     };
     match &shape.fields {
@@ -69,12 +65,7 @@ fn one(value: Value, shape: &Shape) -> Value {
                 Value::Object(projected)
             }
         }
-        None if shape.compact_enabled() => {
-            for key in NOISE {
-                obj.remove(*key);
-            }
-            Value::Object(view::compact(obj))
-        }
+        None if shape.compact_enabled() => Value::Object(view::compact_read(obj)),
         None => Value::Object(obj),
     }
 }

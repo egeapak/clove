@@ -597,6 +597,102 @@ fn read_results_are_compact_and_projectable() {
     s.shutdown();
 }
 
+/// A tool error reads the same whether or not a daemon is running.
+///
+/// Read tools never reach the daemon and write tools fall back to local ops
+/// when none is up, so the classification being shared was not enough: the
+/// daemon rendered `CODE: message` and the local path rendered just `message`.
+/// Within one session `clove_show` and `clove_status` disagreed about the same
+/// missing id, and a script updated to match the documented `ITEM_NOT_FOUND:`
+/// spelling broke again the moment the daemon stopped.
+#[test]
+fn error_text_carries_the_code_without_a_daemon() {
+    let dir = init_repo();
+    let mut s = Session::start(dir.path());
+
+    for tool in ["clove_show", "clove_comments", "clove_dep_tree"] {
+        let r = s.call(2, tool, json!({ "id": "proj-ZZZZZZZZ" }));
+        assert_eq!(r["isError"], true, "{tool} should error");
+        let text = r["content"][0]["text"].as_str().unwrap_or_default();
+        assert!(
+            text.contains("ITEM_NOT_FOUND"),
+            "{tool} must name the code like the daemon does: {text}"
+        );
+    }
+
+    // A write tool on the local fallback path renders the same way.
+    let r = s.call(
+        3,
+        "clove_status",
+        json!({ "id": "proj-ZZZZZZZZ", "status": "closed" }),
+    );
+    assert_eq!(r["isError"], true);
+    let text = r["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(text.contains("ITEM_NOT_FOUND"), "got {text}");
+
+    // A validation failure carries its own code, not a generic one.
+    let created = s.call(4, "clove_new", json!({ "title": "real" }));
+    let id = created["structuredContent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let r = s.call(5, "clove_edit", json!({ "id": id, "priority": 9 }));
+    assert_eq!(r["isError"], true);
+    let text = r["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(
+        text.contains("VALIDATION_ERROR"),
+        "a bad priority is a validation error: {text}"
+    );
+
+    s.shutdown();
+}
+
+/// `clove_dep_tree {depth: 0}` means unlimited, as `--depth 0` does on the CLI
+/// and as DESIGN §7.8 says. It used to pass 0 through, returning the root with
+/// no children — a client asking for the whole tree got one node and no error.
+#[test]
+fn dep_tree_depth_zero_is_unlimited() {
+    let dir = init_repo();
+    let mut s = Session::start(dir.path());
+    let mut previous: Option<String> = None;
+    for i in 0..4 {
+        let args = match &previous {
+            Some(dep) => json!({ "title": format!("level {i}"), "deps": [dep] }),
+            None => json!({ "title": format!("level {i}") }),
+        };
+        let created = s.call(2, "clove_new", args);
+        previous = Some(
+            created["structuredContent"]["id"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        );
+    }
+    let root = previous.unwrap();
+
+    let depth = |v: &Value| -> usize {
+        let mut n = 0;
+        let mut node = v;
+        while node["children"].as_array().map(|c| !c.is_empty()) == Some(true) {
+            node = &node["children"][0];
+            n += 1;
+        }
+        n
+    };
+
+    let full = s.call(3, "clove_dep_tree", json!({ "id": root, "depth": 0 }));
+    assert_eq!(
+        depth(&full["structuredContent"]),
+        3,
+        "depth 0 must return the whole chain, not the root alone"
+    );
+    // A real depth still bounds it.
+    let bounded = s.call(4, "clove_dep_tree", json!({ "id": root, "depth": 1 }));
+    assert_eq!(depth(&bounded["structuredContent"]), 1);
+
+    s.shutdown();
+}
+
 #[test]
 fn tool_error_is_reported_as_is_error() {
     let dir = init_repo();

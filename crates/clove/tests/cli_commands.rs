@@ -559,6 +559,81 @@ fn a_stale_schema_index_is_rebuilt_whichever_command_opens_it_first() {
     assert_eq!(v["data"].as_array().unwrap().len(), 30);
 }
 
+/// `--fields` returns the same keys whether or not an index exists.
+///
+/// The index and daemon fast paths select a lean five-column row, so any field
+/// outside `{id,status,type,priority,title}` was silently absent from the
+/// result — `clove ls --fields id,created` gave `[{"id": …}]` on a machine with
+/// an index and both keys on one without. The answer depended on whether
+/// `.clove/index.db` happened to exist.
+#[test]
+fn fields_outside_the_lean_row_fall_back_to_the_files() {
+    let dir = init_repo();
+    new_item(dir.path(), "Widget", &[]);
+    clove(dir.path()).arg("reindex").assert().success();
+
+    // Outside the lean set: must fall back and still answer in full.
+    let v = json_ok(clove(dir.path()).args(["ls", "--fields", "id,created"]));
+    let mut keys: Vec<&str> = v["data"][0]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|k| k.as_str())
+        .collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec!["created", "id"],
+        "requested fields must be present"
+    );
+    assert_eq!(
+        v["_meta"]["source"], "files",
+        "the lean row cannot serve these"
+    );
+
+    // Inside the lean set: the index still serves it.
+    let v = json_ok(clove(dir.path()).args(["ls", "--fields", "id,title"]));
+    assert_eq!(
+        v["_meta"]["source"], "index",
+        "no need to give up the index"
+    );
+    let mut keys: Vec<&str> = v["data"][0]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|k| k.as_str())
+        .collect();
+    keys.sort();
+    assert_eq!(keys, vec!["id", "title"]);
+
+    // `ready` shares the tiering and the same guard.
+    let v = json_ok(clove(dir.path()).args(["ready", "--fields", "id,updated"]));
+    assert!(
+        v["data"][0].get("updated").is_some(),
+        "ready must honour it too: {v}"
+    );
+}
+
+/// `--compact` produces the same key set as the MCP tools' `compact`.
+///
+/// It did not: the MCP path additionally drops `schema`, so the two surfaces
+/// disagreed by exactly one silent key while the changelog claimed they shaped
+/// identically.
+#[test]
+fn compact_drops_the_same_keys_as_the_mcp_tools() {
+    let dir = init_repo();
+    new_item(dir.path(), "Widget", &[]);
+    let v = json_ok(clove(dir.path()).args(["ls", "--no-index", "--compact"]));
+    let obj = v["data"][0].as_object().unwrap();
+    assert!(obj.get("schema").is_none(), "schema is dropped: {v}");
+    for absent in ["assignee", "parent", "closed", "labels", "deps"] {
+        assert!(obj.get(absent).is_none(), "`{absent}` should be compacted");
+    }
+    // Without --compact the full shape, `schema` included, is unchanged.
+    let full = json_ok(clove(dir.path()).args(["ls", "--no-index"]));
+    assert_eq!(full["data"][0]["schema"], 1);
+}
+
 #[test]
 fn ls_default_limit_caps_at_100_with_full_total() {
     let dir = init_repo();

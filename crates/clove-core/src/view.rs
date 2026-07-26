@@ -266,6 +266,23 @@ pub fn item_object(item: &Item) -> Map<String, Value> {
     frontmatter_object(&item.frontmatter)
 }
 
+/// Keys a *read* result drops whenever compaction is on, on top of null and
+/// empty-list values: internal bookkeeping a reader never acts on.
+///
+/// `schema` is a per-file migration marker, not item data. It lives here rather
+/// than in one surface so `clove ls --compact` and `clove_list` produce the same
+/// key set — they did not, and the difference was a single silent key.
+pub const READ_NOISE: &[&str] = &["schema"];
+
+/// [`compact`], plus the [`READ_NOISE`] keys. The shaping every read surface
+/// applies for `--compact` / `"compact": true`.
+pub fn compact_read(mut map: Map<String, Value>) -> Map<String, Value> {
+    for key in READ_NOISE {
+        map.remove(*key);
+    }
+    compact(map)
+}
+
 /// Drop keys whose value carries no information: JSON `null` and empty arrays.
 ///
 /// Booleans (including `false`), numbers, and strings (including `""`) are

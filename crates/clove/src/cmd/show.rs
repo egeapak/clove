@@ -44,7 +44,7 @@ pub fn run(ctx: &Ctx, format: OutputFormat, args: ShowArgs) -> Result<(), CloveE
         None => obj,
     };
     let projected = if args.compact {
-        clove_core::view::compact(projected)
+        clove_core::view::compact_read(projected)
     } else {
         projected
     };

@@ -967,6 +967,9 @@ comment thread pages on the same per-surface default as an item list.
 echoes the effective limit, so the default is discoverable from a response rather
 than by reading this document.
 
+Reads that return a *fixed* shape rather than a list — `GET /api/v1/cycles`,
+`/meta`, and `clove show` — carry no window and no counts.
+
 `clove comments` / `clove_comments` / `GET /items/:id/comments` page from the
 opposite end — the window is anchored at the *newest* comment — so their skip
 argument is named `--skip-newest` / `skip_newest` rather than `offset`.

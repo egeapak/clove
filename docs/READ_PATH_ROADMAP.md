@@ -53,9 +53,9 @@ shaping work was about cutting.
 
    `Rank` is the default and keeps today's `(priority, topo, id)`. **Every**
    variant must end in `.then_with(|| a.id.cmp(&b.id))` — the same total-order
-   requirement that `sort_hits` in `ops.rs` now documents. Pagination over a
-   non-total order silently repeats and skips rows; that bug has already been
-   shipped once here.
+   requirement `view::sort_by_match` documents. Pagination over a non-total
+   order silently repeats and skips rows; that bug has already been shipped once
+   here.
 
 2. Move `view::sort_by_rank` to be `Order::apply` for `SortField::Rank`, so
    there is one sorter rather than two.
@@ -66,10 +66,12 @@ shaping work was about cutting.
    shared one (keep accepting today's `?sort=`/`?dir=` spellings).
 
 4. **The index path needs matching `ORDER BY`.** `crates/clove-index/src/query.rs`
-   hardcodes `ORDER BY priority ASC, topological_rank IS NULL ASC,
-   topological_rank ASC, id ASC`. Each `SortField` needs its column, always with
-   `, id ASC` last. Build the clause from a match on the enum — never
-   interpolate a user string into SQL.
+   has **two** hardcoded order clauses and they are not identical — the list
+   query uses `ORDER BY priority ASC, topological_rank ASC, id ASC` and the
+   search query adds a `topological_rank IS NULL ASC` term. Both need the new
+   ordering; changing only the one you find first leaves search sorted the old
+   way. Each `SortField` needs its column, always with `, id ASC` last. Build the
+   clause from a match on the enum — never interpolate a user string into SQL.
 
 5. `_meta` echoes `sort` and `dir`, same reasoning as `_meta.limit`.
 
@@ -127,7 +129,7 @@ vectors. The codec is length-delimited **JSON**, so `#[serde(default)]` on the
 new fields is compatible both directions and a mixed-version `clove`/`cloved`
 pair keeps working — but the *semantics* change (a client sending
 `status: "open"` against a daemon expecting a list). Bump
-`clove_ipc::PROTOCOL_VERSION` 4 → 5 (its current value) and let the existing
+`clove_ipc::PROTOCOL_VERSION` from its current **4** to 5, and let the existing
 handshake reject the mismatch — `client.rs` already fails a version mismatch;
 `clove daemon` restarts are cheap and the daemon is a cache, not a source of
 truth.
@@ -153,8 +155,10 @@ change when nothing changed.
 **Plan.**
 
 1. Canonicalize on write: parse to `DateTime<Utc>`, emit one spelling
-   (`to_rfc3339_opts(SecondsFormat::Secs, true)` — the store already truncates
-   to seconds).
+   (`to_rfc3339_opts(SecondsFormat::Secs, true)`). Item frontmatter is already
+   second-truncated, but **comment timestamps and stats snapshots are not** —
+   both carry nanoseconds (`…T08:54:22.904816670+00:00`), so the canonicalization
+   has to cover them too.
 2. Bump `clove_index::SCHEMA_VERSION` (now **5**, after §6.1) so existing
    indexes holding non-canonical strings are replaced rather than compared
    against. The tripwire assertion in `db.rs` makes this a deliberate act.
@@ -283,15 +287,18 @@ change results, which is worse than the original bug. Pinned by
 matches whole tokens. The FTS is therefore a strictly narrower prefilter and the
 two disagree for any needle that is not a whole token:
 
-| query | `--no-index` | index |
-|---|---|---|
-| `core`, against label `area:core` and body `the corepart word` | 2 | 1 |
-| `icode`, against label `Ünicode-tag` | 1 | 0 |
-| `ünicode`, against label `Ünicode-tag` | 1 | 0 |
+| query | fixture | `--no-index` | index |
+|---|---|---|---|
+| `core` | label `area:core`, body `the corepart word` | 2 | 1 |
+| `icode` | label `ünicode-tag` | 1 | 0 |
+| `Ünicode` | label `ünicode-tag` | 1 | 0 |
 
 The last row is a second axis: `tokenize='ascii'` case-folds ASCII only, so a
-non-ASCII title or label differing in case is found by the file path and missed
-by the index path. This is pre-existing — the index path has always been FTS
+non-ASCII **needle** differing in case from the stored text is found by the file
+path (which lowercases both sides) and missed by the index path. Labels are
+canonicalized to lowercase on write, so the case difference has to come from the
+query — `ünicode` against `ünicode-tag` matches on *both* paths, and a fixture
+written the other way round proves nothing. This is pre-existing — the index path has always been FTS
 while the file path has always been `contains` — but it means "the same query
 answers the same way on both paths" is **not** yet true for search, and the
 pinning test uses whole-token needles only, so it cannot see it.

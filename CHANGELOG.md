@@ -10,7 +10,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **MCP read tools take `fields` and `compact`.** `fields` projects each item to
   a named subset (`{"fields": ["id", "title"]}`); `compact` drops keys that are
-  null or an empty list. Compaction is on by default — measured on a 12-item
+  null or an empty list, plus `schema` (a per-file migration marker, not item
+  data — the one dropped key that is neither null nor empty). Compaction is on by default — measured on a 12-item
   repo, a `clove_list` result went from 4595 to 2555 bytes (-44%), and to 764
   with a two-field projection (-83%). `compact: false` restores the previous
   shape exactly. A definite `false` or `0` is never dropped: `ready: false` is an
@@ -25,8 +26,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ones — named for its direction, since it anchors at the opposite end from the
   list tools' `offset`.
 - **`clove ls`/`ready`/`blocked` accept `--compact`**, applying the same
-  null/empty-key omission the MCP read tools use, so the same query shapes
-  identically on either surface.
+  omission the MCP read tools use — through one shared `view::compact_read`, so
+  the two cannot drift. Note the CLI's index and daemon paths select a lean
+  five-column row, so `--compact` there yields fewer keys still; `--no-index`
+  gives the same key set as the matching MCP tool.
 - **`offset` on every list read.** `clove search --offset`, `clove stats
   --history --offset`, and `offset` on the `clove_ready`, `clove_blocked` and
   `clove_search` MCP tools. All of them advertised a `limit` while pinning the
@@ -69,8 +72,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   computed from the item's own dependency closure, falling back to the
   whole-store graph only when that closure is very large. Measured 57.3ms ->
   0.06ms at 10k items, and flat rather than linear in store size. `clove show`,
-  the `clove_show` MCP tool, and the daemon's `show` RPC now share one
-  implementation instead of two.
+  the `clove_show` MCP tool, and the daemon's `show` RPC now share the
+  `ops::graph_terms` helper instead of each deriving those fields themselves.
+  (`clove_show` and the daemon RPC share all of `ops::show`; `clove show` still
+  assembles its own object and has no daemon or index tier.)
 
   *User-visible:* `clove show` computes `ready`/`blocked_by` unconditionally.
   They were previously gated behind `--verbose` — emitted as `null` with a
@@ -93,7 +98,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   with parse failures, exit 4), so no client could recover the right exit code.
   It now emits the same `code`/`exit` pair as the CLI and web API, so a failure
   reported by the daemon is indistinguishable from the same failure raised
-  locally.
+  locally — including its *text*: local MCP errors are now rendered
+  `CODE: message` too. Before, the same missing id read `ITEM_NOT_FOUND: …`
+  through the daemon and bare `no item with id …` through the local fallback,
+  so within one session `clove_status` and `clove_show` disagreed.
 
   *User-visible:* MCP tool errors that route through the daemon now read
   `ITEM_NOT_FOUND: no item with id …` rather than `not_found: …` (likewise
@@ -112,6 +120,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`--fields` was silently dropped on the CLI's index and daemon paths.** Those
+  tiers select a lean five-column row (`id`/`status`/`type`/`priority`/`title`),
+  so `clove ls --fields id,created` returned `[{"id": …}]` where `--no-index`
+  returned both keys — the answer depended on whether `.clove/index.db` happened
+  to exist. A request reaching outside the lean set now falls back to the file
+  scan; one that fits still uses the index.
+- **`depth: 0` on `clove_dep_tree` and `?depth=0` returned the root alone.** `0`
+  is unlimited for every other bound, including `clove dep tree --depth 0`, and
+  DESIGN documented it as such; the two non-CLI surfaces passed it straight
+  through, so a client asking for the whole tree got one node and no error.
+- **`GET /api/v1/stats/history` ignored `?offset=`** (it was parsed and dropped)
+  and reported no `total`, having pushed the limit into SQL — the same defect
+  the CLI's `stats --history` had. It now windows after the fetch and reports
+  `total`/`returned`/`offset`/`limit`.
+
 - **`clove search` and `clove_search` disagreed on what counts as a hit.** The
   MCP tool matched title, **labels**, and body and ranked in three classes; the
   CLI matched title and body and ranked in two — and its index path used an FTS
@@ -120,7 +143,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`view::rank_search_hits`) shared by all three, and `items_fts` indexes labels.
 
   *Index schema v4 → v5.* Existing indexes are rebuilt from the files on next
-  open.
+  open — one extra scan, and one `note: index at … schema changed …; rebuilding`
+  line on **stderr**, which a script parsing stderr will see once. Nothing is
+  lost: the durable `snapshots` history is carried across the rebuild.
 
   *Not fixed:* the FTS matches whole tokens while the shared matcher matches
   substrings, so the index path remains a narrower prefilter — searching `core`
@@ -176,7 +201,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `blocked` also filtered it out unless `--include-warnings` was passed, so by
   default a broken reference appeared in neither list. `blocked` now includes
   such items by default, matching what `GraphStore` has always reported
-  (DESIGN §5.3) and keeping the `ready ∪ blocked ∪ closed` partition intact.
+  (DESIGN §5.3) and keeping the `ready ∪ blocked ∪ closed` partition intact for
+  dangling references. (That partition has a separate, pre-existing hole: an item
+  inside a hard-dependency cycle is `excluded`, so it appears in neither list.)
 
   `--include-warnings` is **removed** from `ready` and `blocked` (and from the
   `clove_ready`/`clove_blocked` MCP tools): it no longer selects anything. It was

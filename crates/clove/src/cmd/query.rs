@@ -10,8 +10,8 @@ use serde::Deserialize;
 use crate::cli::QueryArgs;
 use crate::cmd::index_read::{list_via_daemon, list_via_index};
 use crate::cmd::listing::{
-    emit, objects_from_frontmatters, objects_from_lean_rows, ranks_of, sort_by_priority_topo,
-    window, Filters, ListOpts,
+    emit, lean_can_serve, objects_from_frontmatters, objects_from_lean_rows, ranks_of,
+    sort_by_priority_topo, window, Filters, ListOpts,
 };
 use crate::context::Ctx;
 use crate::item_json::parse_fields;
@@ -61,8 +61,10 @@ pub fn run(
     let fields = args.fields.as_deref().map(parse_fields);
     let window = window(args.offset.or(qf.offset), args.limit.or(qf.limit));
 
-    if let Some((objects, total, warnings)) =
-        list_via_daemon(ctx, no_index, QueryMode::List, &filters, window)
+    let lean_ok = lean_can_serve(fields.as_deref());
+    if let Some((objects, total, warnings)) = lean_ok
+        .then(|| list_via_daemon(ctx, no_index, QueryMode::List, &filters, window))
+        .flatten()
     {
         emit(
             format,
@@ -79,9 +81,10 @@ pub fn run(
         return Ok(());
     }
 
-    if let Some((rows, total, warnings)) =
-        list_via_index(ctx, no_index, deep, QueryMode::List, &filters, window)?
-    {
+    if let Some((rows, total, warnings)) = match lean_ok {
+        true => list_via_index(ctx, no_index, deep, QueryMode::List, &filters, window)?,
+        false => None,
+    } {
         emit(
             format,
             objects_from_lean_rows(&rows),

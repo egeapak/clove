@@ -81,12 +81,12 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
 - `clove setup [--global] [--dry-run]` — register the `clove mcp` server (+ tool\n\
   permissions) with Claude Code and write `CLOVE.md` agent directives.\n\
 - `clove new <title> [--type T] [-p N] [-l LABEL]... [--dep ID]... [--parent ID] [-a WHO] [-b TEXT]`\n\
-- `clove show <id> [--fields LIST] [-v]` — one item (`-v`/json compute `ready`/`blocked_by`).\n\
+- `clove show <id> [--fields LIST] [--compact]` — one item. `ready`/`blocked_by` are always computed (`-v` is accepted but no longer needed for them).\n\
 - `clove edit <id> [--field KEY=VALUE]...` / `clove set <id> KEY=VALUE...`\n\
 - `clove status <id> <open|in_progress|closed>` (aliases `start`, `close`).\n\
 - `clove label <id> <add|rm> <label>`, `clove assign <id> <who|--clear>`, `clove priority <id> <0-4>`.\n\
 - `clove dep add <id> <dep-id>` / `dep rm` / `dep tree <id> [--depth N|--full] [--flat]` / `dep cycle [--fail-on-cycle]`.\n\
-- `clove ready` / `clove blocked` — work queues (filters: `--status --type --label --assignee --priority`).\n\
+- `clove ready` / `clove blocked` — work queues (filters: `--status --type --label --assignee --priority`; also `--limit --offset --fields --compact`).\n\
 - `clove ls` / `clove query [--filter JSON]` — list/query (`--fields`, `--limit`, `--offset`).\n\
 - Every list read (`ls`, `query`, `ready`, `blocked`, `search`) takes the same `--limit`/`--offset`: no flag caps at 100, `--limit 0` returns everything, `_meta.total` is always the full match count and `_meta.limit` echoes the one in force.\n\
 - `clove comment <id> <message>` / `clove comments <id> [--limit N] [--skip-newest N]` — `--limit` keeps the *newest* N (default 100, `--limit 0` for all); `--skip-newest` pages back into older ones. `_meta.total` is the full thread length.\n\
@@ -148,9 +148,17 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
   JSON-RPC), exposing clove as native tools so an agent need not shell out:\n\
   `clove_ready`, `clove_blocked`, `clove_list`, `clove_show`, `clove_search`,\n\
   `clove_comments`, `clove_dep_tree`, `clove_stats` (reads) and `clove_new`, `clove_status`,\n\
-  `clove_edit`, `clove_comment`, `clove_dep_add` (writes). Tool results carry the\n\
-  same item JSON as the CLI. Configure it as an MCP server with command `clove`\n\
-  and arg `mcp`, launched in the repository.\n\
+  `clove_edit`, `clove_comment`, `clove_dep_add`, `clove_dep_remove`, `clove_set_parent`\n\
+  (writes). Configure it as an MCP server with command `clove` and arg `mcp`,\n\
+  launched in the repository.\n\
+- Tool results are the same item JSON as the CLI's, with two differences worth\n\
+  knowing: reads are **compacted by default** (null and empty-list keys, plus\n\
+  `schema`, are omitted — pass `compact: false` for the full shape), and the\n\
+  read tools' default `limit` is **50**, not the CLI's 100. `limit: 0` is\n\
+  unlimited on both, and every list result carries `total`/`returned`/`limit`.\n\
+- `fields` and `compact` are accepted by every read tool, and by `clove ls`,\n\
+  `ready`, `blocked`, `query`, `search`, and `show` as `--fields`/`--compact`.\n\
+  Use them: a two-field projection cuts a list result by roughly 80%.\n\
 - Writes are coordinated through a running daemon when present (so concurrent\n\
   agents share one writer) and fall back to direct file writes otherwise.\n\
 \n\

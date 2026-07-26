@@ -231,10 +231,15 @@ pub async fn get_deptree(
     Query(params): Query<HashMap<String, String>>,
 ) -> ApiResult {
     let id = parse_id(&id)?;
-    let depth = params
+    // `?depth=0` is unlimited, matching `--depth 0` and every other bound.
+    let depth = match params
         .get("depth")
         .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(clove_core::view::defaults::DEP_TREE_DEPTH);
+        .unwrap_or(clove_core::view::defaults::DEP_TREE_DEPTH)
+    {
+        0 => usize::MAX,
+        n => n,
+    };
     let (_frontmatters, ctx) = load(&state)?;
     let tree = ctx
         .graph()
@@ -329,7 +334,7 @@ pub async fn get_stats(
 fn recorded_history_points(
     state: &AppState,
     params: &HashMap<String, String>,
-) -> Option<Vec<Value>> {
+) -> Option<(Vec<Value>, usize)> {
     use clove_index::Index;
 
     let db_path = state.issues_dir.parent()?.join("index.db");
@@ -338,15 +343,19 @@ fn recorded_history_points(
     }
     let index = Index::open(&db_path).ok()?;
     let since = params.get("since").map(String::as_str);
-    // Through the shared contract like every other read here: `?limit=0` is
-    // unlimited, and the web default is unlimited.
-    let limit = page_window(params).limit;
-    // snapshot_history returns most-recent-first; reverse to chronological order
-    // so the throughput deltas below run forward in time.
-    let mut snapshots = index.snapshot_history(since, limit).ok()?;
+    // Fetch the whole series and window it here rather than pushing the limit
+    // into SQL. Pushing it down cannot honour `?offset=` — which this endpoint
+    // parsed and then dropped — and reports the truncated count as the total,
+    // the same defect the CLI's `stats --history` had.
+    let window = page_window(params);
+    let snapshots = index.snapshot_history(since, None).ok()?;
     if snapshots.is_empty() {
         return None;
     }
+    // `snapshot_history` returns most-recent-first, so the window is applied
+    // here (keeping the newest N, as `--limit` does) and the survivors are then
+    // reversed into chronological order for the throughput deltas below.
+    let (mut snapshots, total) = window.apply(snapshots);
     snapshots.reverse();
 
     let mut points = Vec::with_capacity(snapshots.len());
@@ -382,7 +391,7 @@ fn recorded_history_points(
             "blocked": report.blocked,
         }));
     }
-    Some(points)
+    Some((points, total))
 }
 
 /// `GET /api/v1/stats/history` — the throughput/levels history for the timeline.
@@ -401,11 +410,20 @@ pub async fn get_stats_history(
     use std::collections::BTreeMap;
 
     // Durable recorded snapshots win when present.
-    if let Some(points) = recorded_history_points(&state, &params) {
+    if let Some((points, total)) = recorded_history_points(&state, &params) {
+        let window = page_window(&params);
         let recorded = points.len();
         return Ok(ok(
             json!(points),
-            json!({ "source": state.source, "synthesized": false, "snapshots": recorded }),
+            json!({
+                "source": state.source,
+                "synthesized": false,
+                "snapshots": recorded,
+                "total": total,
+                "returned": recorded,
+                "offset": window.offset,
+                "limit": window.reported_limit(),
+            }),
         ));
     }
 

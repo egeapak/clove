@@ -92,7 +92,7 @@ impl Engine {
         let shaping = shaping(&a.shape);
         ops::ready(&self.store(), &filters, window(a.offset, a.limit))
             .map(|v| shape::apply(v, &shaping))
-            .map_err(stringify)
+            .map_err(stringify_core)
     }
 
     pub fn blocked(&self, a: BlockedArgs) -> Result<Value, String> {
@@ -104,7 +104,7 @@ impl Engine {
             window(a.filter.offset, a.filter.limit),
         )
         .map(|v| shape::apply(v, &shaping))
-        .map_err(stringify)
+        .map_err(stringify_core)
     }
 
     pub fn list(&self, a: ListArgs) -> Result<Value, String> {
@@ -116,7 +116,7 @@ impl Engine {
             window(a.filter.offset, a.filter.limit),
         )
         .map(|v| shape::apply(v, &shaping))
-        .map_err(stringify)
+        .map_err(stringify_core)
     }
 
     pub fn show(&self, a: IdArgs) -> Result<Value, String> {
@@ -124,19 +124,19 @@ impl Engine {
         let shaping = shaping(&a.shape);
         ops::show(&self.store(), &id)
             .map(|v| shape::apply(v, &shaping))
-            .map_err(stringify)
+            .map_err(stringify_core)
     }
 
     pub fn search(&self, a: SearchArgs) -> Result<Value, String> {
         let shaping = shaping(&a.shape);
         ops::search(&self.store(), &a.text, window(a.offset, a.limit))
             .map(|v| shape::apply(v, &shaping))
-            .map_err(stringify)
+            .map_err(stringify_core)
     }
 
     pub fn comments(&self, a: CommentsArgs) -> Result<Value, String> {
         let id = parse_id(&a.id)?;
-        ops::comments(&self.store(), &id, window(a.skip_newest, a.limit)).map_err(stringify)
+        ops::comments(&self.store(), &id, window(a.skip_newest, a.limit)).map_err(stringify_core)
     }
 
     pub fn dep_tree(&self, a: DepTreeArgs) -> Result<Value, String> {
@@ -146,12 +146,14 @@ impl Engine {
         // `children` of every leaf — puts the payload outside its published v1
         // schema. The schema-legality argument for compacting items comes from
         // `item.json`'s much smaller `required` set and does not transfer here.
-        ops::dep_tree(
-            &self.store(),
-            &id,
-            a.depth.unwrap_or(DEP_TREE_DEPTH as u64) as usize,
-        )
-        .map_err(stringify)
+        // `0` is unlimited here as it is for every other bound (`--depth 0`,
+        // `--limit 0`, `--top 0`). It used to pass straight through, so a client
+        // asking for the whole tree got the root and no children.
+        let depth = match a.depth.unwrap_or(DEP_TREE_DEPTH as u64) as usize {
+            0 => usize::MAX,
+            n => n,
+        };
+        ops::dep_tree(&self.store(), &id, depth).map_err(stringify_core)
     }
 
     pub fn stats(&self, a: StatsArgs) -> Result<Value, String> {
@@ -161,7 +163,7 @@ impl Engine {
             !a.no_epics.unwrap_or(false),
             Utc::now(),
         )
-        .map_err(stringify)
+        .map_err(stringify_core)
     }
 
     // ---- Write tools (daemon-preferred, ops fallback) -----------------------
@@ -186,23 +188,23 @@ impl Engine {
                 spec,
                 Utc::now(),
             )
-            .map_err(stringify),
+            .map_err(stringify_core),
         }
     }
 
     pub fn set_status(&self, a: StatusArgs) -> Result<Value, String> {
-        let status = ItemStatus::parse(&a.status).map_err(stringify)?;
+        let status = ItemStatus::parse(&a.status).map_err(stringify_core)?;
         match self.with_daemon(|d| d.set_status(a.id.clone(), status)) {
             Some(result) => result,
             None => {
                 let id = parse_id(&a.id)?;
-                ops::transition(&self.store(), &id, status, Utc::now()).map_err(stringify)
+                ops::transition(&self.store(), &id, status, Utc::now()).map_err(stringify_core)
             }
         }
     }
 
     pub fn edit(&self, a: EditArgs) -> Result<Value, String> {
-        let req = a.to_request().map_err(stringify)?;
+        let req = a.to_request().map_err(stringify_core)?;
         if req.is_empty() {
             return Err("no fields to edit".to_owned());
         }
@@ -210,7 +212,7 @@ impl Engine {
             Some(result) => result,
             None => {
                 let id = parse_id(&a.id)?;
-                clove_core::apply_edit(&self.store(), &id, &req, Utc::now()).map_err(stringify)
+                clove_core::apply_edit(&self.store(), &id, &req, Utc::now()).map_err(stringify_core)
             }
         }
     }
@@ -221,7 +223,7 @@ impl Engine {
             Some(result) => result,
             None => {
                 let id = parse_id(&a.id)?;
-                ops::comment(&self.store(), &id, &author, &a.message).map_err(stringify)
+                ops::comment(&self.store(), &id, &author, &a.message).map_err(stringify_core)
             }
         }
     }
@@ -232,7 +234,7 @@ impl Engine {
             None => {
                 let id = parse_id(&a.id)?;
                 let dep = parse_id(&a.dep_id)?;
-                ops::dep_add(&self.store(), &id, &dep, Utc::now()).map_err(stringify)
+                ops::dep_add(&self.store(), &id, &dep, Utc::now()).map_err(stringify_core)
             }
         }
     }
@@ -243,7 +245,7 @@ impl Engine {
             None => {
                 let id = parse_id(&a.id)?;
                 let dep = parse_id(&a.dep_id)?;
-                ops::dep_remove(&self.store(), &id, &dep, Utc::now()).map_err(stringify)
+                ops::dep_remove(&self.store(), &id, &dep, Utc::now()).map_err(stringify_core)
             }
         }
     }
@@ -257,7 +259,8 @@ impl Engine {
                     Some(p) => Some(parse_id(&p)?),
                     None => None,
                 };
-                ops::set_parent(&self.store(), &id, parent.as_ref(), Utc::now()).map_err(stringify)
+                ops::set_parent(&self.store(), &id, parent.as_ref(), Utc::now())
+                    .map_err(stringify_core)
             }
         }
     }
@@ -281,11 +284,25 @@ fn window(offset: Option<u64>, limit: Option<u64>) -> Page {
 }
 
 fn parse_id(raw: &str) -> Result<CloveId, String> {
-    CloveId::new(raw).map_err(stringify)
+    CloveId::new(raw).map_err(stringify_core)
 }
 
 fn stringify<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
+}
+
+/// Render a local `CloveError` the way the daemon renders a remote one:
+/// `CODE: message`.
+///
+/// Read tools never reach the daemon and write tools fall back to local ops
+/// when none is running, so without this the *same* failure read
+/// `ITEM_NOT_FOUND: no item with id X` or `no item with id X` depending on
+/// whether a daemon happened to be up — and within one session `clove_show` and
+/// `clove_status` disagreed on the same missing id. The classification was
+/// already shared; only the rendering was not.
+fn stringify_core(e: clove_types::CloveError) -> String {
+    let (code, _exit) = clove_types::error_code(&e);
+    format!("{code}: {e}")
 }
 
 /// The comment author: `CLOVE_AUTHOR`, then `GIT_AUTHOR_EMAIL`, else `unknown`.
@@ -305,6 +322,6 @@ impl FilterArgs {
             self.assignee.as_deref(),
             self.priority,
         )
-        .map_err(stringify)
+        .map_err(stringify_core)
     }
 }

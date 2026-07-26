@@ -9,7 +9,8 @@ use clove_types::{CloveError, CloveId, ItemFrontmatter};
 use crate::cli::FilterArgs;
 use crate::cmd::index_read::{list_via_daemon, list_via_index};
 use crate::cmd::listing::{
-    emit, objects_from_frontmatters, objects_from_lean_rows, ranks_of, window, Filters, ListOpts,
+    emit, lean_can_serve, objects_from_frontmatters, objects_from_lean_rows, ranks_of, window,
+    Filters, ListOpts,
 };
 use crate::context::Ctx;
 use crate::item_json::parse_fields;
@@ -33,8 +34,10 @@ pub fn run(
     let window = window(args.offset, args.limit);
 
     // Daemon fast path: a running daemon serves the ready set from its hot index.
-    if let Some((objects, total, warnings)) =
-        list_via_daemon(ctx, no_index, QueryMode::Ready, &filters, window)
+    let lean_ok = lean_can_serve(fields.as_deref());
+    if let Some((objects, total, warnings)) = lean_ok
+        .then(|| list_via_daemon(ctx, no_index, QueryMode::Ready, &filters, window))
+        .flatten()
     {
         emit(
             format,
@@ -52,9 +55,10 @@ pub fn run(
     }
 
     // Index fast path: the ready SQL replaces the in-memory graph build.
-    if let Some((rows, total, warnings)) =
-        list_via_index(ctx, no_index, deep, QueryMode::Ready, &filters, window)?
-    {
+    if let Some((rows, total, warnings)) = match lean_ok {
+        true => list_via_index(ctx, no_index, deep, QueryMode::Ready, &filters, window)?,
+        false => None,
+    } {
         emit(
             format,
             objects_from_lean_rows(&rows),

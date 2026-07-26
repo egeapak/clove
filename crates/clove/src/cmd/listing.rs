@@ -35,8 +35,12 @@ pub struct ListOpts<'a> {
     /// reports can't disagree.
     pub window: clove_core::view::Page,
     pub fields: Option<&'a [String]>,
-    /// Drop null/empty-list keys from JSON output. Matches the MCP read tools'
-    /// `compact`, so the same request shapes the same on either surface.
+    /// Drop null/empty-list keys (and `schema`) from JSON output, through the
+    /// same `view::compact_read` the MCP read tools use.
+    ///
+    /// Note this is the *file* path's shape. The index and daemon paths select a
+    /// lean five-column row, so `--compact` there yields fewer keys still —
+    /// see `LEAN_FIELDS`.
     pub compact: bool,
     /// `"files"` or `"index"`.
     pub source: &'a str,
@@ -64,6 +68,24 @@ fn lean_object(id: &str, status: &str, item_type: &str, priority: u8, title: &st
     m.insert("priority".to_owned(), Value::Number(priority.into()));
     m.insert("title".to_owned(), Value::String(title.to_owned()));
     m
+}
+
+/// The keys [`lean_object`] carries — the only fields the index and daemon fast
+/// paths can answer from.
+pub const LEAN_FIELDS: &[&str] = &["id", "status", "type", "priority", "title"];
+
+/// Whether the lean projection can satisfy a `--fields` request.
+///
+/// It cannot serve what it does not select: `--fields id,created` against the
+/// index returned `[{"id": …}]` with `created` silently absent, while the same
+/// command with `--no-index` returned both — so the answer depended on whether
+/// `.clove/index.db` happened to exist. A request reaching outside the lean set
+/// falls back to the file scan instead.
+pub fn lean_can_serve(fields: Option<&[String]>) -> bool {
+    match fields {
+        None => true,
+        Some(requested) => requested.iter().all(|k| LEAN_FIELDS.contains(&k.as_str())),
+    }
 }
 
 /// Build list objects from lean index rows (the index fast path).
@@ -107,7 +129,7 @@ pub fn emit(format: OutputFormat, objects: Vec<ListObject>, opts: ListOpts<'_>) 
                         None => (*obj).clone(),
                     };
                     let obj = if opts.compact {
-                        clove_core::view::compact(obj)
+                        clove_core::view::compact_read(obj)
                     } else {
                         obj
                     };

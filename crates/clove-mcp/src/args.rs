@@ -95,7 +95,7 @@ pub struct CommentsArgs {
 pub struct DepTreeArgs {
     /// The root item id.
     pub id: String,
-    /// Maximum depth (default 5).
+    /// Maximum depth (0 = no limit; default 5).
     pub depth: Option<u64>,
 }
 
