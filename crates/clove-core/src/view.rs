@@ -168,7 +168,7 @@ impl Page {
 /// Where a search needle was found in an item, best match first.
 ///
 /// The single definition of "what counts as a hit, and how well" — shared by
-/// `ops::search` (MCP, web) and `clove search`'s file and index paths, which
+/// `ops::search` (the MCP tool) and `clove search`'s file and index paths, which
 /// previously disagreed on both. The CLI matched title and body only and ranked
 /// in two classes; `ops::search` matched labels too and ranked in three, so a
 /// label-only hit was found by the MCP tool and by neither CLI path.

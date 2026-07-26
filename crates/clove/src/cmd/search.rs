@@ -1,6 +1,12 @@
 //! `clove search` (T-S05): FTS5 search when an index is present, else a parallel
 //! file-content scan. Both paths return the same JSON shape; `_meta.source`
-//! distinguishes them. Title matches are ranked ahead of body-only matches.
+//! distinguishes them, and both rank through `view::rank_search_hits` — title
+//! hits, then labels, then body, tie-broken by `(priority, id)`.
+//!
+//! Caveat, still open: the FTS matches whole *tokens* while `rank_search_hits`
+//! matches substrings, so the index path is a narrower prefilter and the two
+//! paths differ for a needle that is not a whole token (`core` inside
+//! `corepart`). See `docs/READ_PATH_ROADMAP.md` §6.1.
 
 use clove_core::view::rank_search_hits;
 use clove_core::OutputFormat;
@@ -64,7 +70,7 @@ pub fn run(
     // Daemon fast path: the daemon runs the FTS over its hot index and returns
     // matched ids; we still read those files for full detail, so the output is
     // identical to the local index path bar `_meta.source = "daemon"`. The
-    // daemon is asked for ALL matches (limit applied after `rank_title_first`,
+    // daemon is asked for ALL matches (the window is applied after ranking,
     // exactly like the local index path) — truncating inside its SQL would cut
     // by `(priority, topo, id)` before title matches are ranked first.
     if let Some(ids) = search_via_daemon(ctx, no_index, &text) {

@@ -290,21 +290,77 @@ fn a_schema_bump_rebuilds_from_the_files_not_to_empty() {
     assert_eq!(index.search("persisted", None).unwrap().len(), 1);
 }
 
-/// The rebuilding open must not re-scan on every call for a store that is
-/// legitimately empty — the discard is the signal, not the row count.
+/// A healthy index is opened as-is, with no rebuild.
+///
+/// Asserted through *contents* rather than a file mtime: the index holds a row
+/// whose file does not exist on disk, so a rebuild would necessarily drop it to
+/// zero. That is a deterministic signal; an mtime comparison depends on
+/// filesystem timestamp resolution and on the rebuild taking measurable time.
 #[test]
-fn open_or_rebuild_is_a_no_op_when_nothing_was_discarded() {
+fn open_or_rebuild_does_not_rebuild_a_healthy_index() {
     let repo = Repo::new();
-    clove_index::reindex(&repo.issues, &repo.db).unwrap();
-    let before = std::fs::metadata(&repo.db).unwrap().modified().unwrap();
+    {
+        let mut index = Index::open(&repo.db).unwrap();
+        let spec = ItemSpec::new("proj-AAAAAAAA").title("only in the index");
+        index.upsert_item(&item_from_spec(&spec)).unwrap();
+    }
+    // Nothing was ever written to `issues/`, so a rebuild would find no items.
     let index = Index::open_or_rebuild(&repo.db, &repo.issues).unwrap();
-    assert_eq!(index.item_count().unwrap(), 0);
-    drop(index);
     assert_eq!(
-        std::fs::metadata(&repo.db).unwrap().modified().unwrap(),
-        before,
-        "an empty store must not trigger a rebuild on every open"
+        index.item_count().unwrap(),
+        1,
+        "a healthy index must be opened as-is, not rebuilt"
     );
+}
+
+/// A rebuild that cannot run leaves the old database in place, so the *next*
+/// open retries.
+///
+/// The first implementation deleted the database before calling `reindex`. When
+/// the rebuild then failed — `AlreadyRunning` whenever another process is
+/// upgrading the same index, which is exactly the concurrent-upgrade case — the
+/// old file was already gone and its replacement carried the current schema
+/// version, so no later open could tell it was empty rather than up to date.
+/// One transient failure meant a permanently empty index.
+#[test]
+fn a_failed_rebuild_is_retried_rather_than_left_empty() {
+    let repo = Repo::new();
+    ItemSpec::new("proj-AAAAAAAA")
+        .title("persisted")
+        .write_to(&repo);
+    clove_index::reindex(&repo.issues, &repo.db).unwrap();
+    let stale = clove_index::SCHEMA_VERSION - 1;
+    let bump_down = || {
+        let conn = rusqlite::Connection::open(&repo.db).unwrap();
+        conn.pragma_update(None, "user_version", stale).unwrap();
+    };
+    bump_down();
+
+    // Hold the rebuild lock, as a concurrent upgrade would.
+    let lock_path = repo.db.parent().unwrap().join("reindex.lock");
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&lock_path)
+        .unwrap();
+    let mut lock = fd_lock::RwLock::new(lock_file);
+    let guard = lock.try_write().unwrap();
+
+    let blocked = Index::open_or_rebuild(&repo.db, &repo.issues);
+    assert!(blocked.is_err(), "the rebuild cannot run while locked");
+
+    // The old database is untouched — still the stale version, still populated.
+    drop(guard);
+    assert!(
+        matches!(
+            Index::open(&repo.db),
+            Err(IndexError::SchemaMismatch { .. })
+        ),
+        "a failed rebuild must not have replaced the database"
+    );
+    let index = Index::open_or_rebuild(&repo.db, &repo.issues).unwrap();
+    assert_eq!(index.item_count().unwrap(), 1, "the retry rebuilds it");
 }
 
 // ---------------------------------------------------------------------------

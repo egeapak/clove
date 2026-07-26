@@ -534,6 +534,7 @@ CREATE TABLE labels (
 CREATE VIRTUAL TABLE items_fts USING fts5(
     id UNINDEXED,
     title,
+    labels,             -- v5: space-joined, so a label-only hit is findable via the index
     body,
     content='',         -- contentless: FTS index is self-contained; rows managed by upsert_item()
     tokenize='ascii'    -- faster than unicode61 for ASCII-dominant content
@@ -576,10 +577,18 @@ avoids the hidden integer rowid and gives O(log n) point lookups directly on the
 and SIMD-accelerated). Stored as `BLOB(8)`.
 
 **Schema version** is stored in `PRAGMA user_version` (built-in SQLite mechanism, more
-reliable than a custom table row). Checked on every `Index::open`. Mismatch → drop and
-rebuild. Current version is **v4** (v2 covering index + sentinel rank; v3
-`file_mtimes.synced_at`; v4 `items.excluded`, the persisted hard-cycle /
-malformed-parent flag the SQL `ready` query filters on — see §6.5). The same `index.db`
+reliable than a custom table row). Checked on every `Index::open`. Current version is
+**v5** (v2 covering index + sentinel rank; v3 `file_mtimes.synced_at`; v4
+`items.excluded`, the persisted hard-cycle / malformed-parent flag the SQL `ready` query
+filters on — see §6.5; v5 `items_fts.labels`).
+
+On a mismatch, `Index::open_or_rebuild` **rebuilds from the files**: `reindex` builds a
+temp database under the reindex lock and renames it over the live one, so a rebuild that
+cannot run leaves the old database in place and the next open retries. The older
+`Index::open_or_create` discards and returns an *empty* index — it has no store to
+rebuild from — and that discard is unrecoverable, since the replacement carries the
+current version and no later open can distinguish empty from up-to-date. Read paths must
+use `open_or_rebuild`. The same `index.db`
 also holds a durable `snapshots` history table (`clove stats --snapshot`/`--history`),
 created idempotently and **carried across reindex / schema-rebuild** so it is not a
 cache-only artifact (M4).

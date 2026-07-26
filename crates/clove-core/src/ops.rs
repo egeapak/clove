@@ -616,6 +616,8 @@ pub fn search(
 ) -> Result<Value, CloveError> {
     // Matching and ranking are `view::rank_search_hits`, shared with the CLI's
     // file and index paths so the three cannot disagree on what counts as a hit.
+    // (The web has no search route; its `?q=` is a separate, narrower predicate
+    // — see the roadmap.)
     let ranked = crate::view::rank_search_hits(store.list()?, text);
     let objects: Vec<Value> = ranked
         .iter()

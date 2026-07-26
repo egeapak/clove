@@ -45,8 +45,8 @@ pub fn run(
 
     // Optionally persist the snapshot into the index database's history table.
     if args.snapshot {
-        let index =
-            Index::open_or_create(&ctx.db_path).map_err(|e| index_error(e, &ctx.db_path))?;
+        let index = Index::open_or_rebuild(&ctx.db_path, &ctx.issues_dir)
+            .map_err(|e| index_error(e, &ctx.db_path))?;
         index
             .record_snapshot(now, &report)
             .map_err(|e| index_error(e, &ctx.db_path))?;
@@ -87,7 +87,8 @@ fn show_history(ctx: &Ctx, format: OutputFormat, args: &StatsArgs) -> Result<(),
         return Ok(());
     }
 
-    let index = Index::open_or_create(&ctx.db_path).map_err(|e| index_error(e, &ctx.db_path))?;
+    let index = Index::open_or_rebuild(&ctx.db_path, &ctx.issues_dir)
+        .map_err(|e| index_error(e, &ctx.db_path))?;
     // Fetch the whole series and window it here, through the same contract as
     // every other list command. Pushing `--limit` into the query made `_meta`
     // report the *post*-window count as `total`, so a truncated series was
@@ -177,7 +178,13 @@ fn index_telemetry(ctx: &Ctx, no_index: bool) -> Value {
     if no_index || !ctx.db_path.exists() {
         return json!({ "present": false });
     }
-    let Ok(index) = Index::open_or_create(&ctx.db_path) else {
+    // A plain `open`, deliberately: reporting on the index must not *change*
+    // it. `open_or_create` would discard a wrong-version database and hand back
+    // an empty one, and that discard is unrecoverable — the replacement carries
+    // the current version, so no later open can tell it is empty rather than up
+    // to date. `clove stats` runs this on every invocation, so using it here
+    // silently disarmed the rebuild for every other command.
+    let Ok(index) = Index::open(&ctx.db_path) else {
         return json!({ "present": false });
     };
     let items = index.item_count().unwrap_or(0);

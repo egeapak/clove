@@ -429,7 +429,13 @@ fn search_follows_the_shared_limit_contract() {
 }
 
 /// `clove search` finds the same items, in the same order, on the file path and
-/// the index path — and agrees with the `clove_search` MCP tool.
+/// the index path.
+///
+/// Scoped to the two CLI paths, which is what this exercises; the MCP tool
+/// shares the same `rank_search_hits`, but nothing here drives it. Needles are
+/// whole tokens on purpose — the FTS matches tokens while `match_class` matches
+/// substrings, so a partial-token needle would fail on a divergence this test
+/// is not about (roadmap §6.1).
 ///
 /// The three used to disagree twice over. The CLI matched title and body only,
 /// so a label-only hit was invisible to it while `ops::search` (MCP, web)
@@ -496,6 +502,61 @@ fn search_agrees_across_the_file_and_index_paths() {
         expected,
         "index path must agree with the file path, labels included"
     );
+}
+
+/// An index left over from an older clove is rebuilt, and stays rebuilt, no
+/// matter which command opens it first.
+///
+/// The first version of the rebuild discarded the old database inside the
+/// *detection* step, so whichever command opened the index first consumed the
+/// signal. `clove stats` runs a telemetry open on every invocation — documented
+/// in its own comment as "side-effect-free" — and used the non-rebuilding
+/// variant, so a single `clove stats` replaced the index with an empty one
+/// carrying the *current* version. No later open could tell it was empty rather
+/// than up to date, so every subsequent query silently fell back to scanning
+/// files, permanently, until someone ran `clove reindex` by hand.
+///
+/// The store here is deliberately larger than `STALE_REFRESH_LIMIT` so the
+/// staleness path cannot paper over an empty index by refreshing it inline.
+#[test]
+fn a_stale_schema_index_is_rebuilt_whichever_command_opens_it_first() {
+    let dir = init_repo();
+    let issues = dir.path().join(".clove/issues");
+    for i in 0..30u32 {
+        let id = format!("proj-S{i:07}");
+        std::fs::write(
+            issues.join(format!("{id}.md")),
+            format!(
+                "---\nschema: 1\nid: {id}\ntitle: Widget {i}\nstatus: open\ntype: feature\n\
+                 priority: 2\ncreated: 2026-06-02T10:00:00Z\nupdated: 2026-06-02T10:00:00Z\n---\nbody\n"
+            ),
+        )
+        .unwrap();
+    }
+    clove(dir.path()).arg("reindex").assert().success();
+
+    let db = dir.path().join(".clove/index.db");
+    let downgrade = || {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.pragma_update(None, "user_version", clove_index::SCHEMA_VERSION - 1)
+            .unwrap();
+    };
+
+    // `clove stats` first: it must not consume the rebuild.
+    downgrade();
+    clove(dir.path()).arg("stats").assert().success();
+    let v = json_ok(clove(dir.path()).args(["ls", "--limit", "0"]));
+    assert_eq!(
+        v["_meta"]["source"], "index",
+        "the index must still answer after `stats` opened it"
+    );
+    assert_eq!(v["data"].as_array().unwrap().len(), 30);
+
+    // And directly, with a list command opening it first.
+    downgrade();
+    let v = json_ok(clove(dir.path()).args(["ls", "--limit", "0"]));
+    assert_eq!(v["_meta"]["source"], "index");
+    assert_eq!(v["data"].as_array().unwrap().len(), 30);
 }
 
 #[test]

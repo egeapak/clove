@@ -19,7 +19,7 @@ Status of what shipped, for context:
 | Ordering (`sort`/`dir`) | Web only — §1 |
 | Filters | Web has a superset — §2 |
 | Read tiering (daemon → index → files) | CLI only; MCP always reads files — §4 |
-| Search match set + ranking | **Done** — one `view::rank_search_hits`, FTS indexes labels |
+| Search match set + ranking | Labels: **done**; substring-vs-token still diverges — §6.1 |
 | Index rebuild on schema bump | **Done** — `Index::open_or_rebuild` |
 | `/board` window | **Done** — per-column `limit`/`offset` |
 
@@ -255,28 +255,63 @@ is exactly why `GET /items/:id/comments` kept the unlimited web default.
 
 ---
 
-## 6. Closed divergences
+## 6. Divergences addressed
 
-Both are **done**; kept here because the resolutions are decisions worth
-recording, not just diffs.
+6.2 is closed; 6.1 is half closed and its remaining half is specified below.
+Kept here because the resolutions are decisions worth recording, not just diffs.
 
-**6.1 `search` disagreed with itself across surfaces.** `ops::search` (MCP, web)
-matched title, **labels**, and body with three ranking classes; `clove search`'s
-file path matched title and body with two, and its index path used an FTS table
-over `title, body` only. A label-only hit was returned by the MCP tool and by
-neither CLI path.
+**6.1 `search` disagreed with itself across surfaces — labels half resolved,
+matching half still open.**
 
-Resolved by option (a) of the three considered — index labels in FTS — because
-(b) dropping labels from `ops::search` loses capability and (c) routing only the
-CLI's file path through the shared matcher would have made `--no-index` change
-results, which is worse than the original bug. Matching and ranking now live in
-`view::rank_search_hits`, used by `ops::search` and by both CLI paths, so the
-question cannot be answered differently by different callers. Index schema
-4 → 5, which is what forced §3's `open_or_rebuild` to be written first.
+`ops::search` (the `clove_search` MCP tool; the web has no search route) matched
+title, **labels**, and body with three ranking classes; `clove search`'s file
+path matched title and body with two, and its index path used an FTS table over
+`title, body` only. A label-only hit was returned by the MCP tool and by neither
+CLI path.
 
-Pinned by `search_agrees_across_the_file_and_index_paths` in
-`crates/clove/tests/cli_commands.rs`, which asserts both paths return the same
-ids in the same order for an item set with one hit per match class.
+**Resolved:** matching and ranking now live in `view::rank_search_hits`, used by
+`ops::search` and by both CLI paths, and `items_fts` indexes labels (index schema
+4 → 5, which is what forced `open_or_rebuild` to be written first). Option (a) of
+three: (b) dropping labels from `ops::search` loses capability, and (c) routing
+only the CLI's file path through the shared matcher would have made `--no-index`
+change results, which is worse than the original bug. Pinned by
+`search_agrees_across_the_file_and_index_paths` in
+`crates/clove/tests/cli_commands.rs`.
+
+**Still open — substring vs whole token.** `view::match_class` uses `contains()`;
+`clove_index::query::search` quotes the needle as a single FTS *phrase*, which
+matches whole tokens. The FTS is therefore a strictly narrower prefilter and the
+two disagree for any needle that is not a whole token:
+
+| query | `--no-index` | index |
+|---|---|---|
+| `core`, against label `area:core` and body `the corepart word` | 2 | 1 |
+| `icode`, against label `Ünicode-tag` | 1 | 0 |
+| `ünicode`, against label `Ünicode-tag` | 1 | 0 |
+
+The last row is a second axis: `tokenize='ascii'` case-folds ASCII only, so a
+non-ASCII title or label differing in case is found by the file path and missed
+by the index path. This is pre-existing — the index path has always been FTS
+while the file path has always been `contains` — but it means "the same query
+answers the same way on both paths" is **not** yet true for search, and the
+pinning test uses whole-token needles only, so it cannot see it.
+
+Options, none obviously right:
+- **Widen the FTS query** to a prefix match (`"needle"*`) — closes the `core`
+  row, not the `icode` row, since FTS cannot match inside a token.
+- **Switch the tokenizer** to `unicode61` — closes the `ünicode` row at some
+  index-size and speed cost, still not `icode`.
+- **Narrow `match_class` to whole tokens** so both paths agree — closes all
+  three by removing substring search, which is a capability users have today.
+- **Treat the index as an accelerator only for whole-token queries** and fall
+  back to the file scan otherwise — keeps both behaviours, needs a reliable
+  "is this one token" test, and silently changes performance characteristics.
+
+**Also unaddressed:** the web's `?q=` (`crates/clove-web/src/read.rs::matches`)
+is a *fourth* predicate — id + title + labels, **no body**, no match-class
+ranking. Folding it into `rank_search_hits` needs a decision about whether `?q=`
+is a filter (its current role, applied alongside `status`/`label`/…) or a
+search.
 
 **6.2 `GET /api/v1/board` took no window.** It shares `matches()`/`sort_items()`
 with the item list, so it accepted every filter and sort parameter and silently

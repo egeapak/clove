@@ -329,17 +329,14 @@ impl Index {
     /// The public entry point: open the index, rebuilding from scratch if it is
     /// the wrong schema version or corrupt (DESIGN §6.1). A corrupt file is
     /// logged to stderr before rebuilding.
+    /// Prefer [`Index::open_or_rebuild`] wherever the issues directory is known.
+    /// This variant cannot repopulate, so it returns a valid but **empty** index
+    /// after discarding one — and discarding is a one-way door: the next open
+    /// sees a matching version and has no way to tell that the contents are
+    /// missing. Reserved for callers with no store to rebuild from.
     pub fn open_or_create(path: &Utf8Path) -> Result<Index, IndexError> {
-        Index::open_reporting(path).map(|(index, _discarded)| index)
-    }
-
-    /// [`Index::open_or_create`], also reporting whether the existing database
-    /// had to be **discarded** (wrong schema version or corrupt). The caller
-    /// gets a valid but *empty* index in that case; `true` is the signal that it
-    /// needs repopulating from the files.
-    fn open_reporting(path: &Utf8Path) -> Result<(Index, bool), IndexError> {
         match Index::open(path) {
-            Ok(index) => Ok((index, false)),
+            Ok(index) => Ok(index),
             Err(IndexError::SchemaMismatch { found, expected }) => {
                 eprintln!(
                     "note: index schema changed (found {found}, expected {expected}); rebuilding {path}"
@@ -352,17 +349,17 @@ impl Index {
                 if !preserved.is_empty() {
                     crate::stats_store::insert_raw(index.conn(), &preserved)?;
                 }
-                Ok((index, true))
+                Ok(index)
             }
             Err(IndexError::CorruptIndex(msg)) => {
                 eprintln!("warning: index at {path} is corrupt ({msg}); rebuilding");
                 remove_db_files(path)?;
-                Index::open(path).map(|index| (index, true))
+                Index::open(path)
             }
             Err(IndexError::SqliteError(e)) if is_corrupt(&e) => {
                 eprintln!("warning: index at {path} is corrupt ({e}); rebuilding");
                 remove_db_files(path)?;
-                Index::open(path).map(|index| (index, true))
+                Index::open(path)
             }
             Err(other) => Err(other),
         }
@@ -383,13 +380,26 @@ impl Index {
     /// Prefer this wherever the issues directory is known — which is every read
     /// path. Rebuilding costs one scan, once, at the moment the schema changed.
     pub fn open_or_rebuild(path: &Utf8Path, issues_dir: &Utf8Path) -> Result<Index, IndexError> {
-        let (index, discarded) = Index::open_reporting(path)?;
-        if !discarded {
-            return Ok(index);
-        }
-        // Close before reindexing: `reindex` opens the database itself and takes
-        // the rebuild lock.
-        drop(index);
+        let reason = match Index::open(path) {
+            Ok(index) => return Ok(index),
+            Err(IndexError::SchemaMismatch { found, expected }) => {
+                format!("schema changed (found {found}, expected {expected})")
+            }
+            Err(IndexError::CorruptIndex(msg)) => format!("corrupt ({msg})"),
+            Err(IndexError::SqliteError(e)) if is_corrupt(&e) => format!("corrupt ({e})"),
+            Err(other) => return Err(other),
+        };
+        eprintln!("note: index at {path} {reason}; rebuilding from {issues_dir}");
+        // Nothing is destroyed here. `reindex` builds into `<path>.tmp` under the
+        // rebuild lock and renames it over the live file, carrying the durable
+        // stats history across, so a rebuild that fails — most likely
+        // `AlreadyRunning`, when a concurrent process is upgrading the same
+        // index — leaves the old database in place and the *next* open retries.
+        //
+        // Deleting first (as `open_or_create` must, having nothing to rebuild
+        // from) makes that failure permanent: the file is gone, and whatever
+        // replaces it carries the current version, so no later open can tell it
+        // is empty rather than genuinely up to date.
         crate::reindex::reindex(issues_dir, path)?;
         Index::open(path)
     }

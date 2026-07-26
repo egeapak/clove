@@ -119,7 +119,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   MCP tool and by neither CLI path. Matching and ranking are now one function
   (`view::rank_search_hits`) shared by all three, and `items_fts` indexes labels.
 
-  *Index schema v4 → v5.* Existing indexes are replaced on next open.
+  *Index schema v4 → v5.* Existing indexes are rebuilt from the files on next
+  open.
+
+  *Not fixed:* the FTS matches whole tokens while the shared matcher matches
+  substrings, so the index path remains a narrower prefilter — searching `core`
+  finds it inside the body word `corepart` only with `--no-index`. Pre-existing,
+  and now written up in `docs/READ_PATH_ROADMAP.md` §6.1 with the options.
 - **A schema bump left the index empty rather than rebuilt.** `open_or_create`
   recovered the file and stopped, and "empty" is indistinguishable from "nothing
   matched" at every call site — `clove search` returned zero rows for every query
