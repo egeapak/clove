@@ -66,9 +66,18 @@ fn write_item(root: &Path, f: Fixture) {
         assignee,
         deps,
     } = f;
+    // Timestamps vary per item, and `created` runs opposite to `updated`, so a
+    // `--sort created|updated` case cannot pass by degenerating into the id
+    // tiebreak. Every fixture item shared one constant here, which made the
+    // `--sort updated` entry below prove nothing: pointing `SortField::Updated`
+    // at the wrong column left this suite green.
+    let nth = id.as_bytes().get(5).copied().unwrap_or(b'A') - b'A';
+    let created_day = 2 + u32::from(nth);
+    let updated_day = 28 - u32::from(nth);
     let mut s = format!(
         "---\nschema: 1\nid: {id}\ntitle: {title}\nstatus: {status}\ntype: {item_type}\n\
-         priority: {priority}\ncreated: 2026-06-02T10:00:00Z\nupdated: 2026-06-02T10:00:00Z\n"
+         priority: {priority}\ncreated: 2026-06-{created_day:02}T10:00:00Z\n\
+         updated: 2026-06-{updated_day:02}T10:00:00Z\n"
     );
     if status == "closed" {
         s.push_str("closed: 2026-06-09T11:00:00Z\n");
@@ -308,6 +317,7 @@ fn ls_args<'a>(flags: &[&'a str], extra: &[&'a str]) -> Vec<&'a str> {
 ///   must differ from each of its single-value halves;
 /// - **letting `q` read the body** → `q=gadget` must be empty while every body
 ///   contains it.
+
 #[test]
 fn the_fixture_discriminates_the_ways_a_filter_can_be_wrong() {
     let by_name = |name: &str| -> Vec<&'static str> {
@@ -573,6 +583,55 @@ fn meta_echoes_the_parsed_filter_set() {
 
 /// An invalid filter value is a validation error on every list command, not a
 /// filter that silently matches nothing.
+/// A query SQLite cannot *shape* falls back to the files instead of failing.
+///
+/// Each AND-ed label is its own `EXISTS` subquery and SQLite caps expression
+/// depth at 1000, so around 997 repeated `--label` values raised
+/// `Expression tree is too large` — reported as `IO_ERROR`/exit 5, a broken
+/// store — while `--no-index` answered the same query normally. The index is a
+/// cache; the shape of a query is not a reason to refuse it.
+#[test]
+fn an_over_deep_filter_falls_back_to_the_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    build_fixture(root);
+    assert!(run_in(root, &["reindex"]).status.success());
+
+    // Well past SQLite's limit, and deliberately satisfiable: every repetition
+    // is the same label, so the answer is the same as asking once.
+    let mut args: Vec<String> = vec!["ls".into(), "-f".into(), "json".into()];
+    for _ in 0..1200 {
+        args.push("--label".into());
+        args.push("area:core".into());
+    }
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = run_in(root, &argv);
+    assert!(
+        out.status.success(),
+        "an over-deep filter must not fail: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let (deep_ids, meta) = ids_and_meta(&out.stdout);
+    assert_eq!(
+        meta["source"], "files",
+        "it must have fallen back off the index"
+    );
+
+    // ...and the fallback is the *right* answer, not merely a successful one.
+    let mut once = argv.clone();
+    once.truncate(3);
+    once.extend_from_slice(&["--label", "area:core"]);
+    let (want, _) = ids_and_meta(&run_in(root, &once).stdout);
+    assert_eq!(
+        deep_ids, want,
+        "the fallback must agree with a single label"
+    );
+    assert!(
+        !want.is_empty(),
+        "the fixture must actually match something"
+    );
+}
+
 #[test]
 fn invalid_filter_values_are_rejected() {
     let tmp = tempfile::tempdir().unwrap();
@@ -777,7 +836,13 @@ mod daemon {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         build_fixture(root);
-        // A and B block on the open D; C blocks on a missing id (dangling).
+        // A and B block on the open D; C blocks on an id that does not exist.
+        //
+        // The dangling case is not decoration: it is the one the removed
+        // `include_warnings` flag used to gate, and `cmd/blocked.rs` still
+        // reasons about it. The comment claimed C was dangling long before C
+        // actually was — it was never rewritten — so the daemon path was never
+        // exercised with a blocked item whose dependency is missing.
         write_item(
             root,
             Fixture {
@@ -792,6 +857,13 @@ mod daemon {
                 ..item(B)
             },
         );
+        write_item(
+            root,
+            Fixture {
+                deps: &["proj-MISSING1"],
+                ..item(C)
+            },
+        );
         assert!(run_in(root, &["reindex"]).status.success());
 
         let flag_sets: Vec<Vec<&str>> = vec![
@@ -803,7 +875,9 @@ mod daemon {
             vec!["--q", "gadget"],
             vec!["--priority", "0", "--priority", "1"],
         ];
-        let fields = ["rank", "priority", "id", "updated", "status", "type"];
+        let fields = [
+            "rank", "priority", "id", "created", "updated", "status", "type",
+        ];
 
         let truth: Vec<(Vec<&str>, &str, bool, Vec<String>)> = flag_sets
             .iter()

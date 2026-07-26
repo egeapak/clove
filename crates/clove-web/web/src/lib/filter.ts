@@ -17,15 +17,32 @@ export function applyFilters(items: Item[], q: ListQuery): Item[] {
   if (q.assignee) out = out.filter((i) => (i.assignee ?? '') === q.assignee);
   if (q.type?.length) out = out.filter((i) => q.type!.includes(i.type));
   if (q.priority?.length) out = out.filter((i) => q.priority!.includes(i.priority));
-  if (q.label?.length) out = out.filter((i) => q.label!.every((l) => i.labels.includes(l)));
+  // Labels are canonicalized to lowercase on write, and the server canonicalizes
+  // the *query* too (`normalize_label`), so `?label=AREA:Core` matches. Without
+  // the same fold here the UI silently returned nothing for a query the API
+  // answers.
+  if (q.label?.length) {
+    const want = q.label!.map((l) => l.trim().toLowerCase());
+    out = out.filter((i) => {
+      const have = i.labels.map((l) => l.toLowerCase());
+      return want.every((l) => have.includes(l));
+    });
+  }
   if (q.q) {
     const n = q.q.toLowerCase();
-    // Match the server's `q` contract exactly (read.rs matches(): substring over
-    // "id title labels"). The lean list endpoint (GET /items) omits `body`, so it
-    // must NOT be searched here — doing so both crashes on live data (body is
-    // undefined) and diverges from server-side filtering.
-    out = out.filter((i) =>
-      `${i.id} ${i.title} ${i.labels.join(' ')}`.toLowerCase().includes(n)
+    // `clove_core::view::q_matches`: a substring over id, title, and each label
+    // **separately** — never the body, which the lean list endpoint omits anyway.
+    //
+    // Per-field, not a concatenated haystack. Joining them let a needle
+    // containing a space match across a field boundary (`q=widget area:core`
+    // spanning the end of the title and the start of a label), which the server
+    // does not do. Divergence here is invisible to the Rust test suite, because
+    // the shipped UI filters client-side and never asks the server.
+    out = out.filter(
+      (i) =>
+        i.id.toLowerCase().includes(n) ||
+        i.title.toLowerCase().includes(n) ||
+        i.labels.some((l) => l.toLowerCase().includes(n))
     );
   }
   return out;

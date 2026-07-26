@@ -227,6 +227,22 @@ truth.
 
 ---
 
+**Left alone deliberately: two client-side predicates remain.** Same shape as
+§1's client-side sorters.
+
+- `clove-tui`'s `app::listing::ViewFilter::matches` is a fifth copy of the
+  predicate (single-valued `status`, no `q`, labels all-of, types/priorities
+  any-of), with `q_matches` re-implemented inline in `app::mod`. No behaviour
+  difference today where they overlap.
+- The SPA's `web/src/lib/filter.ts::applyFilters` matters more, because the
+  shipped UI **never sends filters to the server**: `store.svelte.ts` fetches the
+  whole store once with no query and `routes/list` filters client-side. So the
+  server-side filtering this section rewrote is not exercised by the browser at
+  all, and the two answered the same URL differently until their semantics were
+  aligned here (per-field `q`, canonicalized labels). Making the SPA ask the
+  server is §6 — it is the same change as making it page.
+
+
 ## 3. Canonical timestamps
 
 Two separate version numbers, easy to confuse: the **item** `schema` field
@@ -353,6 +369,18 @@ introduced there, the two disagree — a full count above a truncated list. That
 is exactly why `GET /items/:id/comments` kept the unlimited web default.
 
 ---
+
+**Two things §2 left for this section.**
+
+- **A filter residue ships the whole match set over the RPC.** When a filter
+  cannot be expressed in SQL (`q` is the only one today), `query_filtered`
+  ignores the window and returns every matching row, `cloved` sends all of them,
+  and the CLI windows locally. Correct, but `clove ls --q x --limit 1` transfers
+  the entire match set. The engine is where the window and the residue can be
+  reasoned about together.
+- **`clove blocked` has no index tier at all**, so it is the one list that
+  cannot answer from SQL even when the index is hot.
+
 
 ## 6. Divergences addressed
 

@@ -132,8 +132,23 @@ pub fn list_via_index(
     filter.order = order;
     // `query_filtered` owns the limit/count decision, because a residue changes
     // both (it may not slice before filtering, and `COUNT(*)` is not the total).
-    let (rows, total) = index
-        .query_filtered(&filter, residue.as_ref(), window)
-        .map_err(|e| index_error(e, &ctx.db_path))?;
-    Ok(Some((rows, total, Vec::new())))
+    // A query the index cannot *shape* falls back to the files rather than
+    // failing: each AND-ed label is its own `EXISTS` subquery, and SQLite caps
+    // expression depth at 1000, so ~997 repeated `--label` values error out
+    // where `--no-index` answers normally. The index is a cache; "this query is
+    // too big for SQLite" is a reason to use the other path, not to refuse.
+    match index.query_filtered(&filter, residue.as_ref(), window) {
+        Ok((rows, total)) => Ok(Some((rows, total, Vec::new()))),
+        Err(e) if query_too_complex(&e) => Ok(None),
+        Err(e) => Err(index_error(e, &ctx.db_path)),
+    }
+}
+
+/// Whether an index error is SQLite refusing the *shape* of the query rather
+/// than reporting a broken store. These are recoverable by asking the files.
+fn query_too_complex(e: &clove_index::IndexError) -> bool {
+    let msg = e.to_string();
+    msg.contains("Expression tree is too large")
+        || msg.contains("too many SQL variables")
+        || msg.contains("parser stack overflow")
 }

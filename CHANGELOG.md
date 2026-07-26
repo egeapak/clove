@@ -81,9 +81,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- **One filter contract, shared by every surface.** `clove_core::view::Filters`
-  is now the single filter set behind the CLI flags, the MCP tool arguments, the
-  web query string, and `cloved`'s query RPC. Its fields are sets
+- **One filter contract, shared by every read surface.**
+  `clove_core::view::Filters` is now the single filter set behind the CLI flags,
+  the MCP tool arguments, the web API's query string, and `cloved`'s query RPC.
+  (Two client-side predicates remain by design and are noted in the roadmap: the
+  TUI's in-memory `ViewFilter`, and the bundled SPA's `applyFilters` — the SPA
+  fetches the store once and filters in the browser, so it does not go through
+  the API's filtering at all. Their semantics were aligned with the shared
+  predicate here; unifying the code is read-path §5/§6.) Its fields are sets
   (`status`/`item_type`/`priority`/`labels`) plus `assignee` and `q`, with an
   empty set meaning *unconstrained* — so every existing single-value caller is
   unchanged, and the web's predicate (the only multi-value one there was) is

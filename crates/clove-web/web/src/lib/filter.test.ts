@@ -47,4 +47,26 @@ describe('applyFilters list search (lean list items carry no body)', () => {
     // body must NOT be searched (server searches id/title/labels only)
     expect(applyFilters([it], { q: 'secret' }).length).toBe(0);
   });
+
+  it('matches each field separately, not a concatenated haystack', () => {
+    const it = lean({ id: 'proj-9', title: 'Alpha widget', labels: ['area:core'] });
+    // Each field on its own still matches.
+    expect(applyFilters([it], { q: 'alpha' }).length).toBe(1);
+    expect(applyFilters([it], { q: 'area:core' }).length).toBe(1);
+    // ...but a needle spanning two fields does not. Joining id/title/labels
+    // into one string let `widget area:core` match across the boundary between
+    // the title and the first label; the server never did, so the UI answered
+    // a query the API would not.
+    expect(applyFilters([it], { q: 'widget area:core' }).length).toBe(0);
+    expect(applyFilters([it], { q: 'proj-9 alpha' }).length).toBe(0);
+  });
+
+  it('canonicalizes a label query the way the server does', () => {
+    const it = lean({ id: 'proj-9', title: 'Alpha', labels: ['area:core'] });
+    // Labels are stored lowercase and the server lowercases the query too, so
+    // this matched through the API and returned nothing in the UI.
+    expect(applyFilters([it], { label: ['AREA:Core'] }).length).toBe(1);
+    expect(applyFilters([it], { label: ['area:core'] }).length).toBe(1);
+    expect(applyFilters([it], { label: ['area:other'] }).length).toBe(0);
+  });
 });
