@@ -95,4 +95,26 @@ export interface ListQuery {
   sort?: string;
   dir?: 'asc' | 'desc';
   mode?: 'list' | 'ready' | 'blocked';
+  /**
+   * Window, sent to the server. `0` means **unlimited** (the API contract on
+   * every surface), and so does an absent value — the web API's default is
+   * unlimited, which is why a view that wants everything (board, timeline) must
+   * still say `limit: 0` rather than relying on it.
+   */
+  limit?: number;
+  offset?: number;
+}
+
+/**
+ * One windowed list response: the rows the server returned plus the `_meta`
+ * counts that describe the window. `total` is the match count *before* the
+ * window, so "showing 1–50 of 128" reads both numbers from one answer and
+ * cannot show a total that disagrees with the rows beneath it.
+ */
+export interface ItemPage {
+  items: Item[];
+  total: number;
+  returned: number;
+  offset: number;
+  limit: number;
 }

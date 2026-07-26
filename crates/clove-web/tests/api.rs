@@ -940,3 +940,146 @@ async fn list_answers_from_the_index_and_reports_the_tier() {
 
     drop(tmp);
 }
+
+/// `?fields=` and `?compact=` — the last result-shaping gap between the web
+/// API and the CLI/MCP (read-path roadmap §5).
+///
+/// The semantics are the **CLI's**: both default off. That is the load-bearing
+/// half of this test — the MCP server compacts by default, and inheriting that
+/// here would silently drop `assignee: null` and `labels: []` from every
+/// response the SPA already depends on.
+#[tokio::test]
+async fn list_shapes_results_like_the_cli() {
+    let (_tmp, addr, _id) = spawn().await;
+    let json = |body: &str| -> serde_json::Value { serde_json::from_str(body).unwrap() };
+
+    // Default: the full object. `p0` (the dependency) sorts first under `rank`.
+    let (_, body) = get(addr, "/api/v1/items").await;
+    let full = json(&body);
+    let row = &full["data"][0];
+    assert!(row["assignee"].is_null(), "unshaped keeps nulls: {body}");
+    assert_eq!(row["relates"], serde_json::json!([]), "…and empty lists");
+    assert_eq!(row["schema"], 1, "…and the migration marker");
+
+    // `?compact=true` drops null and empty-list keys plus `schema`, and keeps
+    // `false`/`0` — those are answers, not absences.
+    let (_, body) = get(addr, "/api/v1/items?compact=true").await;
+    let compact = json(&body);
+    let row = &compact["data"][0];
+    assert!(row.get("assignee").is_none(), "null dropped: {body}");
+    assert!(row.get("relates").is_none(), "empty list dropped");
+    assert!(row.get("blocked_by").is_none(), "empty graph term dropped");
+    assert!(row.get("schema").is_none(), "migration marker dropped");
+    assert_eq!(row["priority"], 0, "zero survives compaction");
+    assert_eq!(row["ready"], true);
+    assert_eq!(compact["_meta"]["total"], 2, "shaping is not a filter");
+    assert_eq!(compact["_meta"]["returned"], 2);
+
+    // `?fields=` is honoured literally: an explicitly requested key comes back
+    // even when its value is null, so a caller can tell "unset" from "not
+    // requested".
+    let (_, body) = get(addr, "/api/v1/items?fields=id,assignee").await;
+    let projected = json(&body);
+    let row = projected["data"][0].as_object().unwrap();
+    assert_eq!(row.len(), 2, "exactly the requested keys: {body}");
+    assert!(
+        row["assignee"].is_null(),
+        "an explicit ask returns the null"
+    );
+    assert_eq!(row["id"], full["data"][0]["id"], "same rows, fewer keys");
+
+    // …and `compact` composes on top of it, exactly as `--fields … --compact`.
+    let (_, body) = get(addr, "/api/v1/items?fields=id,assignee&compact=true").await;
+    let row = json(&body)["data"][0].as_object().unwrap().len();
+    assert_eq!(row, 1, "the null projection is compacted away");
+
+    // Unknown field names are ignored, not an error (the CLI's behaviour).
+    let (status, body) = get(addr, "/api/v1/items?fields=id,nonexistent").await;
+    assert!(status.contains("200"), "{status}");
+    assert_eq!(json(&body)["data"][0].as_object().unwrap().len(), 1);
+
+    // The shaping composes with the window rather than replacing it.
+    let (_, body) = get(addr, "/api/v1/items?fields=id&limit=1").await;
+    let windowed = json(&body);
+    assert_eq!(windowed["data"].as_array().unwrap().len(), 1);
+    assert_eq!(windowed["_meta"]["total"], 2, "total is still pre-window");
+}
+
+/// A boolean query parameter is parsed strictly, like `?sort=` and `?status=`:
+/// `?compact=yes` silently returning the full shape is a response a client
+/// cannot distinguish from a server that does not implement the parameter.
+#[tokio::test]
+async fn an_unparseable_compact_flag_is_a_validation_error() {
+    let (_tmp, addr, _id) = spawn().await;
+
+    let (status, body) = get(addr, "/api/v1/items?compact=yes").await;
+    assert!(status.contains("422"), "status: {status}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["error"]["code"], "VALIDATION_ERROR", "body: {body}");
+
+    // The spellings that *are* accepted.
+    for (query, keys_dropped) in [
+        ("?compact=true", true),
+        ("?compact=1", true),
+        ("?compact=false", false),
+        ("?compact=0", false),
+        ("?compact=", false),
+    ] {
+        let (status, body) = get(addr, &format!("/api/v1/items{query}")).await;
+        assert!(status.contains("200"), "{query}: {status}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            v["data"][0].get("schema").is_none(),
+            keys_dropped,
+            "{query}: body {body}"
+        );
+    }
+}
+
+/// The item detail and the board take the same two parameters — a shaping
+/// surface that stopped at one endpoint would be the "advertised and ignored"
+/// pattern `?limit=` on the board already was (§6.2).
+///
+/// On the board the order of operations is what matters: the grouping reads
+/// each row's `status`, so shaping has to run *after* it. Projecting first
+/// would empty every column instead of returning ids.
+#[tokio::test]
+async fn detail_and_board_share_the_shaping() {
+    let (_tmp, addr, id) = spawn().await;
+
+    let (_, body) = get(addr, &format!("/api/v1/items/{id}?fields=id,body")).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let obj = v["data"].as_object().unwrap();
+    assert_eq!(obj.len(), 2, "detail projects too: {body}");
+    assert_eq!(obj["id"], id);
+    assert!(obj["body"].as_str().unwrap().contains("## Goal"));
+
+    // Unshaped detail is unchanged.
+    let (_, body) = get(addr, &format!("/api/v1/items/{id}")).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v["data"]["assignee"].is_null(), "no shaping by default");
+    assert_eq!(v["data"]["schema"], 1);
+
+    // Both fixture items are open, so the open column holds them both — and
+    // still does with `status` projected away.
+    let (_, body) = get(addr, "/api/v1/board?group_by=status&fields=id").await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let open = v["data"]["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["key"] == "open")
+        .cloned()
+        .unwrap();
+    assert_eq!(open["count"], 2, "grouping ran before shaping: {body}");
+    assert_eq!(open["returned"], 2);
+    for item in open["items"].as_array().unwrap() {
+        assert_eq!(
+            item.as_object().unwrap().len(),
+            1,
+            "each card is projected: {body}"
+        );
+        assert!(item["id"].is_string());
+    }
+}

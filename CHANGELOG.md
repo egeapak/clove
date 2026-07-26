@@ -123,7 +123,53 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tie-breaking within it, and `--desc` with no `--sort` reverses the relevance
   ranking rather than being silently dropped.
 
+- **`?fields=` and `?compact=` on the web API**, closing the last
+  result-shaping gap between the three read surfaces. `GET /api/v1/items`,
+  `GET /api/v1/items/:id` and `GET /api/v1/board` now take the same projection
+  and compaction the CLI's `--fields`/`--compact` and the MCP read tools' `fields`/
+  `compact` do, through the same `clove_core::view::{project, compact_read}`.
+  The semantics are the **CLI's**: both default off, so an unshaped request
+  returns exactly the object it always did. A projection is honoured literally
+  (`?fields=assignee` on an unassigned item returns `{"assignee": null}`, so
+  "unset" is distinguishable from "not requested") and `?compact=true` composes
+  on top of it. On the board the shaping runs after the grouping, which reads
+  each row's `status` — projecting first would empty every column. An
+  unparseable boolean (`?compact=yes`) is a `VALIDATION_ERROR` rather than a
+  silent `false`, matching `?sort=` and `?status=`.
+
 ### Changed
+
+- **The bundled web UI pages, and asks the server rather than the browser.**
+  The SPA used to issue one unparameterized `GET /api/v1/items` at startup and
+  keep the whole store in memory; every view then filtered, sorted and sliced
+  that copy. So the server-side `Filters` and `Order` the API implements were
+  never exercised by the browser at all, and the two answered the same URL
+  differently more than once. The store now holds **one server window**: a view
+  declares its query (filters, ordering *and* `limit`/`offset`) and renders the
+  response as it arrives. The list page fetches 100 rows at a time behind a
+  pager (`?page=` in the URL, so the back button and a shared link land on the
+  same rows); the board and the timeline, which genuinely render every item,
+  ask for `limit=0` explicitly. Startup loads `/meta` alone.
+  - **The list's tab counts changed shape.** All/Ready/Blocked used to count a
+    browser copy of the whole store. Only the **active** tab now carries a
+    number, and it is `_meta.total` for the query that produced the visible
+    rows — the same field the pager's "101–200 of 412" reads, so the two cannot
+    disagree. A count sourced from anywhere else would be a full total standing
+    over a partial list.
+  - **The API default is unchanged and stays unlimited.** `view::defaults::
+    WEB_LIMIT` is one constant shared by `GET /items`, the board's per-column
+    window, `GET /stats/history` and `GET /items/:id/comments`, so capping it
+    would cap four endpoints, three of which have no pager — and on comments it
+    would put a full `comment_count` heading over a truncated thread. Clients
+    that do not page are unaffected; the SPA simply stopped being one of them.
+  - **A superseded response can no longer overwrite a newer one.** The query
+    changes per keystroke in the filter box and `fetch` promises no ordering, so
+    each load is stamped and a reply whose stamp has been superseded is dropped.
+  - **The Blocked tab no longer lists closed items.** It tested
+    `blocked_by.length > 0` alone; `?mode=blocked` routes to `Engine::blocked`,
+    which partitions the *active* items — the same set `clove blocked` returns.
+    A closed item with an open dependency appeared in the browser and never
+    through the API.
 
 - **`_meta.source` on the web *list* endpoints names the tier that answered**
   (`daemon`/`index`/`files`), matching the CLI. It previously reported
@@ -401,6 +447,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The web UI's sorter tied on the wrong thing, which paging would have made
+  visible.** `filter.ts::sortItems` broke ties on the *fetched array's*
+  insertion order and compared strings with `localeCompare` — locale collation,
+  not byte order. Both were indistinguishable from the server's answer only
+  while the SPA held the entire store; once the list pages, two rows that tie
+  either side of a page boundary repeat and skip. Every key now ends in an id
+  tiebreak and compares by byte order, matching `clove_core::view::Order`, and
+  `status`/`type` were added so every `SortField` the API accepts has a client
+  answer. The function is no longer on the live path at all — it survives as the
+  mock backend's sorter, which is precisely where it has to agree with the
+  server. The mock's `GET /items` also filters, **sorts** and **windows** now:
+  it previously returned the match set unsorted and unwindowed, which looked
+  right only because the UI re-sorted everything itself.
 - **`--fields` was silently dropped on the CLI's index and daemon paths.** Those
   tiers select a lean five-column row (`id`/`status`/`type`/`priority`/`title`),
   so `clove ls --fields id,created` returned `[{"id": …}]` where `--no-index`

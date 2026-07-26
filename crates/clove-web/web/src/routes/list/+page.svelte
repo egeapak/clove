@@ -12,12 +12,15 @@
   import BlockedBadge from '$lib/components/BlockedBadge.svelte';
   import { relativeTime, priorityLabel } from '$lib/glyphs';
   import { parseQuery } from '$lib/query';
-  import { applyFilters, defaultDir, sortItems } from '$lib/filter';
+  import { defaultDir } from '$lib/filter';
   import { Virtual } from '$lib/virtual.svelte';
 
   // Fallbacks when /meta isn't available yet.
   const TYPES_FALLBACK: ItemType[] = ['bug', 'feature', 'chore', 'docs', 'epic'];
   const PRIOS_FALLBACK = [0, 1, 2, 3, 4];
+
+  /** Rows per request. The API default is unlimited, so this is sent explicitly. */
+  const PAGE_SIZE = 100;
 
   // ---- URL-encoded state ----
   const url = $derived($page.url);
@@ -39,8 +42,18 @@
     searchInput = q;
   });
 
+  // 1-based page number, in the URL so the back button and a shared link land
+  // on the same rows. The window itself (`limit`/`offset`) is derived from it
+  // and sent to the server — the browser URL never carries those.
+  const pageNum = $derived(Math.max(1, Math.trunc(Number(url.searchParams.get('page')) || 1)));
+  const offset = $derived((pageNum - 1) * PAGE_SIZE);
+
   function setParams(mut: (p: URLSearchParams) => void) {
     const p = new URLSearchParams(url.searchParams);
+    // Any change to the query invalidates the page number: page 4 of the old
+    // filter is not page 4 of the new one, and is usually past the end. The
+    // pager itself sets `page` inside `mut`, after this delete.
+    p.delete('page');
     mut(p);
     goto(`?${p.toString()}`, { replaceState: true, keepFocus: true, noScroll: true });
   }
@@ -85,19 +98,38 @@
     });
   }
 
-  // ---- derived counts & filtered list (shared filter/sort logic) ----
-  const base = $derived(store.all);
-
-  const counts = $derived({
-    all: base.length,
-    ready: base.filter((i) => i.ready && i.status !== 'closed').length,
-    blocked: base.filter((i) => i.blocked_by.length > 0).length
+  // ---- the server answers the query; we render the page it returns ----
+  //
+  // Filtering, ordering and windowing all happen server-side (read-path roadmap
+  // §5). They used to happen here, over a client copy of the whole store, which
+  // meant the shared `Filters`/`Order` the API implements were never exercised
+  // by the browser — and the two disagreed about the same URL more than once.
+  // Under paging a client-side filter is not merely duplicated, it is wrong: it
+  // can only see the rows already fetched.
+  $effect(() => {
+    store.setQuery({ ...query, sort, dir, limit: PAGE_SIZE, offset });
   });
 
-  const filtered = $derived.by(() => {
-    const out = applyFilters(base, query);
-    // 'rank' (default) preserves the server's canonical order via store.rankOf.
-    return sortItems(out, sort, dir, (id) => store.rankOf(id));
+  const rows = $derived(store.all);
+  /** Matches for this query before the window — the server's `_meta.total`. */
+  const total = $derived(store.total);
+  const pageCount = $derived(Math.max(1, Math.ceil(total / PAGE_SIZE)));
+  const firstShown = $derived(rows.length ? offset + 1 : 0);
+  const lastShown = $derived(offset + rows.length);
+
+  function gotoPage(n: number) {
+    const clamped = Math.min(Math.max(1, n), pageCount);
+    setParams((p) => {
+      if (clamped > 1) p.set('page', String(clamped));
+    });
+  }
+
+  // Deleting enough items can strand the URL past the end of the result set;
+  // the server answers honestly with zero rows, so step back to the last page
+  // that has any. Guarded on `total > 0` so an empty result stays on page 1
+  // rather than oscillating.
+  $effect(() => {
+    if (store.loaded && total > 0 && offset >= total) gotoPage(pageCount);
   });
 
   const meta = $derived(store.meta);
@@ -107,7 +139,7 @@
   // ---- keyboard nav ----
   let cursor = $state(0);
   $effect(() => {
-    if (cursor >= filtered.length) cursor = Math.max(0, filtered.length - 1);
+    if (cursor >= rows.length) cursor = Math.max(0, rows.length - 1);
   });
   function onKey(e: KeyboardEvent) {
     if (e.ctrlKey || e.metaKey || e.altKey) return; // never hijack shortcuts
@@ -115,12 +147,12 @@
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
     if (e.key === 'j') {
       e.preventDefault();
-      cursor = Math.min(cursor + 1, filtered.length - 1);
+      cursor = Math.min(cursor + 1, rows.length - 1);
     } else if (e.key === 'k') {
       e.preventDefault();
       cursor = Math.max(cursor - 1, 0);
     } else if (e.key === 'Enter') {
-      const it = filtered[cursor];
+      const it = rows[cursor];
       if (it) goto(`../items/${it.id}`);
     }
   }
@@ -148,8 +180,8 @@
   const ROW_H = 38; // fixed row height (px); matches td padding + line height
   let scrollEl = $state<HTMLDivElement | undefined>();
 
-  // Stable key fn — reads the live `filtered` lazily (not captured at init).
-  const itemKey = (i: number) => filtered[i]?.id ?? i;
+  // Stable key fn — reads the live `rows` lazily (not captured at init).
+  const itemKey = (i: number) => rows[i]?.id ?? i;
 
   const virtual = new Virtual({
     count: 0,
@@ -163,9 +195,9 @@
   $effect(() => {
     if (scrollEl) return virtual.attach();
   });
-  // Re-sync the virtualizer whenever the filtered set changes (count/keys).
+  // Re-sync the virtualizer whenever the page changes (count/keys).
   $effect(() => {
-    virtual.update({ count: filtered.length, getItemKey: itemKey });
+    virtual.update({ count: rows.length, getItemKey: itemKey });
   });
 
   const vItems = $derived(virtual.items);
@@ -237,11 +269,19 @@
   </div>
 {/if}
 
+<!--
+  Only the *active* tab carries a count, and it is `_meta.total` for the query
+  that produced the rows below. The three counts used to be computed from a
+  browser copy of the whole store; with only one page in hand they cannot be,
+  and a number derived from anything but this response would be the same defect
+  the Comments tab has to avoid — a full count standing over a partial list.
+-->
 <div class="ltabs" role="tablist">
-  {#each [['list', 'all', 'All'], ['ready', 'ready', 'Ready'], ['blocked', 'blocked', 'Blocked']] as [mode, cntKey, label] (mode)}
+  {#each [['list', 'All'], ['ready', 'Ready'], ['blocked', 'Blocked']] as [mode, label] (mode)}
     {@const active = (tab === 'list' ? 'list' : tab) === mode}
     <button class="ltab" class:active role="tab" aria-selected={active} onclick={() => setTab(mode)}>
-      {label} <span class="n mono">{counts[cntKey as keyof typeof counts]}</span>
+      {label}
+      {#if active && store.loaded}<span class="n mono">{total}</span>{/if}
     </button>
   {/each}
 </div>
@@ -277,7 +317,7 @@
         {#if padTop > 0}<tr class="spacer" style="height:{padTop}px" aria-hidden="true"><td colspan="8"></td></tr>{/if}
         {#each vItems as row (row.key)}
           {@const i = row.index}
-          {@const item = filtered[i]}
+          {@const item = rows[i]}
           <tr
             class:cursor={i === cursor}
             onclick={() => goto(`../items/${item.id}`)}
@@ -303,15 +343,59 @@
           </tr>
         {/each}
         {#if padBottom > 0}<tr class="spacer" style="height:{padBottom}px" aria-hidden="true"><td colspan="8"></td></tr>{/if}
-        {#if filtered.length === 0}
+        {#if rows.length === 0}
           <tr><td colspan="8" class="empty dim">{store.loaded ? 'No items match these filters' : 'Loading…'}</td></tr>
         {/if}
       </tbody>
     </table>
   </div>
+
+  <!--
+    The range and the total come from the same response as the rows, so
+    "101–200 of 412" can never stand over a list that holds something else.
+  -->
+  <nav class="pager" aria-label="Pagination">
+    <span class="range dim mono">
+      {#if total === 0}
+        {store.loaded ? 'No items' : 'Loading…'}
+      {:else}
+        {firstShown}–{lastShown} of {total}
+      {/if}
+    </span>
+    {#if pageCount > 1}
+      <div class="pbtns">
+        <button class="btn" disabled={pageNum <= 1} onclick={() => gotoPage(1)} aria-label="First page">«</button>
+        <button class="btn" disabled={pageNum <= 1} onclick={() => gotoPage(pageNum - 1)} aria-label="Previous page">‹</button>
+        <span class="dim mono">Page {pageNum} / {pageCount}</span>
+        <button class="btn" disabled={pageNum >= pageCount} onclick={() => gotoPage(pageNum + 1)} aria-label="Next page">›</button>
+        <button class="btn" disabled={pageNum >= pageCount} onclick={() => gotoPage(pageCount)} aria-label="Last page">»</button>
+      </div>
+    {/if}
+  </nav>
 {/if}
 
 <style>
+  .pager {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 2px 0;
+    font-size: 12px;
+    flex-wrap: wrap;
+  }
+  .pbtns {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .pbtns .btn {
+    padding: 3px 9px;
+  }
+  .pbtns .btn:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
   .lbar {
     display: flex;
     align-items: center;

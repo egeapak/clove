@@ -1,6 +1,7 @@
 import { browser, dev } from '$app/environment';
-import type { Item, ConnState, Meta } from './types';
+import type { Item, ConnState, ItemPage, ListQuery, Meta } from './types';
 import { api, isMockMode } from './api';
+import { queryString } from './query';
 
 /** Handle for one in-flight optimistic edit (see `Store.optimistic`). */
 export interface OptimisticEdit {
@@ -10,7 +11,16 @@ export interface OptimisticEdit {
   settle(server?: Item): void;
 }
 
-/** Normalized client cache: Map<id, Item>. All views derive from this. */
+/**
+ * Normalized client cache: `Map<id, Item>` holding **one server window**.
+ *
+ * The store used to be "the whole store": one unparameterized `GET /items` on
+ * startup, with every view filtering, sorting and slicing the result in the
+ * browser. It is now query-driven — a view declares what it needs with
+ * {@link Store.setQuery} and the server decides the contents and the order of
+ * {@link Store.all}. The list route asks for one page; the board and the
+ * timeline, which genuinely render every item, ask for `limit: 0`.
+ */
 class Store {
   items = $state<Map<string, Item>>(new Map());
   meta = $state<Meta | null>(null);
@@ -19,6 +29,23 @@ class Store {
   /** Set when the *initial* load fails (backend down), so views can show a
    *  distinct error/retry panel instead of the empty state. Cleared on success. */
   loadError = $state<string | null>(null);
+
+  /** Match count for the current query **before** its window (`_meta.total`). */
+  total = $state(0);
+  /** The window the server actually applied (`_meta.offset`/`_meta.limit`). */
+  offset = $state(0);
+  limit = $state(0);
+
+  /** ids of the current window, in the order the server returned them. */
+  private order = $state<string[]>([]);
+  /** The query in force. `null` until a view declares one — startup loads
+   *  `/meta` only, so a deep link to the list page fetches its page and never
+   *  the whole store first. */
+  private query: ListQuery | null = null;
+  /** Guards against an older in-flight response overwriting a newer one: the
+   *  query changes per keystroke in the filter box, and `fetch` gives no
+   *  ordering guarantee. */
+  private loadToken = 0;
 
   // Pending optimistic ops per id. Concurrent edits to the same id must compose:
   // we keep the pre-edit `base` (server-authoritative) plus an ordered list of
@@ -29,18 +56,21 @@ class Store {
     string,
     { base: Item; patches: Array<{ token: symbol; patch: Partial<Item> }> }
   >();
-  // Canonical server order: id -> insertion index from the last replaceAll.
-  // The list's default ("rank") sort uses this so it preserves the server's
-  // (priority, topo, id) ordering instead of approximating with priority.
-  private rankIndex = new Map<string, number>();
-
+  /**
+   * The current window, in server order.
+   *
+   * Driven by an explicit id list rather than `items.values()` so an item
+   * fetched out of band — the detail and edit routes `upsert` the full item
+   * they load, body included — populates the cache without appearing as an
+   * extra row in a page it does not belong to.
+   */
   get all(): Item[] {
-    return [...this.items.values()];
-  }
-
-  /** Server canonical rank for an id (lower = earlier). Unknown ids sort last. */
-  rankOf(id: string): number {
-    return this.rankIndex.get(id) ?? Number.MAX_SAFE_INTEGER;
+    const out: Item[] = [];
+    for (const id of this.order) {
+      const item = this.items.get(id);
+      if (item) out.push(item);
+    }
+    return out;
   }
 
   upsert(item: Item) {
@@ -61,10 +91,19 @@ class Store {
     this.items = next;
   }
 
-  replaceAll(list: Item[]) {
+  /**
+   * Adopt a server window: `list` becomes the visible rows, in order.
+   *
+   * `window` carries the server's own counts. When it is absent (the tests, and
+   * any caller that has a plain array) the list *is* the whole answer, so the
+   * counts describe exactly it — never a total larger than what is on screen.
+   */
+  replaceAll(list: Item[], window?: { total: number; offset: number; limit: number }) {
     const next = new Map(list.map((i) => [i.id, i]));
-    // Record server order for the "rank" sort.
-    this.rankIndex = new Map(list.map((i, idx) => [i.id, idx]));
+    this.order = list.map((i) => i.id);
+    this.total = window?.total ?? list.length;
+    this.offset = window?.offset ?? 0;
+    this.limit = window?.limit ?? 0;
     // Re-apply any in-flight optimistic writes on top of the (possibly stale)
     // server list so a batch-triggered refetch can't clobber a pending write.
     // Rebase each pending entry's `base` onto the fresh server value so a later
@@ -156,9 +195,58 @@ class Store {
     this.recompute(id);
   }
 
+  /**
+   * Declare the query this view needs and load it.
+   *
+   * Idempotent: a query that serializes to the same request string is a no-op,
+   * so a route may call this from an `$effect` on every re-render. The
+   * comparison goes through `queryString` — the exact string that would be
+   * sent — so it cannot drift from what the server would see.
+   *
+   * Never throws; a failure lands in `loadError`, like the initial load.
+   */
+  setQuery(query: ListQuery) {
+    if (this.query && queryString(this.query) === queryString(query)) return;
+    this.query = query;
+    void this.refetch().catch((e) => {
+      this.loadError = e instanceof Error ? e.message : 'load failed';
+    });
+  }
+
+  /**
+   * Load the bootstrap metadata if it is not loaded yet.
+   *
+   * Startup uses this instead of a full `refetch`: routes mount before the
+   * layout's `onMount`, so by the time `startLive` runs the view has already
+   * declared its query and a second unconditional load would issue the same
+   * request twice.
+   */
+  async ensureMeta() {
+    if (this.meta) return;
+    this.meta = await api.meta();
+    this.loadError = null;
+    if (isMockMode()) this.conn = 'mock';
+  }
+
   async refetch() {
-    const [list, meta] = await Promise.all([api.items(), api.meta()]);
-    this.replaceAll(list);
+    const token = ++this.loadToken;
+    // Before any view has declared a query there is nothing to page: load the
+    // dropdown/bootstrap metadata alone rather than the entire store.
+    if (!this.query) {
+      const meta = await api.meta();
+      if (token !== this.loadToken) return;
+      this.meta = meta;
+      this.loadError = null;
+      if (isMockMode()) this.conn = 'mock';
+      return;
+    }
+    const [page, meta]: [ItemPage, Meta] = await Promise.all([
+      api.items(this.query),
+      api.meta()
+    ]);
+    // A response for a superseded query must not overwrite a newer one.
+    if (token !== this.loadToken) return;
+    this.replaceAll(page.items, page);
     this.meta = meta;
     this.loadError = null;
     if (isMockMode()) this.conn = 'mock';
@@ -296,7 +384,10 @@ export async function startLive() {
   started = true;
   bindLifecycle();
   try {
-    await store.refetch();
+    // Only the bootstrap metadata: the mounted route has already asked for the
+    // rows it needs, and it is the one that knows whether that is a page or the
+    // whole store.
+    await store.ensureMeta();
   } catch (e) {
     // Initial load failed: surface a distinct error so views can offer Retry.
     store.loadError = e instanceof Error ? e.message : 'load failed';

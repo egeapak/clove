@@ -88,6 +88,93 @@ fn csv(params: &HashMap<String, String>, key: &str) -> Vec<String> {
     clove_core::view::Filters::split_csv(params.get(key).map(String::as_str))
 }
 
+/// How a read result is shaped before it goes on the wire: `?fields=` and
+/// `?compact=`, the last result-shaping gap between the web and the other two
+/// surfaces (read-path roadmap §5).
+///
+/// The semantics are the **CLI's**, not the MCP server's: both default off, so
+/// an unshaped request returns exactly the object it always did. (`clove-mcp`
+/// compacts by default because it is spending a model's context window; a
+/// browser sending no parameters must keep every key, since the SPA reads
+/// `assignee: null` and `labels: []` as answers.)
+///
+/// `fields` is honoured literally — `?fields=assignee` on an unassigned item
+/// still yields `{"assignee": null}`, so a caller can tell "unset" from "not
+/// requested" — and `compact` composes on top of it, exactly as
+/// `clove ls --fields … --compact` does.
+#[derive(Debug, Clone, Default)]
+struct Shape {
+    fields: Option<Vec<String>>,
+    compact: bool,
+}
+
+impl Shape {
+    /// Whether this shape would change any object (the fast path is `false`).
+    fn is_noop(&self) -> bool {
+        self.fields.is_none() && !self.compact
+    }
+
+    /// Shape one item object.
+    fn apply(&self, obj: serde_json::Map<String, Value>) -> Value {
+        let obj = match &self.fields {
+            Some(fields) => clove_core::view::project(obj, fields),
+            None => obj,
+        };
+        let obj = if self.compact {
+            // `compact_read` (not bare `compact`) so `schema` — the per-file
+            // migration marker every surface drops — goes with it.
+            clove_core::view::compact_read(obj)
+        } else {
+            obj
+        };
+        Value::Object(obj)
+    }
+
+    /// Shape a list of already-rendered item objects.
+    fn apply_all(&self, values: Vec<Value>) -> Vec<Value> {
+        if self.is_noop() {
+            return values;
+        }
+        values
+            .into_iter()
+            .map(|v| match v {
+                Value::Object(obj) => self.apply(obj),
+                other => other,
+            })
+            .collect()
+    }
+}
+
+/// Parse a boolean query parameter strictly.
+///
+/// Absent or empty is `false`; `true`/`1` and `false`/`0` are the accepted
+/// spellings; anything else is a `VALIDATION_ERROR` rather than a silent
+/// `false` — the same treatment `?sort=` and `?status=` get, and the reason is
+/// the same: `?compact=yes` quietly returning the full shape is a result a
+/// client cannot distinguish from a server that does not support the parameter.
+fn bool_param(params: &HashMap<String, String>, key: &str) -> Result<bool, ApiError> {
+    match params.get(key).map(String::as_str) {
+        None | Some("") | Some("false") | Some("0") => Ok(false),
+        Some("true") | Some("1") => Ok(true),
+        Some(other) => Err(ApiError::from(clove_types::CloveError::InvalidField {
+            field: key.to_owned(),
+            reason: format!("expected true or false, got `{other}`"),
+        })),
+    }
+}
+
+/// The requested `?fields=`/`?compact=`.
+fn shape_of(params: &HashMap<String, String>) -> Result<Shape, ApiError> {
+    let fields = match csv(params, "fields") {
+        f if f.is_empty() => None,
+        f => Some(f),
+    };
+    Ok(Shape {
+        fields,
+        compact: bool_param(params, "compact")?,
+    })
+}
+
 /// Parse `?offset=`/`?limit=` through the shared contract.
 ///
 /// `?limit=0` means **unlimited**, as it does on the CLI and MCP. It previously
@@ -180,6 +267,7 @@ pub async fn list_items(
 ) -> ApiResult {
     let order = order_of(&params)?;
     let filters = filters_of(&params)?;
+    let shape = shape_of(&params)?;
     let window = page_window(&params);
     let mode = params.get("mode").cloned().unwrap_or_default();
 
@@ -200,7 +288,10 @@ pub async fn list_items(
     let source = answer.source.as_str();
     let total = answer.total;
     let page = values_of(answer, &state)?;
+    // `returned` counts rows, so it is taken before shaping — a projection
+    // changes each row's keys, never how many rows came back.
     let returned = page.len();
+    let page = shape.apply_all(page);
 
     Ok(ok(
         json!(page),
@@ -223,8 +314,13 @@ pub async fn list_items(
 /// (`ops::graph_terms_detailed`), not from a whole-store graph: rendering one
 /// item used to scan and parse every file in the repo to learn whether *that*
 /// item was ready, which is the per-request rebuild read-path §4 names.
-pub async fn get_item(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+pub async fn get_item(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> ApiResult {
     let id = parse_id(&id)?;
+    let shape = shape_of(&params)?;
     let issues_dir = state.issues_dir.clone();
     let store = state.store.clone();
     let obj = blocking(move || {
@@ -234,7 +330,7 @@ pub async fn get_item(State(state): State<AppState>, Path(id): Path<String>) -> 
     })
     .await?;
     Ok(ok(
-        Value::Object(obj),
+        shape.apply(obj),
         json!({ "source": clove_engine::Source::Files.as_str() }),
     ))
 }
@@ -323,6 +419,7 @@ pub async fn get_board(
 ) -> ApiResult {
     let order = order_of(&params)?;
     let filters = filters_of(&params)?;
+    let shape = shape_of(&params)?;
 
     // The board shows every matching item grouped into columns, so the query is
     // unwindowed: `limit`/`offset` window each *column* below, not the query.
@@ -357,12 +454,16 @@ pub async fn get_board(
         .into_iter()
         .map(|(key, label, items)| {
             let (page, count) = window.apply(items);
+            let returned = page.len();
+            // Shaping runs *after* the grouping, which reads each row's
+            // `status`: projecting first would let `?fields=id` empty every
+            // column instead of returning ids.
             json!({
                 "key": key,
                 "label": label,
                 "count": count,
-                "returned": page.len(),
-                "items": page,
+                "returned": returned,
+                "items": shape.apply_all(page),
             })
         })
         .collect();

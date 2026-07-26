@@ -1085,8 +1085,8 @@ through one implementation, `clove_core::view::Page`:
 - **`0`** → unlimited,
 - **`n`** → at most `n`.
 
-The defaults differ (a terminal, an agent's context budget, and a browser that
-virtualizes the whole store have different cost functions) but live in exactly
+The defaults differ (a terminal, an agent's context budget, and an HTTP client
+that states its own window have different cost functions) but live in exactly
 one place, `clove_core::view::defaults`: CLI 100, MCP 50, web unlimited. A
 comment thread pages on the same per-surface default as an item list.
 `_meta.total` is always the match count *before* the window, and `_meta.limit`
@@ -1109,6 +1109,46 @@ before the window) and `returned`; `_meta.per_column` marks the difference from
 a flat list.
 
 Cursor-based pagination is deferred to post-v1; offset is sufficient for M0–M2.
+
+**The bundled SPA pages; it does not hold the store.** `clove-web`'s Svelte app
+is query-driven: a view declares what it needs (`store.setQuery(…)`) and the
+server answers it. The list route asks for one page at a time (`limit=100` plus
+an offset derived from a 1-based `?page=` in the browser URL) and renders the
+response as-is — no client-side filtering, ordering or slicing. The board and
+the timeline, which genuinely render every item, ask for `limit=0`. `_meta.total`
+is what the pager and the active tab's count both read, so neither can state a
+number the visible rows contradict. Startup loads `/meta` alone.
+
+The **API** default is nevertheless still unlimited (`view::defaults::WEB_LIMIT
+= 0`), and deliberately: that one constant is the default for `GET /items`, the
+board's per-column window, `GET /stats/history` *and* `GET /items/:id/comments`,
+so a non-zero value would cap four endpoints, three of which have no pager. On
+comments it would put a full `comment_count` heading over a truncated thread —
+the reason that endpoint's default was chosen in the first place.
+
+**Result shaping** is the third shared decoder, spelled `--fields F,...` /
+`--compact` on the CLI, `fields` / `compact` on the MCP read tools, and
+`?fields=` (csv) / `?compact=true` on the web API. `clove_core::view::project`
+restricts an item object to the named keys (unknown names are ignored);
+`view::compact_read` drops keys whose value carries no information — JSON `null`
+and empty arrays — plus `view::READ_NOISE` (`schema`, a per-file migration
+marker). `false`, `0` and `""` are always kept: they are answers, not absences.
+
+Two rules make the combination predictable:
+
+- **A projection is honoured literally.** `--fields assignee` on an unassigned
+  item returns `{"assignee": null}`, so a caller can tell "unset" from "not
+  requested". Compaction applies on top only when it was asked for explicitly.
+- **The default differs by surface, and only there.** The CLI and the web API
+  shape nothing unless asked; the MCP tools compact by default, because they are
+  spending a model's context window rather than a pipe or a browser. Everything
+  downstream of that choice is the same code.
+
+On `GET /api/v1/board` the shaping runs *after* the grouping, which reads each
+row's `status` — projecting first would empty every column. A boolean query
+parameter is parsed strictly (`true|1|false|0`, absent or empty = false);
+anything else is a `VALIDATION_ERROR`, since a silently-ignored `?compact=yes`
+is indistinguishable from a server that does not implement the parameter.
 
 **Ordering** decodes through one implementation too, `clove_core::view::Order`
 (`SortField` + a direction), spelled `--sort FIELD` / `--desc` on the CLI,

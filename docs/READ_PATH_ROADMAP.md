@@ -15,7 +15,7 @@ Status of what shipped, for context:
 |---|---|
 | `offset`/`limit` decoding | **Done** — `clove_core::view::Page`, all surfaces |
 | Per-surface defaults | **Done** — `clove_core::view::defaults` |
-| Result shaping (`fields`/`compact`) | **Done** on CLI + MCP; **absent on the web API** (§5) |
+| Result shaping (`fields`/`compact`) | **Done** — CLI, MCP, and the web API (§5) |
 | Ordering (`sort`/`dir`) | **Done** — `clove_core::view::Order`, all surfaces (§1) |
 | Filters | **Done** — `clove_core::view::Filters`, all surfaces (§2) |
 | Read tiering (daemon → index → files) | **Done** — `clove-engine`, all surfaces (§4) |
@@ -69,15 +69,15 @@ read path this section covers, but both will drift when a sort field is added:
   Fixed here (`toggling_direction_reverses_the_default_order`). Folding the
   whole thing into `view::Order` is still worth doing; it was skipped because it
   churns the render snapshots.
-- The SPA's `web/src/lib/filter.ts::sortItems` sorts the fetched store
-  client-side. `web/src/lib/query.ts` *does* send `?sort=`/`?dir=`, but with
-  `WEB_LIMIT = 0` the SPA receives the whole store and its own `sortItems`
-  decides what you see. Two things make that fragile once §5 pages: its tiebreak
-  is the *server's insertion order* rather than the id, and it compares
-  timestamps with `localeCompare` — locale collation, not byte order. Both are
-  equivalent to the server's answer only while the fetch is unpaginated. The UI
-  can currently emit only `id`/`priority`/`updated`, all valid `SortField`s, so
-  the new strict validation cannot 422 it.
+- ~~The SPA's `web/src/lib/filter.ts::sortItems` sorts the fetched store
+  client-side.~~ **Fixed in §5**, which is where it became a live bug rather
+  than a latent one. `sortItems` is no longer on the live path at all — the list
+  route renders the server's page in the server's order — and as the mock
+  backend's sorter it now ends every key in an **id** tiebreak (not the fetched
+  array's insertion order) and compares strings by byte order (not
+  `localeCompare`, which is locale collation). The two were equivalent to the
+  server's answer only while the fetch was unpaginated, exactly as this note
+  predicted. It also gained `status`/`type`, so it covers every `SortField`.
 
 The original write-up follows.
 
@@ -235,13 +235,13 @@ truth.
   predicate (single-valued `status`, no `q`, labels all-of, types/priorities
   any-of), with `q_matches` re-implemented inline in `app::mod`. No behaviour
   difference today where they overlap.
-- The SPA's `web/src/lib/filter.ts::applyFilters` matters more, because the
-  shipped UI **never sends filters to the server**: `store.svelte.ts` fetches the
-  whole store once with no query and `routes/list` filters client-side. So the
-  server-side filtering this section rewrote is not exercised by the browser at
-  all, and the two answered the same URL differently until their semantics were
-  aligned here (per-field `q`, canonicalized labels). Making the SPA ask the
-  server is §6 — it is the same change as making it page.
+- ~~The SPA's `web/src/lib/filter.ts::applyFilters` matters more, because the
+  shipped UI **never sends filters to the server**.~~ **Fixed in §5**, and it was
+  indeed the same change as making it page. `store.svelte.ts` is query-driven
+  now: the list route sends the filters, the ordering and the window, and
+  renders what comes back. `applyFilters` survives only inside `api.ts`'s mock
+  backend, where its job is to answer like the server rather than to decide what
+  the browser shows.
 
 
 ## 3. Canonical timestamps — **DONE**
@@ -457,7 +457,73 @@ per unit of risk.
 
 ---
 
-## 5. Web pagination + SPA paging
+## 5. Web pagination + SPA paging — **DONE**
+
+Shipped as specified, plus the two client-side leftovers §1 and §2 recorded.
+`?fields=`/`?compact=` are on the web API (`/items`, `/items/:id`, `/board`);
+the SPA sends `limit`/`offset` and pages; and the list route's client-side
+`applyFilters`/`sortItems` are off the live path entirely. `WEB_LIMIT` stays 0.
+
+**The SPA is now query-driven, and that is the whole change.** `store.svelte.ts`
+used to issue one unparameterized `GET /items` at startup and hold the store;
+every view then filtered, sorted and sliced that copy. It now holds **one server
+window**: a view declares what it needs with `store.setQuery(…)` and the server
+decides the contents *and* the order. `/list` asks for `limit: 100` at the
+current offset; `/board` and `/timeline`, which genuinely render every item, ask
+for `limit: 0`. Startup loads `/meta` alone — routes mount before the layout's
+`onMount`, so the view has already said which rows it wants by then, and a deep
+link to `/list` no longer pulls the whole store first.
+
+**Filtering and sorting moved server-side; `filter.ts` did not die, it changed
+job.** The query string already carried the full shared `Filters` and `Order`,
+so the list route sends them and renders the response as-is. What is left in
+`filter.ts` is the **mock backend's** emulation of the API (`api.ts::filterMock`,
+which now filters, sorts *and* windows, in that order) — the fixture the
+frontend tests and `npm run dev` run against, which has to answer like the
+server or it is worse than useless. Two things §1 flagged are fixed there rather
+than tolerated: the tiebreak is the **id**, not the fetched array's insertion
+order (only the same answer while the fetch is the entire store — the moment it
+pages, ties either side of a page boundary repeat and skip), and string
+comparison is byte order rather than `localeCompare`, which is locale collation
+and therefore runtime-dependent. `sortItems` also gained `status`/`type`, so
+every `SortField` the API accepts has a mock answer.
+
+**Four notes.**
+
+- **`WEB_LIMIT` stays 0, and the reason is that it is not per-endpoint.** The
+  gate this section set — "only after the SPA pages" — is open, but the constant
+  is shared by `GET /items`, `GET /board`'s per-column window, `GET
+  /stats/history`, *and* `GET /items/:id/comments`. A non-zero value is
+  therefore not a change to the item list; it is a change to four endpoints at
+  once, three of which have no pager — and on comments it would reintroduce
+  precisely the defect noted below, a `comment_count` heading over a truncated
+  thread. The client it would protect no longer exists either: every SPA view
+  now states its own window. Splitting the default per endpoint is the
+  prerequisite, and that is a larger change than this section.
+- **The tab counts had to give up something, and it is the inactive tabs.**
+  All/Ready/Blocked used to count a browser copy of the whole store. With one
+  page in hand they cannot be computed, and any *other* source (a `/stats` call,
+  a cached number) is a total that does not describe the rows underneath it —
+  the same shape as the `comment_count` warning. So only the **active** tab
+  carries a number, and it is `_meta.total` from the response that produced the
+  visible rows. The pager reads the same field: "101–200 of 412" and the tab
+  count cannot disagree, because they are one value.
+- **A stale response can no longer overwrite a newer one.** The query changes
+  per keystroke in the filter box and `fetch` promises no ordering, so the store
+  stamps each load with a token and drops a reply whose token has been
+  superseded. Under the old unparameterized fetch there was only ever one
+  request shape, so this could not arise.
+- **`?fields=`/`?compact=` take the CLI's semantics, not the MCP server's** —
+  both default *off*. `clove-mcp` compacts by default because it is spending a
+  model's context window; a browser sending no parameters has to keep every key,
+  since the SPA reads `assignee: null` and `labels: []` as answers. On the board
+  the shaping runs *after* the grouping, which reads each row's `status`:
+  projecting first would let `?fields=id` empty every column. An unparseable
+  boolean (`?compact=yes`) is a `VALIDATION_ERROR`, like `?sort=` and
+  `?status=` — a silent `false` is a response a client cannot distinguish from a
+  server that does not implement the parameter.
+
+The original write-up follows.
 
 **Problem.** `WEB_LIMIT` is 0 (unlimited) on purpose — the bundled SPA fetches
 the store once and virtualizes. That is fine at a few thousand items and not

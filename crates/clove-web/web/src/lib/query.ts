@@ -20,7 +20,15 @@ function csv(p: URLSearchParams, key: string): string[] {
     .filter(Boolean);
 }
 
-/** Parse URLSearchParams into a ListQuery. Accepts `tab` or `mode`. */
+/**
+ * Parse URLSearchParams into a ListQuery. Accepts `tab` or `mode`.
+ *
+ * The **window** (`limit`/`offset`) is deliberately not read here. This parses
+ * the *browser* URL, whose paging state is a 1-based `?page=` the list route
+ * turns into `limit`/`offset`; `buildParams` writes those two for the *API*
+ * URL. The two query strings have never been the same thing (the browser also
+ * accepts `tab`, which the API does not).
+ */
 export function parseQuery(p: URLSearchParams): ListQuery {
   const rawMode = p.get('mode') ?? p.get('tab') ?? '';
   const mode = MODE_VALUES.has(rawMode) ? (rawMode as 'ready' | 'blocked') : 'list';
@@ -52,6 +60,13 @@ export function buildParams(query: ListQuery): URLSearchParams {
   if (query.type?.length) p.set('type', query.type.join(','));
   if (query.priority?.length) p.set('priority', query.priority.map(String).join(','));
   if (query.label?.length) p.set('label', query.label.join(','));
+  // The window is sent explicitly, including `limit: 0`: the API default is
+  // unlimited and stays that way (other clients depend on it), so a paging
+  // client has to ask rather than inherit. `offset: 0` is the default on every
+  // surface, so it is omitted — but `limit: 0` is a real request for
+  // "everything" and must survive.
+  if (query.limit !== undefined) p.set('limit', String(query.limit));
+  if (query.offset) p.set('offset', String(query.offset));
   return p;
 }
 

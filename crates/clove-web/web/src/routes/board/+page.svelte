@@ -7,6 +7,15 @@
   import StatusGlyph from '$lib/components/StatusGlyph.svelte';
   import { Virtual } from '$lib/virtual.svelte';
 
+  // A board renders every item, grouped into columns, so it asks for the whole
+  // store explicitly: `limit: 0` (unlimited on every clove surface). The API
+  // default is also unlimited, but relying on that is what made the SPA's
+  // request indistinguishable from "I forgot to page" — the list route now asks
+  // for one page, and each view says which it wants.
+  $effect(() => {
+    store.setQuery({ limit: 0 });
+  });
+
   const empty = $derived(store.loaded && store.all.length === 0);
 
   const COLS: Array<{ key: Status; label: string }> = [
