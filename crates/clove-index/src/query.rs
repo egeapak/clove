@@ -145,10 +145,14 @@ fn where_clause(filter: &Filter) -> (String, Vec<Box<dyn ToSql>>) {
 ///   alphabetical order the stored words give (`closed` < `in_progress` <
 ///   `open`). The `CASE` is generated from `SortField::{STATUS_ORDER,
 ///   TYPE_ORDER}`, the same arrays the file path ranks by.
-/// - `created`/`updated` are TEXT. Every row is written with
-///   `DateTime<Utc>::to_rfc3339()`, one fixed `+00:00` spelling, so lexicographic
-///   order *is* chronological order. (A non-canonical timestamp reaching the
-///   store by hand-edit could break that — the canonicalization is roadmap §3.)
+/// - `created`/`updated` are TEXT, and lexicographic order *is* chronological
+///   order here: the column is written from a parsed `DateTime<Utc>` via
+///   `to_rfc3339()` (`crate::write`), so the index normalizes to one `+00:00`
+///   spelling no matter how the file was written. A hand-edited `Z` or `+02:00`
+///   in the frontmatter therefore cannot desynchronize the index path from the
+///   file path — it is re-spelled on the way in. Differing sub-second precision
+///   is safe too, and not by accident: `'+' (0x2B) < '.' (0x2E)`, so a truncated
+///   fraction sorts before a longer one at the same instant.
 ///
 /// Unranked items carry the sentinel `topological_rank`
 /// ([`crate::write::UNRANKED_TOPO`], a large value) rather than `NULL`, so they
@@ -188,9 +192,17 @@ fn order_by_sql(order: &Order) -> String {
     format!(" ORDER BY {}", terms.join(", "))
 }
 
-/// The `ORDER BY … [LIMIT …]` tail. A `LIMIT` (from `Filter::limit`) is pushed
-/// into SQL so a paginated `ls` steps only the rows it needs rather than the
-/// whole table.
+/// The `ORDER BY … [LIMIT …]` tail.
+///
+/// A `LIMIT` (from `Filter::limit`) is pushed into SQL, but be precise about
+/// what that buys: only the default `rank` order rides a covering index
+/// (`idx_items_list`) and streams. `id` walks the `WITHOUT ROWID` primary key.
+/// Every other field — `priority`, `created`, `updated`, `status`, `type` —
+/// plans as `SCAN items` + `USE TEMP B-TREE FOR ORDER BY`, so the whole table is
+/// sorted before `LIMIT` takes its slice. Measured on 10k rows: `rank` 0.012 ms,
+/// `updated DESC` 0.931 ms. Sub-millisecond, but linear in store size, and it is
+/// the flagship query (`ls --sort updated --desc --limit 10`). If that becomes
+/// hot, the fix is an index per sortable column, not a change here.
 fn order_limit_sql(filter: &Filter) -> String {
     let limit_sql = match filter.limit {
         Some(n) => format!(" LIMIT {n}"),

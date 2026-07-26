@@ -740,7 +740,10 @@ clove ls [--status S] [--type T] [--label L] [--assignee A]
 clove query [--filter EXPR] [--sort FIELD] [--desc] [--limit N] [--offset N]
             [--format json] [--fields F,...] [--compact]
             # also reads JSON filter object from stdin when stdin is non-TTY
-            # (the JSON object accepts `sort`/`desc` too; the flags win)
+            # (the JSON object accepts `sort`/`desc` too. `--sort` overrides the
+            #  JSON's field; `--desc` is a bare bool flag so it ORs with the
+            #  JSON's direction — there is no way to force ascending from the
+            #  flag side once the JSON asked for descending)
 clove search <text> [--sort FIELD] [--desc] [--limit N] [--offset N]
              [--format json] [--fields F,...] [--compact]
              # --sort FIELD is rank|priority|created|updated|id|status|type

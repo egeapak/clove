@@ -998,8 +998,10 @@ fn read_tools_sort_and_echo_the_order() {
     assert_eq!(listed["structuredContent"]["sort"], "rank");
     assert_eq!(listed["structuredContent"]["dir"], "asc");
 
-    // `sort: id` — the ids were minted in gamma, alpha, beta order, so this is
-    // creation order, and it differs from the priority order above.
+    // Sorted by id, which is NOT creation order: clove ids carry a random
+    // suffix, so `want` is sorted rather than assumed. Without that, a `sort`
+    // that was silently ignored would coincide with the expected order about
+    // one run in six and the test would pass on a broken implementation.
     let by_id = s.call(11, "clove_list", json!({ "sort": "id" }));
     let mut want: Vec<String> = ids.iter().map(|(_, id)| id.clone()).collect();
     want.sort();

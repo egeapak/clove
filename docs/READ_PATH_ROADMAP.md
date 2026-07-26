@@ -46,26 +46,37 @@ Three notes for whoever picks up §2/§4:
   in rank order and carries no sort, so `cmd/blocked.rs` reorders locally
   (reversing for `rank --desc`, re-sorting for every other field). §4's engine
   extraction is the natural place to fold that away.
-- `created`/`updated` on the index path compare as TEXT. Every row is written
-  with `DateTime<Utc>::to_rfc3339()`, one `+00:00` spelling, so lexicographic
-  order is chronological — but a non-canonical timestamp arriving by hand-edit
-  would break the file/index agreement. That is §3.
+- `created`/`updated` on the index path compare as TEXT, and that is safe. The
+  column is written from a parsed `DateTime<Utc>` via `to_rfc3339()`, so the
+  index re-spells whatever the file said into one `+00:00` form; a hand-edited
+  `Z` or `+02:00` cannot desynchronize the paths. Differing sub-second precision
+  is safe too, and not by luck: `'+' (0x2B) < '.' (0x2E)`, so a truncated
+  fraction sorts before a longer one at the same instant. An earlier draft of
+  this section claimed the opposite and deferred it to §3 — it was wrong, and §3
+  is smaller than it looked because of it.
 
 **Left alone deliberately: two client-side sorters remain.** Neither is on a
 read path this section covers, but both will drift when a sort field is added:
 
 - `clove-tui`'s `app::mod::apply_sort` carries its own `SortField`
-  (`Default|Priority|Created|Updated|Id`) over the in-memory view.
-  *Behaviourally* identical to `view::Order` today — same keys, same id
-  tiebreak, same whole-key reverse — so duplication rather than divergence, but
-  it has no `status`/`type`. Folding it in is cheap; it was skipped because it
+  (`Default|Priority|Created|Updated|Id`) over the in-memory view. Its four
+  named fields match `view::Order` — same keys, same id tiebreak, same whole-key
+  reverse — and it has no `status`/`type`. Its *default* order diverged until
+  this phase: `apply_sort` returned before reading the direction, while
+  `toggle_sort_dir` flipped it unconditionally and the header rendered the new
+  arrow, so `S` on the default sort showed `↓` over a list that had not moved.
+  Fixed here (`toggling_direction_reverses_the_default_order`). Folding the
+  whole thing into `view::Order` is still worth doing; it was skipped because it
   churns the render snapshots.
 - The SPA's `web/src/lib/filter.ts::sortItems` sorts the fetched store
-  client-side and never sends `?sort=` at all. Its tiebreak is the *server's
-  insertion order*, not the id, which is equivalent only while the SPA fetches
-  everything in one unpaginated request — i.e. it stops being equivalent the
-  moment §5 makes the SPA page. Sending `?sort=`/`?dir=` to the server is the
-  natural fix and belongs with §5.
+  client-side. `web/src/lib/query.ts` *does* send `?sort=`/`?dir=`, but with
+  `WEB_LIMIT = 0` the SPA receives the whole store and its own `sortItems`
+  decides what you see. Two things make that fragile once §5 pages: its tiebreak
+  is the *server's insertion order* rather than the id, and it compares
+  timestamps with `localeCompare` — locale collation, not byte order. Both are
+  equivalent to the server's answer only while the fetch is unpaginated. The UI
+  can currently emit only `id`/`priority`/`updated`, all valid `SortField`s, so
+  the new strict validation cannot 422 it.
 
 The original write-up follows.
 
@@ -201,8 +212,12 @@ change when nothing changed.
    second-truncated, but **comment timestamps and stats snapshots are not** —
    both carry nanoseconds (`…T08:54:22.904816670+00:00`), so the canonicalization
    has to cover them too.
-2. Bump `clove_index::SCHEMA_VERSION` (now **5**, after §6.1) so existing
-   indexes holding non-canonical strings are replaced rather than compared
+2. Bump `clove_index::SCHEMA_VERSION` (now **5**, after §6.1) **only if** the
+   canonicalization changes what the index stores. Note it may not: the index
+   already normalizes item timestamps through `to_rfc3339()` on write (see §1),
+   so the item columns are canonical today. Check before bumping — a bump costs
+   every user a rebuild. Existing indexes holding non-canonical strings would be
+   replaced rather than compared
    against. The tripwire assertion in `db.rs` makes this a deliberate act.
 3. ~~`Index::open_or_rebuild`~~ — **done**, shipped with the v5 bump for FTS
    labels (§6.1). On a version mismatch it rebuilds from the files rather than

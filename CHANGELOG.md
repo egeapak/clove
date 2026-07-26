@@ -66,8 +66,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`SortField` + a direction) is the single comparator behind `--sort`/`--desc`,
   the MCP `sort`/`desc` arguments, the web's `?sort=`/`?dir=`, and the SQL
   `ORDER BY` the index and daemon paths run. `clove-web`'s private `sort_items`
-  — which was the only sort implementation in the project — is gone, and its
-  accepted spellings are unchanged.
+  — the only *user-selectable field* sort in the project — is now a thin wrapper
+  that parses the query string and delegates, and its accepted spellings are
+  unchanged. (Other comparators remain by design: `GraphStore`'s graph ordering,
+  `clove-tui`'s in-memory list sort, and the SPA's client-side `sortItems`.)
 
   Three properties come with it:
 

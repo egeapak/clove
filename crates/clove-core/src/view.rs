@@ -1042,6 +1042,58 @@ mod tests {
     /// reads the issues directory, so a store-based test sees whatever order
     /// `read_dir` returns — which on this filesystem is already sorted, making
     /// such a test pass with the tiebreak removed.
+    /// A `SortField` has three independent spellings — `serde(rename_all)` on
+    /// the daemon wire, `as_str()` in `_meta.sort` and the SQL `CASE`, and
+    /// `parse()` for user input. Nothing but this test ties them together.
+    ///
+    /// The exhaustive match is the point: adding a variant fails to compile
+    /// here, which is the prompt to check that all three agree. A variant named
+    /// `LastTouched` would serialize as `last_touched` while `as_str()` returned
+    /// whatever the author typed, and `_meta.sort` would disagree with the wire.
+    #[test]
+    fn the_three_spellings_of_a_sort_field_agree() {
+        fn every_variant(f: SortField) -> &'static str {
+            match f {
+                SortField::Rank => "rank",
+                SortField::Priority => "priority",
+                SortField::Created => "created",
+                SortField::Updated => "updated",
+                SortField::Id => "id",
+                SortField::Status => "status",
+                SortField::Type => "type",
+            }
+        }
+        const ALL: &[SortField] = &[
+            SortField::Rank,
+            SortField::Priority,
+            SortField::Created,
+            SortField::Updated,
+            SortField::Id,
+            SortField::Status,
+            SortField::Type,
+        ];
+
+        for &field in ALL {
+            let word = every_variant(field);
+            assert_eq!(field.as_str(), word, "as_str disagrees for {field:?}");
+            assert_eq!(
+                SortField::parse(word).unwrap(),
+                field,
+                "parse disagrees for {field:?}"
+            );
+            assert_eq!(
+                serde_json::to_value(field).unwrap(),
+                Value::String(word.to_owned()),
+                "the wire spelling disagrees for {field:?}"
+            );
+            assert_eq!(
+                serde_json::from_value::<SortField>(Value::String(word.to_owned())).unwrap(),
+                field,
+                "the wire does not round-trip for {field:?}"
+            );
+        }
+    }
+
     #[test]
     fn search_hits_are_totally_ordered() {
         let hit = |class: MatchClass, priority: u8, raw: &str| {

@@ -255,6 +255,70 @@ fn meta_echoes_the_sort_and_direction() {
     assert_eq!(m["sort"], "id");
 }
 
+/// `clove query`'s JSON filter carries `sort`/`desc`, and the flag precedence is
+/// what DESIGN says it is.
+///
+/// Documented in the CHANGELOG, DESIGN's grammar block, and implemented — but
+/// untested until now. The precedence is deliberately asymmetric: `--sort` wins
+/// over the JSON's field, while `--desc` is a bare bool flag and so ORs with the
+/// JSON's direction. There is no way to force ascending back from the flag side,
+/// which is worth pinning precisely because it reads as a wart rather than a
+/// choice.
+#[test]
+fn query_takes_sort_and_desc_from_the_json_filter() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    build_fixture(root);
+
+    let ids = |args: &[&str]| ids_and_source(&run_in(root, args).stdout).0;
+    let by_id = ids(&["--no-index", "ls", "--sort", "id", "-f", "json"]);
+    let query = |filter: &str, extra: &[&str]| -> Vec<String> {
+        let mut a = vec!["--no-index", "query", "--filter", filter, "-f", "json"];
+        a.extend_from_slice(extra);
+        ids(&a)
+    };
+
+    assert_eq!(query(r#"{"sort":"id"}"#, &[]), by_id);
+    assert_eq!(
+        query(r#"{"sort":"id","desc":true}"#, &[]),
+        by_id.iter().rev().cloned().collect::<Vec<_>>(),
+        "the JSON's direction applies"
+    );
+
+    // The flag wins for the *field*...
+    let meta = |filter: &str, extra: &[&str]| -> serde_json::Value {
+        let mut a = vec!["--no-index", "query", "--filter", filter, "-f", "json"];
+        a.extend_from_slice(extra);
+        let v: serde_json::Value = serde_json::from_slice(&run_in(root, &a).stdout).unwrap();
+        v["_meta"].clone()
+    };
+    let m = meta(r#"{"sort":"updated"}"#, &["--sort", "id"]);
+    assert_eq!(m["sort"], "id", "the --sort flag overrides the JSON field");
+
+    // ...but the direction is a disjunction, so the JSON's `desc` survives onto
+    // a field the JSON never named.
+    let m = meta(r#"{"sort":"updated","desc":true}"#, &["--sort", "id"]);
+    assert_eq!(m["sort"], "id");
+    assert_eq!(
+        m["dir"], "desc",
+        "--desc is a bool flag: the JSON's direction cannot be turned off from the flag side"
+    );
+
+    // An unknown field in the JSON is rejected the same way an unknown flag is.
+    let out = run_in(
+        root,
+        &[
+            "--no-index",
+            "query",
+            "--filter",
+            r#"{"sort":"nope"}"#,
+            "-f",
+            "json",
+        ],
+    );
+    assert!(!out.status.success(), "an unknown sort field must not pass");
+}
+
 /// An unknown `--sort` is a validation error, not a silent fall back to `rank`.
 #[test]
 fn an_unknown_sort_field_is_rejected() {
@@ -364,9 +428,24 @@ mod daemon {
     use std::process::Child;
     use std::time::{Duration, Instant};
 
-    fn cloved_bin() -> Option<PathBuf> {
-        let path = cargo_bin("clove").with_file_name("cloved");
-        path.exists().then_some(path)
+    /// Build `cloved` on demand rather than hoping it is already in `target/`.
+    ///
+    /// This used to be `path.exists().then_some(path)`, and the two daemon tests
+    /// below `return`ed early when it was `None` — reporting **ok**. Under
+    /// `cargo test -p clove-cli` on a tree where `cloved` had not been built,
+    /// the "triple comparison" that DESIGN §7.8 says this file pins was in fact
+    /// a double comparison, and it announced itself as passing. A test that
+    /// cannot perform its check must not report success; escargot is already a
+    /// dev-dependency here and is used the same way in `mcp.rs`, so the test can
+    /// simply guarantee its own precondition.
+    fn cloved_bin() -> PathBuf {
+        escargot::CargoBuild::new()
+            .package("cloved")
+            .bin("cloved")
+            .run()
+            .expect("build cloved for the daemon ordering comparison")
+            .path()
+            .to_path_buf()
     }
 
     fn spawn_daemon(clove_dir: &Path, bin: &Path) -> Child {
@@ -399,10 +478,7 @@ mod daemon {
 
     #[test]
     fn daemon_path_agrees_with_the_file_path_for_every_sort_field() {
-        let Some(bin) = cloved_bin() else {
-            eprintln!("skipping: cloved not built (run via `cargo test --workspace`)");
-            return;
-        };
+        let bin = cloved_bin();
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         build_fixture(root);
@@ -476,10 +552,7 @@ mod daemon {
     /// second implementation of the same comparator, so it gets its own check.
     #[test]
     fn blocked_daemon_path_agrees_with_the_file_path() {
-        let Some(bin) = cloved_bin() else {
-            eprintln!("skipping: cloved not built (run via `cargo test --workspace`)");
-            return;
-        };
+        let bin = cloved_bin();
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         assert!(run_in(root, &["init", "--prefix", "proj"]).status.success());
@@ -496,7 +569,9 @@ mod daemon {
         write_item(root, E, "open", 2, "feature", 1, 2, &[]);
         assert!(run_in(root, &["reindex"]).status.success());
 
-        let fields = ["rank", "priority", "created", "updated", "id", "type"];
+        let fields = [
+            "rank", "priority", "created", "updated", "id", "status", "type",
+        ];
         let truth: Vec<(&str, bool, Vec<String>)> = fields
             .iter()
             .flat_map(|f| [false, true].map(|d| (*f, d)))

@@ -260,8 +260,18 @@ impl App {
     /// Re-order `self.view` by the active sort. `Default` keeps the canonical
     /// order `self.all` is already in; other fields sort flatly with an `id`
     /// tiebreak for determinism.
+    ///
+    /// The direction applies to `Default` too. It used to return before reading
+    /// `dir`, while `toggle_sort_dir` flipped the direction unconditionally and
+    /// the header rendered the new glyph — so pressing `S` on the default sort
+    /// showed `↓` over a list that had not moved. Reversing the canonical order
+    /// is what `clove_core::view::Order { field: Rank, descending: true }` does
+    /// on every other surface.
     fn apply_sort(&mut self) {
         if self.list.sort.field == SortField::Default {
+            if self.list.sort.dir == SortDir::Desc {
+                self.list.view.reverse();
+            }
             return;
         }
         let all = &self.data.all;
@@ -943,6 +953,47 @@ mod tests {
         // Two items with no open deps are ready; the dependent one is blocked.
         assert_eq!(app.visible_for(Tab::Ready), 2);
         assert_eq!(app.visible_for(Tab::Blocked), 1);
+    }
+
+    /// `S` reverses the default order instead of only flipping the glyph.
+    ///
+    /// `apply_sort` returned before reading the direction when the field was
+    /// `Default`, but `toggle_sort_dir` flipped it unconditionally and the
+    /// header rendered the new arrow — so the list claimed to be descending
+    /// while sitting in ascending order.
+    #[test]
+    fn toggling_direction_reverses_the_default_order() {
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        app.set_tab(Tab::All);
+
+        // Walk the visible list through the public selection API.
+        let ids = |app: &mut App| -> Vec<String> {
+            app.select_first();
+            let mut out = Vec::new();
+            for _ in 0..app.visible_count() {
+                out.push(app.selected_frontmatter().unwrap().id.to_string());
+                app.select_next();
+            }
+            out
+        };
+
+        assert_eq!(app.list.sort.field, SortField::Default);
+        let ascending = ids(&mut app);
+        assert_eq!(ascending.len(), 3);
+
+        app.toggle_sort_dir();
+        assert_eq!(app.list.sort.dir, SortDir::Desc, "the direction flipped");
+        let descending = ids(&mut app);
+        assert_eq!(
+            descending,
+            ascending.iter().rev().cloned().collect::<Vec<_>>(),
+            "the list must actually reverse, not just the header glyph"
+        );
+
+        // And back.
+        app.toggle_sort_dir();
+        assert_eq!(ids(&mut app), ascending);
     }
 
     #[test]
