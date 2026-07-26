@@ -63,7 +63,9 @@ file scan — and the engine owns that choice **once per method** (`list`, `read
 `cmd/{ls,ready,blocked,query,search}`, `clove-mcp`'s tool engine, and
 `clove-web`'s `read.rs` are adapters: parse arguments → call the engine →
 render. `_meta.source` (plain `source` on the MCP page) names the tier that
-answered, and is always `clove_engine::Source::as_str` — never a literal.
+answered on the five list commands, where it is `clove_engine::Source::as_str`
+rather than a literal. `stats`/`export`, the TUI, and CLI
+`show`/`comments`/`dep tree` do not route through the engine.
 
 Three things to know before touching it:
 

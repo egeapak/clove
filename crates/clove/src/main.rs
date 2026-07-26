@@ -290,7 +290,7 @@ fn run_repo(
         Commands::Doctor(a) => cmd::doctor::run(ctx, f, a, no_index),
         Commands::Daemon(a) => cmd::daemon::run(ctx, f, a.action),
         Commands::Tui => cmd::tui::run(ctx, f).map(|_| ok),
-        Commands::Serve(a) => cmd::serve::run(ctx, a, quiet).map(|_| ok),
+        Commands::Serve(a) => cmd::serve::run(ctx, a, quiet, no_index, deep).map(|_| ok),
         // `import` mirrors `export`: the built-in native formats (`json`/`jsonl`,
         // clove's own restore) parse their own `rest`; any other provider
         // (`tk`, `beads`, …) falls through to a `clove-import-<provider>` plugin

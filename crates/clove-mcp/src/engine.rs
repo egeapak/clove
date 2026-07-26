@@ -65,8 +65,11 @@ impl Engine {
             ItemStore::new(repo_root.clone()),
             clove_dir.clone(),
             // Every tier, fast staleness check: the MCP server has no
-            // `--no-index` equivalent, and `--deep` is a CLI diagnostic.
-            clove_engine::Tiers::default(),
+            // `--no-index` equivalent, and `--deep` is a CLI diagnostic. But
+            // `index.auto_refresh` is the repo's policy, not the surface's —
+            // hardcoding it made an MCP *read* write to `index.db` in a repo
+            // that had asked reads not to.
+            clove_engine::Tiers::for_repo(&repo_root),
         );
         Self {
             clove_dir,

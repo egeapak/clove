@@ -14,8 +14,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **once per method** (`list`, `ready`, `blocked`, `search`, `show`, `comments`,
   `dep_tree`, `stats`); the CLI's `ls`/`ready`/`blocked`/`query`/`search`,
   `clove-mcp`'s tool engine, and `clove-web`'s `read.rs` are now adapters over
-  it. `_meta.source` is unchanged on the CLI and is always the engine's own
-  report, never a literal.
+  it. On the five list commands `_meta.source` is always the engine's own
+  report rather than a literal — and `clove blocked` can now say `"index"`,
+  which it never could before it had that tier. `stats` and `export` still
+  write their `source` literally; they do not go through the engine.
   - **The MCP read tools gained the daemon and index tiers.** They previously
     read files unconditionally, so the server paid a full store scan per tool
     call while a hot daemon sat idle beside it — the read half of "CLI should use
@@ -25,8 +27,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     the returned page is read back from disk, so the rows are still full items.
     The MCP page gains a `source` key — the `_meta.source` of the other surfaces,
     carried plainly because that payload has no `_meta`. `clove_show`,
-    `clove_dep_tree`, and `clove_stats` route to the daemon's own RPCs, which
-    call the same `clove_core::ops`.
+    `clove_dep_tree`, and `clove_stats` route to the daemon's own RPCs. Output
+    is byte-identical, but not always by the same route: the daemon answers
+    `dep_tree` from its cached graph and the engine re-serializes it, rather
+    than both calling one `clove_core::ops` function.
   - **The web gained the index tier** and stopped rebuilding the whole
     dependency graph per request: `GET /api/v1/items/:id`, the write responses,
     and a tier-served list derive `ready`/`blocked_by`/`dangling_deps` from the
@@ -121,7 +125,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- **`_meta.source` on the web read endpoints names the tier that answered**
+- **`_meta.source` on the web *list* endpoints names the tier that answered**
   (`daemon`/`index`/`files`), matching the CLI. It previously reported
   `state.source`, the *serving mode* — so a `cloved`-hosted server claimed
   `"daemon"` for an answer it had just scanned off disk. The serving mode is

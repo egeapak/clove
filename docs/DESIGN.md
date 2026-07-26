@@ -767,7 +767,9 @@ everywhere else.
 | `Full` | Full frontmatter is required. A tier still answers the *query* — filtering, ordering, and counting stay in SQL — and only the returned page is read back from disk (frontmatter only, in parallel above 500 rows). | `clove blocked`, the MCP read tools, the web |
 | `Files` | Full frontmatter required **and** no tier may answer. A caller policy, not a property of the store. | `clove ls --fields id,created` (a field outside the lean row) |
 
-**Fallback conditions**, all in one place: `--no-index` (which disables the
+**Fallback conditions** for the list reads, in one place (`clove dep tree` and
+`clove stats` still gate on `--no-index` themselves — they do not route through
+the engine): `--no-index` (which disables the
 daemon tier too — the flag promises a file scan, and a daemon answering from its
 hot index is no more of one); no daemon or any IPC error; a missing, broken, or
 too-stale index (> 20 changed items); and a query SQLite cannot *shape*

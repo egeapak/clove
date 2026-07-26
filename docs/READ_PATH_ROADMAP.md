@@ -354,7 +354,8 @@ cascade once per method (`list`, `ready`, `blocked`, `search`, `show`,
 search}`, `clove-mcp`'s tool engine, and `clove-web`'s `read.rs` are adapters
 (parse → call → render). `cmd/index_read.rs` is gone. `_meta.source` — plain
 `source` on the MCP page, which has no `_meta` — is always
-`clove_engine::Source::as_str`, never a literal. DESIGN §6.8 is the spec.
+`clove_engine::Source::as_str` on the five list commands — `stats` and `export`
+still write theirs literally. DESIGN §6.8 is the spec.
 
 **Six notes for whoever comes next.**
 
@@ -394,7 +395,8 @@ search}`, `clove-mcp`'s tool engine, and `clove-web`'s `read.rs` are adapters
 
 **Not done, deliberately.** `clove show`, `clove comments`, `clove dep tree`, and
 `clove stats` on the **CLI** still call `ops`/`cmd` code directly rather than the
-engine; the engine methods exist and the MCP and web surfaces use them, but the
+engine; the engine methods exist and MCP uses all of them (the web still calls
+`store.get` directly for item detail, so it has no daemon tier there), but the
 CLI's renderers for those four differ enough from `ops::show`/`dep_tree` that
 routing them would be a behaviour change, not a refactor. `clove blocked`'s
 daemon tier still fetches every blocked id before filtering (`GraphRequest::

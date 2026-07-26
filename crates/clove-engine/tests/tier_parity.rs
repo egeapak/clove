@@ -43,6 +43,7 @@ fn fixture() -> Fixture {
 
     let store = ItemStore::new(root.clone());
     let mut ids = Vec::new();
+    let base = clove_types::parse_rfc3339("2026-06-02T10:00:00Z").unwrap();
     // (title, type, priority, labels, assignee)
     type Spec = (
         &'static str,
@@ -71,7 +72,7 @@ fn fixture() -> Fixture {
         ("epsilon widget", ItemType::Epic, 4, &["area:core"], None),
         ("zeta gizmo", ItemType::Bug, 2, &[], None),
     ];
-    for (title, item_type, priority, labels, assignee) in specs {
+    for (i, (title, item_type, priority, labels, assignee)) in specs.into_iter().enumerate() {
         let item = store
             .create(
                 "proj",
@@ -85,9 +86,25 @@ fn fixture() -> Fixture {
                     assignee: assignee.map(str::to_owned),
                     body: format!("body of {title}"),
                 },
-                Utc::now(),
+                // Distinct per item, and `created` running opposite to
+                // `updated`, so `--sort created`, `--sort updated` and
+                // `--sort id` are three *different* sequences.
+                //
+                // Every item was stamped `Utc::now()` in this loop, and
+                // timestamps truncate to whole seconds, so all six shared one
+                // instant: the created/updated orders collapsed onto the id
+                // tiebreak and the "14 orders" this file claims were 10. A bug
+                // confined to the `created_at`/`updated_at` ORDER BY columns —
+                // wrong column, TEXT-vs-date comparison, a missing tiebreak —
+                // would have passed.
+                base + chrono::Duration::minutes(i as i64),
             )
             .unwrap();
+        // `updated` counts down while `created` counts up.
+        let id = item.frontmatter.id.clone();
+        edit(&store, &id, |fm| {
+            fm.updated = base + chrono::Duration::minutes((specs.len() - i) as i64);
+        });
         ids.push(item.frontmatter.id);
     }
 

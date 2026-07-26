@@ -249,6 +249,31 @@ pub struct Tiers {
     pub auto_refresh: bool,
 }
 
+impl Tiers {
+    /// Every tier, with `auto_refresh` taken from the repo's `.clove/config`.
+    ///
+    /// `index.auto_refresh = false` is a **repo-level** policy — "do not let a
+    /// read freshen my index" — so a surface that ignores it is not merely
+    /// answering differently, it is *writing* to `index.db` in a repo that asked
+    /// it not to. MCP and the web both hardcoded `true` and did exactly that: a
+    /// `clove_list` call refreshed the index inline and advanced its mtime,
+    /// while `clove ls` in the same repo left it alone and returned a different
+    /// count.
+    ///
+    /// `repo_root` is the directory *containing* `.clove/`. A config that cannot
+    /// be read falls back to the defaults — a surface should not fail to start
+    /// because of a malformed config it is not otherwise using.
+    pub fn for_repo(repo_root: &camino::Utf8Path) -> Tiers {
+        let auto_refresh = clove_core::load_config(repo_root)
+            .map(|c| c.index.auto_refresh)
+            .unwrap_or(true);
+        Tiers {
+            auto_refresh,
+            ..Tiers::default()
+        }
+    }
+}
+
 impl Default for Tiers {
     /// Every tier, fast staleness check, auto-refresh on — what a surface with
     /// no `--no-index` equivalent wants.
@@ -496,11 +521,17 @@ impl Engine {
     /// byte-identical to a local one; there is no index tier because the index
     /// stores neither the body nor the comment thread.
     pub fn show(&self, id: &CloveId) -> Result<Answer<Value>, CloveError> {
+        // A daemon *error* falls through to the files rather than failing the
+        // read, matching `list`/`ready`/`blocked`. Propagating it made a
+        // reachable-but-unhappy daemon (say, a poisoned index lock) fail a call
+        // the file tier answers perfectly well — and the file tier is
+        // authoritative, so it reaches the same domain answer, `NotFound`
+        // included.
         if self.tiers.daemon {
-            if let Some(value) = self.with_daemon(|d| d.show(id.to_string())) {
+            if let Some(Ok(value)) = self.with_daemon(|d| d.show(id.to_string())) {
                 return Ok(Answer {
                     source: Source::Daemon,
-                    value: value?,
+                    value,
                 });
             }
         }
@@ -549,11 +580,13 @@ impl Engine {
         include_epics: bool,
         now: DateTime<Utc>,
     ) -> Result<Answer<Value>, CloveError> {
+        // As in `show`: a daemon error is a reason to use the next tier, not to
+        // fail a read the files can answer.
         if self.tiers.daemon {
-            if let Some(value) = self.with_daemon(|d| d.stats(top as u32, include_epics)) {
+            if let Some(Ok(value)) = self.with_daemon(|d| d.stats(top as u32, include_epics)) {
                 return Ok(Answer {
                     source: Source::Daemon,
-                    value: value?,
+                    value,
                 });
             }
         }

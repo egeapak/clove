@@ -85,6 +85,11 @@ impl AppState {
             .parent()
             .map(Utf8PathBuf::from)
             .unwrap_or_else(|| issues_dir.clone());
+        // `load_config` takes the directory *containing* `.clove/`.
+        let clove_dir_for_config = clove_dir
+            .parent()
+            .map(Utf8PathBuf::from)
+            .unwrap_or_else(|| clove_dir.clone());
         let engine = clove_engine::Engine::new(
             store.clone(),
             clove_dir,
@@ -97,7 +102,11 @@ impl AppState {
                 daemon: source != "daemon",
                 index: true,
                 deep: false,
-                auto_refresh: true,
+                // The repo's policy, not the server's: hardcoding `true` made a
+                // web read freshen (and so write to) an index in a repo whose
+                // config disabled exactly that.
+                auto_refresh: clove_engine::Tiers::for_repo(clove_dir_for_config.as_path())
+                    .auto_refresh,
             },
         );
         Self {
@@ -112,6 +121,29 @@ impl AppState {
             seq: Arc::new(AtomicU64::new(0)),
             heartbeat: None,
         }
+    }
+
+    /// Override the read tiers — `clove serve --no-index` / `--deep`.
+    ///
+    /// Those two flags are documented as global ("force a file scan even if an
+    /// index is present"), and `serve` silently dropped them: before the engine
+    /// existed the web always read files, so the promise was kept by accident;
+    /// afterwards it was simply false, and `clove --no-index serve` answered
+    /// from the index.
+    pub fn with_read_tiers(mut self, daemon: bool, index: bool, deep: bool) -> Self {
+        let tiers = clove_engine::Tiers {
+            daemon: daemon && self.source != "daemon",
+            index,
+            deep,
+            auto_refresh: self.engine.tiers().auto_refresh,
+        };
+        let clove_dir = self
+            .issues_dir
+            .parent()
+            .map(Utf8PathBuf::from)
+            .unwrap_or_else(|| self.issues_dir.clone());
+        self.engine = clove_engine::Engine::new(self.store.clone(), clove_dir, tiers);
+        self
     }
 
     /// Attach a per-request hook (the daemon passes one that resets its

@@ -1253,6 +1253,79 @@ fn filter_args_take_one_value_or_many() {
 /// hot daemon sits idle". The tools now share `clove-engine`'s cascade with the
 /// CLI, and report the tier in `source` (the MCP page has no `_meta`).
 ///
+/// The MCP daemon tier answers, reports itself, and agrees with the files.
+///
+/// Every other MCP test sets `CLOVE_MCP_NO_DAEMON=1`, so the tier the engine
+/// extraction added for MCP had no automated coverage at all — and
+/// `read_tools_use_the_index_tier_and_report_it` actively depends on no daemon
+/// being up, so it could not have caught a broken daemon tier either.
+#[test]
+fn read_tools_use_the_daemon_tier_and_agree_with_the_files() {
+    let dir = init_repo();
+    for (title, priority) in [("alpha", 0), ("beta", 2), ("gamma", 1)] {
+        clove(dir.path())
+            .args(["new", title, "-p", &priority.to_string()])
+            .assert()
+            .success();
+    }
+    // Ground truth from the file path, before any daemon exists.
+    let want: Vec<String> = {
+        let out = clove(dir.path())
+            .args(["ls", "--no-index", "--sort", "priority", "-f", "json"])
+            .output()
+            .unwrap();
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+        v["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(want.len(), 3);
+
+    let cloved = escargot::CargoBuild::new()
+        .package("cloved")
+        .bin("cloved")
+        .run()
+        .expect("build cloved");
+    let mut daemon = std::process::Command::new(cloved.path())
+        .arg("run")
+        .arg("--clove-dir")
+        .arg(dir.path().join(".clove"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn cloved");
+    let pid = dir.path().join(".clove/daemon.pid");
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_secs(5) && !pid.exists() {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(pid.exists(), "daemon did not come up");
+
+    // A session WITHOUT the no-daemon opt-out: the engine may route to it.
+    let mut s = Session::start_cmd(clove(dir.path()));
+    let listed = s.call(2, "clove_list", json!({ "sort": "priority" }));
+    let page = &listed["structuredContent"];
+    assert_eq!(
+        page["source"], "daemon",
+        "the daemon tier must answer: {page}"
+    );
+    let got: Vec<String> = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(got, want, "the daemon tier must agree with the files");
+    assert_eq!(page["total"], 3);
+    s.shutdown();
+
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+}
+
 /// The output must not have changed shape: a tier answers the *query* in SQL and
 /// the engine then reads back only the page's item files, so the rows are still
 /// full items, not the five-column lean projection the CLI's `ls` renders.

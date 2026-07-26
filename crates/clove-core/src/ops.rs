@@ -579,6 +579,13 @@ pub fn stats(
 
 // ---- Read-list operations (file-based; always correct) -----------------------
 
+// The four list ops below have no production caller since the read tier moved
+// to `clove-engine` — the engine uses the `*_rows` helpers directly and wraps
+// them with `page_payload`. They are kept because they *are* the file tier's
+// answer in payload form: the shape a tier-served page must match. Their tests
+// are the shape contract, and `clove-engine`'s parity tests compare tier output
+// against these helpers, so a drift here still fails something.
+
 /// List items matching `filters`, ordered by `order` (default `(priority, topo,
 /// id)`), paginated. Returns `{ total, returned, offset, limit, sort, dir,
 /// items: [full objects] }`.
