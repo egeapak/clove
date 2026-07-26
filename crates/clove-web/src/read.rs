@@ -175,20 +175,39 @@ fn shape_of(params: &HashMap<String, String>) -> Result<Shape, ApiError> {
     })
 }
 
+/// Parse a whole-number query parameter strictly.
+///
+/// Absent or empty is `None` (the caller's default); anything that is not a
+/// non-negative decimal integer is a `VALIDATION_ERROR`, for exactly the reason
+/// [`bool_param`] gives. This is the roadmap's §7 "malformed query value" item:
+/// `?limit=abc` and `?limit=-5` used to fall through `.ok()` to the *default*,
+/// which on the web is **unlimited** — so a client typo returned the whole store
+/// with a 200, and `?offset=-1` silently became `0`. The CLI rejects the same
+/// input (clap parses `--limit` as a `usize`), and `?sort=`/`?status=`/
+/// `?compact=` on this very endpoint reject theirs; only the numbers were lenient.
+fn usize_param(params: &HashMap<String, String>, key: &str) -> Result<Option<usize>, ApiError> {
+    match params.get(key).map(String::as_str) {
+        None | Some("") => Ok(None),
+        Some(raw) => raw.parse::<usize>().map(Some).map_err(|_| {
+            ApiError::from(clove_types::CloveError::InvalidField {
+                field: key.to_owned(),
+                reason: format!("expected a whole number ≥ 0, got `{raw}`"),
+            })
+        }),
+    }
+}
+
 /// Parse `?offset=`/`?limit=` through the shared contract.
 ///
 /// `?limit=0` means **unlimited**, as it does on the CLI and MCP. It previously
 /// meant "return nothing" here — the same parameter with the opposite meaning on
 /// one surface out of three.
-fn page_window(params: &HashMap<String, String>) -> clove_core::view::Page {
-    clove_core::view::Page::new(
-        params
-            .get("offset")
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(0),
-        params.get("limit").and_then(|s| s.parse::<usize>().ok()),
+fn page_window(params: &HashMap<String, String>) -> Result<clove_core::view::Page, ApiError> {
+    Ok(clove_core::view::Page::new(
+        usize_param(params, "offset")?.unwrap_or(0),
+        usize_param(params, "limit")?,
         clove_core::view::defaults::WEB_LIMIT,
-    )
+    ))
 }
 
 /// Load the whole store's frontmatter and the derived graph context.
@@ -246,8 +265,9 @@ fn filters_of(params: &HashMap<String, String>) -> Result<clove_core::view::Filt
 ///
 /// Unlike the old comparator, an unrecognized value is a `VALIDATION_ERROR`
 /// rather than a silent fall-back to `rank` — the same answer `clove ls --sort
-/// nope` gives. (`?limit=abc` is still lenient; making the *whole* query string
-/// strict is roadmap §7.)
+/// nope` gives. Every other parameter on these endpoints now answers the same
+/// way: the numbers go through [`usize_param`] and the flags through
+/// [`bool_param`] (roadmap §7).
 fn order_of(params: &HashMap<String, String>) -> Result<clove_core::view::Order, ApiError> {
     clove_core::view::Order::parse(
         params.get("sort").map(String::as_str),
@@ -268,7 +288,7 @@ pub async fn list_items(
     let order = order_of(&params)?;
     let filters = filters_of(&params)?;
     let shape = shape_of(&params)?;
-    let window = page_window(&params);
+    let window = page_window(&params)?;
     let mode = params.get("mode").cloned().unwrap_or_default();
 
     let engine = state.engine.clone();
@@ -352,11 +372,8 @@ pub async fn get_comments(
     // SPA sends no limit and renders the thread against `comment_count`, so a
     // cap would show a full count above a truncated list.
     let window = clove_core::view::Page::new(
-        params
-            .get("skip_newest")
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(0),
-        params.get("limit").and_then(|s| s.parse::<usize>().ok()),
+        usize_param(&params, "skip_newest")?.unwrap_or(0),
+        usize_param(&params, "limit")?,
         clove_core::view::defaults::WEB_LIMIT,
     );
     let engine = state.engine.clone();
@@ -385,9 +402,7 @@ pub async fn get_deptree(
 ) -> ApiResult {
     let id = parse_id(&id)?;
     // `?depth=0` is unlimited, matching `--depth 0` and every other bound.
-    let depth = match params
-        .get("depth")
-        .and_then(|s| s.parse::<usize>().ok())
+    let depth = match usize_param(&params, "depth")?
         .unwrap_or(clove_core::view::defaults::DEP_TREE_DEPTH)
     {
         0 => usize::MAX,
@@ -449,7 +464,7 @@ pub async fn get_board(
             col.2.push(value);
         }
     }
-    let window = page_window(&params);
+    let window = page_window(&params)?;
     let columns: Vec<Value> = columns
         .into_iter()
         .map(|(key, label, items)| {
@@ -487,11 +502,11 @@ pub async fn get_stats(
     Query(params): Query<HashMap<String, String>>,
 ) -> ApiResult {
     let opts = StatsOptions {
-        top: params
-            .get("top")
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(clove_core::view::defaults::STATS_TOP),
-        include_epics: params.get("no_epics").map(String::as_str) != Some("true"),
+        top: usize_param(&params, "top")?.unwrap_or(clove_core::view::defaults::STATS_TOP),
+        // Through `bool_param`, like every other flag here: this was a raw
+        // `== Some("true")`, so `?no_epics=1` silently *kept* the epic rollup —
+        // the spelling the same client would use for `?compact=1`.
+        include_epics: !bool_param(&params, "no_epics")?,
     };
     let engine = state.engine.clone();
     let answer = blocking(move || {
@@ -516,6 +531,10 @@ pub async fn get_stats(
 fn recorded_history_points(
     state: &AppState,
     params: &HashMap<String, String>,
+    // Parsed by the caller and passed in: parsing it here too would make a
+    // malformed `?limit=` reject or not depending on whether the repo happened
+    // to have snapshots recorded.
+    window: clove_core::view::Page,
 ) -> Option<(Vec<Value>, usize)> {
     use clove_index::Index;
 
@@ -529,7 +548,6 @@ fn recorded_history_points(
     // into SQL. Pushing it down cannot honour `?offset=` — which this endpoint
     // parsed and then dropped — and reports the truncated count as the total,
     // the same defect the CLI's `stats --history` had.
-    let window = page_window(params);
     let snapshots = index.snapshot_history(since, None).ok()?;
     if snapshots.is_empty() {
         return None;
@@ -591,9 +609,12 @@ pub async fn get_stats_history(
     use chrono::Duration;
     use std::collections::BTreeMap;
 
+    // The window is parsed *before* either path runs, so a malformed `?limit=`
+    // is a 422 whether or not this repo has recorded snapshots.
+    let window = page_window(&params)?;
+
     // Durable recorded snapshots win when present.
-    if let Some((points, total)) = recorded_history_points(&state, &params) {
-        let window = page_window(&params);
+    if let Some((points, total)) = recorded_history_points(&state, &params, window) {
         let recorded = points.len();
         return Ok(ok(
             json!(points),
@@ -609,9 +630,10 @@ pub async fn get_stats_history(
         ));
     }
 
-    let days: i64 = params
-        .get("days")
-        .and_then(|s| s.parse::<i64>().ok())
+    // `?days=` is strict for the same reason as `?limit=` (a typo used to mean
+    // "90 days" silently); the clamp then bounds a legal-but-absurd request.
+    let days: i64 = usize_param(&params, "days")?
+        .map(|n| n.min(i64::MAX as usize) as i64)
         .unwrap_or(90)
         .clamp(1, 365);
 

@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://clove.dev/schema/v1/mcp-comment-page.json",
+  "title": "clove MCP comment page",
+  "description": "The result of the clove_comments MCP tool: one window of an item's comment thread, oldest first. This is the payload the server puts in `structuredContent` (and, byte-identically, in `content[0].text`), and what the tool advertises as its `outputSchema` in tools/list. The window is anchored at the NEWEST end — `limit` keeps the most recent comments and `skip_newest` pages back into older ones — which is why the skip key is not called `offset`.",
+  "type": "object",
+  "required": ["total", "returned", "skip_newest", "limit", "items"],
+  "properties": {
+    "total": {
+      "description": "Comments on the item BEFORE the window.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "returned": { "type": "integer", "minimum": 0 },
+    "skip_newest": {
+      "description": "How many of the newest comments were skipped.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "limit": {
+      "description": "The page size in force; 0 means unlimited, as everywhere else.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "items": {
+      "description": "The windowed thread, oldest first.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["author", "timestamp", "body"],
+        "properties": {
+          "author": { "type": "string" },
+          "timestamp": {
+            "description": "RFC3339 UTC with whole seconds — the one canonical spelling every surface writes.",
+            "type": "string"
+          },
+          "body": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

@@ -1422,3 +1422,137 @@ fn the_index_tier_agrees_with_the_file_tier_for_the_mcp_tools() {
         files["structuredContent"]["total"]
     );
 }
+
+/// The advertised `outputSchema` is a promise, so what the tools actually put in
+/// `structuredContent` has to keep it (read-path roadmap §7).
+///
+/// The MCP page payload had no published schema on any surface and no
+/// `outputSchema` in `tools/list`, so `limit: 0` meaning *unlimited* — the kind
+/// of thing a schema exists to state — was folklore a client could only learn by
+/// calling the tool. The five page tools now publish one; the MCP contract is
+/// that `structuredContent` validates against it, which is what this asserts,
+/// across the argument combinations that change the payload's shape (a
+/// projection, an explicit `compact: false`, a window, a filter set, the
+/// no-`filters` search page, and the newest-anchored comment page).
+#[test]
+fn published_output_schemas_validate_the_tool_results() {
+    let dir = init_repo();
+    let main = new_id(
+        &clove(dir.path())
+            .args(["new", "alpha widget", "--format", "json"])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    let dep = new_id(
+        &clove(dir.path())
+            .args(["new", "beta gizmo", "--format", "json", "--type", "bug"])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    clove(dir.path())
+        .args(["dep", "add", &main, &dep])
+        .assert()
+        .success();
+    clove(dir.path())
+        .args(["comment", &main, "a note"])
+        .assert()
+        .success();
+
+    let mut s = Session::start(dir.path());
+
+    // Which tools publish a schema is itself the contract: a tool that gains one
+    // has taken on the obligation below, and one that loses it silently stops
+    // being checked.
+    let resp = s.request(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
+    let tools = resp["result"]["tools"].as_array().unwrap().clone();
+    let with_schema: Vec<&str> = tools
+        .iter()
+        .filter(|t| t.get("outputSchema").is_some())
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        with_schema,
+        // `tools/list` is name-ordered.
+        vec![
+            "clove_blocked",
+            "clove_comments",
+            "clove_list",
+            "clove_ready",
+            "clove_search",
+        ],
+        "the set of tools publishing an outputSchema changed"
+    );
+
+    let compiled = |name: &str| {
+        let tool = tools.iter().find(|t| t["name"] == name).unwrap();
+        let schema = tool["outputSchema"].clone();
+        // A schema an agent cannot compile is worse than none.
+        (
+            jsonschema::validator_for(&schema).expect("outputSchema is a valid JSON Schema"),
+            schema,
+        )
+    };
+
+    // Every call below must both succeed *and* validate: an `isError` result has
+    // no `structuredContent`, which would make the validation vacuous.
+    let check = |session: &mut Session, id: i64, tool: &str, args: Value| {
+        let (validator, schema) = compiled(tool);
+        let result = session.call(id, tool, args.clone());
+        assert_ne!(result["isError"], true, "{tool} {args} failed: {result}");
+        let structured = result
+            .get("structuredContent")
+            .unwrap_or_else(|| panic!("{tool} returned no structuredContent: {result}"));
+        if let Err(e) = validator.validate(structured) {
+            panic!("{tool} {args}: {e}\npayload: {structured}\nschema: {schema}");
+        }
+        // The text copy is kept for clients that do not read structured results
+        // (the MCP spec's backwards-compatibility guidance), and it must stay the
+        // same document — a client may parse either one.
+        let text: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap())
+            .expect("content[0].text is the payload as JSON");
+        assert_eq!(&text, structured, "{tool}: the two copies diverged");
+        result.clone()
+    };
+
+    let page = check(&mut s, 3, "clove_list", json!({}));
+    assert_eq!(page["structuredContent"]["total"], 2, "{page}");
+    check(
+        &mut s,
+        4,
+        "clove_list",
+        json!({ "fields": ["id", "title"] }),
+    );
+    check(&mut s, 5, "clove_list", json!({ "compact": false }));
+    check(&mut s, 6, "clove_list", json!({ "limit": 1, "offset": 1 }));
+    check(
+        &mut s,
+        7,
+        "clove_list",
+        json!({ "status": ["open"], "type": "bug", "sort": "created", "desc": true }),
+    );
+    check(&mut s, 8, "clove_ready", json!({ "limit": 0 }));
+    let blocked = check(&mut s, 9, "clove_blocked", json!({}));
+    assert_eq!(
+        blocked["structuredContent"]["returned"], 1,
+        "the blocked page must be non-empty, or its schema check is vacuous"
+    );
+    // `search` is the one page with no `filters` key at all.
+    let found = check(&mut s, 10, "clove_search", json!({ "text": "widget" }));
+    assert_eq!(found["structuredContent"]["sort"], "relevance");
+    assert!(
+        found["structuredContent"].get("filters").is_none(),
+        "search publishes no filter surface: {found}"
+    );
+    let comments = check(&mut s, 11, "clove_comments", json!({ "id": main }));
+    assert_eq!(comments["structuredContent"]["returned"], 1, "{comments}");
+    check(
+        &mut s,
+        12,
+        "clove_comments",
+        json!({ "id": main, "limit": 1, "offset": 1 }),
+    );
+
+    s.shutdown();
+}

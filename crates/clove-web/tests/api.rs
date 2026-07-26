@@ -1083,3 +1083,78 @@ async fn detail_and_board_share_the_shaping() {
         assert!(item["id"].is_string());
     }
 }
+
+/// A malformed *number* is a `VALIDATION_ERROR`, like a malformed sort, status
+/// or boolean (read-path roadmap §7).
+///
+/// `?limit=abc` and `?limit=-5` used to fall through `.ok()` to the endpoint's
+/// default — which on the web is **unlimited** — so a client typo asking for one
+/// page silently received the entire store with a 200, and `?offset=-1` silently
+/// became `0`. That is precisely the outcome the `?compact=` doc comment forty
+/// lines above the code called out: a result a client cannot distinguish from a
+/// server that does not implement the parameter. The CLI has always rejected the
+/// same input (clap parses `--limit` as a `usize`).
+#[tokio::test]
+async fn a_malformed_number_is_a_validation_error() {
+    let (_tmp, addr, id) = spawn().await;
+
+    for path in [
+        "/api/v1/items?limit=abc",
+        "/api/v1/items?limit=-5",
+        "/api/v1/items?limit=1.5",
+        "/api/v1/items?limit=1e3",
+        "/api/v1/items?offset=-1",
+        "/api/v1/items?offset=one",
+        "/api/v1/items?limit=0&offset=nope",
+        "/api/v1/board?limit=abc",
+        "/api/v1/board?offset=-1",
+        "/api/v1/stats?top=-1",
+        "/api/v1/stats?no_epics=yes",
+        "/api/v1/stats/history?limit=abc",
+        "/api/v1/stats/history?days=-30",
+    ] {
+        let (status, body) = get(addr, path).await;
+        assert!(
+            status.contains("422"),
+            "{path}: status {status}, body {body}"
+        );
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["ok"], false, "{path}: {body}");
+        assert_eq!(v["error"]["code"], "VALIDATION_ERROR", "{path}: {body}");
+    }
+
+    // The same treatment on the per-item routes, which take their own numbers.
+    for path in [
+        format!("/api/v1/items/{id}/comments?limit=-1"),
+        format!("/api/v1/items/{id}/comments?skip_newest=x"),
+        format!("/api/v1/items/{id}/deptree?depth=-2"),
+    ] {
+        let (status, body) = get(addr, &path).await;
+        assert!(
+            status.contains("422"),
+            "{path}: status {status}, body {body}"
+        );
+    }
+
+    // …and the spellings that *are* accepted still are, including the empty
+    // value a form submits for an untouched field and the `0` that means
+    // unlimited. Rejecting these would break the SPA, which sends `limit`
+    // explicitly on every list request.
+    for (query, returned) in [
+        ("?limit=", 2),
+        ("?limit=0", 2),
+        ("?limit=1", 1),
+        ("?limit=2&offset=0", 2),
+        ("?offset=", 2),
+        ("?limit=100&offset=1", 1),
+    ] {
+        let (status, body) = get(addr, &format!("/api/v1/items{query}")).await;
+        assert!(status.contains("200"), "{query}: status {status}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            v["data"].as_array().unwrap().len(),
+            returned,
+            "{query}: {body}"
+        );
+    }
+}

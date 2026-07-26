@@ -23,7 +23,82 @@
         "additionalProperties": true
       }
     },
-    "_meta": { "type": "object" }
+    "_meta": { "$ref": "#/$defs/listMeta" }
   },
-  "additionalProperties": false
+  "additionalProperties": false,
+  "$defs": {
+    "listMeta": {
+      "title": "list `_meta`",
+      "description": "What the server applied to produce `data`: the window, the ordering, the filter set, and the tier that answered. Every key is optional because one schema covers each list producer — `ls`/`ready`/`blocked`/`query` emit the window, ordering, filters and source; `search` emits everything but `filters` (it has no field filters); `export json` emits `source` + `clove_export` and no window at all. `additionalProperties` is false so a new `_meta` key has to be described here rather than shipping invisible to a client generated from this schema.",
+      "type": "object",
+      "properties": {
+        "total": {
+          "description": "Matches BEFORE the window — always the full count, never the page size.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "returned": {
+          "description": "Elements in `data` (`total` capped by the window).",
+          "type": "integer",
+          "minimum": 0
+        },
+        "offset": {
+          "description": "Rows skipped from the start of the ordered result.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "limit": {
+          "description": "The page size in force, in the same encoding callers pass in: 0 means UNLIMITED, not \"empty page\". Echoed so a client can read the effective cap instead of memorizing each surface's default (CLI 100, MCP 50, web unlimited).",
+          "type": "integer",
+          "minimum": 0
+        },
+        "sort": {
+          "description": "The ordering field in force. `relevance` is search-only (it is not a sortable field, so it cannot be requested on a list command).",
+          "enum": ["rank", "priority", "created", "updated", "id", "status", "type", "relevance"]
+        },
+        "dir": { "enum": ["asc", "desc"] },
+        "source": {
+          "description": "Which read tier answered. `files` on a producer that has no tiering (`search`, `export`).",
+          "enum": ["daemon", "index", "files"]
+        },
+        "filters": { "$ref": "#/$defs/filters" },
+        "warnings": {
+          "description": "Non-fatal problems encountered while producing this result.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "clove_export": {
+          "description": "`export json` only: the container version, so a later `import json` can version-check the file.",
+          "type": "object",
+          "required": ["format", "item_schema"],
+          "properties": {
+            "format": { "type": "integer", "minimum": 1 },
+            "item_schema": { "type": "integer", "minimum": 1 }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "filters": {
+      "title": "the applied filter set",
+      "description": "The parsed, canonicalized filters — echoed for the same reason `limit` is: a multi-valued filter has several accepted spellings (`--label a --label b`, MCP `[\"a\",\"b\"]`, web `?label=a,b`) and every value is normalized, so a client should be able to read back what was applied. Any-of within a field, all-of across fields; `labels` is all-of within the field too. An empty array does not constrain.",
+      "type": "object",
+      "properties": {
+        "status": { "type": "array", "items": { "enum": ["open", "in_progress", "closed"] } },
+        "type": { "type": "array", "items": { "enum": ["bug", "feature", "chore", "docs", "epic"] } },
+        "priority": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0, "maximum": 4 }
+        },
+        "labels": { "type": "array", "items": { "type": "string" } },
+        "assignee": { "type": ["string", "null"] },
+        "q": {
+          "description": "Case-insensitive substring over id/title/labels (NOT bodies — that is `clove search`).",
+          "type": ["string", "null"]
+        }
+      },
+      "additionalProperties": false
+    }
+  }
 }

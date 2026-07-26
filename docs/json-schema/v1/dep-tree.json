@@ -13,6 +13,10 @@
         "status": { "enum": ["open", "in_progress", "closed"] },
         "ready": { "type": "boolean" },
         "cycle_ref": { "type": "boolean" },
+        "repeat_ref": {
+          "description": "This node's subtree is rendered elsewhere in the tree and is elided here. Optional: the engine and the MCP `clove_dep_tree` tool emit it, the CLI renderer does not.",
+          "type": "boolean"
+        },
         "children": {
           "type": "array",
           "items": { "$ref": "#/$defs/node" }
@@ -27,7 +31,14 @@
     "v": { "const": 1 },
     "ok": { "const": true },
     "data": { "$ref": "#/$defs/node" },
-    "_meta": { "type": "object" }
+    "_meta": {
+      "description": "Envelope metadata. `warnings` is the only key this response carries; `additionalProperties` is false so a new key has to be described here rather than shipping invisible to a client generated from this schema.",
+      "type": "object",
+      "properties": {
+        "warnings": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    }
   },
   "additionalProperties": false
 }

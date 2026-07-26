@@ -5,7 +5,7 @@ use std::process::Command;
 
 use assert_cmd::prelude::*;
 use jsonschema::Validator;
-use serde_json::Value;
+use serde_json::{json, Value};
 use tempfile::TempDir;
 
 fn clove(dir: &Path) -> Command {
@@ -224,4 +224,85 @@ fn doctor_output_matches_schema() {
     for expected in ["DANGLING_REF", "GITIGNORE_DRIFT", "ORPHAN_COMMENTS"] {
         assert!(codes.contains(&expected), "missing {expected} in {codes:?}");
     }
+}
+
+/// `_meta` has a real schema, not `{"type": "object"}` (read-path roadmap §7).
+///
+/// A bare object schema validates anything, so `_meta.limit` — whose `0` means
+/// *unlimited*, the sort of thing a schema exists to state — was invisible to a
+/// client generating types from the published document, and a typo'd or
+/// wrong-typed key validated happily. The keys are now described and
+/// `additionalProperties` is false, so a new `_meta` key has to be documented
+/// here rather than shipping unannounced.
+#[test]
+fn meta_is_described_by_the_published_schemas() {
+    let dir = init_with_items();
+    let list = schema("item-list.json");
+    let comments_schema = schema("comment-list.json");
+    let stats_schema = schema("stats.json");
+
+    // Every real envelope still validates.
+    let ls = run_json(clove(dir.path()).arg("ls")).0;
+    assert_valid(&list, &ls);
+    let id = ls["data"][0]["id"].as_str().unwrap().to_owned();
+    clove(dir.path())
+        .args(["comment", &id, "a note"])
+        .assert()
+        .success();
+    let comments = run_json(clove(dir.path()).args(["comments", &id])).0;
+    assert_valid(&comments_schema, &comments);
+    let stats = run_json(clove(dir.path()).arg("stats")).0;
+    assert_valid(&stats_schema, &stats);
+
+    // The keys the roadmap named are actually described, not just permitted.
+    let ls_meta = ls["_meta"].as_object().expect("_meta object");
+    for key in [
+        "total", "returned", "offset", "limit", "sort", "dir", "source",
+    ] {
+        assert!(ls_meta.contains_key(key), "`ls` _meta lost {key}: {ls}");
+    }
+    assert_eq!(ls_meta["limit"], 100, "the CLI default cap is reported");
+
+    // …and a wrong-typed or unknown `_meta` key is now a violation. Under the
+    // old `{"type": "object"}` every one of these validated.
+    let mut broken = ls.clone();
+    for (key, bad) in [
+        ("limit", Value::String("100".to_owned())),
+        ("total", json!(-1)),
+        ("source", Value::String("magic".to_owned())),
+        ("dir", Value::String("sideways".to_owned())),
+        ("sort", Value::String("whatever".to_owned())),
+        ("warnings", Value::String("none".to_owned())),
+        ("filters", json!({ "status": ["paused"] })),
+        ("lmit", json!(10)),
+    ] {
+        broken["_meta"] = ls["_meta"].clone();
+        broken["_meta"][key] = bad.clone();
+        assert!(
+            list.validate(&broken).is_err(),
+            "item-list.json accepts _meta.{key} = {bad}"
+        );
+    }
+
+    // The other envelopes describe their own `_meta` too.
+    let mut bad_comments = comments.clone();
+    bad_comments["_meta"]["skip_newest"] = Value::String("0".to_owned());
+    assert!(comments_schema.validate(&bad_comments).is_err());
+    let mut bad_stats = stats.clone();
+    bad_stats["_meta"]["snapshotted"] = Value::String("false".to_owned());
+    assert!(stats_schema.validate(&bad_stats).is_err());
+
+    // An `export json` envelope is a list envelope with a *different* `_meta`
+    // (no window, plus the container version), and it has to keep validating —
+    // one schema covers every producer of this shape.
+    let out = clove(dir.path())
+        .args(["export", "json", "--format", "json"])
+        .output()
+        .unwrap();
+    let exported: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        exported["_meta"]["clove_export"]["format"].is_number(),
+        "export provenance: {exported}"
+    );
+    assert_valid(&list, &exported);
 }

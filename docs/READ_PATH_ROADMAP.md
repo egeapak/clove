@@ -713,27 +713,84 @@ came back; `_meta.per_column` marks the difference from a flat list.
 
 ---
 
-## 7. Smaller items
+## 7. Smaller items — **DONE**
 
 - ~~**`GraphRequest::Blocked { include_warnings }`**~~ — **done**, removed with
   the §2 protocol bump (v4 → v5) as planned. The variant now carries `order`
   instead.
-- **Malformed query values on the web** (`?limit=abc`, `?limit=-1`) fall through
-  to the default via `.ok()`. The CLI rejects the same input with a clap error.
-  Either reject with a `VALIDATION_ERROR` or document the leniency.
-- **`--no-index`/`--deep` are `global = true`**, so they appear in `--help` for
-  `comments`, `version`, and other commands where they do nothing.
-- **`clove stats --since`/`--limit`/`--offset` are silently ignored without
-  `--history`.** The help text says "With `--history`:", but silence is still the
-  advertised-and-ignored pattern worth avoiding.
-- **`_meta` has no schema.** `item-list.json` types it as a bare
-  `{"type": "object"}`, so `_meta.limit` validates — and is invisible to any
-  client generating from the published schema. The MCP page payload
-  (`{total, returned, offset, limit, items}`) has no published schema at all, and
-  no `outputSchema` is advertised in `tools/list`.
-- **MCP wire duplication.** Every tool result carries the payload twice —
-  byte-identical `content[0].text` and `structuredContent` (measured: a 9035-byte
-  frame for a 4157-byte payload). Deliberately left alone: the saving is IPC
-  bytes, not model context, since the client feeds the model one copy. Worth
-  revisiting only alongside publishing `outputSchema`, which is what would let a
-  client drop the text copy.
+- ~~**Malformed query values on the web**~~ — **done**. `?limit=abc` and
+  `?limit=-5` fell through `.ok()` to the endpoint default, which on the web is
+  *unlimited*, so a typo returned the whole store with a 200; `?offset=-1`
+  silently became `0`. Both are now a `VALIDATION_ERROR` (422), through one
+  `usize_param` that every number on the read endpoints goes through
+  (`limit`, `offset`, `skip_newest`, `depth`, `top`, `days`) — the treatment
+  `?sort=`, `?status=` and `?compact=` already got, and the one the CLI has
+  always given (`--limit abc` is a clap parse error). `?no_epics=` went through
+  `bool_param` with them: it was a raw `== "true"`, so `?no_epics=1` read as
+  "keep the epics". `?limit=` (empty) still means "not specified" — a form
+  submitting an untouched field must not 422.
+
+  The SPA sends `limit`/`offset` on every list request, so it was checked first:
+  its window is derived from a 1-based `?page=` in the browser URL, which is
+  user-editable, and `?page=1e400` produced `String(Infinity)` on the wire. The
+  page number is now clamped to a safe integer (`parsePage`, with a vitest that
+  asserts every hostile spelling still yields a decimal-integer offset).
+
+- ~~**`--no-index`/`--deep` are `global = true`**~~ — **done, by documenting the
+  leniency rather than scoping the flags.** They genuinely affect `ls`, `ready`,
+  `blocked`, `query`, `stats`, `doctor`, `dep`, `serve` (§5 gave `serve` the read
+  tiers) and every plugin, which receives them as `$CLOVE_NO_INDEX`/`$CLOVE_DEEP`
+  and decides for itself. Scoping them was rejected on two grounds: as global
+  flags they parse in *either* position, and `clove --no-index <cmd>` — the
+  spelling the docs and most of the test suite use — is exactly what a
+  per-command `#[arg]` would stop accepting; and the acting set is not a static
+  property once plugins are in it. What was removed instead is the *silence*:
+  each flag's long help now names the commands that act on it and says it is
+  accepted and inert elsewhere, so `clove comments --help` no longer advertises
+  something it will ignore without saying so. (`search` accepts them and does
+  nothing with them by design — one tier, §6.1.)
+
+- ~~**`clove stats --since`/`--limit`/`--offset` silently ignored without
+  `--history`**~~ — **done, by erroring.** Making them meaningful was the
+  alternative and there is nothing for them to mean: a live report is a single
+  object, so there is no series to filter with `--since` and no page to take.
+  They are `requires = "history"` in clap, so the failure names the missing flag
+  and exits 1 (usage) instead of printing a full report that ignored the
+  argument.
+
+- ~~**`_meta` has no schema**~~ — **done.** `item-list.json` typed it as
+  `{"type": "object"}`, which validates anything; every key is now described,
+  with `additionalProperties: false` so a new one has to be documented rather
+  than shipping invisible to a client generating from the published schema. The
+  same for `comment-list.json` (`skip_newest`), `stats.json`
+  (`generated_at`/`snapshotted`) and the `{ "warnings": [] }` of the
+  single-object responses. One schema still covers every producer of the list
+  envelope — `search` emits no `filters`, `export json` emits no window at all —
+  so the keys stay optional and the types do the work.
+
+  The MCP page is published too: `mcp-item-page.json` and `mcp-comment-page.json`
+  describe `{total, returned, offset, limit, sort, dir, filters?, source, items}`
+  and its newest-anchored comment sibling, and `clove_list`/`clove_ready`/
+  `clove_blocked`/`clove_search`/`clove_comments` advertise them as
+  **`outputSchema`** in `tools/list`. The MCP contract is that
+  `structuredContent` validates against the advertised schema, so
+  `crates/clove/tests/mcp.rs` asserts exactly that against real tool output
+  across projections, windows, and filter sets — the schemas are permissive
+  where the payload genuinely varies (`fields` can project any key away, so no
+  item key is required) and strict about the envelope, which never varies.
+  `clove_show`, `clove_stats`, `clove_dep_tree` and the write tools publish
+  nothing: an `outputSchema` is a promise on every call, and those payloads are
+  built elsewhere (the daemon, `clove-core`) or render differently per surface —
+  `dep_tree` is the proof, since its engine renderer emits a `repeat_ref` the
+  published `dep-tree.json` did not list (now documented as optional).
+
+- ~~**MCP wire duplication**~~ — **re-examined alongside the `outputSchema`
+  work, and deliberately left alone.** Publishing an `outputSchema` is what
+  *permits* a client to read only `structuredContent`, but it does not make the
+  text copy droppable: the spec's guidance is that a server returning structured
+  content should also serialize it into a text block for clients that do not
+  read structured results, and nothing in the handshake distinguishes those
+  clients. Dropping it would break them for a saving that is IPC bytes, not
+  model context — the client feeds the model one copy. The test that validates
+  the payload also asserts the two copies are the *same document*, so a client
+  may parse whichever it prefers.

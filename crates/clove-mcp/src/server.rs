@@ -83,7 +83,8 @@ impl CloveServer {
         description = "List work items ready to start now: open/in-progress items \
                        whose hard dependencies are all closed and which have no \
                        dangling dependencies, ordered by (priority, topology). The \
-                       primary 'what should I work on?' query."
+                       primary 'what should I work on?' query.",
+        output_schema = crate::schema::item_page()
     )]
     async fn clove_ready(
         &self,
@@ -98,7 +99,8 @@ impl CloveServer {
                        each with its `blocked_by` ids, ordered by (priority, \
                        topology). An item whose dependency id has no backing \
                        file is blocked too — that is a broken reference worth \
-                       seeing, not a reason to omit it."
+                       seeing, not a reason to omit it.",
+        output_schema = crate::schema::item_page()
     )]
     async fn clove_blocked(
         &self,
@@ -108,8 +110,11 @@ impl CloveServer {
         self.run(move || e.blocked(a)).await
     }
 
-    #[tool(description = "List work items with optional filters, ordered by \
-                          (priority, topology, id).")]
+    #[tool(
+        description = "List work items with optional filters, ordered by \
+                       (priority, topology, id).",
+        output_schema = crate::schema::item_page()
+    )]
     async fn clove_list(
         &self,
         Parameters(a): Parameters<ListArgs>,
@@ -130,10 +135,13 @@ impl CloveServer {
         self.run(move || e.show(a)).await
     }
 
-    #[tool(description = "Search item titles, labels, and bodies for a \
-                          case-insensitive SUBSTRING (not whole words: `core` \
-                          matches `corepart`). Title matches rank first, then \
-                          labels, then bodies.")]
+    #[tool(
+        description = "Search item titles, labels, and bodies for a \
+                       case-insensitive SUBSTRING (not whole words: `core` \
+                       matches `corepart`). Title matches rank first, then \
+                       labels, then bodies.",
+        output_schema = crate::schema::item_page()
+    )]
     async fn clove_search(
         &self,
         Parameters(a): Parameters<SearchArgs>,
@@ -142,10 +150,13 @@ impl CloveServer {
         self.run(move || e.search(a)).await
     }
 
-    #[tool(description = "Read an item's comment thread, oldest first. The read \
+    #[tool(
+        description = "Read an item's comment thread, oldest first. The read \
                        counterpart to clove_comment — clove_show reports only a \
                        `comment_count`. `limit` keeps the most recent comments; \
-                       `offset` pages back through older ones.")]
+                       `offset` pages back through older ones.",
+        output_schema = crate::schema::comment_page()
+    )]
     async fn clove_comments(
         &self,
         Parameters(a): Parameters<CommentsArgs>,

@@ -59,6 +59,14 @@ Every JSON response is `{{ \"v\": 1, \"ok\": <bool>, ... }}`:\n\
 - success: `{{ \"v\":1, \"ok\":true, \"data\": <value>, \"_meta\": {{...}} }}`\n\
 - error:   `{{ \"v\":1, \"ok\":false, \"error\": {{ \"code\": <STR>, \"message\": <STR>, \"exit\": <N> }} }}`\n\
 \n\
+`_meta` is described by the published JSON Schemas under\n\
+`docs/json-schema/v1/` (`item-list.json` for every list command,\n\
+`comment-list.json`, `stats.json`, and `{{ \"warnings\": [] }}` for the\n\
+single-object responses), so a key like `_meta.limit` — where `0` means\n\
+*unlimited* — is readable from the schema rather than by experiment. Those\n\
+schemas set `additionalProperties: false`: a new `_meta` key is documented\n\
+before it ships.\n\
+\n\
 The item `schema` version is currently **{schema}**. Re-read this document if it\n\
 changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
 \n\
@@ -96,8 +104,10 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
 - `clove search <text> [--sort FIELD] [--desc] [--limit N] [--offset N] [--fields LIST] [--compact]` — searches **titles, labels, and bodies**, relevance-ranked by default (title hits, then labels, then body).\n\
 - Search matches a **case-insensitive substring**, not whole words: `clove search core` finds a body reading `the corepart word` and a label `area:core` alike, and `clove search icode` finds the label `ünicode-tag`. Case folding is full Unicode, so `Ünicode` finds `ünicode-tag`. The text is a literal — there is no query language, so `clove search '\"a b\" OR c*'` looks for that exact character sequence, and quoting/wildcards buy you nothing.\n\
 - `clove search` always scans the item files: it has no index or daemon fast path, so `_meta.source` is always `files`, `--no-index` changes nothing, and the same query gives the same ids whether or not `.clove/index.db` exists or a daemon is running. It reads every body, so prefer `--q` on `ls`/`ready` when id/title/labels are enough.\n\
-- `clove stats [--top N] [--no-epics] [--snapshot] [--history [--since RFC3339] [--limit N]]` — work-item analytics (counts by status/type/priority/assignee/label, ready/blocked, cycles, epic rollups, throughput) plus daemon/index telemetry. `--snapshot` persists to the index's durable history (`.clove/index.db`); `--history` replays the series.\n\
+- `clove stats [--top N] [--no-epics] [--snapshot] [--history [--since RFC3339] [--limit N] [--offset N]]` — work-item analytics (counts by status/type/priority/assignee/label, ready/blocked, cycles, epic rollups, throughput) plus daemon/index telemetry. `--snapshot` persists to the index's durable history (`.clove/index.db`); `--history` replays the series.\n\
+- `--since`/`--limit`/`--offset` window the **history series** and require `--history`: a live report is a single object with nothing to page, so passing one without it is a usage error (exit 1) rather than a flag that is silently dropped.\n\
 - `clove reindex` — rebuild the SQLite index. `clove doctor [--fix] [--strict]` — health check.\n\
+- `--no-index` (force a file scan) and `--deep` (thorough index staleness check) are global flags acted on only by the commands that choose a read tier — `ls`, `ready`, `blocked`, `query`, `stats`, `doctor`, `dep`, `serve` — and by plugins (`$CLOVE_NO_INDEX`/`$CLOVE_DEEP`). They are accepted and inert everywhere else, which their `--help` says; `--no-index` never changes an *answer*, only which tier produced it.\n\
 - `clove version` — `{{ clove, schema, git_hash, build_date }}`.\n\
 \n\
 ## Interop (import / export / merge)\n\
@@ -161,6 +171,14 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
   `schema`, are omitted — pass `compact: false` for the full shape), and the\n\
   read tools' default `limit` is **50**, not the CLI's 100. `limit: 0` is\n\
   unlimited on both, and every list result carries `total`/`returned`/`limit`.\n\
+- `clove_list`, `clove_ready`, `clove_blocked`, `clove_search` and\n\
+  `clove_comments` advertise an **`outputSchema`** in `tools/list` (published as\n\
+  `docs/json-schema/v1/mcp-item-page.json` / `mcp-comment-page.json`), so the\n\
+  page shape — `{{total, returned, offset, limit, sort, dir, filters?, source,\n\
+  items}}`, with `skip_newest` in place of `offset` on comments — can be read\n\
+  rather than discovered. `structuredContent` validates against it; the identical\n\
+  JSON is also in `content[0].text` for clients that do not read structured\n\
+  results, so parse whichever you prefer, not both.\n\
 - `fields` and `compact` are accepted by every read tool, and by `clove ls`,\n\
   `ready`, `blocked`, `query`, `search`, and `show` as `--fields`/`--compact`.\n\
   Use them: a two-field projection cuts a list result by roughly 80%.\n\

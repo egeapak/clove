@@ -11,7 +11,7 @@
   import Avatar from '$lib/components/Avatar.svelte';
   import BlockedBadge from '$lib/components/BlockedBadge.svelte';
   import { relativeTime, priorityLabel } from '$lib/glyphs';
-  import { parseQuery } from '$lib/query';
+  import { parseQuery, parsePage } from '$lib/query';
   import { defaultDir } from '$lib/filter';
   import { Virtual } from '$lib/virtual.svelte';
 
@@ -45,7 +45,10 @@
   // 1-based page number, in the URL so the back button and a shared link land
   // on the same rows. The window itself (`limit`/`offset`) is derived from it
   // and sent to the server — the browser URL never carries those.
-  const pageNum = $derived(Math.max(1, Math.trunc(Number(url.searchParams.get('page')) || 1)));
+  // `parsePage` clamps: `?page=` is user-editable, and the derived `offset`
+  // below is sent to the server, which now rejects a non-integer window with a
+  // 422 rather than silently reading it as 0.
+  const pageNum = $derived(parsePage(url.searchParams));
   const offset = $derived((pageNum - 1) * PAGE_SIZE);
 
   function setParams(mut: (p: URLSearchParams) => void) {

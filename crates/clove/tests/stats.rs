@@ -319,3 +319,53 @@ fn history_orders_by_instant_across_stored_spellings() {
         );
     }
 }
+
+/// `--since`/`--limit`/`--offset` are the `--history` window, and passing one
+/// without `--history` is a usage error rather than a flag that does nothing
+/// (read-path roadmap §7).
+///
+/// A live report is a single object: there is no series to filter or page, so
+/// these three had nothing to apply and were silently dropped — `clove stats
+/// --limit 5` exited 0 with the full report, indistinguishable from a build that
+/// does not support the flag. Their help text already said "With `--history`:";
+/// clap now enforces it and names the missing flag.
+#[test]
+fn the_history_window_flags_require_history() {
+    let dir = init_with_items();
+
+    for args in [
+        vec!["stats", "--limit", "5"],
+        vec!["stats", "--offset", "1"],
+        vec!["stats", "--since", "2000-01-01T00:00:00+00:00"],
+        vec!["stats", "--limit", "5", "--format", "json"],
+    ] {
+        let out = clove(dir.path()).args(&args).output().unwrap();
+        assert!(
+            !out.status.success(),
+            "{args:?} silently ignored the flag: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("--history"),
+            "{args:?}: the error must name the flag that is missing: {stderr}"
+        );
+        // The report must not be printed alongside the error.
+        assert!(
+            String::from_utf8_lossy(&out.stdout).trim().is_empty(),
+            "{args:?}: printed a report anyway"
+        );
+    }
+
+    // With `--history` they are accepted, and a live report still needs none of
+    // them — the rejection is about the *combination*, not the flags.
+    clove(dir.path())
+        .args(["stats", "--history", "--limit", "5", "--offset", "0"])
+        .assert()
+        .success();
+    clove(dir.path()).args(["stats"]).assert().success();
+    clove(dir.path())
+        .args(["stats", "--top", "3", "--no-epics"])
+        .assert()
+        .success();
+}

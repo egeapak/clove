@@ -46,6 +46,28 @@ export function parseQuery(p: URLSearchParams): ListQuery {
   return q;
 }
 
+/**
+ * The largest `?page=` we honour. `(page - 1) * PAGE_SIZE` has to stay a plain
+ * integer: the server now rejects a malformed `offset` with a 422 instead of
+ * silently reading it as 0, and `String(1e21)` is `"1e+21"` — which is exactly
+ * the kind of value the stricter parser refuses. A billion pages is past any
+ * real store and keeps the product inside `Number.MAX_SAFE_INTEGER`.
+ */
+const MAX_PAGE = 1_000_000_000;
+
+/**
+ * The 1-based page number in a browser URL, as a safe integer ≥ 1.
+ *
+ * `?page=` is user-editable, so it can hold anything: `abc`, `-3`, `1e400`,
+ * `99999999999999999999`. Each of those must still produce an `offset` the API
+ * accepts — the window is derived from this number and sent to the server.
+ */
+export function parsePage(p: URLSearchParams): number {
+  const n = Number(p.get('page'));
+  if (!Number.isFinite(n) || n < 1) return 1;
+  return Math.min(Math.trunc(n), MAX_PAGE);
+}
+
 /** Serialize a ListQuery into URLSearchParams. Writes `mode` (not `tab`). */
 export function buildParams(query: ListQuery): URLSearchParams {
   const p = new URLSearchParams();

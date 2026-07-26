@@ -805,10 +805,22 @@ Global flags:
                                     Overridden by CLOVE_FORMAT env var
                                     Precedence: flag > CLOVE_FORMAT > config.toml default > human
   --no-index                        Force file-scan even if index.db present
+  --deep                            Thorough per-file index staleness check
   --quiet                           Suppress informational stderr
   --color <auto|always|never>       Terminal color control
   --clove-dir <PATH>                Override .clove/ discovery
 ```
+
+`--no-index` and `--deep` are **read-tier** flags: global (so they parse before
+or after the subcommand, like every other global) but acted on only by the
+commands that choose a tier — `ls`, `ready`, `blocked`, `query`, `stats`,
+`doctor`, `dep`, `serve` — plus any plugin, which receives them as
+`$CLOVE_NO_INDEX` / `$CLOVE_DEEP` and decides for itself. They are accepted and
+inert elsewhere: `search` has a single file-scan tier by design (§6.7), and the
+write and metadata commands never consult the index. That leniency is kept
+deliberately — scoping them per command would break `clove --no-index <cmd>`,
+the spelling the docs use, and the acting set is not static once plugins are in
+it — so their `--help` text names the scope instead of leaving it silent.
 
 ### 7.2 Complete Command Table
 
@@ -990,6 +1002,44 @@ selected, not the number returned. `returned` is `len(data)` after `--limit`, an
 `limit` is the limit actually in force (`0` = unlimited), echoed so a client can
 tell a short page from an exhausted one without knowing the surface's default.
 
+**`_meta` is schema'd, not free-form.** `docs/json-schema/v1/item-list.json`
+describes each key above — including that `limit: 0` means unlimited — and sets
+`additionalProperties: false`, so a new `_meta` key has to be documented there
+rather than shipping invisible to a client generated from the published schema.
+The same is true of `comment-list.json` (the newest-anchored `skip_newest`
+window), `stats.json` (`generated_at`/`snapshotted`), and the
+`{ "warnings": [] }` `_meta` of the single-object responses. One schema covers
+every producer of the list envelope, so each key is optional: `search` emits no
+`filters`, and `export json` emits `source` + `clove_export` and no window at
+all. `crates/clove/tests/schema_validation.rs` validates real command output
+against these and asserts a wrong-typed key is rejected.
+
+**The MCP page is the same response with the envelope flattened.** A tool result
+has no `{v, ok, data, _meta}` wrapper, so what the CLI reports under `_meta`
+travels as plain keys beside `items`:
+`{ total, returned, offset, limit, sort, dir, filters?, source, items }`
+(`clove_comments` instead pages from the newest end:
+`{ total, returned, skip_newest, limit, items }`). Both shapes are published —
+`docs/json-schema/v1/mcp-item-page.json` and `mcp-comment-page.json` — and
+`clove_list`/`clove_ready`/`clove_blocked`/`clove_search`/`clove_comments`
+advertise them as their **`outputSchema`** in `tools/list`, so a client can
+generate types for a result instead of learning the shape by calling the tool.
+The schema text lives in `clove-mcp`'s `schema.rs` (`docs/` is outside that
+crate's package) with a test pinning it to the published file, and
+`crates/clove/tests/mcp.rs` validates real `structuredContent` against what
+`tools/list` advertised — the MCP contract is that the two agree. Tools whose
+payload this crate does not fully own (`clove_show`, `clove_stats`,
+`clove_dep_tree`, and the writes) advertise nothing rather than a schema that
+holds most of the time.
+
+Every tool result still carries the payload **twice** — `content[0].text` holds
+the same JSON as `structuredContent`. Publishing an `outputSchema` is what would
+let a client drop the text copy, but the MCP spec asks a server returning
+structured content to keep serializing it into a text block for clients that do
+not read structured results, and nothing in the handshake says whether this
+client is one of them. The cost is IPC bytes, not model context (a client feeds
+the model one copy), so both stay.
+
 ### 7.6 Exit Code Table
 
 | Code | Name | Meaning |
@@ -1102,6 +1152,16 @@ argument is named `--skip-newest` / `skip_newest` rather than `offset`.
 
 `--depth` on `dep tree` follows the same `0 = unlimited` rule (so `--depth 0` and
 `--full` are one request), as does `--top` on `stats`.
+
+**A malformed window value is rejected, never defaulted.** `--limit abc` is a
+clap parse error on the CLI, and `?limit=abc` / `?limit=-5` / `?offset=-1` are a
+`VALIDATION_ERROR` (HTTP 422) on the web, as are the other numbers the read
+endpoints take (`skip_newest`, `depth`, `top`, `days`) and the flags
+(`?compact=`, `?no_epics=`). The web used to parse these with `.ok()` and fall
+through to the endpoint default — which here is *unlimited* — so a typo returned
+the whole store with a 200, a result a client cannot tell from a server that does
+not implement the parameter. `?limit=` (empty) still means "not specified", which
+is what a form submits for an untouched field.
 
 `GET /api/v1/board` applies the window to **each column independently** — a
 board caps how tall a column gets. Each column reports `count` (its full size,

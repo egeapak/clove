@@ -9,6 +9,7 @@
 
 mod args;
 mod engine;
+mod schema;
 mod server;
 mod shape;
 

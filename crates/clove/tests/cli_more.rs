@@ -864,3 +864,62 @@ fn a_dangling_reference_is_blocked_not_invisible() {
         "the index tier must agree"
     );
 }
+
+/// `--no-index`/`--deep` stay **global**, and their help says where they apply
+/// (read-path roadmap §7).
+///
+/// They appear in `--help` for commands that ignore them, which is the
+/// advertised-and-ignored shape this phase removes elsewhere. Scoping them to
+/// the commands that read them is not free: as global flags they parse in either
+/// position, and `clove --no-index ls` — the spelling the docs and most of this
+/// suite use — is exactly the one a per-command `#[arg]` would stop accepting.
+/// The set is not static either: every plugin receives them as `$CLOVE_NO_INDEX`
+/// / `$CLOVE_DEEP` and decides for itself. So the leniency stays and the help
+/// stops being silent about it.
+#[test]
+fn the_read_tier_flags_are_global_and_say_so() {
+    let dir = init_repo();
+    new_item(dir.path(), "Alpha", &[]);
+
+    // Both positions parse, on a command that reads them and one that does not.
+    for args in [
+        vec!["--no-index", "ls"],
+        vec!["ls", "--no-index"],
+        vec!["--deep", "ls"],
+        vec!["ls", "--deep"],
+        vec!["--no-index", "version"],
+        vec!["version", "--no-index"],
+    ] {
+        clove(dir.path()).args(&args).assert().success();
+    }
+    // On a tier-choosing command the flag still *does* something.
+    let scanned = json_ok(clove(dir.path()).args(["--no-index", "ls"]));
+    assert_eq!(scanned["_meta"]["source"], "files");
+
+    // …and the long help names the scope, on a command where they are inert.
+    // Checked per flag: the entry for `--no-index` has to say it itself, or a
+    // note that only reached one of the two would satisfy a whole-text search.
+    let help = String::from_utf8(
+        clove(dir.path())
+            .args(["comments", "--help"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    for flag in ["--no-index", "--deep"] {
+        let start = help
+            .find(&format!("      {flag}\n"))
+            .unwrap_or_else(|| panic!("`comments --help` does not list {flag}:\n{help}"));
+        // The flag's own block runs to the next option entry.
+        let rest = &help[start + 7 + flag.len()..];
+        let end = rest.find("\n      -").unwrap_or(rest.len());
+        let block = &rest[..end];
+        for expected in ["ls, ready, blocked", "inert"] {
+            assert!(
+                block.contains(expected),
+                "{flag}'s help does not say where it applies ({expected}):\n{block}"
+            );
+        }
+    }
+}

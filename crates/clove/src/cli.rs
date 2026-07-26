@@ -13,12 +13,24 @@ pub struct Cli {
     #[arg(short = 'f', long, global = true, value_parser = parse_format)]
     pub format: Option<OutputFormat>,
 
-    /// Force a file scan even if an index is present.
+    /// Force a file scan even if an index or daemon is present.
+    ///
+    /// A read-tier flag: it is accepted anywhere (before or after the
+    /// subcommand) but only the commands that *choose a tier* act on it — ls,
+    /// ready, blocked, query, stats, doctor, dep, serve — plus any plugin, which
+    /// receives it as `$CLOVE_NO_INDEX` and decides for itself. It is inert
+    /// everywhere else: `search` has a single file-scan tier by design, and the
+    /// write and metadata commands (new, show, comments, version, …) never
+    /// consult the index at all.
     #[arg(long, global = true)]
     pub no_index: bool,
 
     /// Use the thorough per-file staleness check (stats every file) instead of
     /// the fast directory-level check, when reading via the index.
+    ///
+    /// Same scope as `--no-index`: only the tier-choosing commands (ls, ready,
+    /// blocked, query, stats, doctor, dep, serve) and plugins (`$CLOVE_DEEP`)
+    /// act on it; it is accepted and inert elsewhere.
     #[arg(long, global = true)]
     pub deep: bool,
 
@@ -537,15 +549,21 @@ pub struct StatsArgs {
     /// Show the recorded snapshot history instead of a live report.
     #[arg(long)]
     pub history: bool,
+    // The three window flags below are `requires = "history"`: a live report is
+    // a single object with no series to filter or page, so `clove stats --limit
+    // 5` had nothing to apply and used to succeed while ignoring the flag — the
+    // advertised-and-ignored pattern the read-path roadmap §7 exists to remove.
+    // The doc comments already said "With `--history`:"; clap now enforces it,
+    // and prints that requirement instead of the flag quietly doing nothing.
     /// With `--history`: only snapshots at/after this RFC3339 timestamp.
-    #[arg(long, value_name = "RFC3339")]
+    #[arg(long, value_name = "RFC3339", requires = "history")]
     pub since: Option<String>,
     /// With `--history`: show at most this many snapshots (default 100; use
     /// `--limit 0` for all).
-    #[arg(long, value_name = "N")]
+    #[arg(long, value_name = "N", requires = "history")]
     pub limit: Option<usize>,
     /// With `--history`: skip this many snapshots.
-    #[arg(long, value_name = "N")]
+    #[arg(long, value_name = "N", requires = "history")]
     pub offset: Option<usize>,
 }
 

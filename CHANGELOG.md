@@ -137,6 +137,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unparseable boolean (`?compact=yes`) is a `VALIDATION_ERROR` rather than a
   silent `false`, matching `?sort=` and `?status=`.
 
+- **`_meta` has a published schema, and so does the MCP page.**
+  `docs/json-schema/v1/item-list.json` typed `_meta` as a bare
+  `{"type": "object"}`, so `_meta.limit` — whose `0` means *unlimited* — was
+  invisible to any client generating types from the published document, and a
+  wrong-typed or misspelled key validated happily. Every key is now described
+  with `additionalProperties: false`, in `item-list.json` (the window, the
+  ordering, `source`, `filters`, `warnings`, and `export json`'s
+  `clove_export`), `comment-list.json` (the newest-anchored `skip_newest`
+  window), `stats.json` (`generated_at`/`snapshotted`), and the
+  `{ "warnings": [] }` of the single-object responses. One schema still covers
+  every producer of the list envelope, so `export json` — which carries no
+  window — keeps validating.
+
+- **The MCP page shape is published and advertised as an `outputSchema`.** The
+  payload `{total, returned, offset, limit, sort, dir, filters?, source, items}`
+  had no published schema on any surface and nothing in `tools/list`, so a
+  client learned it by calling the tool. It is now
+  `docs/json-schema/v1/mcp-item-page.json` (plus `mcp-comment-page.json` for
+  `clove_comments`, which pages from the newest end), advertised by
+  `clove_list`, `clove_ready`, `clove_blocked`, `clove_search` and
+  `clove_comments`. The MCP contract is that `structuredContent` validates
+  against the advertised schema, and `crates/clove/tests/mcp.rs` asserts exactly
+  that against real tool output across projections, windows and filter sets.
+  Tools whose payload `clove-mcp` does not fully own (`clove_show`,
+  `clove_stats`, `clove_dep_tree`, the writes) advertise nothing rather than a
+  schema that holds most of the time. Nothing about a result changed:
+  `content[0].text` still carries the same JSON as `structuredContent`, because
+  the spec asks a server returning structured content to keep the text copy for
+  clients that do not read structured results.
+
 ### Changed
 
 - **The bundled web UI pages, and asks the server rather than the browser.**
@@ -447,6 +477,44 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   will use it.
 
 ### Fixed
+
+- **A malformed number in a web query string silently meant the default.**
+  `?limit=abc` and `?limit=-5` fell through `.ok()` to the endpoint default —
+  which on the web is *unlimited* — so a client typo asking for one page
+  received the entire store with a 200, and `?offset=-1` silently became `0`.
+  Both are now a `VALIDATION_ERROR` (HTTP 422), the same answer `?sort=nope`,
+  `?status=bogus` and `?compact=yes` already gave, and the same input the CLI
+  has always rejected at the argument parser. The other numbers on the read
+  endpoints go the same way (`skip_newest`, `depth`, `top`, `days`), as does
+  `?no_epics=`, which was a raw `== "true"` comparison and so read `?no_epics=1`
+  — the spelling accepted for `?compact=1` — as "keep the epics". `?limit=`
+  (empty) still means "not specified". The bundled SPA sends `limit`/`offset` on
+  every list request and is unaffected: its window comes from a 1-based `?page=`
+  in the browser URL, which is now clamped to a safe integer, so a hand-edited
+  `?page=1e400` can no longer produce an `offset` of `"Infinity"` on the wire.
+- **`clove stats --since/--limit/--offset` were silently ignored without
+  `--history`.** Their help said "With `--history`:" and a live report is a
+  single object with no series to filter or page, so the flags had nothing to
+  apply and were dropped — `clove stats --limit 5` exited 0 with the full
+  report, indistinguishable from a build that does not support the flag. They
+  now `require` `--history`, so the error names the missing flag (exit 1).
+- **`--no-index`/`--deep` advertised themselves on commands they do not
+  affect.** They are global flags, so they appear in `--help` for `version`,
+  `comments`, `new` and the rest, where nothing reads them. They stay global —
+  scoping them per command would stop `clove --no-index ls` parsing, the
+  spelling the docs use, and the acting set is not static anyway (every plugin
+  receives them as `$CLOVE_NO_INDEX`/`$CLOVE_DEEP` and decides for itself) — but
+  their help text now names the commands that act on them (`ls`, `ready`,
+  `blocked`, `query`, `stats`, `doctor`, `dep`, `serve`, plus plugins) and says
+  it is accepted and inert elsewhere.
+- **`GET /api/v1/stats/history` parsed its window twice**, in the recorded-
+  snapshot path and again in the caller, so whether a malformed `?limit=` was
+  even looked at depended on whether the repo had snapshots. It is parsed once,
+  before either path runs.
+- **The MCP `clove_dep_tree` payload carries `repeat_ref`**, which
+  `dep-tree.json` did not list while forbidding extra keys — so the published
+  schema rejected a payload clove itself produces. The key is now documented as
+  optional (the CLI's renderer omits it).
 
 - **The web UI's sorter tied on the wrong thing, which paging would have made
   visible.** `filter.ts::sortItems` broke ties on the *fetched array's*

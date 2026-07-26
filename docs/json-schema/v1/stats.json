@@ -123,7 +123,26 @@
       },
       "additionalProperties": false
     },
-    "_meta": { "type": "object" }
+    "_meta": {
+      "description": "How this report was produced. `additionalProperties` is false so a new key has to be described here rather than shipping invisible to a client generated from this schema.",
+      "type": "object",
+      "properties": {
+        "source": {
+          "description": "Which read tier answered. `files` for the CLI, which always computes analytics from the item files (the index and daemon are reported *in* the report, not relied on).",
+          "enum": ["daemon", "index", "files"]
+        },
+        "generated_at": {
+          "description": "The instant the report was computed, RFC3339 with whole seconds — the same stamp `--snapshot` records as `captured_at`.",
+          "type": "string"
+        },
+        "snapshotted": {
+          "description": "Whether this report was also persisted to the durable history (`--snapshot`).",
+          "type": "boolean"
+        },
+        "warnings": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    }
   },
   "additionalProperties": false,
   "$defs": {
