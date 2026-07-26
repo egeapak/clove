@@ -81,6 +81,52 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **One canonical timestamp spelling, everywhere clove writes one.** Timestamps
+  were stored as written, and RFC 3339 has several equivalent spellings of the
+  same instant (`Z` vs `+00:00`, an equivalent non-UTC offset, any amount of
+  sub-second precision). Item frontmatter has always been written at whole-second
+  `Z` precision, but **comment timestamps and stats snapshots were not** — both
+  carried a raw `Utc::now()`, so `clove comments` rendered
+  `2026-06-02T08:54:22.904816670+00:00` a line below an item's
+  `2026-06-02T08:54:22Z`, and `clove stats --history` stored the same shape.
+
+  Everything clove writes now goes through `clove_types::canonical_rfc3339`
+  (UTC, whole seconds, `Z`), and every read accepts any parseable spelling and
+  normalizes it — `ItemFrontmatter` does so at the type boundary, so YAML
+  frontmatter, `export`/`import json`, the daemon wire, and web request bodies
+  cannot diverge. **There is no migration and no flag day:** an existing store is
+  re-spelled the next time each item is written, and stats history the next time
+  a snapshot is recorded.
+
+  Two things this fixes beyond the cosmetics:
+
+  - **`clove sync github` no longer sees a re-spelled timestamp as an edit.** The
+    sync decides "did the local side change?" by comparing `updated` against the
+    value recorded on the last run, so a merge, a hand-edit, or a foreign tool
+    that rendered the same instant with sub-second precision produced a no-op
+    PATCH against GitHub on every subsequent sync.
+  - **`clove stats --history` orders and filters by instant, not by suffix
+    byte.** `captured_at` is compared as TEXT and the snapshots table is durable
+    (it is carried verbatim across every reindex and index-schema rebuild), so
+    rows written by an older clove sit next to canonical ones. Ordering and the
+    `--since` bound now compare the second-precision prefix the spellings share;
+    previously a `--since` bound could silently drop a snapshot recorded in the
+    boundary second.
+
+  **The index schema version is unchanged (still 6).** The item timestamp columns
+  are an internal ordering key written through chrono's `to_rfc3339()`; nothing
+  renders them (the list projection carries no timestamps at all), and
+  re-spelling them would have cost every user a full index rebuild to change a
+  string no surface shows. What is canonical is the value they are written
+  *from*. Pinned by `timestamp_columns_keep_their_stored_spelling` in
+  `clove-index`.
+
+  **Comment file names keep their nanoseconds**, and that is deliberate: the name
+  is a comment's only timestamp and its only record of ordering, so truncating it
+  would re-order a thread whose comments were added in the same second. The name
+  format is unchanged, so comments written by an older clove need no migration.
+  Their *rendering* is canonical like everything else.
+
 - **`clove search` is a file scan on every surface, and now answers the same
   question everywhere.** It matched a case-insensitive *substring* over
   title/labels/body when it scanned files (`--no-index`), and a whole ASCII-folded

@@ -216,3 +216,106 @@ fn top_caps_breakdowns() {
     let v = json(clove(dir.path()).args(["stats", "--top", "1", "--format", "json"]));
     assert!(v["data"]["by_assignee"].as_array().unwrap().len() <= 1);
 }
+
+// ---------------------------------------------------------------------------
+// Canonical timestamps (READ_PATH_ROADMAP §3)
+// ---------------------------------------------------------------------------
+
+/// Whether `s` is in clove's one canonical spelling: RFC 3339, UTC, whole
+/// seconds, `Z`.
+fn is_canonical(s: &str) -> bool {
+    s.len() == 20
+        && s.ends_with('Z')
+        && !s.contains('.')
+        && s.parse::<chrono::DateTime<chrono::Utc>>().is_ok()
+}
+
+#[test]
+fn snapshot_timestamps_are_canonical_end_to_end() {
+    let dir = init_with_items();
+    let taken = json(clove(dir.path()).args(["stats", "--snapshot", "--format", "json"]));
+    let generated_at = taken["_meta"]["generated_at"].as_str().unwrap();
+    assert!(
+        is_canonical(generated_at),
+        "_meta.generated_at `{generated_at}` is not canonical"
+    );
+
+    let hist = json(clove(dir.path()).args(["stats", "--history", "--format", "json"]));
+    let captured_at = hist["data"][0]["captured_at"].as_str().unwrap();
+    assert!(
+        is_canonical(captured_at),
+        "captured_at `{captured_at}` is not canonical"
+    );
+}
+
+#[test]
+fn history_orders_by_instant_across_stored_spellings() {
+    // `--history` sorts on `captured_at` as a string, and the snapshots table is
+    // durable — it is carried verbatim across every reindex and index-schema
+    // rebuild, so rows an older clove wrote in a different spelling outlive any
+    // bump and sit next to canonical ones. Rows are written straight into the
+    // database here for exactly that reason: routing them through `--snapshot`
+    // would canonicalize them and the fixture would prove nothing.
+    let dir = init_with_items();
+    clove(dir.path())
+        .args(["stats", "--snapshot"])
+        .assert()
+        .success();
+
+    // Reuse the real report blob the snapshot just wrote, so these rows differ
+    // from a genuine one only in the spelling of `captured_at`.
+    let db = dir.path().join(".clove").join("index.db");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let detail: String = conn
+        .query_row("SELECT detail_json FROM snapshots", [], |r| r.get(0))
+        .unwrap();
+    conn.execute("DELETE FROM snapshots", []).unwrap();
+    for captured_at in [
+        "2026-06-01T10:00:02Z",                // canonical
+        "2026-06-01T10:00:00.904816670+00:00", // as an older clove wrote it
+        "2026-06-01T10:00:01+00:00",
+    ] {
+        conn.execute(
+            "INSERT INTO snapshots (captured_at, total, open, in_progress, closed, ready, \
+             blocked, dangling, cycles, detail_json) VALUES (?1, 0, 0, 0, 0, 0, 0, 0, 0, ?2)",
+            rusqlite::params![captured_at, detail],
+        )
+        .unwrap();
+    }
+    drop(conn);
+
+    let hist = json(clove(dir.path()).args(["stats", "--history", "--format", "json"]));
+    let series: Vec<String> = hist["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["captured_at"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        series,
+        vec![
+            "2026-06-01T10:00:02Z",
+            "2026-06-01T10:00:01Z",
+            "2026-06-01T10:00:00Z"
+        ],
+        "newest first by instant, every row canonical"
+    );
+
+    // A `--since` bound at the boundary second is inclusive whatever spelling
+    // either side of the comparison uses.
+    for bound in ["2026-06-01T10:00:01Z", "2026-06-01T10:00:01+00:00"] {
+        let since = json(clove(dir.path()).args([
+            "stats",
+            "--history",
+            "--since",
+            bound,
+            "--format",
+            "json",
+        ]));
+        assert_eq!(
+            since["data"].as_array().unwrap().len(),
+            2,
+            "`{bound}` must include the boundary row"
+        );
+    }
+}

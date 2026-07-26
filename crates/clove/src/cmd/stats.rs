@@ -11,7 +11,6 @@
 //! layer carries that table across its reindex/rebuild so history survives a
 //! schema bump or `clove reindex` (only true file corruption loses it).
 
-use chrono::Utc;
 use clove_core::{compute_stats, GraphStore, OutputFormat, StatsOptions, StatsReport};
 use clove_index::{Index, SCHEMA_VERSION};
 use clove_ipc::DaemonClient;
@@ -40,7 +39,10 @@ pub fn run(
     // Compute analytics from the files (the single source of truth).
     let (frontmatters, _errors) = ctx.store.scan_frontmatter()?;
     let (graph, _dangling) = GraphStore::build(&frontmatters);
-    let now = Utc::now();
+    // Whole seconds, like every stored clove timestamp: this stamps both the
+    // `_meta.generated_at` echo and (with `--snapshot`) the recorded
+    // `captured_at`, and the two must not disagree in precision.
+    let now = crate::util::now_seconds();
     let report = compute_stats(&frontmatters, &graph, now, opts);
 
     // Optionally persist the snapshot into the index database's history table.
@@ -62,7 +64,7 @@ pub fn run(
                 data,
                 json!({
                     "source": "files",
-                    "generated_at": now.to_rfc3339(),
+                    "generated_at": clove_types::canonical_rfc3339(now),
                     "snapshotted": args.snapshot,
                 }),
             );

@@ -71,6 +71,19 @@ pub fn upsert_item(conn: &mut Connection, item: &Item) -> Result<(), IndexError>
 
 /// Write one item's rows within an existing transaction. The shared core of the
 /// write-through, reindex, and resync paths.
+///
+/// ## Why the timestamp columns keep `to_rfc3339()` (READ_PATH_ROADMAP §3)
+///
+/// `created_at`/`updated_at`/`closed_at` are written in chrono's `+00:00`
+/// spelling rather than the canonical `Z` one, deliberately. They are an
+/// **internal ordering key**: nothing selects them into a public payload (the
+/// list projection is [`crate::ItemListRow`], which carries no timestamps at
+/// all), so their spelling is never user-visible. Re-spelling them would change
+/// the bytes of every row in every existing index and therefore require a
+/// `SCHEMA_VERSION` bump — a full rebuild for every user — to buy nothing. What
+/// *is* canonical is the value they are rendered from: `ItemFrontmatter`
+/// normalizes on deserialize, so a hand-edited `+02:00` or a sub-second fraction
+/// is already truncated to the canonical instant before it reaches this row.
 pub(crate) fn write_row(
     tx: &Transaction<'_>,
     item: &Item,
@@ -188,6 +201,68 @@ mod tests {
             },
             body: body.to_owned(),
         }
+    }
+
+    /// The timestamp columns keep the `+00:00` spelling `to_rfc3339()` renders,
+    /// deliberately (READ_PATH_ROADMAP §3 — see the `write_row` note).
+    ///
+    /// Canonicalizing them would rewrite the bytes of every row in every
+    /// existing index, which is only safe behind a [`crate::SCHEMA_VERSION`]
+    /// bump — a full rebuild for every user, to change a string no surface ever
+    /// renders. **If this test starts failing, that change needs a schema bump.**
+    #[test]
+    fn timestamp_columns_keep_their_stored_spelling() {
+        let (_d, mut index) = index();
+        let mut it = item("proj-AAAA1111", "t", "b");
+        it.frontmatter.closed = Some("2026-06-02T11:00:00Z".parse().unwrap());
+        it.frontmatter.status = ItemStatus::Closed;
+        index.upsert_item(&it).unwrap();
+
+        let row: (String, String, Option<String>) = index
+            .conn()
+            .query_row(
+                "SELECT created_at, updated_at, closed_at FROM items",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            (
+                "2026-06-02T10:00:00+00:00".to_owned(),
+                "2026-06-02T10:00:00+00:00".to_owned(),
+                Some("2026-06-02T11:00:00+00:00".to_owned())
+            )
+        );
+    }
+
+    /// ...but the *values* they are written from are canonical even when the
+    /// file was not, so the index and the file path cannot rank the same two
+    /// items differently. Parsed from raw bytes, not built in memory: an
+    /// in-memory `ItemFrontmatter` never carries a foreign spelling.
+    #[test]
+    fn a_sub_second_file_timestamp_is_normalized_before_it_reaches_a_row() {
+        let (_d, mut index) = index();
+        let raw = concat!(
+            "---\nschema: 1\nid: proj-AAAA1111\ntitle: Hand edited\nstatus: open\n",
+            "type: feature\npriority: 2\n",
+            "created: 2026-06-02T10:00:00.904816670+00:00\n",
+            "updated: 2026-06-02T10:00:00.904816670+00:00\n---\nbody\n"
+        )
+        .as_bytes();
+        let it = clove_core::parse_item_bytes(
+            raw,
+            camino::Utf8Path::new("proj-AAAA1111.md"),
+            &CloveId::new("proj-AAAA1111").unwrap(),
+        )
+        .unwrap();
+        index.upsert_item(&it).unwrap();
+
+        let created: String = index
+            .conn()
+            .query_row("SELECT created_at FROM items", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(created, "2026-06-02T10:00:00+00:00", "no stored fraction");
     }
 
     /// Bulk upserts stay internally consistent: one `items` row and one

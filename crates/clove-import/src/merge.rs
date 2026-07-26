@@ -272,7 +272,9 @@ pub fn merge_frontmatter(
         &ours.created,
         &theirs.created,
         "created",
-        |v| v.to_rfc3339(),
+        // Canonical spelling, matching the file the driver writes back and every
+        // other surface that renders a timestamp.
+        |v| clove_types::canonical_rfc3339(*v),
         &mut merged.created,
         &mut conflicts,
     );
@@ -431,7 +433,11 @@ fn resolve_closed(
 
 fn render_status(status: ItemStatus, closed: Option<chrono::DateTime<chrono::Utc>>) -> String {
     match closed {
-        Some(ts) => format!("{} ({})", status.as_str(), ts.to_rfc3339()),
+        Some(ts) => format!(
+            "{} ({})",
+            status.as_str(),
+            clove_types::canonical_rfc3339(ts)
+        ),
         None => status.as_str().to_owned(),
     }
 }
@@ -488,6 +494,63 @@ mod tests {
 
     fn id(s: &str) -> CloveId {
         CloveId::new(s).unwrap()
+    }
+
+    /// A minimal frontmatter with a fixed `created`/`updated`.
+    fn fm(created: &str, status: ItemStatus, closed: Option<&str>) -> ItemFrontmatter {
+        ItemFrontmatter {
+            schema: 1,
+            id: id("proj-7AF3K2MN"),
+            title: "T".to_owned(),
+            status,
+            item_type: clove_types::ItemType::Feature,
+            priority: clove_types::Priority::DEFAULT,
+            created: created.parse().unwrap(),
+            updated: "2026-06-02T10:00:00Z".parse().unwrap(),
+            closed: closed.map(|c| c.parse().unwrap()),
+            assignee: None,
+            parent: None,
+            labels: Vec::new(),
+            deps: Vec::new(),
+            relates: Vec::new(),
+            duplicates: Vec::new(),
+            supersedes: Vec::new(),
+            source_system: None,
+            external_ref: None,
+        }
+    }
+
+    #[test]
+    fn conflict_rendering_uses_the_canonical_timestamp_spelling() {
+        // The conflict text is user-facing (it goes into the marker block the
+        // merge driver writes), so it must not render a timestamp in a spelling
+        // no clove-written file ever contains.
+        let base = fm("2026-06-01T00:00:00Z", ItemStatus::Open, None);
+        let ours = fm("2026-06-02T10:00:00Z", ItemStatus::Open, None);
+        let theirs = fm("2026-06-03T11:30:00Z", ItemStatus::Open, None);
+        let MergeOutcome::Conflict { conflicts, .. } =
+            merge_frontmatter(Some(&base), &ours, &theirs)
+        else {
+            panic!("both sides changed `created` — that is a conflict");
+        };
+        let created = conflicts.iter().find(|c| c.field == "created").unwrap();
+        assert_eq!(created.ours, "2026-06-02T10:00:00Z");
+        assert_eq!(created.theirs, "2026-06-03T11:30:00Z");
+
+        // `status` renders its closed timestamp inline, through the same helper.
+        let ours_closed = fm(
+            "2026-06-01T00:00:00Z",
+            ItemStatus::Closed,
+            Some("2026-06-02T10:00:00Z"),
+        );
+        let theirs_prog = fm("2026-06-01T00:00:00Z", ItemStatus::InProgress, None);
+        let MergeOutcome::Conflict { conflicts, .. } =
+            merge_frontmatter(Some(&base), &ours_closed, &theirs_prog)
+        else {
+            panic!("both sides changed `status`");
+        };
+        let status = conflicts.iter().find(|c| c.field == "status").unwrap();
+        assert_eq!(status.ours, "closed (2026-06-02T10:00:00Z)");
     }
 
     #[test]

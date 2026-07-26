@@ -470,7 +470,10 @@ pub fn comments(
         .map(|c| {
             json!({
                 "author": c.author,
-                "timestamp": c.timestamp.to_rfc3339(),
+                // The one canonical spelling, so a comment written by an older
+                // clove (nanoseconds, `+00:00`) renders exactly like one written
+                // today — on every surface, since all four share this shape.
+                "timestamp": clove_types::canonical_rfc3339(c.timestamp),
                 "body": c.body,
             })
         })

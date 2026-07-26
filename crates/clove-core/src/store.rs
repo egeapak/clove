@@ -15,11 +15,9 @@ use thiserror::Error;
 use crate::error::CloveError;
 use crate::fields;
 use crate::id::{new_id, CloveId};
-use crate::model::{
-    truncate_to_seconds, Item, ItemFrontmatter, ItemStatus, ItemType, Priority,
-    CURRENT_SCHEMA_VERSION,
-};
+use crate::model::{Item, ItemFrontmatter, ItemStatus, ItemType, Priority, CURRENT_SCHEMA_VERSION};
 use crate::parse::{parse_frontmatter_file, parse_item_file};
+use crate::time::truncate_to_seconds;
 use crate::validate::validate_item;
 use crate::write::write_item_file;
 

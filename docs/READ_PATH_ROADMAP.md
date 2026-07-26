@@ -20,6 +20,7 @@ Status of what shipped, for context:
 | Filters | **Done** — `clove_core::view::Filters`, all surfaces (§2) |
 | Read tiering (daemon → index → files) | CLI only; MCP always reads files — §4 |
 | Search match set + ranking | **Done** — one substring matcher, no index tier (§6.1) |
+| Canonical timestamp spelling | **Done** — `clove_types::canonical_rfc3339`, no index bump (§3) |
 | Index rebuild on schema bump | **Done** — `Index::open_or_rebuild` |
 | `/board` window | **Done** — per-column `limit`/`offset` |
 
@@ -243,7 +244,60 @@ truth.
   server is §6 — it is the same change as making it page.
 
 
-## 3. Canonical timestamps
+## 3. Canonical timestamps — **DONE**
+
+Shipped, with **no index-schema bump** and two deliberate exceptions. There is one
+spelling clove writes — `clove_types::canonical_rfc3339` (UTC, whole seconds,
+`Z`) — and every read accepts any parseable RFC 3339 and normalizes it.
+`ItemFrontmatter` does the normalizing at the *type* boundary
+(`clove_types::time::{serde_ts, serde_ts_opt}`), so YAML frontmatter, `import
+json`, the daemon wire and web request bodies all get it and no surface can be
+forgotten. No flag day, no `clove migrate`: a store is re-spelled as it is
+written.
+
+**The index version stayed at 6, and checking was the right call.** The item
+timestamp columns are an internal ordering key — the list projection
+(`ItemListRow`) carries no timestamps at all, so nothing renders them — and
+canonicalizing them would have rewritten the bytes of every row in every existing
+index to change a string no surface shows. What *is* canonical is the value they
+are written from, so the index and file paths cannot rank two items differently.
+Pinned by `timestamp_columns_keep_their_stored_spelling` (clove-index), which
+exists to fail if someone re-spells them without bumping. The section's own note
+turned out to matter in the other direction too: the `snapshots` table — the one
+place old and new spellings genuinely coexist — is *preserved verbatim* across a
+schema rebuild, so a bump would not have migrated the very rows this section
+cares about. What fixes those is the lazy rewrite in `record_snapshot` plus a
+spelling-agnostic comparison (`substr(captured_at, 1, 19)`) for both the
+`ORDER BY` and the `--since` bound.
+
+**Two things the plan got wrong.**
+
+- **"Comment timestamps … are not [truncated]" — half right.** The gap was real
+  but it is in the *rendering*: `ops::comments` rendered `to_rfc3339()` of a
+  nanosecond `Utc::now()`, so a comment stamped
+  `2026-06-02T08:54:22.904816670+00:00` sat a line below an item's
+  `2026-06-02T08:54:22Z`. Truncating what is *stored* — the file name — is a
+  regression, not a fix: comment files are append-only and never rewritten, so
+  the name's fraction is the only record of the order of two comments added in
+  the same second. Truncating it re-orders such a thread arbitrarily, which two
+  existing tests (`comments_limit_returns_most_recent_n`,
+  `comments_page_from_the_newest_end`) caught immediately. The name format is
+  therefore unchanged — which also means comments written by an older clove need
+  no migration and cannot produce a duplicate-looking file — and only the
+  rendering is canonical. The tie this exposed *was* worth fixing: `list_comments`
+  now breaks a timestamp+author tie on the file name, so a thread pulled from
+  GitHub (whose `created_at` has second resolution) cannot come back in `readdir`
+  order.
+- **"`clove-import`'s GitHub sync compares them" — true, but not as strings.**
+  Every comparison in `sync`/`sync_net` is over parsed `DateTime<Utc>` values, so
+  a pure `Z`-vs-`+00:00` difference was never the bug. The reachable failure is
+  *precision*: `local_updated > entry.local_updated` is true for a re-spelling
+  that adds a sub-second fraction to the same second, so a merge, a hand-edit, or
+  a foreign tool produced a no-op PATCH on every subsequent sync. Pinned by
+  `a_re_spelled_local_timestamp_is_not_a_change` in
+  `crates/clove/tests/sync_github.rs`.
+
+The original write-up follows.
 
 Two separate version numbers, easy to confuse: the **item** `schema` field
 (`clove_types::CURRENT_SCHEMA_VERSION`, **1**) and the **index** schema

@@ -164,6 +164,29 @@ Fields absent because null/empty: `closed`, `duplicates`, `supersedes`, `source_
 omitted. Null scalars serialize as `null`, never omitted. **This is enforced by a hand-rolled
 `FrontmatterWriter` (see §4), not by serde library defaults.**
 
+**Timestamp canonicalization rule (one RFC 3339 spelling):** RFC 3339 has several
+equivalent spellings of the same instant — `Z` vs `+00:00`, an equivalent non-UTC offset, any
+amount of sub-second precision — and clove compares timestamp *strings* in places where a
+difference in spelling would read as a difference in content (the GitHub sync's change
+detection, `stats --history` ordering). So there is exactly one spelling clove ever **writes**:
+**UTC, whole seconds, `Z` suffix** (`2026-06-02T10:00:00Z`), rendered by
+`clove_types::canonical_rfc3339`. Every **read** accepts any parseable RFC 3339 and normalizes
+it — `ItemFrontmatter` does this at the type boundary (`clove_types::time::serde_ts`), so YAML
+frontmatter, `import json`, the daemon wire and web request bodies cannot diverge, and a
+hand-edited or foreign-written value is simply re-spelled on the next write. **There is no
+migration step and no flag day** (no `clove migrate` pass, no index-schema bump): the store is
+files, and files are rewritten as they are touched. Two deliberate exceptions, both because
+the value is not a rendered RFC 3339 string:
+
+- **Comment file names** keep nanosecond precision (§2.5). The name is a comment's only
+  timestamp *and* its only record of the order of two comments added in the same second, so
+  truncating it would re-order a thread. Its format is fixed and single-spelled already; only
+  its rendering is canonicalized.
+- **The index's `created_at`/`updated_at`/`closed_at` columns** keep chrono's `+00:00`
+  rendering (§6). They are an internal ordering key that no surface renders; re-spelling them
+  would force a `SCHEMA_VERSION` bump — a full rebuild for every user — for no visible change.
+  The *values* they are written from are canonical, so the index and file paths always agree.
+
 **Label normalization rule (case-insensitive labels):** Labels are **canonicalized to
 lowercase on every write** — `clove new -l`, `clove label add`, `clove edit labels+=`, and all
 importers pass each label through `normalize_label()` (Unicode lowercase via
@@ -260,6 +283,15 @@ are added or reordered.
 - **Timestamp:** nanosecond-precision RFC3339 (`2026-06-02T10:00:00.123456789Z`) so
   lexicographic sort == chronological sort. The nanosecond portion plus the 4-char random
   suffix makes same-clock-second collisions astronomically unlikely.
+  **This is the one stored timestamp that is not truncated to whole seconds**, and it is an
+  exception on purpose (see the canonicalization rule in §2.2): comment files are append-only
+  and never rewritten, so the name is the only record of the order of two comments added
+  within the same second. The *rendered* timestamp (`clove comments`, the web API, the
+  `clove_comments` MCP tool) is canonical like every other one. Because the name format is
+  unchanged, comments written by any earlier clove read back unchanged. Listing sorts by
+  timestamp, then author, then file name — a **total** order, so a thread whose timestamps
+  tie (e.g. comments pulled from GitHub, whose `created_at` has second resolution) cannot come
+  back in `readdir` order.
 - **Author slug:** `git user.email` lowercased, non-alphanumeric → `-`, truncated at 32 chars.
 - **Body:** plain Markdown, no frontmatter.
 - **Why the 4-char random suffix:** covers HFS+ (1-second mtime granularity) and any network
@@ -509,7 +541,7 @@ CREATE TABLE items (
     topological_rank INTEGER,
     has_dangling_deps BOOLEAN NOT NULL DEFAULT FALSE,
     labels TEXT NOT NULL DEFAULT '[]',   -- JSON array
-    created_at TEXT NOT NULL,            -- RFC3339
+    created_at TEXT NOT NULL,            -- RFC3339, chrono `+00:00` form (see below)
     updated_at TEXT NOT NULL,
     closed_at TEXT,
     file_mtime INTEGER NOT NULL,         -- Unix epoch ms
@@ -537,6 +569,15 @@ CREATE TABLE labels (
 -- clove surface matches a full-Unicode substring, so the FTS answered a strictly narrower
 -- question and `clove search X` returned different ids depending on whether an index existed.
 -- Search is a parallel file scan on every surface now — see §6.7 and read-path roadmap §6.1.
+
+-- The three timestamp columns keep chrono's `to_rfc3339()` `+00:00` rendering rather than the
+-- canonical `Z` one clove writes into files (§2.2). They are an internal ordering key: the list
+-- projection carries no timestamps at all, so nothing renders them, and re-spelling them would
+-- change the bytes of every row in every existing index — only safe behind a SCHEMA_VERSION
+-- bump, i.e. a full rebuild for every user, to change a string no surface shows. The *values*
+-- they are written from are canonical (ItemFrontmatter normalizes on deserialize), so the index
+-- and file paths can never rank two items differently. Pinned by
+-- `timestamp_columns_keep_their_stored_spelling` in clove-index.
 
 -- Staleness oracle (exactly one row enforced by the CHECK constraint)
 CREATE TABLE meta (
@@ -588,6 +629,14 @@ use `open_or_rebuild`. The same `index.db`
 also holds a durable `snapshots` history table (`clove stats --snapshot`/`--history`),
 created idempotently and **carried across reindex / schema-rebuild** so it is not a
 cache-only artifact (M4).
+
+Because that table is durable, it is the one place where rows written by *different clove
+versions* coexist indefinitely — a schema bump would not migrate it, since it is preserved
+verbatim across the rebuild. `captured_at` is therefore written canonically (§2.2),
+canonicalized again on read, and both the `ORDER BY` and the `--since` bound compare
+`substr(captured_at, 1, 19)` — the second-precision prefix every RFC 3339 spelling of a UTC
+instant shares — rather than resting on the byte order of the suffix. Rows an older clove
+wrote are re-spelled in place on the next `--snapshot` ("rewrite on the next mutation").
 
 ### 6.2 Staleness Detection (Two-Level)
 
