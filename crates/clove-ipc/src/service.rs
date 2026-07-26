@@ -13,8 +13,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::protocol::{
-    GraphRequest, GraphResponse, QueryListResponse, QueryRequest, ReindexDone, SearchRequest,
-    StatusResponse,
+    GraphRequest, GraphResponse, QueryListResponse, QueryRequest, ReindexDone, StatusResponse,
 };
 
 /// The exit code carried by an [`RpcError`] that predates the `exit` field, and
@@ -81,8 +80,13 @@ pub trait CloveRpc {
     async fn change_generation() -> u64;
     /// A lean list query (`ls`/`ready`/`query`): page-limited rows + total count.
     async fn query(req: QueryRequest) -> Result<QueryListResponse, RpcError>;
-    /// Full-text search; matched item ids in FTS-rank order.
-    async fn search(req: SearchRequest) -> Result<Vec<String>, RpcError>;
+    // There is deliberately **no `search`** here. v5 had one — the daemon ran the
+    // index's FTS5 query and returned matched ids — and it is gone with the FTS
+    // table (index schema 6, read-path roadmap §6.1): search is a parallel file
+    // scan on every surface now, which the client performs itself. Re-adding a
+    // daemon search would reintroduce the divergence the removal closed, because
+    // the daemon's answer would have to come from something other than the file
+    // scan the `--no-index` path runs.
     /// A dependency-graph query served from the daemon's cached graph.
     async fn graph(req: GraphRequest) -> Result<GraphResponse, RpcError>;
     /// Force a full reindex inside the daemon; returns its report.

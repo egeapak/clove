@@ -1,9 +1,9 @@
 //! The single item write path (T-S02).
 //!
 //! [`upsert_item`] is the only public mutator of the `items` table. It updates
-//! `items`, `edges`, `labels`, and the contentless `items_fts` mirror inside one
-//! `BEGIN IMMEDIATE` transaction so the full-text index can never drift from the
-//! row data (DESIGN §6.3). Bulk loading ([`crate::reindex`]) and incremental
+//! `items`, `edges`, and `labels` inside one `BEGIN IMMEDIATE` transaction so
+//! the side tables can never drift from the row data (DESIGN §6.3). Bulk
+//! loading ([`crate::reindex`]) and incremental
 //! resync ([`crate::stale`]) reuse the lower-level [`write_row`] under their own
 //! transactions, supplying the file `mtime`, content hash, dangling flag, and
 //! topological rank that a lone [`Item`] does not carry.
@@ -21,18 +21,6 @@ pub(crate) fn content_hash8(bytes: &[u8]) -> [u8; 8] {
     let mut out = [0u8; 8];
     out.copy_from_slice(&hash.as_bytes()[..8]);
     out
-}
-
-/// A stable, deterministic FTS5 rowid derived from the item id.
-///
-/// `items` is `WITHOUT ROWID` (its key is the TEXT id), so there is no integer
-/// rowid to share with the contentless FTS5 table. We derive one from the id's
-/// BLAKE3 hash: deterministic, so the delete-then-insert FTS sync needs no
-/// lookup. The 64-bit space makes a collision astronomically unlikely at any
-/// realistic item count (DESIGN §6.3).
-pub(crate) fn fts_rowid(id: &str) -> i64 {
-    let hash = blake3::hash(id.as_bytes());
-    i64::from_le_bytes(hash.as_bytes()[..8].try_into().expect("8 bytes"))
 }
 
 /// Sentinel `topological_rank` for items whose rank is unknown (incremental
@@ -153,30 +141,6 @@ pub(crate) fn write_row(
         }
     }
 
-    // (6) FTS5 mirror (contentless, contentless_delete=1: managed explicitly).
-    // Delete the old shadow row by rowid first, then insert the current
-    // title/labels/body. We use `DELETE ... WHERE rowid` (not the FTS5 'delete'
-    // command) because that command requires the *previous* column values,
-    // which we don't have when the body changed — passing the new values would
-    // corrupt the token counts. `contentless_delete=1` (DESIGN §6.1 DDL) makes
-    // rowid-only deletes sound.
-    //
-    // `labels` is indexed so the index path finds label-only hits. Without it
-    // the FTS never returned them, while the file path and the MCP tool did —
-    // the same query answering differently depending on whether an index
-    // happened to be present.
-    let rowid = fts_rowid(id);
-    tx.execute("DELETE FROM items_fts WHERE rowid = ?1", params![rowid])?;
-    tx.execute(
-        "INSERT INTO items_fts(rowid, id, title, labels, body) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![rowid, id, fm.title, fm.labels.join(" "), item.body],
-    )?;
-    // Reverse map so a full-text match (which yields only rowids on a contentless
-    // table) can be resolved back to the item id.
-    tx.execute(
-        "INSERT OR REPLACE INTO fts_map (fts_rowid, item_id) VALUES (?1, ?2)",
-        params![rowid, id],
-    )?;
     Ok(())
 }
 
@@ -226,54 +190,28 @@ mod tests {
         }
     }
 
-    fn fts_ids(index: &Index, query: &str) -> Vec<String> {
-        let mut stmt = index
-            .conn()
-            .prepare(
-                "SELECT m.item_id FROM items_fts JOIN fts_map m ON m.fts_rowid = items_fts.rowid \
-                 WHERE items_fts MATCH ?1 ORDER BY m.item_id",
-            )
-            .unwrap();
-        let rows = stmt
-            .query_map([query], |r| r.get::<_, String>(0))
-            .unwrap()
-            .map(Result::unwrap)
-            .collect();
-        rows
-    }
-
+    /// Bulk upserts stay internally consistent: one `items` row and one
+    /// `labels` row per item, with no orphans left behind.
+    ///
+    /// This replaces an FTS-shadow-consistency test that schema 6 deleted along
+    /// with `items_fts`; the invariant it was really guarding — the side tables
+    /// track `items` exactly across many writes — now rides on `labels`.
     #[test]
-    fn fts_consistency_over_many_items() {
+    fn side_tables_stay_consistent_over_many_items() {
         let (_d, mut index) = index();
         for i in 0..100 {
             let id = format!("proj-{:0>8}", radix(i));
-            let it = item(
-                &id,
-                &format!("title {i}"),
-                &format!("body keyword{i} shared"),
-            );
+            let mut it = item(&id, &format!("title {i}"), &format!("body keyword{i}"));
+            it.frontmatter.labels = vec![format!("n:{i}"), "shared".to_owned()];
             index.upsert_item(&it).unwrap();
         }
         assert_eq!(index.item_count().unwrap(), 100);
-        // A term shared by every body matches all 100.
-        assert_eq!(fts_ids(&index, "shared").len(), 100);
-        // A unique term matches exactly one.
-        assert_eq!(fts_ids(&index, "keyword42").len(), 1);
-    }
-
-    #[test]
-    fn reupsert_replaces_body_in_fts() {
-        let (_d, mut index) = index();
-        let id = "proj-AAAA1111";
-        index.upsert_item(&item(id, "t", "original alpha")).unwrap();
-        assert_eq!(fts_ids(&index, "alpha").len(), 1);
-        assert_eq!(fts_ids(&index, "omega").len(), 0);
-
-        // Re-upsert with new body: old term gone, new term present, no dup row.
-        index.upsert_item(&item(id, "t", "revised omega")).unwrap();
-        assert_eq!(index.item_count().unwrap(), 1);
-        assert_eq!(fts_ids(&index, "alpha").len(), 0);
-        assert_eq!(fts_ids(&index, "omega").len(), 1);
+        let labels: i64 = index
+            .conn()
+            .query_row("SELECT COUNT(*) FROM labels", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(labels, 200, "two labels per item, none duplicated");
+        assert_eq!(index.integrity_check().unwrap(), None);
     }
 
     #[test]

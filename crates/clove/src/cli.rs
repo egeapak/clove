@@ -85,7 +85,7 @@ pub enum Commands {
     Comment(CommentArgs),
     /// List an item's comments.
     Comments(CommentsArgs),
-    /// Full-text search.
+    /// Search titles, labels, and bodies for a case-insensitive substring.
     Search(SearchArgs),
     /// Show work-item analytics (counts, ready/blocked, epics, throughput).
     Stats(StatsArgs),

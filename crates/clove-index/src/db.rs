@@ -3,8 +3,8 @@
 //! [`Index`] owns a private [`rusqlite::Connection`]. The connection is never
 //! handed out mutably: every write goes through the single encapsulated path in
 //! [`crate::write::upsert_item`] (and the bulk path in [`crate::reindex`]), so
-//! the FTS5 mirror can never silently drift from the `items` table (DESIGN §6.3,
-//! T-S02). Schema version lives in `PRAGMA user_version`; on mismatch or
+//! the derived columns can never silently drift from the item files (DESIGN
+//! §6.3, T-S02). Schema version lives in `PRAGMA user_version`; on mismatch or
 //! corruption the database is dropped and rebuilt (DESIGN §6.1).
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -20,29 +20,29 @@ use thiserror::Error;
 /// malformed-parent exclusion flag) so the SQL `ready` query matches the
 /// in-memory `ready_items` exactly, and the incremental path now keeps
 /// `topological_rank`/`has_dangling_deps`/`excluded` exact (no longer
-/// reindex-only). The index is a rebuildable cache, so each bump just rebuilds.
-pub const SCHEMA_VERSION: i64 = 5;
+/// reindex-only). v5 added labels to the `items_fts` full-text mirror. v6
+/// **removed** `items_fts`/`fts_map` outright: search no longer runs through the
+/// index at all (read-path roadmap §6.1 — the FTS matched whole ASCII-folded
+/// tokens where every other surface matches Unicode substrings, so it answered
+/// a narrower question, and it was 77% of the file on a 10k store). The index is
+/// a rebuildable cache, so each bump just rebuilds.
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// Complete DDL for the index (DESIGN §6.1). Kept as one reviewable block.
 /// PRAGMAs that must run per-connection (not persisted) are applied separately
 /// in [`set_pragmas`].
 ///
-/// Two deviations from the DESIGN §6.1 DDL, both forced by combining a
-/// contentless FTS5 table with a `WITHOUT ROWID` `items` table:
-///
-/// 1. `items_fts` adds `contentless_delete=1`. The plan (T-S02) reached for the
-///    FTS5 `'delete'` command, but that requires the *previous* column values to
-///    undo a row — values we don't have when an item's body changed or its file
-///    was removed. `contentless_delete=1` (SQLite ≥3.43, in the bundled build)
-///    lets us delete a shadow row by rowid alone, correct across edits/deletes.
-///
-/// 2. A `fts_map(fts_rowid → item_id)` side table is added. A contentless FTS5
-///    table returns NULL for all columns (even `UNINDEXED id`), and `items` has
-///    no integer rowid to join on, so a full-text match cannot otherwise be
-///    mapped back to an item id. `fts_map` is that mapping; it is tiny (one
-///    integer + id per item) and preserves the contentless space win for bodies.
-///
-/// Both are maintained by [`crate::write::write_row`].
+/// **There is no full-text table here, and that is deliberate.** Schemas 1–5
+/// carried a contentless `items_fts` mirror plus an `fts_map` side table to map
+/// matched rowids back to item ids; `clove search` used it as a candidate
+/// prefilter. It was removed in schema 6 because FTS5 answers a *different*
+/// question from the one every other clove surface answers — whole tokens with
+/// ASCII-only case folding, against `str::contains` over a full-Unicode
+/// lowercase — so the same `clove search X` returned different ids depending on
+/// whether `.clove/index.db` happened to exist. Search now always scans files
+/// (measured: 62–216 ms over 10k items, *faster* than the index path for any
+/// needle matching more than a few percent of the store, because that path had
+/// to re-read every matched file anyway). See `docs/READ_PATH_ROADMAP.md` §6.1.
 const SCHEMA_DDL: &str = "\
 CREATE TABLE items (
     id TEXT PRIMARY KEY,
@@ -78,16 +78,6 @@ CREATE TABLE labels (
     PRIMARY KEY (item_id, label)
 ) WITHOUT ROWID;
 
-CREATE VIRTUAL TABLE items_fts USING fts5(
-    id UNINDEXED,
-    title,
-    labels,
-    body,
-    content='',
-    contentless_delete=1,
-    tokenize='ascii'
-);
-
 CREATE TABLE meta (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     dir_mtime INTEGER NOT NULL,
@@ -100,11 +90,6 @@ CREATE TABLE file_mtimes (
     mtime_ns INTEGER NOT NULL,
     content_hash BLOB NOT NULL,
     synced_at INTEGER
-);
-
-CREATE TABLE fts_map (
-    fts_rowid INTEGER PRIMARY KEY,
-    item_id TEXT NOT NULL
 );
 
 CREATE INDEX idx_items_status ON items(status);
@@ -446,11 +431,16 @@ impl Index {
     ///    variant of `integrity_check`; it skips the exhaustive index/content
     ///    cross-validation but catches the page-level corruption that the shallow
     ///    open-time [`is_corrupt`] probe misses).
-    /// 2. The contentless-FTS mirror: `fts_map` must have exactly one row per
-    ///    `items` row. Because `items_fts` is contentless and joined back through
-    ///    `fts_map` (see the schema notes above), a torn `fts_map` is a
-    ///    clove-specific corruption that `quick_check` cannot see but that would
-    ///    silently drop or misattribute search hits.
+    /// 2. The `labels` side table must not reference an item that is not in
+    ///    `items`. Every label row is written in the same transaction as its
+    ///    item, so an orphan is a clove-specific tear that `quick_check` cannot
+    ///    see (it is referentially, not structurally, broken) but that makes a
+    ///    `--label` query return an id the store cannot resolve.
+    ///
+    /// Schema 5 checked the contentless-FTS mirror here instead (`fts_map` had
+    /// to have exactly one row per item). That table is gone in schema 6 — see
+    /// the `SCHEMA_DDL` note — so the equivalent cross-table check moved to the
+    /// side table that remains.
     pub fn integrity_check(&self) -> Result<Option<String>, IndexError> {
         let mut stmt = self.conn.prepare("PRAGMA quick_check")?;
         let problems: Vec<String> = stmt
@@ -463,15 +453,14 @@ impl Index {
             return Ok(Some(format!("quick_check: {}", problems.join("; "))));
         }
 
-        let items: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))?;
-        let fts: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM fts_map", [], |r| r.get(0))?;
-        if items != fts {
+        let orphans: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM labels WHERE item_id NOT IN (SELECT id FROM items)",
+            [],
+            |r| r.get(0),
+        )?;
+        if orphans != 0 {
             return Ok(Some(format!(
-                "full-text index out of sync ({fts} fts row(s) vs {items} item(s))"
+                "label index out of sync ({orphans} label row(s) with no item)"
             )));
         }
         Ok(None)
@@ -604,22 +593,41 @@ mod tests {
     }
 
     #[test]
-    fn integrity_check_passes_clean_and_catches_fts_drift() {
+    fn integrity_check_passes_clean_and_catches_side_table_drift() {
         let (_dir, path) = tmp_db();
         let index = Index::open(&path).unwrap();
         // A fresh index is internally consistent.
         assert_eq!(index.integrity_check().unwrap(), None);
-        // Tear the FTS mirror: a stray fts_map row with no matching item makes
-        // the contentless-FTS cross-check fail even though quick_check is happy.
+        // Tear the label side table: a row for an item that does not exist is
+        // referentially broken, which `quick_check` cannot see.
         index
             .conn()
             .execute(
-                "INSERT INTO fts_map(fts_rowid, item_id) VALUES (1, 'ghost')",
+                "INSERT INTO labels(item_id, label) VALUES ('ghost', 'area:core')",
                 [],
             )
             .unwrap();
         let reason = index.integrity_check().unwrap().unwrap();
-        assert!(reason.contains("full-text index"), "{reason}");
+        assert!(reason.contains("label index"), "{reason}");
+    }
+
+    /// Schema 6 carries **no** full-text tables. Search is a file scan on every
+    /// surface (read-path roadmap §6.1); an `items_fts` reintroduced here would
+    /// be a prefilter answering a narrower question than `view::match_class`,
+    /// which is exactly the divergence §6.1 removed.
+    #[test]
+    fn schema_has_no_full_text_tables() {
+        let (_dir, path) = tmp_db();
+        let index = Index::open(&path).unwrap();
+        let names: Vec<String> = index
+            .conn()
+            .prepare("SELECT name FROM sqlite_master WHERE name LIKE '%fts%'")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(names.is_empty(), "schema 6 must carry no FTS: {names:?}");
     }
 
     /// T-D01 / schema v3: `file_mtimes` carries the nullable `synced_at` column
@@ -640,31 +648,12 @@ mod tests {
             .unwrap();
         assert!(has_col, "file_mtimes.synced_at must exist at schema v3+");
         // A tripwire, on purpose: bumping the version invalidates every index in
-        // the wild, so it should never happen as a side effect. v5 adds `labels`
-        // to `items_fts` — without it the index path could not find label-only
-        // hits that the file path and the MCP tool both returned.
+        // the wild, so it should never happen as a side effect. v6 drops
+        // `items_fts`/`fts_map` — search no longer touches the index, so the FTS
+        // was 77% of a 10k index file maintained for nothing.
         assert_eq!(
-            SCHEMA_VERSION, 5,
-            "index schema v5 indexes labels for full-text search"
-        );
-    }
-
-    /// The FTS mirror indexes labels, which is the whole point of v5.
-    #[test]
-    fn items_fts_indexes_labels() {
-        let (_dir, path) = tmp_db();
-        let index = Index::open(&path).unwrap();
-        let columns: Vec<String> = index
-            .conn()
-            .prepare("SELECT name FROM pragma_table_info('items_fts')")
-            .unwrap()
-            .query_map([], |r| r.get::<_, String>(0))
-            .unwrap()
-            .map(Result::unwrap)
-            .collect();
-        assert!(
-            columns.iter().any(|c| c == "labels"),
-            "items_fts must index labels; got {columns:?}"
+            SCHEMA_VERSION, 6,
+            "index schema v6 removed the full-text tables"
         );
     }
 }

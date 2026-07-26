@@ -130,8 +130,10 @@ impl CloveServer {
         self.run(move || e.show(a)).await
     }
 
-    #[tool(description = "Full-text search over item titles, labels, and bodies \
-                          (case-insensitive; title matches rank first).")]
+    #[tool(description = "Search item titles, labels, and bodies for a \
+                          case-insensitive SUBSTRING (not whole words: `core` \
+                          matches `corepart`). Title matches rank first, then \
+                          labels, then bodies.")]
     async fn clove_search(
         &self,
         Parameters(a): Parameters<SearchArgs>,

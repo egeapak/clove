@@ -14,7 +14,7 @@ clove/                          (workspace root)
   Cargo.toml                    [workspace] + [workspace.dependencies]
   crates/
     clove-core/                 lib — item model, file store, DAG engine, ID gen
-    clove-index/                lib — SQLite index, FTS5, staleness, reindex
+    clove-index/                lib — SQLite index, staleness, reindex
     clove-import/               lib — json/jsonl export, merge driver, tk/beads importer logic, pure GitHub mapping
     clove-plugin/               lib — cargo-style plugin support (PluginContext + envelope harness)
     clove-sync-github/          bin — the `clove-sync-github` plugin (two-way GitHub sync, octocrab)
@@ -531,18 +531,12 @@ CREATE TABLE labels (
     PRIMARY KEY (item_id, label)
 ) WITHOUT ROWID;
 
-CREATE VIRTUAL TABLE items_fts USING fts5(
-    id UNINDEXED,
-    title,
-    labels,             -- v5: space-joined, so a label-only hit is findable via the index
-    body,
-    content='',         -- contentless: FTS index is self-contained; rows managed by upsert_item()
-    tokenize='ascii'    -- faster than unicode61 for ASCII-dominant content
-);
--- Note: `body` here is the item body text passed explicitly on insert; it is NOT a reference
--- to a column in the `items` table (which has no body column). The `content=''` declaration
--- makes this a contentless FTS5 table — all content must be provided via explicit
--- INSERT/DELETE in upsert_item(). See §6.3 and T-S02.
+-- There is deliberately NO full-text table. Schemas 1-5 carried a contentless `items_fts`
+-- (plus an `fts_map` rowid→id side table) that `clove search` used as a candidate prefilter;
+-- v6 removed both. FTS5 matches whole tokens with ASCII-only case folding, while every other
+-- clove surface matches a full-Unicode substring, so the FTS answered a strictly narrower
+-- question and `clove search X` returned different ids depending on whether an index existed.
+-- Search is a parallel file scan on every surface now — see §6.7 and read-path roadmap §6.1.
 
 -- Staleness oracle (exactly one row enforced by the CHECK constraint)
 CREATE TABLE meta (
@@ -578,9 +572,11 @@ and SIMD-accelerated). Stored as `BLOB(8)`.
 
 **Schema version** is stored in `PRAGMA user_version` (built-in SQLite mechanism, more
 reliable than a custom table row). Checked on every `Index::open`. Current version is
-**v5** (v2 covering index + sentinel rank; v3 `file_mtimes.synced_at`; v4
+**v6** (v2 covering index + sentinel rank; v3 `file_mtimes.synced_at`; v4
 `items.excluded`, the persisted hard-cycle / malformed-parent flag the SQL `ready` query
-filters on — see §6.5; v5 `items_fts.labels`).
+filters on — see §6.5; v5 `items_fts.labels`; v6 **dropped `items_fts`/`fts_map`**, which
+also took the index from ~21 MB to ~4.8 MB and `clove reindex` from ~1.46 s to ~0.39 s on a
+10,000-item store).
 
 On a mismatch, `Index::open_or_rebuild` **rebuilds from the files**: `reindex` builds a
 temp database under the reindex lock and renames it over the live one, so a rebuild that
@@ -617,15 +613,15 @@ targeted). Update `last_git_head` after.
 
 Every CLI command that mutates a file (new, edit, status, label, dep, assign, priority) does:
 1. Write the `.md` file (atomic rename, see §4).
-2. Upsert the SQLite rows (items + edges + labels + FTS5 sync) in a single `BEGIN IMMEDIATE`
+2. Upsert the SQLite rows (items + edges + labels) in a single `BEGIN IMMEDIATE`
    transaction.
 
 If the SQLite upsert fails: log to stderr and continue (file is the truth; index is stale
 but recoverable). File writes are always attempted first.
 
-**FTS5 sync:** All item upserts must use the encapsulated `upsert_item(conn, item)` function —
-the single write path — which always syncs FTS5 in the same transaction. Direct SQL writes to
-`items` outside this function are forbidden.
+**Side-table sync:** All item upserts must use the encapsulated `upsert_item(conn, item)`
+function — the single write path — which replaces the item's `edges` and `labels` rows in the
+same transaction. Direct SQL writes to `items` outside this function are forbidden.
 
 ### 6.4 Auto-Refresh Threshold
 
@@ -682,7 +678,9 @@ with the understanding that a crash during reindex is detected via `PRAGMA user_
 Missing `index.db`:
 - Print to stderr (not stdout): `note: no index found, using file scan (run 'clove reindex' to build)`
 - Use file-scan for all operations.
-- `clove search` degrades to parallel rayon substring scan over file content.
+- `clove search` is **always** a parallel rayon substring scan over file content, index or
+  no index — it has no index tier and no daemon tier to degrade from. See §7.x "Search
+  semantics" and read-path roadmap §6.1; its `_meta.source` is therefore always `"files"`.
 
 All JSON responses include `"_meta": { "source": "files" | "index", "took_ms": N }`.
 
@@ -934,7 +932,7 @@ with `clove init`, so the two never drift.
 checks via the non-healing `Index::open` (so problems are reported, not silently
 rebuilt away): **schema-version mismatch** (`INDEX_SCHEMA_MISMATCH`, warning),
 **internal corruption** (`INDEX_CORRUPT`, error — `PRAGMA quick_check` plus a
-contentless-FTS `fts_map`↔`items` row-count cross-check), and **index↔files
+`labels`→`items` orphan cross-check), and **index↔files
 divergence** (`INDEX_DIVERGENCE`, warning, counts/hashes via the staleness
 machinery). All three are fixable: `--fix` triggers a single `reindex` from the
 files (the source of truth) and re-checks. Skipped under `--no-index`.
@@ -1096,6 +1094,51 @@ owns in one place.
 must return identical results for every filter combination, pinned by
 `crates/clove/tests/filter_parity.rs`.
 
+#### `q` (a filter) vs. `search` (a search) — two different questions
+
+These are deliberately **not** the same predicate, and neither one is a bug:
+
+| | `q` | `search` |
+|---|---|---|
+| spelled | `--q TEXT`, `{"q": …}`, `?q=` | `clove search TEXT`, `clove_search` |
+| reads | id, title, labels | title, labels, body |
+| combines with `--status`/`--label`/… | yes — it is one filter among several | no — `search` takes no field filters |
+| ranks | no (the list's `--sort` applies) | yes — title, then label, then body |
+| implementation | `clove_core::view::q_matches` | `clove_core::view::rank_search_hits` |
+
+`q` narrows a list you are already looking at, cheaply and without reading
+bodies; `search` is the "where did I write that?" question, which has to read
+bodies and has to rank. Folding `q` into `search` would make `clove ls --q x`
+read every body and lose its composability with the other filters; folding
+`search` into `q` would lose ranking and body matching. Both spellings match a
+**case-insensitive Unicode substring**, so `--q Ünicode` and `search Ünicode`
+agree about what "matches" means even though they look in different places.
+
+#### Search matching is a substring, everywhere
+
+`clove search X` returns **identical ids in identical order** whether or not
+`.clove/index.db` exists and whether or not a daemon is running. That is achieved
+by having exactly one implementation — `clove_core::view::rank_search_hits` over
+a parallel file scan — and *no* index or daemon tier at all. `_meta.source` on a
+search is therefore always `"files"`.
+
+A needle matches a case-insensitive **substring** over a full-Unicode lowercase,
+so `core` finds `corepart`, `icode` finds the label `ünicode-tag`, and `Ünicode`
+finds it too. The needle is a literal, never a query language: `clove search
+'"quoted" OR x*'` looks for that exact character sequence.
+
+Until index schema 6 this was not true. The index path ran an FTS5 phrase query,
+which matches whole tokens with ASCII-only case folding, so it was a strictly
+*narrower* prefilter and the three needles above answered differently depending
+on whether an index or a daemon happened to be present. No FTS query is a
+superset of substring matching (a prefix match reaches `corepart` but never
+`icode`), so the choice was between removing mid-word matching — a capability
+users have — and removing the prefilter. Measured over a 10,000-item store, the
+file scan costs 65 ms for a selective needle and 220 ms when nearly everything
+matches, against 22 ms and 350 ms for the index path, which had to re-read every
+matched file anyway in order to rank it: the FTS won only for highly selective
+needles and lost outright otherwise. It was removed. See read-path roadmap §6.1.
+
 ### 7.9 `clove agent-doc`
 
 Generates a self-contained workflow document suitable for AGENTS.md/CLAUDE.md. Contents:
@@ -1175,13 +1218,14 @@ STATUS → { uptime_s, items_indexed, watcher_state, last_event_ms }
 
 **`PROTOCOL_VERSION`** (returned by `PING`) gates a mixed-version pair; the
 client fails a mismatch and falls back, which is safe because the daemon is a
-cache, not a source of truth. It is **5**:
+cache, not a source of truth. It is **6**:
 
 | v | change |
 |---|---|
 | 3 | `apply_edit(EditRequest)` / `dep_remove` / `set_parent` mutations |
 | 4 | `change_generation()` for MCP `resources/updated` push |
 | 5 | `QueryRequest`'s five scalar filter fields → one `filters: view::Filters`; `GraphRequest::Blocked` carries an `order` and drops the dead `include_warnings` |
+| 6 | `search` RPC and `SearchRequest` **removed** — search is a file scan on every surface (§7.8, read-path roadmap §6.1), so the daemon has nothing to answer with |
 
 The v5 bump is worth spelling out because the codec is JSON and a v4 frame still
 *decodes*: its `"status": "open"` simply lands nowhere, and the daemon answers
@@ -1610,7 +1654,8 @@ All wall-clock, measured with `hyperfine --warmup 3 --runs 20`. Cold = OS page c
 | `clove ls` 1,000 items, index | — | < 5 ms |
 | `clove ls` 10,000 items, index | — | < 10 ms |
 | `clove ready` 10,000 items, index | — | < 10 ms |
-| `clove search` 10,000 items, FTS5 | — | < 20 ms |
+| `clove search` 10,000 items, file scan (selective needle) | — | < 400 ms (measured ~65 ms) |
+| `clove search` 10,000 items, file scan (matches nearly all) | — | measured ~220 ms |
 | `clove ready` 100,000 items, index | — | < 100 ms |
 | `clove reindex` 1,000 items | — | < 500 ms |
 | `clove reindex` 10,000 items | — | < 1,000 ms |
@@ -1637,7 +1682,7 @@ required above that threshold.
 
 Body text is never materialized during `ls`/`ready`/`blocked`/`query`. The `scan_lazy()`
 path parses only `ItemFrontmatter` (no body allocation). `Item { frontmatter, body: String }`
-is constructed only on the full-load path (`clove show`, FTS5 indexing, reindex). This keeps
+is constructed only on the full-load path (`clove show`, `clove search`, reindex). This keeps
 peak RSS low for bulk scan operations.
 
 ### 13.4 Comparative Benchmark Methodology

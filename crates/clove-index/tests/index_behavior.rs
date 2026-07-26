@@ -212,11 +212,10 @@ fn open_then_reopen_persists_data() {
     // Reopen via open_or_create: schema already present, the row survives.
     let index = Index::open_or_create(&repo.db).unwrap();
     assert_eq!(index.item_count().unwrap(), 1);
-    let rows = index
-        .search("persisted", &Default::default(), None)
-        .unwrap();
+    let rows = index.query_list(&Filter::default()).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, "proj-AAAAAAAA");
+    assert_eq!(rows[0].title, "persisted");
 }
 
 #[test]
@@ -290,11 +289,8 @@ fn a_schema_bump_rebuilds_from_the_files_not_to_empty() {
     let index = Index::open_or_rebuild(&repo.db, &repo.issues).unwrap();
     assert_eq!(index.item_count().unwrap(), 1, "rebuilt from the files");
     assert_eq!(
-        index
-            .search("persisted", &Default::default(), None)
-            .unwrap()
-            .len(),
-        1
+        index.query_list(&Filter::default()).unwrap()[0].title,
+        "persisted"
     );
 }
 
@@ -372,11 +368,20 @@ fn a_failed_rebuild_is_retried_rather_than_left_empty() {
 }
 
 // ---------------------------------------------------------------------------
-// 2. upsert + FTS + re-upsert
+// 2. upsert + re-upsert
 // ---------------------------------------------------------------------------
 
+/// Re-upserting an item replaces its row rather than adding one, and the
+/// projected columns reflect the new values.
+///
+/// This was `search_finds_by_title_and_body_and_replaces_on_reupsert`, which
+/// asserted the same replacement through the FTS mirror. Schema 6 removed that
+/// mirror (search is a file scan on every surface — read-path roadmap §6.1), so
+/// the assertion moved to the `items` row itself. The body is no longer indexed
+/// at all, which is the point: an index that stored bodies could only answer a
+/// narrower question than `view::match_class`, and did.
 #[test]
-fn search_finds_by_title_and_body_and_replaces_on_reupsert() {
+fn reupsert_replaces_the_row_rather_than_adding_one() {
     let repo = Repo::new();
     let mut index = Index::open(&repo.db).unwrap();
 
@@ -390,32 +395,20 @@ fn search_finds_by_title_and_body_and_replaces_on_reupsert() {
     index.upsert_item(&item_from_spec(&b)).unwrap();
     assert_eq!(index.item_count().unwrap(), 2);
 
-    // Found by a title term...
-    let by_title = index.search("widget", &Default::default(), None).unwrap();
-    assert_eq!(by_title.len(), 1);
-    assert_eq!(by_title[0].id, "proj-AAAAAAAA");
-    // ...and by a body term.
-    let by_body = index.search("quokka", &Default::default(), None).unwrap();
-    assert_eq!(by_body.len(), 1);
-    assert_eq!(by_body[0].id, "proj-AAAAAAAA");
-
-    // Re-upsert A with a new body: the old term disappears, the new one matches,
-    // and there is no duplicate row.
     let a2 = ItemSpec::new("proj-AAAAAAAA")
-        .title("alpha widget")
+        .title("alpha renamed")
         .body("now featuring a narwhal instead");
     index.upsert_item(&item_from_spec(&a2)).unwrap();
     assert_eq!(index.item_count().unwrap(), 2, "no duplicate row");
-    assert!(
-        index
-            .search("quokka", &Default::default(), None)
-            .unwrap()
-            .is_empty(),
-        "old term gone"
-    );
-    let narwhal = index.search("narwhal", &Default::default(), None).unwrap();
-    assert_eq!(narwhal.len(), 1);
-    assert_eq!(narwhal[0].id, "proj-AAAAAAAA");
+    let titles: Vec<String> = index
+        .query_list(&Filter::default())
+        .unwrap()
+        .into_iter()
+        .map(|r| r.title)
+        .collect();
+    assert!(titles.contains(&"alpha renamed".to_owned()), "{titles:?}");
+    assert!(!titles.contains(&"alpha widget".to_owned()), "{titles:?}");
+    assert_eq!(index.integrity_check().unwrap(), None);
 }
 
 // ---------------------------------------------------------------------------
@@ -667,7 +660,14 @@ fn staleness_clean_after_reindex_with_backdated_mtimes() {
 fn staleness_detects_new_deleted_modified_and_apply_resyncs() {
     let repo = Repo::new();
     for id in ["proj-AAAAAAAA", "proj-BBBBBBBB", "proj-CCCCCCCC"] {
-        ItemSpec::new(id).body("initial body").write_to(&repo);
+        // Labels are load-bearing: they are what a delete has to clean up out of
+        // the `labels` side table, and `integrity_check` below is what notices
+        // if it does not. Without them the deletion path has no side-table work
+        // to get wrong and the check passes vacuously.
+        ItemSpec::new(id)
+            .body("initial body")
+            .labels(&["area:core", "kind:perf"])
+            .write_to(&repo);
     }
     reindex(&repo.issues, &repo.db).unwrap();
 
@@ -675,6 +675,7 @@ fn staleness_detects_new_deleted_modified_and_apply_resyncs() {
     // file lands inside the recent-window guard, forcing the content-hash check).
     ItemSpec::new("proj-DDDDDDDD")
         .body("brand new searchterm")
+        .labels(&["area:core"])
         .write_to(&repo);
     repo.remove("proj-CCCCCCCC");
     ItemSpec::new("proj-AAAAAAAA")
@@ -695,13 +696,22 @@ fn staleness_detects_new_deleted_modified_and_apply_resyncs() {
     index.apply_staleness(&report, &repo.issues).unwrap();
     assert_eq!(index.item_count().unwrap(), 3, "C removed, D added");
 
-    // The new item is searchable; the deleted one is gone.
+    // The new item is in the index; the deleted one is gone.
+    let ids: Vec<String> = index
+        .query_list(&Filter::default())
+        .unwrap()
+        .into_iter()
+        .map(|r| r.id.to_string())
+        .collect();
+    assert!(ids.contains(&"proj-DDDDDDDD".to_owned()), "{ids:?}");
+    assert!(!ids.contains(&"proj-CCCCCCCC".to_owned()), "{ids:?}");
+    // ...and the deleted item left nothing behind in the side tables. Schema 5
+    // guarded this through the FTS row-count cross-check; schema 6 has no FTS,
+    // so `labels` is where a torn delete now shows up.
     assert_eq!(
-        index
-            .search("searchterm", &Default::default(), None)
-            .unwrap()
-            .len(),
-        1
+        index.integrity_check().unwrap(),
+        None,
+        "a deleted item must not leave orphan label rows"
     );
     // A subsequent check no longer reports the resynced rows as stale/deleted.
     let after = index.check_staleness(&repo.issues).unwrap();
@@ -770,79 +780,4 @@ fn ready_set_matches_clove_core_graph() {
     );
     // Sanity: the fixture actually exercises readiness (non-empty, non-all).
     assert!(!graph_ready.is_empty() && graph_ready.len() < frontmatters.len());
-}
-
-// ---------------------------------------------------------------------------
-// 8. search: limit, punctuation-safety, empty result
-// ---------------------------------------------------------------------------
-
-#[test]
-fn search_limit_is_honored() {
-    let repo = Repo::new();
-    let mut index = Index::open(&repo.db).unwrap();
-    for id in [
-        "proj-AAAAAAAA",
-        "proj-BBBBBBBB",
-        "proj-CCCCCCCC",
-        "proj-DDDDDDDD",
-    ] {
-        index
-            .upsert_item(&item_from_spec(
-                &ItemSpec::new(id).body("shared common token"),
-            ))
-            .unwrap();
-    }
-    assert_eq!(
-        index
-            .search("shared", &Default::default(), None)
-            .unwrap()
-            .len(),
-        4
-    );
-    assert_eq!(
-        index
-            .search("shared", &Default::default(), Some(2))
-            .unwrap()
-            .len(),
-        2
-    );
-    assert_eq!(
-        index
-            .search("shared", &Default::default(), Some(0))
-            .unwrap()
-            .len(),
-        0
-    );
-}
-
-#[test]
-fn search_is_quoting_safe_and_empty_on_no_match() {
-    let repo = Repo::new();
-    let mut index = Index::open(&repo.db).unwrap();
-    index
-        .upsert_item(&item_from_spec(
-            &ItemSpec::new("proj-AAAAAAAA").body("normal content here"),
-        ))
-        .unwrap();
-
-    // Input full of FTS metacharacters / punctuation must not error or inject
-    // query syntax — it's treated as a literal phrase that simply matches nothing.
-    for tricky in [
-        "\"quote injection\" OR 1",
-        "foo* AND bar",
-        "(unbalanced",
-        "co-lon: semi; comma,",
-    ] {
-        let res = index.search(tricky, &Default::default(), None).unwrap();
-        assert!(
-            res.is_empty(),
-            "tricky input matched unexpectedly: {tricky:?}"
-        );
-    }
-
-    // A clean non-matching term is also empty.
-    assert!(index
-        .search("absentword", &Default::default(), None)
-        .unwrap()
-        .is_empty());
 }

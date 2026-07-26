@@ -19,7 +19,7 @@ Status of what shipped, for context:
 | Ordering (`sort`/`dir`) | **Done** — `clove_core::view::Order`, all surfaces (§1) |
 | Filters | **Done** — `clove_core::view::Filters`, all surfaces (§2) |
 | Read tiering (daemon → index → files) | CLI only; MCP always reads files — §4 |
-| Search match set + ranking | Labels: **done**; substring-vs-token still diverges — §6.1 |
+| Search match set + ranking | **Done** — one substring matcher, no index tier (§6.1) |
 | Index rebuild on schema bump | **Done** — `Index::open_or_rebuild` |
 | `/board` window | **Done** — per-column `limit`/`offset` |
 
@@ -151,7 +151,7 @@ set meaning unconstrained. `Filters::parse` keeps the single-value spelling;
 --label` repeat on the CLI, the MCP tools take `string | string[]` through an
 untagged wrapper, and `clove query`'s JSON filter does too. `clove_index::
 push_down` is the exhaustive split, `_meta.filters` echoes the parsed set, and
-`clove_ipc::PROTOCOL_VERSION` is 5.
+`clove_ipc::PROTOCOL_VERSION` is 5 (6 after §6.1 removed the `search` RPC).
 
 Notes for whoever picks up §4:
 
@@ -163,8 +163,8 @@ Notes for whoever picks up §4:
   in the same bump (§7's first bullet, folded in here as planned).
 - **`q` is the only residue, and it is a design decision, not a gap.** SQLite's
   `LIKE`/`lower()` case-fold ASCII only while `str::to_lowercase` is full
-  Unicode, so pushing `q` into SQL would reintroduce §6.1's file-vs-index
-  divergence on a *filter* rather than a search. A residue changes the query
+  Unicode, so pushing `q` into SQL would reintroduce the ASCII-folding half of
+  §6.1's file-vs-index divergence on a *filter* rather than a search. A residue changes the query
   mechanics too — the `LIMIT` may not be pushed down and `COUNT(*)` is not the
   total — and `clove_index::query_filtered` is the one place that knows it. The
   residue path also has to select full rows, since `q` reads labels and the lean
@@ -247,8 +247,8 @@ truth.
 
 Two separate version numbers, easy to confuse: the **item** `schema` field
 (`clove_types::CURRENT_SCHEMA_VERSION`, **1**) and the **index** schema
-(`clove_index::SCHEMA_VERSION`, in `PRAGMA user_version`, now **5** after the
-FTS-labels bump in §6.1). This section bumps the index one again. The item
+(`clove_index::SCHEMA_VERSION`, in `PRAGMA user_version`, now **6** after §6.1
+dropped the FTS tables). This section bumps the index one again. The item
 schema stays at 1 — canonical RFC3339 is still RFC3339, so nothing about the
 file format changes shape.
 
@@ -266,7 +266,7 @@ change when nothing changed.
    second-truncated, but **comment timestamps and stats snapshots are not** —
    both carry nanoseconds (`…T08:54:22.904816670+00:00`), so the canonicalization
    has to cover them too.
-2. Bump `clove_index::SCHEMA_VERSION` (now **5**, after §6.1) **only if** the
+2. Bump `clove_index::SCHEMA_VERSION` (now **6**, after §6.1) **only if** the
    canonicalization changes what the index stores. Note it may not: the index
    already normalizes item timestamps through `to_rfc3339()` on write (see §1),
    so the item columns are canonical today. Check before bumping — a bump costs
@@ -274,7 +274,8 @@ change when nothing changed.
    replaced rather than compared
    against. The tripwire assertion in `db.rs` makes this a deliberate act.
 3. ~~`Index::open_or_rebuild`~~ — **done**, shipped with the v5 bump for FTS
-   labels (§6.1). On a version mismatch it rebuilds from the files rather than
+   labels and exercised again by the v6 FTS removal (§6.1). On a version
+   mismatch it rebuilds from the files rather than
    leaving an empty index. It was a prerequisite for bumping the version at all:
    without it every bump ships a window where searches return nothing and the
    CLI silently falls back to file scans for every query.
@@ -384,11 +385,10 @@ is exactly why `GET /items/:id/comments` kept the unlimited web default.
 
 ## 6. Divergences addressed
 
-6.2 is closed; 6.1 is half closed and its remaining half is specified below.
-Kept here because the resolutions are decisions worth recording, not just diffs.
+6.1 and 6.2 are both closed. Kept here because the resolutions are decisions
+worth recording, not just diffs.
 
-**6.1 `search` disagreed with itself across surfaces — labels half resolved,
-matching half still open.**
+**6.1 `search` disagreed with itself across surfaces — RESOLVED (both halves).**
 
 `ops::search` (the `clove_search` MCP tool; the web has no search route) matched
 title, **labels**, and body with three ranking classes; `clove search`'s file
@@ -405,10 +405,11 @@ change results, which is worse than the original bug. Pinned by
 `search_agrees_across_the_file_and_index_paths` in
 `crates/clove/tests/cli_commands.rs`.
 
-**Still open — substring vs whole token.** `view::match_class` uses `contains()`;
-`clove_index::query::search` quotes the needle as a single FTS *phrase*, which
-matches whole tokens. The FTS is therefore a strictly narrower prefilter and the
-two disagree for any needle that is not a whole token:
+**Second half — substring vs whole token: RESOLVED by deleting the FTS.**
+`view::match_class` used `contains()`; `clove_index::query::search` quoted the
+needle as a single FTS5 *phrase*, which matches whole tokens. The FTS was
+therefore a strictly narrower prefilter and the two disagreed for any needle that
+was not a whole token:
 
 | query | fixture | `--no-index` | index |
 |---|---|---|---|
@@ -416,32 +417,90 @@ two disagree for any needle that is not a whole token:
 | `icode` | label `ünicode-tag` | 1 | 0 |
 | `Ünicode` | label `ünicode-tag` | 1 | 0 |
 
-The last row is a second axis: `tokenize='ascii'` case-folds ASCII only, so a
-non-ASCII **needle** differing in case from the stored text is found by the file
+The last row was a second axis: `tokenize='ascii'` case-folds ASCII only, so a
+non-ASCII **needle** differing in case from the stored text was found by the file
 path (which lowercases both sides) and missed by the index path. Labels are
-canonicalized to lowercase on write, so the case difference has to come from the
-query — `ünicode` against `ünicode-tag` matches on *both* paths, and a fixture
-written the other way round proves nothing. This is pre-existing — the index path has always been FTS
-while the file path has always been `contains` — but it means "the same query
-answers the same way on both paths" is **not** yet true for search, and the
-pinning test uses whole-token needles only, so it cannot see it.
+canonicalized to lowercase on write, so the case difference had to come from the
+query — `ünicode` against `ünicode-tag` matched on *both* paths, and a fixture
+written the other way round proves nothing.
 
-Options, none obviously right:
-- **Widen the FTS query** to a prefix match (`"needle"*`) — closes the `core`
-  row, not the `icode` row, since FTS cannot match inside a token.
-- **Switch the tokenizer** to `unicode61` — closes the `ünicode` row at some
-  index-size and speed cost, still not `icode`.
-- **Narrow `match_class` to whole tokens** so both paths agree — closes all
-  three by removing substring search, which is a capability users have today.
-- **Treat the index as an accelerator only for whole-token queries** and fall
-  back to the file scan otherwise — keeps both behaviours, needs a reliable
-  "is this one token" test, and silently changes performance characteristics.
+**The decision: option (a) — drop the FTS, always scan files.** The four options
+on the table were widen the FTS to a prefix match (closes `core`, never `icode`),
+switch to `unicode61` (closes `Ünicode`, never `icode`), narrow `match_class` to
+whole tokens (closes all three by removing substring search), or keep both
+behaviours behind an "is this one token" test (silently variable performance).
+No FTS query is a superset of substring matching, so the real choice was between
+losing mid-word matching — a capability users have today — and losing the
+prefilter.
 
-**Also unaddressed:** the web's `?q=` (`crates/clove-web/src/read.rs::matches`)
-is a *fourth* predicate — id + title + labels, **no body**, no match-class
-ranking. Folding it into `rank_search_hits` needs a decision about whether `?q=`
-is a filter (its current role, applied alongside `status`/`label`/…) or a
-search.
+**Measured first, and the numbers decided it.** Two synthetic stores (1,000 and
+10,000 items, ~200-word prose bodies, mixed labels/status/type), release build,
+warm page cache, best of 7 whole-process runs of `clove search <needle> --limit
+0`:
+
+| store | needle | matches | file scan | FTS index path |
+|---|---|---|---|---|
+| 10k | `zzznotfound` | 0 | 62 ms | 8 ms |
+| 10k | `quokka` | 487 (4.9%) | 70 ms | 22 ms |
+| 10k | `gateway` | 6,738 (67%) | 173 ms | **233 ms** |
+| 10k | `breaker` | 9,872 (99%) | 216 ms | **350 ms** |
+| 1k | `zzznotfound` | 0 | 10 ms | 5 ms |
+| 1k | `quokka` | 46 | 11 ms | 6 ms |
+| 1k | `gateway` | 679 | 18 ms | **26 ms** |
+| 1k | `breaker` | 987 | 22 ms | **36 ms** |
+
+The file scan is 62–216 ms at 10k — inside the "few hundred ms" bar — and the
+index path *lost* on two of the four needles. That is not a surprise once
+written down: the FTS only ever narrowed the **candidate** set, and `clove
+search` then had to read every matched item file anyway, because ranking needs
+labels and body. The index bought a 40–60 ms saving on a highly selective needle
+and cost 60–130 ms on a broad one. It also cost 16.4 MB of the 21.2 MB index file
+and most of the reindex time.
+
+So (a) costs no capability, deletes a divergence rather than redefining one, and
+is *faster* in the common broad-match case. (b) — prefix-token semantics on both
+paths — would have removed mid-word matching to buy a saving the measurements say
+is not reliably there.
+
+**What was removed, and the two version bumps.** Leaving the FTS in place as dead
+schema would be worse than removing it, so both went:
+
+- **Index schema 5 → 6**: `items_fts` and `fts_map` dropped, along with
+  `query::search`, `Index::search`, and `write::fts_rowid`.
+  `Index::open_or_rebuild` (shipped in the first half of this section) makes the
+  bump free at the point of use — the first read on an old index rebuilds it from
+  the files, with no user action. `integrity_check`'s FTS row-count cross-check
+  became a `labels`→`items` orphan check, the equivalent for the side table that
+  remains. Side effects on a 10k store: `index.db` 21.2 MB → 4.8 MB (−77%),
+  `clove reindex` 1.46 s → 0.39 s (−73%).
+- **IPC protocol 5 → 6**: the `search` RPC and `SearchRequest` removed. With no
+  FTS the daemon had nothing to contribute — the client has to read every matched
+  file itself — and a v5 daemon still answering searches from its hot FTS would
+  have been exactly the divergence this closes. The bump is what makes the `ping`
+  handshake reject it; a `cloved` restart is cheap and the daemon is a cache.
+
+`clove search` now has **one** implementation on every surface:
+`view::rank_search_hits` over `ItemStore::scan()`. `_meta.source` is always
+`"files"`, and `--no-index` is a no-op on `search`. The `clove_search` MCP tool
+already shared `rank_search_hits`, so it needed no change — it was the CLI's
+index tier that was the odd one out.
+
+Pinned by three tests, each of which fails if an index tier reappears:
+`search_agrees_across_the_file_and_index_paths` in
+`crates/clove/tests/cli_commands.rs` (now carrying the three needles above, plus
+a literal-needle case for `"quoted" OR x*`, and asserting a *live* index is
+present so the `source: "files"` claim is not vacuous);
+`search_is_a_file_scan_even_with_a_live_daemon` in
+`crates/clove/tests/daemon_routing.rs`; and `schema_has_no_full_text_tables` in
+`clove-index`.
+
+**The web's `?q=` stays a filter, and that is correct.** It is
+`view::q_matches` over id/title/labels, never the body, applied alongside
+`status`/`label`/… — the same predicate the CLI's `--q` and the index path's
+`PostFilter` residue use, shared since §2. Folding it into `rank_search_hits`
+would make `clove ls --q x` read every body and would cost it composability with
+the other filters, so it stays distinct. DESIGN §7.8 now carries a table naming
+which is which, and `clove agent-doc` says it too.
 
 **6.2 `GET /api/v1/board` took no window.** It shares `matches()`/`sort_items()`
 with the item list, so it accepted every filter and sort parameter and silently

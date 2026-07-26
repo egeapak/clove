@@ -81,6 +81,54 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`clove search` is a file scan on every surface, and now answers the same
+  question everywhere.** It matched a case-insensitive *substring* over
+  title/labels/body when it scanned files (`--no-index`), and a whole ASCII-folded
+  *token* when it went through the index's FTS5 table or a running daemon. The FTS
+  was therefore a strictly narrower prefilter, and `clove search X` returned
+  different ids depending on whether `.clove/index.db` happened to exist:
+  `search core` found a body reading `the corepart word` only without an index,
+  and `search icode` / `search Ünicode` found the label `ünicode-tag` only without
+  one (FTS cannot match inside a token at all, and `tokenize='ascii'` case-folds
+  ASCII only).
+
+  No FTS query is a superset of substring matching, so this could only be closed
+  by giving up mid-word search or by giving up the prefilter. **The prefilter
+  went.** Measured over a 10,000-item store (release, warm cache): the file scan
+  costs 62 ms for a needle matching nothing and 216 ms for one matching 99% of
+  items, where the index path cost 8 ms and 350 ms — it won only for highly
+  selective needles and lost outright otherwise, because it had to re-read every
+  matched file anyway in order to rank it. Substring matching is a capability
+  users have; a 40 ms saving on selective queries is not worth it.
+
+  Search now has one implementation, `clove_core::view::rank_search_hits` over a
+  parallel file scan, which the `clove_search` MCP tool already shared.
+  `_meta.source` on a search is always `"files"`; `--no-index` is accepted (it is
+  a global flag) and does nothing. The needle stays a literal — `clove search
+  '"quoted" OR x*'` looks for that exact character sequence.
+
+  Two removals came with it, since dead schema is worse than no schema:
+
+  - **Index schema 5 → 6** drops `items_fts` and `fts_map`. Existing indexes
+    rebuild themselves on first read (`Index::open_or_rebuild`), so there is
+    nothing to run. On a 10,000-item store this takes `index.db` from 21.2 MB to
+    4.8 MB (−77%, the FTS was most of the file) and `clove reindex` from 1.46 s
+    to 0.39 s (−73%). `clove doctor`'s index-corruption probe swapped its FTS
+    row-count cross-check for a `labels`→`items` orphan check.
+  - **IPC protocol 5 → 6** drops the `search` RPC and `SearchRequest`. With no
+    FTS the daemon had nothing to contribute to a search, and a v5 daemon still
+    answering from its hot FTS would have reintroduced the divergence. An old
+    `cloved` left running is rejected by the `ping` handshake and the CLI falls
+    back cleanly, as with any protocol bump; `clove daemon stop` (or a restart)
+    clears it.
+
+  `--q` on `ls`/`ready`/`blocked`/`query` and `?q=` on the web are **unchanged
+  and deliberately still a different predicate**: a case-insensitive substring
+  over **id, title, and labels**, never the body, composing with the other
+  filters and applying no ranking. `q` narrows a list; `search` finds where
+  something was written. DESIGN §7.8 and `clove agent-doc` now say which is
+  which.
+
 - **One filter contract, shared by every read surface.**
   `clove_core::view::Filters` is now the single filter set behind the CLI flags,
   the MCP tool arguments, the web API's query string, and `cloved`'s query RPC.

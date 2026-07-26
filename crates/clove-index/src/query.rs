@@ -344,47 +344,6 @@ pub fn query_list(conn: &Connection, filter: &Filter) -> Result<Vec<ItemListRow>
     Ok(out)
 }
 
-/// Full-text search over the FTS5 index (T-S05, index path).
-///
-/// The match runs in a subquery that resolves matched FTS rowids back to item
-/// ids via `fts_map` (a contentless FTS table exposes only rowids); the outer
-/// query then reads full item rows. Relevance ordering is left to the caller
-/// (the CLI re-ranks title matches ahead of body matches), so `order` decides
-/// only which rows a `limit` keeps.
-///
-/// This clause is built by the *same* [`order_by_sql`] as the list query. It
-/// used to be a second, hand-written literal that differed from the list one by
-/// a dead `topological_rank IS NULL ASC` term — a divergence that would have
-/// survived changing only the clause you find first.
-pub fn search(
-    conn: &Connection,
-    text: &str,
-    order: &Order,
-    limit: Option<usize>,
-) -> Result<Vec<ItemRow>, IndexError> {
-    // Quote the user text as a single FTS5 string token, escaping embedded
-    // quotes, so arbitrary input can't be interpreted as FTS query syntax.
-    let match_query = format!("\"{}\"", text.replace('"', "\"\""));
-    let limit_sql = match limit {
-        Some(n) => format!(" LIMIT {n}"),
-        None => String::new(),
-    };
-    let order_sql = order_by_sql(order);
-    let sql = format!(
-        "SELECT {ITEM_COLUMNS} FROM items WHERE id IN (\
-           SELECT m.item_id FROM items_fts JOIN fts_map m ON m.fts_rowid = items_fts.rowid \
-           WHERE items_fts MATCH ?1\
-         ){order_sql}{limit_sql}"
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map([match_query], ItemRow::from_row)?;
-    let mut out = Vec::new();
-    for row in rows {
-        out.push(row?);
-    }
-    Ok(out)
-}
-
 /// Run a [`push_down`] result as one query: the SQL half, then the in-memory
 /// residue, returning the lean rows a list renders plus the **unpaginated**
 /// match count.
@@ -453,16 +412,6 @@ impl crate::db::Index {
     /// Count items matching `filter` (ignoring `limit`) — the unpaginated total.
     pub fn count_items(&self, filter: &Filter) -> Result<usize, IndexError> {
         count_items(self.conn(), filter)
-    }
-
-    /// Full-text search (T-S05).
-    pub fn search(
-        &self,
-        text: &str,
-        order: &Order,
-        limit: Option<usize>,
-    ) -> Result<Vec<ItemRow>, IndexError> {
-        search(self.conn(), text, order, limit)
     }
 }
 
@@ -1013,44 +962,6 @@ mod tests {
             item_type.contains("WHEN 'bug' THEN 0") && item_type.contains("WHEN 'epic' THEN 4"),
             "{item_type}"
         );
-    }
-
-    /// `search`'s `ORDER BY` is the *second* order clause in this module, and it
-    /// used to be a separate literal. It is only observable through a `limit`
-    /// (the CLI asks for every candidate and re-ranks), so that is how it is
-    /// tested: with `LIMIT 1`, the kept row is whichever the order puts first.
-    #[test]
-    fn search_honours_the_requested_order() {
-        let fx = setup();
-        // Both match the needle; A is p0/oldest-id, B is p3.
-        for (id, priority) in [("proj-AAAAAAAA", 0u8), ("proj-BBBBBBBB", 3u8)] {
-            std::fs::write(
-                fx.issues.join(format!("{id}.md")),
-                format!(
-                    "---\nschema: 1\nid: {id}\ntitle: needle {id}\nstatus: open\ntype: bug\n\
-                     priority: {priority}\ncreated: 2026-06-02T10:00:00Z\n\
-                     updated: 2026-06-02T10:00:00Z\n---\nbody\n"
-                ),
-            )
-            .unwrap();
-        }
-        reindex(&fx.issues, &fx.db).unwrap();
-        let index = crate::db::Index::open(&fx.db).unwrap();
-
-        let top = |field, descending| -> String {
-            index
-                .search("needle", &Order { field, descending }, Some(1))
-                .unwrap()[0]
-                .id
-                .clone()
-        };
-        assert_eq!(top(SortField::Priority, false), "proj-AAAAAAAA");
-        assert_eq!(
-            top(SortField::Priority, true),
-            "proj-BBBBBBBB",
-            "the search clause must honour the direction, not just the field"
-        );
-        assert_eq!(top(SortField::Id, true), "proj-BBBBBBBB");
     }
 
     /// Each `SortField` really discriminates on the index path: the fixture is

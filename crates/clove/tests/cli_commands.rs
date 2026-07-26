@@ -250,8 +250,16 @@ fn show_missing_item_json_error_envelope() {
     assert_eq!(v["error"]["exit"], 2);
 }
 
+/// `clove search` scans files whether or not an index exists — and reports so.
+///
+/// This test used to assert the opposite (`source == "index"` after a reindex).
+/// The index tier is gone: it ran an FTS5 phrase query, which matches whole
+/// ASCII-folded tokens, so it could not answer the substring question the file
+/// path answers, and `clove search` gave different results depending on whether
+/// `.clove/index.db` existed (read-path roadmap §6.1). `--no-index` is still
+/// accepted on `search`; it is now a no-op.
 #[test]
-fn reindex_then_search_uses_index() {
+fn search_scans_files_even_with_an_index_present() {
     let dir = init_repo();
     new_item(
         dir.path(),
@@ -261,15 +269,24 @@ fn reindex_then_search_uses_index() {
     new_item(dir.path(), "Other", &[]);
 
     clove(dir.path()).arg("reindex").assert().success();
+    // The index has to be real, or "search used files" says nothing.
+    assert_eq!(
+        json_ok(clove(dir.path()).args(["ls"]))["_meta"]["source"],
+        "index"
+    );
 
     let v = json_ok(clove(dir.path()).args(["search", "sprockets"]));
-    assert_eq!(v["_meta"]["source"], "index");
+    assert_eq!(v["_meta"]["source"], "files");
     assert_eq!(v["data"].as_array().unwrap().len(), 1);
 
-    // Without an index (forced), it falls back to a file scan.
-    let v2 = json_ok(clove(dir.path()).args(["search", "widget", "--no-index"]));
+    // `--no-index` changes nothing, because there was nothing to opt out of.
+    let v2 = json_ok(clove(dir.path()).args(["search", "sprockets", "--no-index"]));
     assert_eq!(v2["_meta"]["source"], "files");
-    assert_eq!(v2["data"].as_array().unwrap().len(), 1);
+    assert_eq!(v2["data"], v["data"]);
+
+    let v3 = json_ok(clove(dir.path()).args(["search", "widget", "--no-index"]));
+    assert_eq!(v3["_meta"]["source"], "files");
+    assert_eq!(v3["data"].as_array().unwrap().len(), 1);
 }
 
 #[test]
@@ -428,35 +445,66 @@ fn search_follows_the_shared_limit_contract() {
     assert_eq!(idx["_meta"]["total"], 120);
 }
 
-/// `clove search` finds the same items, in the same order, on the file path and
-/// the index path.
+/// `clove search` returns identical ids in identical order whether or not
+/// `.clove/index.db` exists.
 ///
-/// Scoped to the two CLI paths, which is what this exercises; the MCP tool
-/// shares the same `rank_search_hits`, but nothing here drives it. Needles are
-/// whole tokens on purpose — the FTS matches tokens while `match_class` matches
-/// substrings, so a partial-token needle would fail on a divergence this test
-/// is not about (roadmap §6.1).
+/// Scoped to the CLI, which is what this drives; the MCP tool shares the same
+/// `rank_search_hits`, and the daemon leg is
+/// `search_does_not_route_through_the_daemon` in `daemon_routing.rs`.
 ///
-/// The three used to disagree twice over. The CLI matched title and body only,
-/// so a label-only hit was invisible to it while `ops::search` (MCP, web)
-/// returned it; and the FTS table indexed `title, body`, so even after the file
-/// path learned about labels the index path would not have. Ranking differed
-/// too: two match classes on the CLI, three in `ops::search`.
+/// **The needles are the point.** This test used whole-token needles only for
+/// most of its life, and that is exactly why it could not see the bug roadmap
+/// §6.1 recorded: the index path ran an FTS5 phrase query, which matches whole
+/// tokens with ASCII-only case folding, while `view::match_class` is
+/// `str::contains` over a full-Unicode lowercase. Three divergent rows, all
+/// covered below:
+///
+/// | needle | fixture | before: `--no-index` | before: index |
+/// |---|---|---|---|
+/// | `core` | label `area:core`, body `the corepart word` | 2 | 1 |
+/// | `icode` | label `ünicode-tag` | 1 | 0 |
+/// | `Ünicode` | label `ünicode-tag` | 1 | 0 |
+///
+/// The last row is a second axis: `tokenize='ascii'` folds ASCII only, so a
+/// non-ASCII *needle* differing in case from the stored text was found by the
+/// file path and missed by the index. Labels are lowercased on write, so the
+/// case difference has to come from the query — `ünicode` against `ünicode-tag`
+/// matched on both paths, and a fixture written that way round proves nothing.
+///
+/// Resolved by dropping the FTS entirely (index schema 6): search is a file scan
+/// on every surface. So the assertion that an index is *present* and search
+/// still reports `source: "files"` is load-bearing — it is what fails the moment
+/// anyone reintroduces an index tier, before the id sets even get compared.
+///
+/// The `gateway` rows are the older half of this test: the CLI once matched
+/// title and body only, so a label-only hit was invisible to it while
+/// `ops::search` returned it, and ranking differed (two match classes vs three).
 #[test]
 fn search_agrees_across_the_file_and_index_paths() {
     let dir = init_repo();
     let issues = dir.path().join(".clove/issues");
     // One item per match class, so ranking is observable, plus a non-match.
+    // Match class runs **counter to id order** on purpose: every item is
+    // priority 2, so class is the only thing that can produce the expected
+    // sequence, and a ranker that fell back to the id tiebreak alone would
+    // return the exact reverse. An earlier version of this fixture had the
+    // title hit on the lowest id, so sorting by id passed it.
     let rows = [
-        ("AAAAAAAA", "Payments gateway", "unrelated prose", ""),
+        ("AAAAAAAA", "Unrelated title", "the gateway times out", ""),
         (
             "BBBBBBBB",
-            "Unrelated title",
+            "Another title",
             "unrelated prose",
             "area:gateway",
         ),
-        ("CCCCCCCC", "Another title", "the gateway times out", ""),
-        ("DDDDDDDD", "Nothing here", "nothing at all", "area:core"),
+        ("CCCCCCCC", "Payments gateway", "unrelated prose", ""),
+        // Mid-token in the body: `core` lives inside `corepart`, which no FTS
+        // query can reach (a prefix match `"core"*` would not help either).
+        ("DDDDDDDD", "Nothing here", "the corepart word", ""),
+        ("EEEEEEEE", "Plain title", "nothing at all", "area:core"),
+        // Non-ASCII label, for the `icode` (mid-token) and `Ünicode`
+        // (non-ASCII case-folded needle) rows.
+        ("FFFFFFFF", "Plain title two", "plain body", "ünicode-tag"),
     ];
     for (suffix, title, body, label) in rows {
         let id = format!("proj-{suffix}");
@@ -476,8 +524,6 @@ fn search_agrees_across_the_file_and_index_paths() {
         .unwrap();
     }
 
-    // Title, then label, then body — and the non-matching item is absent.
-    let expected = vec!["proj-AAAAAAAA", "proj-BBBBBBBB", "proj-CCCCCCCC"];
     let ids_of = |v: &Value| -> Vec<String> {
         v["data"]
             .as_array()
@@ -487,21 +533,76 @@ fn search_agrees_across_the_file_and_index_paths() {
             .collect()
     };
 
-    let files = json_ok(clove(dir.path()).args(["search", "gateway", "--no-index"]));
+    // (needle, expected ids in relevance order, what it exercises)
+    let cases: [(&str, Vec<&str>, &str); 6] = [
+        (
+            "gateway",
+            vec!["proj-CCCCCCCC", "proj-BBBBBBBB", "proj-AAAAAAAA"],
+            "whole token: title, then label, then body — the reverse of id order",
+        ),
+        (
+            "core",
+            vec!["proj-EEEEEEEE", "proj-DDDDDDDD"],
+            "mid-token in a body (`corepart`) beside a whole-token label hit",
+        ),
+        (
+            "icode",
+            vec!["proj-FFFFFFFF"],
+            "mid-token inside a non-ASCII label",
+        ),
+        (
+            "Ünicode",
+            vec!["proj-FFFFFFFF"],
+            "non-ASCII needle, case-folded against a lowercase label",
+        ),
+        (
+            "COREPART",
+            vec!["proj-DDDDDDDD"],
+            "ASCII needle case-folded against a body",
+        ),
+        (
+            "\"quote injection\" OR gateway*",
+            Vec::new(),
+            "the needle is a literal substring, not a query language",
+        ),
+    ];
+
+    // Leg 1: no index on disk at all.
+    let mut want: Vec<(&str, Vec<String>)> = Vec::new();
+    for (needle, expected, why) in &cases {
+        let v = json_ok(clove(dir.path()).args(["search", needle, "--no-index"]));
+        assert_eq!(v["_meta"]["source"], "files");
+        assert_eq!(ids_of(&v), *expected, "file path, {needle:?}: {why}");
+        want.push((needle, ids_of(&v)));
+    }
+
+    // Leg 2: a fresh, complete index on disk. `search` must not consult it — and
+    // the index has to genuinely exist, or this leg proves nothing.
+    clove(dir.path()).arg("reindex").assert().success();
+    assert!(
+        dir.path().join(".clove/index.db").exists(),
+        "the index must exist for this leg to mean anything"
+    );
+    let listed = json_ok(clove(dir.path()).args(["ls", "--limit", "0"]));
     assert_eq!(
-        ids_of(&files),
-        expected,
-        "file path: class order, labels found"
+        listed["_meta"]["source"], "index",
+        "the index must be live enough to answer a list, or `search` \
+         falling back to files would be trivially true"
     );
 
-    clove(dir.path()).arg("reindex").assert().success();
-    let index = json_ok(clove(dir.path()).args(["search", "gateway"]));
-    assert_eq!(index["_meta"]["source"], "index", "the index must answer");
-    assert_eq!(
-        ids_of(&index),
-        expected,
-        "index path must agree with the file path, labels included"
-    );
+    for (needle, expected) in &want {
+        let v = json_ok(clove(dir.path()).args(["search", needle]));
+        assert_eq!(
+            v["_meta"]["source"], "files",
+            "search has no index tier ({needle:?}); reintroducing one \
+             reintroduces roadmap §6.1"
+        );
+        assert_eq!(
+            &ids_of(&v),
+            expected,
+            "with an index present, {needle:?} must answer identically"
+        );
+    }
 }
 
 /// An index left over from an older clove is rebuilt, and stays rebuilt, no

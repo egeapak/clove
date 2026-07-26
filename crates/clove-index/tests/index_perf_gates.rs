@@ -7,7 +7,8 @@
 //! Gates (warm index, 10k items):
 //! - `reindex`                < 1000 ms (met, ~735 ms — incl. deferred covering-index build)
 //! - `ls` (lean `query_list`)  <   8 ms (met, ~2.5–4.5 ms via the `idx_items_list` covering scan)
-//! - `search` (FTS5, selective) < 20 ms (met, ~3 ms)
+//! - `search` (file scan, selective) < 400 ms (met, ~60-70 ms; schema 6
+//!   removed the FTS — roadmap §6.1)
 //! - staleness fast, 0 stale   <   5 ms (met, ~3 ms via `check_staleness_fast`)
 
 use std::time::{Duration, Instant};
@@ -119,33 +120,55 @@ fn m1_index_perf_gates() {
     });
     assert_within("ready_lean", ready_elapsed, Duration::from_millis(15));
 
-    // FTS5 search gate. A real query is selective; "medium" matches the ~10% of
-    // bodies in the medium-size class — the case the FTS index exists for.
+    // Search gate — a *file scan*, not an index query, and deliberately so.
+    //
+    // Schema 6 removed the FTS5 mirror this gate used to measure. FTS matched
+    // whole ASCII-folded tokens where `view::match_class` matches Unicode
+    // substrings, so it answered a narrower question than the file path and
+    // `clove search X` returned different ids depending on whether an index
+    // existed (read-path roadmap §6.1). Search is a parallel file scan on every
+    // surface now, so the scan is what needs a budget.
+    //
+    // "medium" matches the ~10% of bodies in the medium-size class — a
+    // realistically selective query. The budget is the file-scan reality
+    // (measured ~60-70 ms for a selective needle over 10k items on a warm cache,
+    // release build), not the ~3 ms the FTS used to post.
+    // `ItemStore::new` takes the repo root; `issues` is `<root>/.clove/issues`.
+    let root = issues.parent().unwrap().parent().unwrap().to_path_buf();
+    let store = clove_core::ItemStore::new(root);
     let mut hits = 0;
-    let search_elapsed = best_of(20, || {
-        hits = index
-            .search("medium", &Default::default(), None)
-            .unwrap()
-            .len();
+    let search_elapsed = best_of(5, || {
+        let (items, _errors) = store.scan().unwrap();
+        hits = clove_core::view::rank_search_hits(
+            items,
+            "medium",
+            clove_core::view::SearchOrder::default(),
+            &std::collections::HashMap::new(),
+        )
+        .len();
     });
     assert!(
         hits > 0 && hits < n,
         "selective search must match a subset, got {hits}"
     );
     assert_within(
-        "search_selective",
+        "search_selective_file_scan",
         search_elapsed,
-        Duration::from_millis(20),
+        Duration::from_millis(400),
     );
 
-    // Broad match ("benchmark" is in every body): informational. Shares ls's
-    // row-materialization cost, so it exceeds 20ms at 10k — the same known gap.
-    let broad = best_of(5, || {
+    // Broad match ("benchmark" is in every body): informational. The scan cost is
+    // the same; the ranking and result set grow.
+    let broad = best_of(3, || {
+        let (items, _errors) = store.scan().unwrap();
         std::hint::black_box(
-            index
-                .search("benchmark", &Default::default(), None)
-                .unwrap()
-                .len(),
+            clove_core::view::rank_search_hits(
+                items,
+                "benchmark",
+                clove_core::view::SearchOrder::default(),
+                &std::collections::HashMap::new(),
+            )
+            .len(),
         );
     });
     eprintln!("m1 perf gate search_broad_all_rows: {broad:?} (informational — see report)");

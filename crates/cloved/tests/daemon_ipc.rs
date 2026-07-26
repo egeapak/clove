@@ -367,21 +367,18 @@ fn stale_socket_recovery_is_fast() {
     assert!(!clove_dir.join("daemon.pid").exists(), "stale pid cleaned");
 }
 
+/// The daemon serves graph queries over IPC — and, deliberately, **not** search.
+///
+/// Protocol v5 had a `search` RPC that ran the index's FTS5 query; v6 removed it
+/// with the FTS table itself (read-path roadmap §6.1). There is nothing to call
+/// here any more, which is the point: `clove search` scans files on every
+/// surface, so a live daemon cannot change its answer.
 #[test]
-fn search_and_graph_over_ipc() {
-    use clove_ipc::{GraphRequest, GraphResponse, SearchRequest};
+fn graph_over_ipc_and_no_search_rpc() {
+    use clove_ipc::{GraphRequest, GraphResponse};
     let (_tmp, clove_dir) = init_repo_with_items(3);
     let mut child = spawn_ready(&clove_dir);
     let mut client = DaemonClient::probe(&clove_dir).expect("daemon alive");
-
-    // SEARCH returns ids for a matching title token ("item" is in every title).
-    let ids = client
-        .search(SearchRequest {
-            text: "item".to_owned(),
-            limit: None,
-        })
-        .unwrap();
-    assert_eq!(ids.len(), 3, "search matches all three items");
 
     // GRAPH: no deps yet → no cycles, nothing blocked.
     match client.graph(GraphRequest::Cycles).unwrap() {

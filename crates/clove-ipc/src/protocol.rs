@@ -34,7 +34,19 @@ use serde::{Deserialize, Serialize};
 /// The same bump removes the dead `GraphRequest::Blocked::include_warnings`
 /// (unreachable — no surface could set it, every caller hard-coded `true`) and
 /// gives `Blocked` the `order` it always needed.
-pub const PROTOCOL_VERSION: u32 = 5;
+///
+/// **v6 removes the `search` RPC and `SearchRequest`.** The daemon answered
+/// search by running the index's FTS5 query and returning matched ids; index
+/// schema 6 deleted that table, because FTS matched whole ASCII-folded tokens
+/// where `clove_core::view::match_class` matches Unicode substrings, so
+/// `clove search X` returned different ids depending on whether a daemon or an
+/// index happened to be present (read-path roadmap §6.1). Search is now a
+/// parallel file scan on every surface, which the client does for itself — the
+/// daemon had nothing left to contribute, since the client had to read every
+/// matched file anyway to rank it. Removing the method is what makes the
+/// handshake reject a v5 daemon rather than let it keep answering searches with
+/// the old, narrower match set.
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// A dependency-graph query (DESIGN §8.4 extension for `blocked`/`dep`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,16 +84,6 @@ pub enum GraphResponse {
     Tree { node: Option<DepTreeNode> },
     /// Whether the edge would create a cycle.
     WouldCycle { would: bool },
-}
-
-/// The payload of a `search` call (the FTS query the daemon runs).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SearchRequest {
-    /// The free-text query.
-    pub text: String,
-    /// Optional result cap.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub limit: Option<usize>,
 }
 
 /// Which lean list a `query` call runs — mirrors `clove_index::QueryMode`. Both
@@ -349,22 +351,29 @@ mod tests {
         );
     }
 
-    /// Edge: an empty search query and an absent limit still round-trip.
+    /// The service *shape* changed in v6 — the `search` RPC and `SearchRequest`
+    /// were removed — so the constant had to move with it.
+    ///
+    /// Unlike the v5 filter change, neither direction of a mismatched pair is
+    /// unsafe here: a v5 client calling a v6 daemon's absent `search` gets an
+    /// error and falls back to its local path, and a v6 client never asks. The
+    /// bump is policy (DESIGN §8.4: the constant gates a mixed-version pair
+    /// whenever the shape changes) and it is what keeps the handshake honest —
+    /// without it, `clove daemon status` would report a peer as compatible when
+    /// its method set is not the one this crate declares.
+    ///
+    /// This assertion is a tripwire, not a proof: nothing can detect an
+    /// added or removed tarpc method at runtime. It exists so that
+    /// re-introducing a daemon-side search — which would put the §6.1
+    /// file-vs-daemon divergence back — cannot be done without landing on this
+    /// comment.
     #[test]
-    fn search_request_edges() {
-        let cases = vec![
-            SearchRequest {
-                text: String::new(),
-                limit: None,
-            },
-            SearchRequest {
-                text: "hello world".to_owned(),
-                limit: Some(0),
-            },
-        ];
-        for case in cases {
-            let json = serde_json::to_string(&case).unwrap();
-            assert_eq!(case, serde_json::from_str(&json).unwrap(), "{json}");
-        }
+    fn removing_the_search_rpc_moved_the_protocol_version() {
+        const {
+            assert!(
+                PROTOCOL_VERSION >= 6,
+                "the service method set changed (search removed); bump the version"
+            )
+        };
     }
 }

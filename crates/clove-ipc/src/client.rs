@@ -23,8 +23,7 @@ use tokio::runtime::Runtime;
 use tokio::time::timeout;
 
 use crate::protocol::{
-    GraphRequest, GraphResponse, QueryListResponse, QueryRequest, ReindexDone, SearchRequest,
-    StatusResponse,
+    GraphRequest, GraphResponse, QueryListResponse, QueryRequest, ReindexDone, StatusResponse,
 };
 use crate::service::{CloveRpcClient, RpcError};
 use crate::transport::build_transport;
@@ -258,11 +257,6 @@ impl DaemonClient {
     /// Run a lean list query; returns the rows + total the CLI shapes itself.
     pub fn query_list(&mut self, req: QueryRequest) -> Result<QueryListResponse, ClientError> {
         self.app(self.client.query(context::current(), req))
-    }
-
-    /// Run a full-text search; returns matched ids in FTS-rank order.
-    pub fn search(&mut self, req: SearchRequest) -> Result<Vec<String>, ClientError> {
-        self.app(self.client.search(context::current(), req))
     }
 
     /// Run a dependency-graph query against the daemon's cached graph.

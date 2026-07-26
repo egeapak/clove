@@ -3,7 +3,7 @@
 //!
 //! `PING`/`STATUS` answer from daemon state; `QUERY` runs the lean `clove_index`
 //! list (freshening first, like the CLI's index path) and returns rows the client
-//! shapes itself; `SEARCH` runs FTS; `GRAPH` serves the cached graph; `REINDEX`
+//! shapes itself; `GRAPH` serves the cached graph; `REINDEX`
 //! rebuilds and reopens the index. The transport (tarpc over a local socket) is
 //! wired in `lifecycle::accept_loop`.
 
@@ -17,7 +17,7 @@ use clove_core::ItemStore;
 use clove_index::{Filter, Index, ItemListRow, PostFilter, QueryMode};
 use clove_ipc::{
     CloveRpc, GraphRequest, GraphResponse, LeanRow, QueryKind, QueryListResponse, QueryRequest,
-    ReindexDone, RpcError, SearchRequest, StatusResponse, PROTOCOL_VERSION,
+    ReindexDone, RpcError, StatusResponse, PROTOCOL_VERSION,
 };
 use clove_types::{CloveError, CloveId, ItemType, NewSpec};
 use serde_json::Value;
@@ -83,11 +83,6 @@ impl CloveRpc for Dispatcher {
     async fn query(self, _: Context, req: QueryRequest) -> Result<QueryListResponse, RpcError> {
         self.touch();
         self.blocking(move |this| this.handle_query(req)).await
-    }
-
-    async fn search(self, _: Context, req: SearchRequest) -> Result<Vec<String>, RpcError> {
-        self.touch();
-        self.blocking(move |this| this.handle_search(req)).await
     }
 
     async fn graph(self, _: Context, req: GraphRequest) -> Result<GraphResponse, RpcError> {
@@ -390,23 +385,6 @@ impl Dispatcher {
             .filter(|row| wanted.contains(row.id.as_str()))
             .map(|row| row.id.to_string())
             .collect())
-    }
-
-    /// Run an FTS search over the hot index (freshening first) and return matched
-    /// ids in rank order; the client reads those files for full detail.
-    fn handle_search(&self, req: SearchRequest) -> Result<Vec<String>, RpcError> {
-        let mut index = self
-            .index
-            .lock()
-            .map_err(|_| RpcError::new("internal", "index lock poisoned"))?;
-        self.refresh(&mut index);
-        // The FTS is a candidate prefilter; the client re-ranks (relevance, or an
-        // explicit `--sort`) over the full items, so the SQL order here only
-        // decides which rows an explicit `limit` would keep.
-        index
-            .search(&req.text, &clove_core::view::Order::default(), req.limit)
-            .map(|rows| rows.into_iter().map(|r| r.id).collect())
-            .map_err(|e| RpcError::new("search_failed", e.to_string()))
     }
 
     /// Serve a lean list query, freshening the index inline first (the daemon owns

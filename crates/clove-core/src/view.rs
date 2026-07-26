@@ -325,6 +325,20 @@ pub enum MatchClass {
 ///
 /// `needle` is taken pre-lowered so a caller scanning a whole store lowers it
 /// once rather than per item.
+///
+/// **This is the only definition of "matches" for search, on every surface.**
+/// The predicate is `str::contains` over a full-Unicode `to_lowercase` — a
+/// *substring*, not a word: `core` matches `corepart`, `icode` matches
+/// `ünicode-tag`, and a `Ünicode` needle matches a stored `ünicode-tag`. The
+/// needle is always a literal; there is no query syntax to escape.
+///
+/// Until index schema 6 there was a second definition: the index path ran an
+/// FTS5 phrase query, which matches whole tokens with ASCII-only case folding,
+/// so all three examples above answered differently depending on whether
+/// `.clove/index.db` existed. The FTS was removed rather than this narrowed —
+/// see `docs/READ_PATH_ROADMAP.md` §6.1. Narrowing this to whole tokens now
+/// would resurrect that divergence in reverse, against every caller's
+/// expectations.
 pub fn match_class(item: &Item, needle: &str) -> Option<MatchClass> {
     let fm = &item.frontmatter;
     if fm.title.to_lowercase().contains(needle) {
@@ -1490,6 +1504,83 @@ mod tests {
             Some(MatchClass::Title)
         );
         assert_eq!(match_class(&item("nothing"), "absent"), None);
+    }
+
+    /// Search matches a **substring**, over a full-Unicode lowercase — the
+    /// contract that made removing the index's FTS prefilter necessary rather
+    /// than optional (roadmap §6.1).
+    ///
+    /// Every case here is one an FTS5 phrase query over `tokenize='ascii'` gets
+    /// wrong: it matches whole tokens (so never `core` inside `corepart`, and
+    /// never `icode` at all) and folds case for ASCII only (so never a `Ünicode`
+    /// needle against a stored `ünicode-tag`). Whole-token needles agreed on
+    /// both paths even while the bug was live, which is why nothing caught it.
+    #[test]
+    fn match_class_is_a_unicode_substring_not_a_token() {
+        let mut f = fm("Widget rendering", ItemStatus::Open, ItemType::Bug, 1, &[]);
+        f.labels = vec!["area:core".to_owned(), "ünicode-tag".to_owned()];
+        let item = |body: &str| Item {
+            frontmatter: f.clone(),
+            body: body.to_owned(),
+        };
+        // `rank_search_hits` lowercases the needle once for the whole store, so
+        // that is what a caller passes; mirror it here.
+        let class = |body: &str, needle: &str| match_class(&item(body), &needle.to_lowercase());
+
+        // Mid-token, in a body.
+        assert_eq!(class("the corepart word", "core"), Some(MatchClass::Label));
+        assert_eq!(
+            class("the corepart word", "orepart"),
+            Some(MatchClass::Body)
+        );
+        // Mid-token, in a label — unreachable by any FTS query, prefix or not.
+        assert_eq!(class("", "icode"), Some(MatchClass::Label));
+        // Non-ASCII needle, case-folded against a lowercase label. Labels are
+        // lowercased on write, so the case difference has to come from the
+        // query — `ünicode` would match even with ASCII-only folding and so
+        // proves nothing.
+        assert_eq!(class("", "Ünicode"), Some(MatchClass::Label));
+        assert_eq!(class("", "ÜNICODE-TAG"), Some(MatchClass::Label));
+        // Mid-token in a title, for completeness.
+        assert_eq!(class("", "idget"), Some(MatchClass::Title));
+        // A needle is a literal, not a query language: no wildcard, no operator.
+        assert_eq!(class("the corepart word", "core*"), None);
+        assert_eq!(class("the corepart word", "core OR widget"), None);
+
+        // Folding has to be full Unicode on **both** sides, and each side needs
+        // its own case or the assertion is vacuous. Titles and bodies are stored
+        // verbatim (only labels are lowercased on write), so an uppercase `Ü` in
+        // the *haystack* is reachable — and `to_ascii_lowercase` on either side
+        // leaves it unmatched.
+        let mut upper = f.clone();
+        upper.title = "Ünicode Widget".to_owned();
+        let up_item = |body: &str| Item {
+            frontmatter: upper.clone(),
+            body: body.to_owned(),
+        };
+        assert_eq!(
+            match_class(&up_item(""), "ünicode"),
+            Some(MatchClass::Title),
+            "haystack-side folding must be full Unicode"
+        );
+        assert_eq!(
+            match_class(&up_item("a ÜBERSICHT line"), "übersicht"),
+            Some(MatchClass::Body),
+            "haystack-side folding must be full Unicode in bodies too"
+        );
+        // And the needle side, which only `rank_search_hits` performs — the
+        // closure above pre-lowers, so `match_class` alone cannot see it.
+        let ranked = rank_search_hits(
+            vec![up_item("")],
+            "Ünicode",
+            SearchOrder::default(),
+            &HashMap::new(),
+        );
+        assert_eq!(
+            ranked.len(),
+            1,
+            "needle-side folding must be full Unicode: `Ünicode` must find `ünicode-tag`"
+        );
     }
 
     #[test]

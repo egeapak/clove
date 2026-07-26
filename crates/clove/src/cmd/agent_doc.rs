@@ -93,7 +93,9 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
 - Every list read (`ls`, `query`, `ready`, `blocked`, `search`) takes the same `--limit`/`--offset`: no flag caps at 100, `--limit 0` returns everything, `_meta.total` is always the full match count and `_meta.limit` echoes the one in force.\n\
 - They also take the same `--sort <rank|priority|created|updated|id|status|type>` and `--desc`. The default is `rank` — priority, then dependency order, then id — except on `search`, whose default is relevance (title hits, then labels, then body); naming a field there replaces that ranking entirely. `status` sorts open → in_progress → closed and `type` sorts bug → feature → chore → docs → epic (declared order, not alphabetical). Every order ends in an id tiebreak, so paging with `--offset` is stable. `_meta.sort`/`_meta.dir` echo what was applied. Prefer `--sort updated --desc --limit N` over pulling the store and sorting yourself.\n\
 - `clove comment <id> <message>` / `clove comments <id> [--limit N] [--skip-newest N]` — `--limit` keeps the *newest* N (default 100, `--limit 0` for all); `--skip-newest` pages back into older ones. `_meta.total` is the full thread length.\n\
-- `clove search <text> [--sort FIELD] [--desc] [--limit N] [--offset N] [--fields LIST] [--compact]` — full-text (index) or substring (files) search, relevance-ranked by default.\n\
+- `clove search <text> [--sort FIELD] [--desc] [--limit N] [--offset N] [--fields LIST] [--compact]` — searches **titles, labels, and bodies**, relevance-ranked by default (title hits, then labels, then body).\n\
+- Search matches a **case-insensitive substring**, not whole words: `clove search core` finds a body reading `the corepart word` and a label `area:core` alike, and `clove search icode` finds the label `ünicode-tag`. Case folding is full Unicode, so `Ünicode` finds `ünicode-tag`. The text is a literal — there is no query language, so `clove search '\"a b\" OR c*'` looks for that exact character sequence, and quoting/wildcards buy you nothing.\n\
+- `clove search` always scans the item files: it has no index or daemon fast path, so `_meta.source` is always `files`, `--no-index` changes nothing, and the same query gives the same ids whether or not `.clove/index.db` exists or a daemon is running. It reads every body, so prefer `--q` on `ls`/`ready` when id/title/labels are enough.\n\
 - `clove stats [--top N] [--no-epics] [--snapshot] [--history [--since RFC3339] [--limit N]]` — work-item analytics (counts by status/type/priority/assignee/label, ready/blocked, cycles, epic rollups, throughput) plus daemon/index telemetry. `--snapshot` persists to the index's durable history (`.clove/index.db`); `--history` replays the series.\n\
 - `clove reindex` — rebuild the SQLite index. `clove doctor [--fix] [--strict]` — health check.\n\
 - `clove version` — `{{ clove, schema, git_hash, build_date }}`.\n\
@@ -172,6 +174,12 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
   `{{\"status\": [\"open\", \"in_progress\"], \"label\": [\"area:core\", \"area:ios\"]}}`\n\
   is one call for a question that used to need several. The result object\n\
   carries a `filters` key echoing the parsed set.\n\
+- `q` (on the filtering tools) and `clove_search` are different questions, not\n\
+  two spellings of one. `q` is a filter over **id, title, and labels**, composes\n\
+  with the other filters, and never reads a body; `clove_search` reads **titles,\n\
+  labels, and bodies**, ranks the hits, and takes no field filters. Both match a\n\
+  case-insensitive Unicode *substring*. Reach for `q` to narrow a list and\n\
+  `clove_search` to find where something was written.\n\
 - Writes are coordinated through a running daemon when present (so concurrent\n\
   agents share one writer) and fall back to direct file writes otherwise.\n\
 \n\

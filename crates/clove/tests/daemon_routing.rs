@@ -149,10 +149,12 @@ fn tier1_tier2_commands_route_through_daemon_with_parity() {
     let clove_dir = root.join(".clove");
     let mut daemon = spawn_daemon(&clove_dir, &bin);
 
-    // search → daemon, finds the item by title.
+    // search does NOT route to the daemon — see
+    // `search_is_a_file_scan_even_with_a_live_daemon` for why, and for the
+    // needles that make it observable.
     let (search_ids, search_src) =
         ids_and_source(&run_in(root, &["search", "apple", "-f", "json"]).stdout);
-    assert_eq!(search_src, "daemon", "search routes to the daemon");
+    assert_eq!(search_src, "files", "search has no daemon tier");
     assert_eq!(search_ids, vec![a.clone()], "search finds 'alpha apple'");
 
     // blocked → daemon, same set as the file path.
@@ -271,4 +273,85 @@ fn routed_reads_fall_back_after_daemon_crash() {
         "corpse socket cleaned by the liveness probe"
     );
     assert!(!clove_dir.join("daemon.pid").exists(), "corpse pid cleaned");
+}
+
+/// `clove search` answers identically with a live daemon, with only a local
+/// index, and with neither — the third leg of the read-path §6.1 invariant
+/// (`crates/clove/tests/cli_commands.rs::search_agrees_across_the_file_and_index_paths`
+/// covers the first two).
+///
+/// Protocol v5 had a `search` RPC that ran the daemon's hot FTS5 index and
+/// returned matched ids. FTS matches whole tokens with ASCII-only case folding,
+/// so the daemon's match set was strictly narrower than the file scan's, and
+/// merely *starting* a daemon changed what `clove search` found. v6 removed the
+/// RPC with the FTS table itself.
+///
+/// The needles below are the ones that make the difference visible: a whole
+/// token agreed on both paths even when the bug was live, which is why the old
+/// test could not see it.
+#[test]
+fn search_is_a_file_scan_even_with_a_live_daemon() {
+    let Some(bin) = cloved_bin() else {
+        eprintln!("skipping: cloved binary not built (run via `cargo test --workspace`)");
+        return;
+    };
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    assert!(run_in(root, &["init", "--prefix", "proj"]).status.success());
+    let issues = root.join(".clove/issues");
+    // `corepart` holds `core` mid-token; `ünicode-tag` holds `icode` mid-token
+    // and is only reachable by a case-folded non-ASCII needle.
+    for (suffix, title, body, label) in [
+        ("AAAAAAAA", "Payments gateway", "unrelated prose", ""),
+        ("BBBBBBBB", "Plain title", "the corepart word", ""),
+        ("CCCCCCCC", "Plain title two", "plain body", "ünicode-tag"),
+    ] {
+        let id = format!("proj-{suffix}");
+        let labels = if label.is_empty() {
+            String::new()
+        } else {
+            format!("labels:\n  - {label}\n")
+        };
+        std::fs::write(
+            issues.join(format!("{id}.md")),
+            format!(
+                "---\nschema: 1\nid: {id}\ntitle: {title}\nstatus: open\ntype: feature\n\
+                 priority: 2\ncreated: 2026-06-02T10:00:00Z\nupdated: 2026-06-02T10:00:00Z\n\
+                 {labels}---\n{body}\n"
+            ),
+        )
+        .unwrap();
+    }
+    assert!(run_in(root, &["reindex"]).status.success());
+
+    let needles = ["gateway", "core", "icode", "Ünicode"];
+    let ground: Vec<Vec<String>> = needles
+        .iter()
+        .map(|n| list_ids(&run_in(root, &["search", n, "--no-index", "-f", "json"]).stdout))
+        .collect();
+    // The fixture must actually discriminate: without hits on the mid-token and
+    // non-ASCII needles this test would pass against the bug it targets.
+    assert_eq!(ground[1], vec!["proj-BBBBBBBB"], "mid-token `core`");
+    assert_eq!(ground[2], vec!["proj-CCCCCCCC"], "mid-token `icode`");
+    assert_eq!(ground[3], vec!["proj-CCCCCCCC"], "non-ASCII `Ünicode`");
+
+    let clove_dir = root.join(".clove");
+    let mut daemon = spawn_daemon(&clove_dir, &bin);
+
+    // The daemon has to be genuinely live, or "search did not use it" is vacuous.
+    let (_, ls_src) = ids_and_source(&run_in(root, &["ls", "-f", "json"]).stdout);
+    assert_eq!(ls_src, "daemon", "the daemon must be answering something");
+
+    for (needle, want) in needles.iter().zip(&ground) {
+        let (ids, src) = ids_and_source(&run_in(root, &["search", needle, "-f", "json"]).stdout);
+        assert_eq!(src, "files", "search must not route to the daemon");
+        assert_eq!(
+            &ids, want,
+            "{needle:?} must answer identically with a daemon live"
+        );
+    }
+
+    sigterm(daemon.id());
+    let _ = daemon.wait();
 }
