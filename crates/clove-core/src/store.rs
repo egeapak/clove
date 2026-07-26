@@ -105,6 +105,10 @@ pub struct ItemStore {
     issues_dir: Utf8PathBuf,
 }
 
+/// One search hit: how well it matched, and the frontmatter that survived the
+/// scan. The body is deliberately absent — nothing below classification reads it.
+pub type SearchHit = (crate::view::MatchClass, ItemFrontmatter);
+
 impl ItemStore {
     /// Open the store rooted at `repo_root` (the directory containing `.clove/`).
     pub fn new(repo_root: Utf8PathBuf) -> Self {
@@ -421,6 +425,44 @@ impl ItemStore {
             paths.iter().map(parse).collect()
         };
         Ok(partition(results))
+    }
+
+    /// Scan for search hits, keeping only what matches — the memory-bounded
+    /// counterpart to [`ItemStore::scan`].
+    ///
+    /// Each file is parsed, classified against `needle` (already lowercased),
+    /// and its **body dropped** before the next is considered, so peak memory
+    /// tracks the number of *hits* rather than the size of the store. `scan()`
+    /// materializes every body at once: measured at 399 MB of RSS on a 381 MB
+    /// store even for a query matching nothing, and a store of items near the
+    /// 4 MB body cap would exhaust memory outright. Only frontmatter survives,
+    /// which is all ranking and rendering need.
+    ///
+    /// Under rayon the bound is per-worker rather than per-item — a handful of
+    /// bodies live at once, not one — which is still O(threads), not O(store).
+    pub fn scan_search_hits(
+        &self,
+        needle: &str,
+    ) -> Result<(Vec<SearchHit>, Vec<ScanError>), CloveError> {
+        let paths = self.item_file_paths()?;
+        let classify = |path: &Utf8PathBuf| -> Result<
+            Option<(crate::view::MatchClass, ItemFrontmatter)>,
+            ScanError,
+        > {
+            let item = parse_item_file(path).map_err(|source| ScanError::ParseFailed {
+                path: path.clone(),
+                source,
+            })?;
+            // The body is read here and dropped at the end of this closure.
+            Ok(crate::view::match_class(&item, needle).map(|class| (class, item.frontmatter)))
+        };
+        let results: Vec<Result<Option<_>, ScanError>> = if paths.len() > PARALLEL_SCAN_THRESHOLD {
+            paths.par_iter().map(classify).collect()
+        } else {
+            paths.iter().map(classify).collect()
+        };
+        let (hits, errors) = partition(results);
+        Ok((hits.into_iter().flatten().collect(), errors))
     }
 
     /// Successfully-parsed items only (parse failures are dropped). For surfacing

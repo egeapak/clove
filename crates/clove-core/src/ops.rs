@@ -617,6 +617,24 @@ pub fn blocked(
 /// relevance — title matches first, then labels, then body — unless `order`
 /// names a field, which replaces that key entirely. Returns full item objects,
 /// paginated.
+/// Scan the store and return only the items that match `text`, already
+/// classified — the memory-bounded half of search.
+///
+/// Bodies are read, classified, and **dropped** one item at a time rather than
+/// materialized for the whole store. `store.list()` held every body at once, so
+/// peak RSS tracked total store bytes rather than result size: measured 399 MB
+/// on a 381 MB store, and a store of items near the 4 MB body cap would exhaust
+/// memory on a query matching nothing. Only the frontmatter of an actual hit
+/// survives the scan, which is all ranking and rendering need — `item_object`
+/// never reads the body.
+pub fn search_hits(
+    store: &ItemStore,
+    text: &str,
+) -> Result<Vec<(crate::view::MatchClass, ItemFrontmatter)>, CloveError> {
+    let needle = crate::view::fold_needle(text);
+    Ok(store.scan_search_hits(&needle)?.0)
+}
+
 pub fn search(
     store: &ItemStore,
     text: &str,
@@ -627,21 +645,22 @@ pub fn search(
     // file and index paths so the three cannot disagree on what counts as a hit.
     // (The web has no search route; its `?q=` is a separate, narrower predicate
     // — see the roadmap.)
-    let items = store.list()?;
+    let mut hits = search_hits(store, text)?;
     // Only `--sort rank` needs the graph; every other key (including the
-    // relevance default) reads straight off the frontmatter.
+    // relevance default) reads straight off the frontmatter. It is built from a
+    // body-free frontmatter scan rather than from the hits, because a
+    // topological rank is only meaningful against the whole graph.
     let ranks = if order.needs_ranks() {
-        let frontmatters: Vec<ItemFrontmatter> =
-            items.iter().map(|i| i.frontmatter.clone()).collect();
+        let (frontmatters, _errors) = store.scan_frontmatter()?;
         let (graph, _dangling) = GraphStore::build(&frontmatters);
         graph.topological_ranks()
     } else {
         std::collections::HashMap::new()
     };
-    let ranked = crate::view::rank_search_hits(items, text, order, &ranks);
+    let ranked = crate::view::rank_hits(&mut hits, order, &ranks);
     let objects: Vec<Value> = ranked
         .iter()
-        .map(|item| Value::Object(item_object(item)))
+        .map(|fm| Value::Object(crate::view::frontmatter_object(fm)))
         .collect();
     Ok(search_page(objects, order, window))
 }

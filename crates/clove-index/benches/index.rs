@@ -108,11 +108,10 @@ fn bench_index(c: &mut Criterion) {
         clove_core::ItemStore::new(issues.parent().unwrap().parent().unwrap().to_path_buf());
     c.bench_function(&format!("search_{n}"), |b| {
         b.iter(|| {
-            let (items, _errors) = store.scan().unwrap();
+            let mut hits = clove_core::ops::search_hits(&store, "fox").unwrap();
             criterion::black_box(
-                clove_core::view::rank_search_hits(
-                    items,
-                    "fox",
+                clove_core::view::rank_hits(
+                    &mut hits,
                     clove_core::view::SearchOrder::default(),
                     &std::collections::HashMap::new(),
                 )

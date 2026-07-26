@@ -246,6 +246,51 @@ fn corrupt_db_is_rebuilt_by_open_or_create() {
 /// every query after a bump — and the staleness gate then reports every file as
 /// changed, which is over the inline-refresh limit, so the CLI silently falls
 /// back to scanning files for every query until someone reindexes by hand.
+/// The orphan check covers **both** side tables, not just `labels`.
+///
+/// Schema 5's `COUNT(items) == COUNT(fts_map)` covered every item in both
+/// directions. Replacing it with a single-table orphan scan was weaker twice
+/// over: it only sees items carrying a side row, and only the leak direction.
+/// `edges` was outside it entirely, so a torn `DELETE FROM edges` was caught by
+/// nothing — this pins the half that can be pinned.
+#[test]
+fn integrity_check_sees_orphans_in_every_side_table() {
+    let repo = Repo::new();
+    ItemSpec::new("proj-AAAAAAAA").title("kept").write_to(&repo);
+    clove_index::reindex(&repo.issues, &repo.db).unwrap();
+    let index = Index::open(&repo.db).unwrap();
+    assert_eq!(index.integrity_check().unwrap(), None, "clean to start");
+    drop(index);
+
+    // Tear each side table in turn: a row pointing at an id `items` lacks.
+    for (table, sql) in [
+        (
+            "labels",
+            "INSERT INTO labels (item_id, label) VALUES ('proj-GHOSTAAA', 'area:core')",
+        ),
+        (
+            "edges",
+            "INSERT INTO edges (from_id, to_id, kind) VALUES ('proj-GHOSTAAA', 'proj-AAAAAAAA', 0)",
+        ),
+    ] {
+        let conn = rusqlite::Connection::open(&repo.db).unwrap();
+        conn.execute(sql, []).unwrap();
+        drop(conn);
+
+        let index = Index::open(&repo.db).unwrap();
+        let report = index.integrity_check().unwrap();
+        assert!(
+            report.is_some(),
+            "an orphan in `{table}` must be reported, got {report:?}"
+        );
+        drop(index);
+
+        let conn = rusqlite::Connection::open(&repo.db).unwrap();
+        conn.execute(&format!("DELETE FROM {table} WHERE 1=1"), [])
+            .unwrap();
+    }
+}
+
 #[test]
 fn a_schema_bump_rebuilds_from_the_files_not_to_empty() {
     let repo = Repo::new();
@@ -707,11 +752,11 @@ fn staleness_detects_new_deleted_modified_and_apply_resyncs() {
     assert!(!ids.contains(&"proj-CCCCCCCC".to_owned()), "{ids:?}");
     // ...and the deleted item left nothing behind in the side tables. Schema 5
     // guarded this through the FTS row-count cross-check; schema 6 has no FTS,
-    // so `labels` is where a torn delete now shows up.
+    // so the side tables are where a torn delete shows up.
     assert_eq!(
         index.integrity_check().unwrap(),
         None,
-        "a deleted item must not leave orphan label rows"
+        "a deleted item must not leave orphan side rows"
     );
     // A subsequent check no longer reports the resynced rows as stale/deleted.
     let after = index.check_staleness(&repo.issues).unwrap();

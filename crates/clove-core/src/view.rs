@@ -339,6 +339,16 @@ pub enum MatchClass {
 /// see `docs/READ_PATH_ROADMAP.md` §6.1. Narrowing this to whole tokens now
 /// would resurrect that divergence in reverse, against every caller's
 /// expectations.
+/// Fold a raw search needle for matching.
+///
+/// Named rather than inlined so there is one place the needle side is folded and
+/// one place to test it: `match_class` takes an *already*-folded needle, so a
+/// test that pre-lowers its input cannot see a caller that forgets to fold.
+/// That is exactly how ASCII-only folding survived a revert here once.
+pub fn fold_needle(text: &str) -> String {
+    text.to_lowercase()
+}
+
 pub fn match_class(item: &Item, needle: &str) -> Option<MatchClass> {
     let fm = &item.frontmatter;
     if fm.title.to_lowercase().contains(needle) {
@@ -372,32 +382,22 @@ pub fn sort_by_match<T>(hits: &mut [(MatchClass, T)], key: impl Fn(&T) -> (Prior
     });
 }
 
-/// Classify, filter, and order a set of items against a search `text`.
+/// Order pre-classified hits in place: relevance by default, or an explicit
+/// [`SortField`] replacing the whole key.
 ///
-/// The whole shared search pipeline, so every surface's ranking is the same
-/// function and not three that happen to agree.
-///
-/// `order` defaults to relevance (`(match class, priority, id)`); an explicit
-/// [`SortField`] replaces that key entirely. `ranks` is consulted only for
-/// [`SortField::Rank`] — pass an empty map when [`SearchOrder::needs_ranks`] is
-/// false.
-pub fn rank_search_hits(
-    items: Vec<Item>,
-    text: &str,
+/// The counterpart to [`crate::ops::search_hits`]. Takes frontmatter rather than
+/// whole items so the scan can drop bodies as it goes — nothing below the
+/// classification step reads a body, and holding every body at once put peak RSS
+/// at 399 MB on a 381 MB store even for a query matching nothing.
+pub fn rank_hits<'a>(
+    hits: &'a mut [(MatchClass, ItemFrontmatter)],
     order: SearchOrder,
     ranks: &HashMap<CloveId, usize>,
-) -> Vec<Item> {
-    let needle = text.to_lowercase();
-    let mut hits: Vec<(MatchClass, Item)> = items
-        .into_iter()
-        .filter_map(|item| match_class(&item, &needle).map(|class| (class, item)))
-        .collect();
+) -> Vec<&'a ItemFrontmatter> {
     match order.explicit() {
-        Some(explicit) => explicit.apply_by(&mut hits, ranks, |(_, item)| &item.frontmatter),
+        Some(explicit) => explicit.apply_by(hits, ranks, |(_, fm)| fm),
         None => {
-            sort_by_match(&mut hits, |item| {
-                (item.frontmatter.priority, item.frontmatter.id.clone())
-            });
+            sort_by_match(hits, |fm| (fm.priority, fm.id.clone()));
             // Reverse the *whole* relevance key (class, priority, id), which is
             // still a total order — the same thing `Order::descending` does.
             if order.descending {
@@ -405,7 +405,7 @@ pub fn rank_search_hits(
             }
         }
     }
-    hits.into_iter().map(|(_, item)| item).collect()
+    hits.iter().map(|(_, fm)| fm).collect()
 }
 
 /// A topological rank lookup that sorts unknown ids last.
@@ -1296,24 +1296,28 @@ mod tests {
             },
         ];
 
+        // Classify the way the scan does, then rank.
+        let classify = |items: &[Item]| -> Vec<(MatchClass, ItemFrontmatter)> {
+            items
+                .iter()
+                .filter_map(|i| match_class(i, "widget").map(|c| (c, i.frontmatter.clone())))
+                .collect()
+        };
+
         // Default: relevance — the title hit wins despite being older.
-        let ranked = rank_search_hits(
-            items.clone(),
-            "widget",
-            SearchOrder::default(),
-            &HashMap::new(),
-        );
-        assert_eq!(ranked[0].frontmatter.title, "widget");
+        let mut hits = classify(&items);
+        let ranked = rank_hits(&mut hits, SearchOrder::default(), &HashMap::new());
+        assert_eq!(ranked[0].title, "widget");
 
         // Explicit `updated desc`: the newer body hit wins.
-        let by_updated = rank_search_hits(
-            items,
-            "widget",
+        let mut hits = classify(&items);
+        let by_updated = rank_hits(
+            &mut hits,
             SearchOrder::parse(Some("updated"), Some("desc")).unwrap(),
             &HashMap::new(),
         );
         assert_eq!(
-            by_updated[0].frontmatter.title, "other",
+            by_updated[0].title, "other",
             "an explicit sort replaces the match-class key, not just its tail"
         );
     }
@@ -1568,17 +1572,14 @@ mod tests {
             Some(MatchClass::Body),
             "haystack-side folding must be full Unicode in bodies too"
         );
-        // And the needle side, which only `rank_search_hits` performs — the
-        // closure above pre-lowers, so `match_class` alone cannot see it.
-        let ranked = rank_search_hits(
-            vec![up_item("")],
-            "Ünicode",
-            SearchOrder::default(),
-            &HashMap::new(),
-        );
+        // And the needle side, which `match_class` does not do — it takes an
+        // already-folded needle, so a test that pre-lowers cannot see a caller
+        // that forgets. `fold_needle` is that step, and it must be full Unicode
+        // too: ASCII-only folding here is what let `Ünicode` miss `ünicode-tag`.
+        assert_eq!(fold_needle("Ünicode"), "ünicode");
         assert_eq!(
-            ranked.len(),
-            1,
+            match_class(&up_item(""), &fold_needle("Ünicode")),
+            Some(MatchClass::Title),
             "needle-side folding must be full Unicode: `Ünicode` must find `ünicode-tag`"
         );
     }

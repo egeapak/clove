@@ -431,16 +431,21 @@ impl Index {
     ///    variant of `integrity_check`; it skips the exhaustive index/content
     ///    cross-validation but catches the page-level corruption that the shallow
     ///    open-time [`is_corrupt`] probe misses).
-    /// 2. The `labels` side table must not reference an item that is not in
-    ///    `items`. Every label row is written in the same transaction as its
-    ///    item, so an orphan is a clove-specific tear that `quick_check` cannot
-    ///    see (it is referentially, not structurally, broken) but that makes a
-    ///    `--label` query return an id the store cannot resolve.
+    /// 2. Neither side table — `labels` nor `edges` — may reference an id that
+    ///    is not in `items`. Every side row is written in the same transaction
+    ///    as its item, so an orphan is a clove-specific tear that `quick_check`
+    ///    cannot see (it is referentially, not structurally, broken) but that
+    ///    makes a `--label` query or a graph walk resolve an id the store does
+    ///    not have.
     ///
-    /// Schema 5 checked the contentless-FTS mirror here instead (`fts_map` had
-    /// to have exactly one row per item). That table is gone in schema 6 — see
-    /// the `SCHEMA_DDL` note — so the equivalent cross-table check moved to the
-    /// side table that remains.
+    /// Schema 5 checked the contentless-FTS mirror instead: `fts_map` had one
+    /// row per item, so `COUNT(items) == COUNT(fts_map)` covered **every** item
+    /// unconditionally and in **both** directions — a leaked shadow after a
+    /// delete and a missing one after an insert. A plain orphan scan is weaker
+    /// on both counts: it only sees items that carry a side row at all, and only
+    /// the leak direction. `edges` was added here because the first version of
+    /// this check covered `labels` alone, so a torn `DELETE FROM edges` was
+    /// caught by nothing.
     pub fn integrity_check(&self) -> Result<Option<String>, IndexError> {
         let mut stmt = self.conn.prepare("PRAGMA quick_check")?;
         let problems: Vec<String> = stmt
@@ -453,15 +458,21 @@ impl Index {
             return Ok(Some(format!("quick_check: {}", problems.join("; "))));
         }
 
-        let orphans: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM labels WHERE item_id NOT IN (SELECT id FROM items)",
-            [],
-            |r| r.get(0),
-        )?;
-        if orphans != 0 {
-            return Ok(Some(format!(
-                "label index out of sync ({orphans} label row(s) with no item)"
-            )));
+        for (table, column, what) in [("labels", "item_id", "label"), ("edges", "from_id", "edge")]
+        {
+            let orphans: i64 = self.conn.query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM {table} \
+                     WHERE {column} NOT IN (SELECT id FROM items)"
+                ),
+                [],
+                |r| r.get(0),
+            )?;
+            if orphans != 0 {
+                return Ok(Some(format!(
+                    "{what} index out of sync ({orphans} {what} row(s) with no item)"
+                )));
+            }
         }
         Ok(None)
     }

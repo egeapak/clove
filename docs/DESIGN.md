@@ -679,7 +679,7 @@ Missing `index.db`:
 - Print to stderr (not stdout): `note: no index found, using file scan (run 'clove reindex' to build)`
 - Use file-scan for all operations.
 - `clove search` is **always** a parallel rayon substring scan over file content, index or
-  no index — it has no index tier and no daemon tier to degrade from. See §7.x "Search
+  no index — it has no index tier and no daemon tier to degrade from. See §7.8 "Search
   semantics" and read-path roadmap §6.1; its `_meta.source` is therefore always `"files"`.
 
 All JSON responses include `"_meta": { "source": "files" | "index", "took_ms": N }`.
@@ -1660,8 +1660,14 @@ All wall-clock, measured with `hyperfine --warmup 3 --runs 20`. Cold = OS page c
 | `clove reindex` 1,000 items | — | < 500 ms |
 | `clove reindex` 10,000 items | — | < 1,000 ms |
 
-File-scan path at > 50,000 items is out-of-target for the 100 ms bound; the index is
-required above that threshold.
+File-scan path at > 50,000 items is out-of-target for the 100 ms bound for the
+*list* reads; the index carries them above that threshold.
+
+**`clove search` has no index tier at any size** (§6.1), so its cost is the scan
+plus classification: measured 62–216 ms warm at 10k depending on selectivity, and
+0.4–1.4 s at 50k. That is the accepted price of one substring answer everywhere;
+if it bites, the shape that fixes it is a prefilter with *substring* semantics
+(trigram) or a streaming scan, not the whole-token index that was removed.
 
 ### 13.2 I/O Strategy
 
@@ -1679,11 +1685,21 @@ required above that threshold.
 | `clove ls` 10,000 items | < 50 MB |
 | `clove ready` 100,000 items (index) | < 8 MB |
 | `clove reindex` 100,000 items | < 500 MB |
+| `clove search`, any store size | < 20 MB |
 
 Body text is never materialized during `ls`/`ready`/`blocked`/`query`. The `scan_lazy()`
 path parses only `ItemFrontmatter` (no body allocation). `Item { frontmatter, body: String }`
-is constructed only on the full-load path (`clove show`, `clove search`, reindex). This keeps
+is constructed only on the full-load path (`clove show`, reindex). This keeps
 peak RSS low for bulk scan operations.
+
+**`clove search` reads every body but holds none of them.** It has to read them —
+a substring match against body text cannot be answered from frontmatter — but
+`ItemStore::scan_search_hits` classifies each item and drops its body before
+moving on, keeping only the frontmatter of an actual hit. Peak RSS therefore
+tracks the *result* size, not the store size: measured 8 MB on a 111 MB store,
+whether the query matches nothing or everything. Loading the store first (which
+is what `store.scan()` does) put that at 399 MB on a 381 MB store and would
+exhaust memory on a store of items near the 4 MB body cap.
 
 ### 13.4 Comparative Benchmark Methodology
 

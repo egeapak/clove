@@ -41,8 +41,9 @@ single, dependency-light, cross-platform binary.
   `{ v, ok, data, _meta }` JSON envelope with documented exit codes;
   `clove agent-doc` describes the whole agent-facing surface.
 - **Optional accelerators, never required** — a SQLite index for fast
-  search/staleness and a `cloved` daemon that keeps the index + graph hot and
-  serves reads over IPC. Delete them and nothing is lost.
+  listing/staleness and a `cloved` daemon that keeps the index + graph hot and
+  serves reads over IPC. Delete them and nothing is lost. (`clove search` is
+  always a file scan: it matches substrings, which no index can answer.)
 - **Analytics** — `clove stats` (counts, ready/blocked, epics, throughput) with
   recorded history snapshots.
 - **Two UIs** — a `ratatui` terminal browser (`clove tui`) and an embedded

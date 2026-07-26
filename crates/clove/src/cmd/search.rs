@@ -30,7 +30,7 @@
 
 use std::collections::HashMap;
 
-use clove_core::view::{rank_search_hits, SearchOrder};
+use clove_core::view::SearchOrder;
 use clove_core::OutputFormat;
 use clove_types::{CloveError, ItemFrontmatter};
 
@@ -91,18 +91,22 @@ fn file_search(
     text: &str,
     order: SearchOrder,
 ) -> Result<Vec<ItemFrontmatter>, CloveError> {
-    let (items, _errors) = ctx.store.scan()?;
-    // This path holds the whole store, so `--sort rank` builds its graph from
-    // what is in hand rather than re-scanning.
+    // `search_hits` classifies during the scan and keeps only matches, so peak
+    // memory tracks the result size rather than the store size. Holding every
+    // body at once — which this did — put RSS at 399 MB on a 381 MB store even
+    // for a query that matched nothing.
+    let mut hits = clove_core::ops::search_hits(&ctx.store, text)?;
+    // Only `--sort rank` needs the graph, and a topological rank is only
+    // meaningful against the whole store, so it comes from a body-free
+    // frontmatter scan rather than from the hits.
     let ranks = if order.needs_ranks() {
-        let frontmatters: Vec<ItemFrontmatter> =
-            items.iter().map(|i| i.frontmatter.clone()).collect();
+        let (frontmatters, _errors) = ctx.store.scan_frontmatter()?;
         crate::cmd::listing::ranks_of(&frontmatters).1
     } else {
         HashMap::new()
     };
-    Ok(rank_search_hits(items, text, order, &ranks)
+    Ok(clove_core::view::rank_hits(&mut hits, order, &ranks)
         .into_iter()
-        .map(|item| item.frontmatter)
+        .cloned()
         .collect())
 }

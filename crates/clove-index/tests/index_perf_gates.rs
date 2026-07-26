@@ -138,10 +138,11 @@ fn m1_index_perf_gates() {
     let store = clove_core::ItemStore::new(root);
     let mut hits = 0;
     let search_elapsed = best_of(5, || {
-        let (items, _errors) = store.scan().unwrap();
-        hits = clove_core::view::rank_search_hits(
-            items,
-            "medium",
+        // The real path: classify during the scan so peak memory tracks the
+        // result size, not the store size.
+        let mut found = clove_core::ops::search_hits(&store, "medium").unwrap();
+        hits = clove_core::view::rank_hits(
+            &mut found,
             clove_core::view::SearchOrder::default(),
             &std::collections::HashMap::new(),
         )
@@ -160,11 +161,10 @@ fn m1_index_perf_gates() {
     // Broad match ("benchmark" is in every body): informational. The scan cost is
     // the same; the ranking and result set grow.
     let broad = best_of(3, || {
-        let (items, _errors) = store.scan().unwrap();
+        let mut found = clove_core::ops::search_hits(&store, "benchmark").unwrap();
         std::hint::black_box(
-            clove_core::view::rank_search_hits(
-                items,
-                "benchmark",
+            clove_core::view::rank_hits(
+                &mut found,
                 clove_core::view::SearchOrder::default(),
                 &std::collections::HashMap::new(),
             )
