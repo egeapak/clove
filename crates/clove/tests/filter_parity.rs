@@ -752,17 +752,22 @@ mod daemon {
             .arg(clove_dir)
             .spawn()
             .expect("spawn cloved");
-        // Readiness is the socket, not the pid — see the note in `sort_order.rs`.
+        // The pid already implies a bound socket (`cloved::lifecycle`); the socket
+        // check is belt-and-braces. See the note in `sort_order.rs`.
         let pid = clove_dir.join("daemon.pid");
         let sock = clove_dir.join("daemon.sock");
         let start = Instant::now();
-        while start.elapsed() < Duration::from_secs(5) {
+        while start.elapsed() < Duration::from_secs(10) {
             if pid.exists() && sock.exists() {
                 return child;
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        panic!("daemon not ready");
+        panic!(
+            "daemon not ready (pid {}, sock {})",
+            pid.exists(),
+            sock.exists()
+        );
     }
 
     extern "C" {

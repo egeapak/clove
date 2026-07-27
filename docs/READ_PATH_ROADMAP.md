@@ -713,97 +713,6 @@ came back; `_meta.per_column` marks the difference from a flat list.
 
 ---
 
-## 8. Known follow-ups (found by the final whole-branch review)
-
-None of these is a regression from this work — the first two are pre-existing on
-`master` — but they are the places a reader will otherwise rediscover as bugs.
-
-- **`--deep` does not stat every file.** `stale::check_staleness` opens with the
-  same directory-mtime + file-count short-circuit as the fast path, so an
-  in-place edit that leaves the directory mtime alone (truncate-and-rewrite, as
-  opposed to the replace-by-rename that clove's own writes, git, `sed -i` and vim
-  all use) is invisible to *both* paths. Measured: three edited items, then
-  `clove ls --q WWMARK` and `clove --deep ls --q WWMARK` both answer `total=0`
-  from the index while `--no-index` answers `total=3`. `--deep` is documented as
-  the escape hatch for exactly this, so it should either stat or stop claiming to.
-- **`clove dep tree --format json` omits `repeat_ref`**, which the MCP and web
-  renderers emit. Three `tree_to_json` implementations remain (`cmd/dep.rs`,
-  `ops.rs`, `clove-engine`). §7 marked the key optional in `dep-tree.json` rather
-  than unifying them, so this is the one place "same query, same answer
-  everywhere" is untrue on *shape*. Harmless, but it is an exception, not a
-  guarantee.
-- **The daemon tier is slower than the index tier for `blocked`.**
-  `GraphRequest::Blocked` carries no filter or window, so the engine hydrates the
-  whole blocked set before filtering and windowing. Measured at 700 items / 83
-  blocked, `blocked --limit 1`: daemon 29 ms, index 10 ms, files 33 ms — the
-  daemon tier is barely better than a full file scan, and degrades as the blocked
-  set grows. Fixing it is a protocol bump (`QueryKind::Blocked`).
-- ~~**`parse_item_file` resolved every path twice**~~ — **done**. It called
-  `std::fs::metadata(path)` for the size guard and then `std::fs::read(path)`,
-  which opens and `fstat`s the descriptor anyway — so the standalone `metadata`
-  was a second *by-path* lookup for an answer already available for free. The
-  guard now runs off the opened descriptor, and the read goes through a `Take`
-  because std's `File` specialization of `read_to_end` re-`fstat`s to size its
-  buffer (which put the saved call straight back — measured, not assumed).
-  `statx` per item 2 → 1, syscalls per item 6 → 5. On a filesystem with 200 µs
-  per operation, a 2,000-item `clove search` went **739 ms → 595 ms (−19.5%)**.
-  Locally it is noise; the win is entirely on network/virtualised storage.
-
-- **Trigram search index — deferred, with a stated threshold.** Measured in full
-  (see below). Ship it when a real store crosses **~25k items** (warm scan passes
-  ~150 ms, cold ~700 ms) **or** a user reports search latency on a
-  networked/virtualised store — behind `[index] trigram = false` by default.
-
-  *Why it is worth having, eventually.* The scan issues 6 syscalls per item —
-  300,339 at 50k — so on a filesystem where every operation is a round trip it
-  dominates completely. At 50k with 200 µs/op: scan **18,545 ms** vs trigram
-  **12 ms** (1,545×). Modelled by device: local SSD 1.4 s vs 8 ms; cloud network
-  SSD 10.4 s vs 44 ms; 7200 rpm HDD 166 s vs 0.7 s.
-
-  *Why not now.* Store size is not the crossover variable — **selectivity is**.
-  The scan is O(items) and needle-independent; the index is O(hits). A 0%-match
-  needle is 350× faster, ~5% is 12×, ~67% is 1.4×, and **~99% is 0.93× — it
-  loses**. So does any needle under 3 characters, which trigram cannot index at
-  all. Against that: **+260% on `index.db`** (4.6 → 16.7 MB at 10k), ~4× reindex,
-  ~15% on every item edit, plus a merge/optimize policy (17% bloat per half-store
-  churn). And it puts a second matcher back on the one read path §6.1
-  deliberately collapsed to a single tier.
-
-  *The correctness rule, which is not optional.* Index our own `fold_needle`
-  output with `tokenize='trigram case_sensitive 1'` so SQLite folds nothing
-  itself; the prefilter is then a superset by construction. Verified across 76
-  needles — mid-word (`ebhook`→webhook), `Ünicode`/`İstanbul`/`Straße`,
-  decomposed vs precomposed `café`, FTS5 syntax as literal text, 1–2 char
-  fallbacks — **zero prefilter misses**. But the variant that answers entirely in
-  SQL and never reads a file **reproduced §6.1's bug in a new costume**: with
-  labels joined into one column, `alpha\nbeta` matched across a label boundary
-  that `match_class` never would. So: the tier narrows *candidates*; the files
-  answer. A convenient concatenation is not a valid model of the matcher.
-
-  *Shape.* `detail='none', columnsize=0` (12 MB at 10k vs 48 MB for the phrase
-  shape, identical candidate sets), `contentless_delete=1` (bundled SQLite is
-  3.50.2), an id↔rowid map — deleting by an `UNINDEXED` id column is a full table
-  scan and costs 7.6 ms/edit instead of 0.6 ms. Never store content.
-  `Engine::search` gains exactly one tier (`Source::Index`), no daemon tier. A
-  stale index must fall to the file scan, never answer — a stale trigram drops
-  rows, which is a *missing hit*, not a stale column.
-
-- **Windows: the daemon pipe name is a hash of the un-canonicalized path.**
-  `clove_ipc::repo_hash` is FNV-1a over `clove_dir.as_str()`, and the Windows
-  named pipe is `\\.\pipe\clove-<hash>`. Two spellings of the same directory —
-  `C:\Repo` vs `c:\repo`, a `subst` drive, a junction — therefore hash to
-  different pipes, so two clients silently fail to share a daemon and each falls
-  back to the index. Answers stay correct; the daemon tier just never engages.
-  Unix is unaffected (the socket is a real file, so any spelling resolves to it).
-  Not exercised today: every daemon test in the repo is `#[cfg(unix)]`, which is
-  also why this went unnoticed. Canonicalizing before hashing would fix it, and
-  would be a pipe-name change (i.e. a compatibility break for a running daemon).
-
-- **`DELETE /api/v1/items/:id?force=`** is still a lenient `== "true"`, so
-  `?force=1` — the spelling `?compact=1` accepts — is silently ignored. It fails
-  *safe* (a delete is refused, never forced), which is why §7 left it, but it is
-  the same defect class the rest of the API no longer has.
-
 ## 7. Smaller items — **DONE**
 
 - ~~**`GraphRequest::Blocked { include_warnings }`**~~ — **done**, removed with
@@ -885,3 +794,119 @@ None of these is a regression from this work — the first two are pre-existing 
   model context — the client feeds the model one copy. The test that validates
   the payload also asserts the two copies are the *same document*, so a client
   may parse whichever it prefers.
+
+## 8. Known follow-ups (found by the final whole-branch review)
+
+None of these is a regression from this work — the first two are pre-existing on
+`master` — but they are the places a reader will otherwise rediscover as bugs.
+
+- **`--deep` does not stat every file.** `stale::check_staleness` opens with the
+  same directory-mtime + file-count short-circuit as the fast path, so an
+  in-place edit that leaves the directory mtime alone (truncate-and-rewrite, as
+  opposed to the replace-by-rename that clove's own writes, git, `sed -i` and vim
+  all use) is invisible to *both* paths. Measured: three edited items, then
+  `clove ls --q WWMARK` and `clove --deep ls --q WWMARK` both answer `total=0`
+  from the index while `--no-index` answers `total=3`. `--deep` is documented as
+  the escape hatch for exactly this, so it should either stat or stop claiming to.
+- **`clove dep tree --format json` omits `repeat_ref`**, which the MCP and web
+  renderers emit. Three `tree_to_json` implementations remain (`cmd/dep.rs`,
+  `ops.rs`, `clove-engine`). §7 marked the key optional in `dep-tree.json` rather
+  than unifying them, so this is the one place "same query, same answer
+  everywhere" is untrue on *shape*. Harmless, but it is an exception, not a
+  guarantee.
+- **The daemon tier is slower than the index tier for `blocked`.**
+  `GraphRequest::Blocked` carries no filter or window, so the engine hydrates the
+  whole blocked set before filtering and windowing. Measured at 700 items / 83
+  blocked, `blocked --limit 1`: daemon 29 ms, index 10 ms, files 33 ms — the
+  daemon tier is barely better than a full file scan, and degrades as the blocked
+  set grows. Fixing it is a protocol bump (`QueryKind::Blocked`).
+- ~~**`parse_item_file` resolved every path twice**~~ — **done**. It called
+  `std::fs::metadata(path)` for the size guard and then `std::fs::read(path)`,
+  which opens and `fstat`s the descriptor anyway — so the standalone `metadata`
+  was a second *by-path* lookup for an answer already available for free. The
+  guard now runs off the opened descriptor, and the read goes through a `Take`
+  because std's `File` specialization of `read_to_end` re-`fstat`s to size its
+  buffer (which put the saved call straight back — measured, not assumed).
+  `statx` per item 2 → 1, syscalls per item 6 → 5. On a filesystem with 200 µs
+  per operation, a 2,000-item `clove search` went **739 ms → 595 ms (−19.5%)**.
+  Locally it is noise; the win is entirely on network/virtualised storage.
+
+- **Trigram search index — deferred, with a stated threshold.** Measured in full
+  (see below). Ship it when a real store crosses **~25k items** (warm scan passes
+  ~150 ms, cold ~700 ms) **or** a user reports search latency on a
+  networked/virtualised store — behind `[index] trigram = false` by default.
+
+  *Why it is worth having, eventually.* The scan issues 6 syscalls per item —
+  300,339 at 50k — so on a filesystem where every operation is a round trip it
+  dominates completely. At 50k with 200 µs/op: scan **18,545 ms** vs trigram
+  **12 ms** (1,545×). Modelled by device: local SSD 1.4 s vs 8 ms; cloud network
+  SSD 10.4 s vs 44 ms; 7200 rpm HDD 166 s vs 0.7 s.
+
+  *Why not now.* Store size is not the crossover variable — **selectivity is**.
+  The scan is O(items) and needle-independent; the index is O(hits). A 0%-match
+  needle is 350× faster, ~5% is 12×, ~67% is 1.4×, and **~99% is 0.93× — it
+  loses**. So does any needle under 3 characters, which trigram cannot index at
+  all. Against that: **+260% on `index.db`** (4.6 → 16.7 MB at 10k), ~4× reindex,
+  ~15% on every item edit, plus a merge/optimize policy (17% bloat per half-store
+  churn). And it puts a second matcher back on the one read path §6.1
+  deliberately collapsed to a single tier.
+
+  *The correctness rule, which is not optional.* Index our own `fold_needle`
+  output with `tokenize='trigram case_sensitive 1'` so SQLite folds nothing
+  itself; the prefilter is then a superset by construction. Verified across 76
+  needles — mid-word (`ebhook`→webhook), `Ünicode`/`İstanbul`/`Straße`,
+  decomposed vs precomposed `café`, FTS5 syntax as literal text, 1–2 char
+  fallbacks — **zero prefilter misses**. But the variant that answers entirely in
+  SQL and never reads a file **reproduced §6.1's bug in a new costume**: with
+  labels joined into one column, `alpha\nbeta` matched across a label boundary
+  that `match_class` never would. So: the tier narrows *candidates*; the files
+  answer. A convenient concatenation is not a valid model of the matcher.
+
+  *Shape.* `detail='none', columnsize=0` (12 MB at 10k vs 48 MB for the phrase
+  shape, identical candidate sets), `contentless_delete=1` (bundled SQLite is
+  3.50.2), an id↔rowid map — deleting by an `UNINDEXED` id column is a full table
+  scan and costs 7.6 ms/edit instead of 0.6 ms. Never store content.
+  `Engine::search` gains exactly one tier (`Source::Index`), no daemon tier. A
+  stale index must fall to the file scan, never answer — a stale trigram drops
+  rows, which is a *missing hit*, not a stale column.
+
+- **`parse_frontmatter_file` still resolves each path twice.** The single-open
+  fix landed on `parse_item_file` only, and this is the *hotter* path — it backs
+  `ItemStore::scan_frontmatter` (the `ls`/`ready`/`blocked` file tier, every
+  mutation's `scan_or_fail`, `dependents_of`) and `Engine::hydrate` (every
+  tiered page). Measured on a 2,000-item store: `clove ls --no-index` still
+  issues 2 `statx` per item and takes 777 ms under 200 µs/op, against 659 ms for
+  the fixed search path. The same ~19% is still available, mechanically.
+
+- **The macOS `blocked_daemon_path_agrees_with_the_file_path` flake is
+  unexplained.** It failed once in five runs. The first diagnosis — that
+  `cloved` writes `daemon.pid` before binding its socket — was **wrong**: the
+  opposite is a documented, tested invariant (`cloved::lifecycle`, DESIGN §8.2,
+  `daemon_pid_appears_only_after_socket_is_bound`), so "pid exists" already
+  implies "connectable". The timeout was raised 5 s → 10 s on the theory that a
+  loaded runner is simply slow, but that is a guess, not a diagnosis. If it
+  recurs, do not re-investigate the pid/socket ordering.
+
+- **Write endpoints still report the serving mode in `_meta.source`.**
+  `POST`/`PATCH`/`DELETE /api/v1/items` emit `"standalone"` (`write.rs:43,274`),
+  which is outside the `["daemon","index","files"]` enum the published schemas
+  declare. The read half was fixed; a client reading the key uniformly still
+  gets a tier on reads and a serving mode on writes. Nothing formally violated —
+  `item.json` declares no `_meta` — but it is the same defect on the other half
+  of the API.
+
+- **Windows: the daemon pipe name is a hash of the un-canonicalized path.**
+  `clove_ipc::repo_hash` is FNV-1a over `clove_dir.as_str()`, and the Windows
+  named pipe is `\\.\pipe\clove-<hash>`. Two spellings of the same directory —
+  `C:\Repo` vs `c:\repo`, a `subst` drive, a junction — therefore hash to
+  different pipes, so two clients silently fail to share a daemon and each falls
+  back to the index. Answers stay correct; the daemon tier just never engages.
+  Unix is unaffected (the socket is a real file, so any spelling resolves to it).
+  Not exercised today: every daemon test in the repo is `#[cfg(unix)]`, which is
+  also why this went unnoticed. Canonicalizing before hashing would fix it, and
+  would be a pipe-name change (i.e. a compatibility break for a running daemon).
+
+- **`DELETE /api/v1/items/:id?force=`** is still a lenient `== "true"`, so
+  `?force=1` — the spelling `?compact=1` accepts — is silently ignored. It fails
+  *safe* (a delete is refused, never forced), which is why §7 left it, but it is
+  the same defect class the rest of the API no longer has.

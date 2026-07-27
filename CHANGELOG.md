@@ -476,8 +476,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   *strings* above, with the classification in place for the write routing that
   will use it.
 
-### Fixed
-
+### Performance
 
 - **`clove search` resolves each item path once instead of twice.**
   `parse_item_file` ran `std::fs::metadata(path)` for its size guard and then
@@ -490,6 +489,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   disk; on a filesystem with 200 µs per operation, a 2,000-item search went
   739 ms → 595 ms (−19.5%). The size guard is unchanged, and a file that grows
   between the stat and the read is now rejected rather than silently truncated.
+
+### Fixed
+
 - **A malformed number in a web query string silently meant the default.**
   `?limit=abc` and `?limit=-5` fell through `.ok()` to the endpoint default —
   which on the web is *unlimited* — so a client typo asking for one page

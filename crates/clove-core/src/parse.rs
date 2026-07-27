@@ -2,7 +2,10 @@
 //!
 //! Pipeline for each file:
 //! 1. Size guard from the opened file's metadata (reject absurdly large files
-//!    before read) — one `open` + `fstat`, never a second lookup by path.
+//!    before read). In [`parse_item_file`] this is one `open` + `fstat` with no
+//!    second lookup by path; [`parse_frontmatter_file`] still does the older
+//!    `metadata(path)` + `read(path)` pair (two path resolutions) — see the
+//!    roadmap's follow-up list.
 //! 2. Locate the `---` … `---` frontmatter fences (`memchr`, zero-copy slice).
 //! 3. Enforce the frontmatter byte budget and reject YAML anchors/aliases (bomb
 //!    guard) before handing bytes to the YAML parser.

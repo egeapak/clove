@@ -455,11 +455,17 @@ mod daemon {
             .arg(clove_dir)
             .spawn()
             .expect("spawn cloved");
-        // Readiness is the *socket*, not the pid file. `cloved` writes the pid
-        // before it is listening, so waiting on the pid alone races the client's
-        // probe — the engine then correctly falls back to the index and the test
-        // fails asserting `daemon`. Seen on a loaded macOS runner; Linux was
-        // always fast enough to hide it.
+        // `daemon.pid` already implies readiness: `cloved` binds the socket and
+        // completes its startup sweep *before* writing the pid — a documented
+        // invariant (`cloved::lifecycle`, DESIGN §8.2) with its own test,
+        // `daemon_pid_appears_only_after_socket_is_bound`. So the socket check
+        // below is belt-and-braces, not the fix; what addresses a loaded runner
+        // is the 10 s budget, up from 5 s.
+        //
+        // An earlier version of this comment claimed the pid is written before
+        // the socket is bound and that the race was the cause of a macOS flake.
+        // That is the opposite of what `cloved` does. The flake's actual cause is
+        // still unidentified — see the roadmap's follow-up list.
         let pid = clove_dir.join("daemon.pid");
         let sock = clove_dir.join("daemon.sock");
         let start = Instant::now();
