@@ -478,6 +478,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+
+- **`clove search` resolves each item path once instead of twice.**
+  `parse_item_file` ran `std::fs::metadata(path)` for its size guard and then
+  `std::fs::read(path)`, which opens and `fstat`s the descriptor anyway — so the
+  standalone `metadata` was a second by-path lookup for an answer already in
+  hand. The guard now reads the opened descriptor, and the body is read through
+  a `Take` because std's `File` specialization of `read_to_end` re-`fstat`s to
+  size its buffer, which would have reinstated the call it removed. `statx` per
+  item drops 2 → 1 and syscalls 6 → 5. No effect worth measuring on a local
+  disk; on a filesystem with 200 µs per operation, a 2,000-item search went
+  739 ms → 595 ms (−19.5%). The size guard is unchanged, and a file that grows
+  between the stat and the read is now rejected rather than silently truncated.
 - **A malformed number in a web query string silently meant the default.**
   `?limit=abc` and `?limit=-5` fell through `.ok()` to the endpoint default —
   which on the web is *unlimited* — so a client typo asking for one page

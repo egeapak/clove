@@ -738,6 +738,56 @@ None of these is a regression from this work — the first two are pre-existing 
   blocked, `blocked --limit 1`: daemon 29 ms, index 10 ms, files 33 ms — the
   daemon tier is barely better than a full file scan, and degrades as the blocked
   set grows. Fixing it is a protocol bump (`QueryKind::Blocked`).
+- ~~**`parse_item_file` resolved every path twice**~~ — **done**. It called
+  `std::fs::metadata(path)` for the size guard and then `std::fs::read(path)`,
+  which opens and `fstat`s the descriptor anyway — so the standalone `metadata`
+  was a second *by-path* lookup for an answer already available for free. The
+  guard now runs off the opened descriptor, and the read goes through a `Take`
+  because std's `File` specialization of `read_to_end` re-`fstat`s to size its
+  buffer (which put the saved call straight back — measured, not assumed).
+  `statx` per item 2 → 1, syscalls per item 6 → 5. On a filesystem with 200 µs
+  per operation, a 2,000-item `clove search` went **739 ms → 595 ms (−19.5%)**.
+  Locally it is noise; the win is entirely on network/virtualised storage.
+
+- **Trigram search index — deferred, with a stated threshold.** Measured in full
+  (see below). Ship it when a real store crosses **~25k items** (warm scan passes
+  ~150 ms, cold ~700 ms) **or** a user reports search latency on a
+  networked/virtualised store — behind `[index] trigram = false` by default.
+
+  *Why it is worth having, eventually.* The scan issues 6 syscalls per item —
+  300,339 at 50k — so on a filesystem where every operation is a round trip it
+  dominates completely. At 50k with 200 µs/op: scan **18,545 ms** vs trigram
+  **12 ms** (1,545×). Modelled by device: local SSD 1.4 s vs 8 ms; cloud network
+  SSD 10.4 s vs 44 ms; 7200 rpm HDD 166 s vs 0.7 s.
+
+  *Why not now.* Store size is not the crossover variable — **selectivity is**.
+  The scan is O(items) and needle-independent; the index is O(hits). A 0%-match
+  needle is 350× faster, ~5% is 12×, ~67% is 1.4×, and **~99% is 0.93× — it
+  loses**. So does any needle under 3 characters, which trigram cannot index at
+  all. Against that: **+260% on `index.db`** (4.6 → 16.7 MB at 10k), ~4× reindex,
+  ~15% on every item edit, plus a merge/optimize policy (17% bloat per half-store
+  churn). And it puts a second matcher back on the one read path §6.1
+  deliberately collapsed to a single tier.
+
+  *The correctness rule, which is not optional.* Index our own `fold_needle`
+  output with `tokenize='trigram case_sensitive 1'` so SQLite folds nothing
+  itself; the prefilter is then a superset by construction. Verified across 76
+  needles — mid-word (`ebhook`→webhook), `Ünicode`/`İstanbul`/`Straße`,
+  decomposed vs precomposed `café`, FTS5 syntax as literal text, 1–2 char
+  fallbacks — **zero prefilter misses**. But the variant that answers entirely in
+  SQL and never reads a file **reproduced §6.1's bug in a new costume**: with
+  labels joined into one column, `alpha\nbeta` matched across a label boundary
+  that `match_class` never would. So: the tier narrows *candidates*; the files
+  answer. A convenient concatenation is not a valid model of the matcher.
+
+  *Shape.* `detail='none', columnsize=0` (12 MB at 10k vs 48 MB for the phrase
+  shape, identical candidate sets), `contentless_delete=1` (bundled SQLite is
+  3.50.2), an id↔rowid map — deleting by an `UNINDEXED` id column is a full table
+  scan and costs 7.6 ms/edit instead of 0.6 ms. Never store content.
+  `Engine::search` gains exactly one tier (`Source::Index`), no daemon tier. A
+  stale index must fall to the file scan, never answer — a stale trigram drops
+  rows, which is a *missing hit*, not a stale column.
+
 - **Windows: the daemon pipe name is a hash of the un-canonicalized path.**
   `clove_ipc::repo_hash` is FNV-1a over `clove_dir.as_str()`, and the Windows
   named pipe is `\\.\pipe\clove-<hash>`. Two spellings of the same directory —
