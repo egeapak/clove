@@ -738,6 +738,17 @@ None of these is a regression from this work — the first two are pre-existing 
   blocked, `blocked --limit 1`: daemon 29 ms, index 10 ms, files 33 ms — the
   daemon tier is barely better than a full file scan, and degrades as the blocked
   set grows. Fixing it is a protocol bump (`QueryKind::Blocked`).
+- **Windows: the daemon pipe name is a hash of the un-canonicalized path.**
+  `clove_ipc::repo_hash` is FNV-1a over `clove_dir.as_str()`, and the Windows
+  named pipe is `\\.\pipe\clove-<hash>`. Two spellings of the same directory —
+  `C:\Repo` vs `c:\repo`, a `subst` drive, a junction — therefore hash to
+  different pipes, so two clients silently fail to share a daemon and each falls
+  back to the index. Answers stay correct; the daemon tier just never engages.
+  Unix is unaffected (the socket is a real file, so any spelling resolves to it).
+  Not exercised today: every daemon test in the repo is `#[cfg(unix)]`, which is
+  also why this went unnoticed. Canonicalizing before hashing would fix it, and
+  would be a pipe-name change (i.e. a compatibility break for a running daemon).
+
 - **`DELETE /api/v1/items/:id?force=`** is still a lenient `== "true"`, so
   `?force=1` — the spelling `?compact=1` accepts — is silently ignored. It fails
   *safe* (a delete is refused, never forced), which is why §7 left it, but it is
