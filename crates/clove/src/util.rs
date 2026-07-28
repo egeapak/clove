@@ -1,12 +1,12 @@
 //! Small parsing helpers shared across commands.
 
-use chrono::{DateTime, Timelike, Utc};
+use chrono::{DateTime, Utc};
 use clove_types::{CloveError, CloveId, ItemStatus, Priority};
 
 /// The current time truncated to whole seconds (the canonical on-disk timestamp
 /// precision; matches `ItemStore`'s internal truncation).
 pub fn now_seconds() -> DateTime<Utc> {
-    Utc::now().with_nanosecond(0).unwrap_or_else(Utc::now)
+    clove_types::truncate_to_seconds(Utc::now())
 }
 
 /// Parse and validate an item id argument.

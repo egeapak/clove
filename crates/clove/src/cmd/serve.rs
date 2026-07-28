@@ -14,7 +14,13 @@ use clove_web::AppState;
 use crate::cli::ServeArgs;
 use crate::context::Ctx;
 
-pub fn run(ctx: &Ctx, args: ServeArgs, quiet: bool) -> Result<(), CloveError> {
+pub fn run(
+    ctx: &Ctx,
+    args: ServeArgs,
+    quiet: bool,
+    no_index: bool,
+    deep: bool,
+) -> Result<(), CloveError> {
     // Hand off to a running daemon if it is already serving the web UI: the
     // daemon serves by default, so we point the user at it instead of binding a
     // second server (and blocking this process).
@@ -68,7 +74,11 @@ pub fn run(ctx: &Ctx, args: ServeArgs, quiet: bool) -> Result<(), CloveError> {
         "standalone",
         false,
         ctx.config.default_type,
-    );
+    )
+    // `--no-index`/`--deep` are global flags; `serve` used to drop them. Before
+    // the engine the web always read files, so "force a file scan" was kept by
+    // accident — afterwards it was simply false.
+    .with_read_tiers(!no_index, !no_index, deep);
 
     if !quiet {
         eprintln!("clove web UI: {url}");

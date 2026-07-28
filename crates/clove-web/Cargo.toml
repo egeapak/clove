@@ -11,6 +11,7 @@ repository.workspace = true
 clove-types.workspace = true
 clove-core.workspace = true
 clove-index.workspace = true
+clove-engine.workspace = true
 axum.workspace = true
 tower-http.workspace = true
 tokio.workspace = true
@@ -29,6 +30,7 @@ flate2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+clove-index.workspace = true    # tests build a real index to exercise the index tier
 # tests/api.rs drives a real server over TCP with #[tokio::test]; use full tokio
 # for tests so the release lib can keep the trimmed feature set.
 tokio = { workspace = true, features = ["full"] }

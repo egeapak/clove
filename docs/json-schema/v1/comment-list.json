@@ -21,7 +21,30 @@
         "additionalProperties": false
       }
     },
-    "_meta": { "type": "object" }
+    "_meta": {
+      "description": "The comment window. Anchored at the NEWEST end: `limit` keeps the most recent comments and `skip_newest` pages back into older ones, which is why the skip key is not called `offset` (the list commands' `offset` counts from the start). `additionalProperties` is false so a new key has to be described here rather than shipping invisible to a client generated from this schema.",
+      "type": "object",
+      "properties": {
+        "total": {
+          "description": "Comments on the item BEFORE the window.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "returned": { "type": "integer", "minimum": 0 },
+        "skip_newest": {
+          "description": "How many of the newest comments were skipped.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "limit": {
+          "description": "The page size in force; 0 means unlimited, as everywhere else.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "warnings": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    }
   },
   "additionalProperties": false
 }

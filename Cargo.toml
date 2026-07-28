@@ -6,6 +6,7 @@ members = [
     "crates/clove-index",
     "crates/clove-import",
     "crates/clove-ipc",
+    "crates/clove-engine",
     "crates/clove-mcp",
     "crates/clove-tui",
     "crates/clove-web",
@@ -38,7 +39,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml_neo = "0.11"         # strict YAML (maintained serde_yaml fork); DESIGN §4/§14.2 pinned 0.9 but crates.io only has 0.10/0.11
 petgraph = { version = "0.6", default-features = false, features = ["stable_graph"] }  # DAG engine (graphmap/matrix_graph unused)
-rusqlite = { version = "0.37", features = ["bundled"] }  # embedded SQLite, no runtime dep (M1). DESIGN §1 named 0.40, but its libsqlite3-sys 0.38 build script needs unstable `cfg_select!`; 0.37 (libsqlite3-sys 0.35) builds on the pinned toolchain and still bundles SQLite ≥3.43 for FTS5 contentless_delete.
+rusqlite = { version = "0.37", features = ["bundled"] }  # embedded SQLite, no runtime dep (M1). DESIGN §1 named 0.40, but its libsqlite3-sys 0.38 build script needs unstable `cfg_select!`; 0.37 (libsqlite3-sys 0.35) builds on the pinned toolchain. (The pin was originally justified by FTS5 `contentless_delete`; the FTS was removed in index schema 6 — see roadmap §6.1 — so only the toolchain reason remains.)
 # file-watch (M3); 9.0-rc is NOT production-ready — do not bump. We use the
 # closure-callback watcher API, not the channel API, so drop the default
 # `crossbeam-channel` feature (notify falls back to std mpsc internally).
@@ -120,6 +121,7 @@ clove-core = { path = "crates/clove-core", version = "0.1.0" }
 clove-index = { path = "crates/clove-index", version = "0.1.0" }
 clove-import = { path = "crates/clove-import", version = "0.1.0", default-features = false }
 clove-ipc = { path = "crates/clove-ipc", version = "0.1.0" }
+clove-engine = { path = "crates/clove-engine", version = "0.1.0" }
 clove-mcp = { path = "crates/clove-mcp", version = "0.1.0" }
 clove-tui = { path = "crates/clove-tui", version = "0.1.0" }
 clove-web = { path = "crates/clove-web", version = "0.1.0" }

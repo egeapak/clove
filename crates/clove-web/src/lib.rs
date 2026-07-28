@@ -50,8 +50,16 @@ pub struct AppState {
     /// The configured default item type, honored by `POST /items` when the
     /// request omits a type (matches every other surface's `config.default_type`).
     pub default_type: ItemType,
-    /// Serving mode label surfaced to clients: `"standalone"` or `"daemon"`.
+    /// Serving mode label surfaced to clients on `GET /api/v1/meta`:
+    /// `"standalone"` or `"daemon"`.
+    ///
+    /// Note this is **not** `_meta.source` on the read endpoints. That names the
+    /// tier that answered (`daemon`/`index`/`files`), as it does on the CLI —
+    /// this field used to be reported there too, which meant a `cloved`-hosted
+    /// server claimed `"daemon"` for an answer it had just scanned off disk.
     pub source: String,
+    /// The tiered read path: daemon → index → files.
+    pub engine: clove_engine::Engine,
     /// Whether a daemon is known to be running for this repo.
     pub daemon_running: bool,
     /// The real-time event fan-out channel.
@@ -72,17 +80,70 @@ impl AppState {
         default_type: ItemType,
     ) -> Self {
         let (events, _rx) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
+        let source = source.into();
+        let clove_dir = issues_dir
+            .parent()
+            .map(Utf8PathBuf::from)
+            .unwrap_or_else(|| issues_dir.clone());
+        // `load_config` takes the directory *containing* `.clove/`.
+        let clove_dir_for_config = clove_dir
+            .parent()
+            .map(Utf8PathBuf::from)
+            .unwrap_or_else(|| clove_dir.clone());
+        let engine = clove_engine::Engine::new(
+            store.clone(),
+            clove_dir,
+            clove_engine::Tiers {
+                // The daemon-hosted server **is** the daemon: an RPC to itself
+                // would cross its own two-worker runtime for an answer it
+                // already holds, and its index tier reads the very file the
+                // daemon keeps fresh. A standalone `clove serve` does route to a
+                // daemon when one is up.
+                daemon: source != "daemon",
+                index: true,
+                deep: false,
+                // The repo's policy, not the server's: hardcoding `true` made a
+                // web read freshen (and so write to) an index in a repo whose
+                // config disabled exactly that.
+                auto_refresh: clove_engine::Tiers::for_repo(clove_dir_for_config.as_path())
+                    .auto_refresh,
+            },
+        );
         Self {
             store,
             issues_dir,
             id_prefix,
             default_type,
-            source: source.into(),
+            source,
             daemon_running,
             events,
+            engine,
             seq: Arc::new(AtomicU64::new(0)),
             heartbeat: None,
         }
+    }
+
+    /// Override the read tiers — `clove serve --no-index` / `--deep`.
+    ///
+    /// Those two flags are documented as global ("force a file scan even if an
+    /// index is present"), and `serve` silently dropped them: before the engine
+    /// existed the web always read files, so the promise was kept by accident;
+    /// afterwards it was simply false, and `clove --no-index serve` answered
+    /// from the index.
+    pub fn with_read_tiers(mut self, daemon: bool, index: bool, deep: bool) -> Self {
+        let tiers = clove_engine::Tiers {
+            daemon: daemon && self.source != "daemon",
+            index,
+            deep,
+            auto_refresh: self.engine.tiers().auto_refresh,
+        };
+        let clove_dir = self
+            .issues_dir
+            .parent()
+            .map(Utf8PathBuf::from)
+            .unwrap_or_else(|| self.issues_dir.clone());
+        self.engine = clove_engine::Engine::new(self.store.clone(), clove_dir, tiers);
+        self
     }
 
     /// Attach a per-request hook (the daemon passes one that resets its

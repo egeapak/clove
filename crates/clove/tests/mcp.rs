@@ -23,6 +23,12 @@ fn clove(dir: &Path) -> Command {
     cmd
 }
 
+/// The id from a `clove new --format json` stdout.
+fn new_id(out: &[u8]) -> String {
+    let v: Value = serde_json::from_slice(out).unwrap();
+    v["data"]["id"].as_str().unwrap().to_owned()
+}
+
 fn init_repo() -> TempDir {
     let dir = tempfile::tempdir().unwrap();
     clove(dir.path())
@@ -128,14 +134,15 @@ fn handshake_and_tools_list() {
 
     let resp = s.request(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
     let tools = resp["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 14, "all 14 tools advertised");
-    let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    for expected in [
+    // The wire contract, maintained by hand on purpose: this is what a client
+    // sees, so a tool appearing or vanishing should be a deliberate edit here.
+    const EXPECTED: &[&str] = &[
         "clove_ready",
         "clove_blocked",
         "clove_list",
         "clove_show",
         "clove_search",
+        "clove_comments",
         "clove_dep_tree",
         "clove_stats",
         "clove_new",
@@ -145,8 +152,15 @@ fn handshake_and_tools_list() {
         "clove_dep_add",
         "clove_dep_remove",
         "clove_set_parent",
-    ] {
-        assert!(names.contains(&expected), "missing tool {expected}");
+    ];
+    assert_eq!(
+        tools.len(),
+        EXPECTED.len(),
+        "advertised tool count drifted from the expected set"
+    );
+    let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+    for expected in EXPECTED {
+        assert!(names.contains(expected), "missing tool {expected}");
     }
     // Each tool publishes an input schema object.
     let ready = tools.iter().find(|t| t["name"] == "clove_ready").unwrap();
@@ -260,7 +274,7 @@ fn starts_without_a_repository() {
 
     // Handshake already succeeded inside Session::start; tools are still listed.
     let resp = s.request(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
-    assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 14);
+    assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 15);
 
     // A read tool returns a tool error (not a protocol error / crash) because
     // there is no repository yet.
@@ -366,6 +380,325 @@ fn resources_are_listed_and_readable() {
     s.shutdown();
 }
 
+/// An agent can read back what it wrote. Before `clove_comments`, `clove_comment`
+/// was write-only over MCP — `clove_show` reported a `comment_count` and nothing
+/// else, so findings an agent recorded were unreachable in a later session.
+#[test]
+fn comments_round_trip_through_mcp() {
+    let dir = init_repo();
+    let mut s = Session::start(dir.path());
+
+    let created = s.call(2, "clove_new", json!({ "title": "investigate" }));
+    let id = created["structuredContent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    for note in ["first finding", "second finding", "third finding"] {
+        let r = s.call(3, "clove_comment", json!({ "id": id, "message": note }));
+        assert_ne!(r["isError"], true, "comment failed: {r}");
+    }
+
+    let all = s.call(4, "clove_comments", json!({ "id": id }));
+    let page = &all["structuredContent"];
+    assert_eq!(page["total"], 3);
+    assert_eq!(page["returned"], 3);
+    let bodies: Vec<&str> = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["body"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        bodies,
+        vec!["first finding", "second finding", "third finding"],
+        "comments come back oldest-first"
+    );
+    // Authorship is attributed, but lossily: comments carry the author only in
+    // their file name, so it is stored as a filename-safe slug
+    // (`tester@example.com` -> `tester-example-com`) and the original address is
+    // not recoverable. Pinned here so the MCP surface's fidelity is explicit.
+    assert_eq!(page["items"][0]["author"], "tester-example-com");
+
+    // `limit` keeps the most recent, matching `clove comments --limit`.
+    let last = s.call(5, "clove_comments", json!({ "id": id, "limit": 1 }));
+    assert_eq!(
+        last["structuredContent"]["items"][0]["body"],
+        "third finding"
+    );
+    assert_eq!(
+        last["structuredContent"]["total"], 3,
+        "total is the unpaginated count"
+    );
+
+    // A missing item is a tool error, not an empty page.
+    let missing = s.call(6, "clove_comments", json!({ "id": "proj-ZZZZZZZZ" }));
+    assert_eq!(missing["isError"], true);
+
+    s.shutdown();
+}
+
+/// Every list-shaped read tool honours the *same* `offset`/`limit` contract:
+/// absent → the surface default, `0` → unlimited, `n` → at most `n`; `total` is
+/// always the pre-pagination match count and `limit` is echoed back.
+///
+/// Before the shared `Page` existed only `clove_list` had an `offset` at all —
+/// `clove_ready` / `clove_blocked` / `clove_search` hard-coded it to zero, so an
+/// agent that hit the limit had no way to reach the rest of the matches.
+#[test]
+fn every_list_tool_pages_the_same_way() {
+    let dir = init_repo();
+    let mut s = Session::start(dir.path());
+
+    // One blocker plus five items that depend on it: `blocked` sees the five,
+    // `ready` sees the blocker alone once the five are wired up.
+    let blocker = s.call(2, "clove_new", json!({ "title": "page blocker" }));
+    let blocker = blocker["structuredContent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for n in 0..5 {
+        let r = s.call(
+            3,
+            "clove_new",
+            json!({ "title": format!("page item {n}"), "deps": [blocker] }),
+        );
+        assert_ne!(r["isError"], true, "create failed: {r}");
+    }
+
+    // Ids in the tool's own order, so the paging assertions below compare
+    // against ground truth rather than a guess about the sort.
+    let ids = |s: &mut Session, tool: &str, args: Value| -> Vec<String> {
+        let r = s.call(9, tool, args);
+        assert_ne!(r["isError"], true, "{tool} failed: {r}");
+        r["structuredContent"]["items"]
+            .as_array()
+            .expect("items array")
+            .iter()
+            .map(|i| i["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+
+    for (tool, args, expected_total) in [
+        ("clove_blocked", json!({}), 5),
+        ("clove_list", json!({}), 6),
+        ("clove_search", json!({ "text": "page" }), 6),
+    ] {
+        let with = |extra: Value| -> Value {
+            let mut merged = args.as_object().unwrap().clone();
+            for (k, v) in extra.as_object().unwrap() {
+                merged.insert(k.clone(), v.clone());
+            }
+            Value::Object(merged)
+        };
+
+        // The unpaginated order is the reference for every window below.
+        let all = ids(&mut s, tool, with(json!({ "limit": 0 })));
+        assert_eq!(all.len(), expected_total, "{tool}: limit 0 is unlimited");
+
+        let page = s.call(9, tool, with(json!({ "offset": 2, "limit": 2 })));
+        let meta = &page["structuredContent"];
+        assert_eq!(meta["total"], expected_total, "{tool}: total is pre-window");
+        assert_eq!(meta["returned"], 2, "{tool}: returned is post-window");
+        assert_eq!(meta["offset"], 2, "{tool}: offset is echoed");
+        assert_eq!(meta["limit"], 2, "{tool}: limit is echoed");
+        let windowed: Vec<String> = meta["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["id"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(
+            windowed,
+            all[2..4],
+            "{tool}: offset skips, it does not clamp"
+        );
+
+        // Walking past the end is an empty page, not an error or a wrap-around.
+        let past = s.call(9, tool, with(json!({ "offset": 99 })));
+        assert_eq!(past["structuredContent"]["returned"], 0, "{tool}: past end");
+        assert_eq!(
+            past["structuredContent"]["total"], expected_total,
+            "{tool}: total survives an out-of-range offset"
+        );
+    }
+
+    // `clove_ready` shares the contract even though only the blocker is ready.
+    let ready = s.call(9, "clove_ready", json!({ "offset": 1 }));
+    assert_eq!(ready["structuredContent"]["total"], 1);
+    assert_eq!(ready["structuredContent"]["returned"], 0);
+    assert_eq!(ids(&mut s, "clove_ready", json!({})), vec![blocker]);
+
+    // The default is the MCP default, echoed back rather than left to folklore.
+    assert_eq!(
+        s.call(9, "clove_list", json!({}))["structuredContent"]["limit"],
+        50
+    );
+
+    s.shutdown();
+}
+
+/// Read results are compacted by default and can be projected to a field
+/// subset. Both cut what an agent has to read; neither changes what the CLI,
+/// the web API, or `export json` produce.
+#[test]
+fn read_results_are_compact_and_projectable() {
+    let dir = init_repo();
+    let mut s = Session::start(dir.path());
+    s.call(2, "clove_new", json!({ "title": "shape me" }));
+
+    // Default: keys that are null or empty on a plain item are gone, but a
+    // definite `false` is not.
+    let default = s.call(3, "clove_list", json!({}));
+    let row = &default["structuredContent"]["items"][0];
+    for absent in [
+        "assignee",
+        "parent",
+        "closed",
+        "labels",
+        "deps",
+        "relates",
+        "duplicates",
+        "supersedes",
+        "source_system",
+        "external_ref",
+        "schema",
+    ] {
+        assert!(row.get(absent).is_none(), "`{absent}` should be compacted");
+    }
+    assert!(row.get("id").is_some());
+    assert!(row.get("title").is_some());
+    // The page envelope is never shaped away.
+    assert_eq!(default["structuredContent"]["total"], 1);
+    assert_eq!(default["structuredContent"]["returned"], 1);
+
+    // `fields` projects, and is honoured literally.
+    let projected = s.call(4, "clove_list", json!({ "fields": ["id", "title"] }));
+    let row = &projected["structuredContent"]["items"][0];
+    assert_eq!(
+        row.as_object().unwrap().len(),
+        2,
+        "exactly the two asked for"
+    );
+    assert!(row.get("id").is_some() && row.get("title").is_some());
+
+    // `compact: false` restores the pre-existing full shape for any client that
+    // depended on it.
+    let full = s.call(5, "clove_list", json!({ "compact": false }));
+    let row = &full["structuredContent"]["items"][0];
+    assert!(row["assignee"].is_null(), "opt-out returns the null keys");
+    assert_eq!(row["labels"], json!([]));
+    assert_eq!(row["schema"], 1);
+
+    // `clove_show` shapes too, and `ready: false` survives compaction — it is an
+    // answer, not an absence.
+    let id = default["structuredContent"]["items"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let shown = s.call(6, "clove_show", json!({ "id": id }));
+    assert_eq!(shown["structuredContent"]["ready"], true);
+    assert!(shown["structuredContent"].get("assignee").is_none());
+
+    s.shutdown();
+}
+
+/// A tool error reads the same whether or not a daemon is running.
+///
+/// Read tools never reach the daemon and write tools fall back to local ops
+/// when none is up, so the classification being shared was not enough: the
+/// daemon rendered `CODE: message` and the local path rendered just `message`.
+/// Within one session `clove_show` and `clove_status` disagreed about the same
+/// missing id, and a script updated to match the documented `ITEM_NOT_FOUND:`
+/// spelling broke again the moment the daemon stopped.
+#[test]
+fn error_text_carries_the_code_without_a_daemon() {
+    let dir = init_repo();
+    let mut s = Session::start(dir.path());
+
+    for tool in ["clove_show", "clove_comments", "clove_dep_tree"] {
+        let r = s.call(2, tool, json!({ "id": "proj-ZZZZZZZZ" }));
+        assert_eq!(r["isError"], true, "{tool} should error");
+        let text = r["content"][0]["text"].as_str().unwrap_or_default();
+        assert!(
+            text.contains("ITEM_NOT_FOUND"),
+            "{tool} must name the code like the daemon does: {text}"
+        );
+    }
+
+    // A write tool on the local fallback path renders the same way.
+    let r = s.call(
+        3,
+        "clove_status",
+        json!({ "id": "proj-ZZZZZZZZ", "status": "closed" }),
+    );
+    assert_eq!(r["isError"], true);
+    let text = r["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(text.contains("ITEM_NOT_FOUND"), "got {text}");
+
+    // A validation failure carries its own code, not a generic one.
+    let created = s.call(4, "clove_new", json!({ "title": "real" }));
+    let id = created["structuredContent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let r = s.call(5, "clove_edit", json!({ "id": id, "priority": 9 }));
+    assert_eq!(r["isError"], true);
+    let text = r["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(
+        text.contains("VALIDATION_ERROR"),
+        "a bad priority is a validation error: {text}"
+    );
+
+    s.shutdown();
+}
+
+/// `clove_dep_tree {depth: 0}` means unlimited, as `--depth 0` does on the CLI
+/// and as DESIGN §7.8 says. It used to pass 0 through, returning the root with
+/// no children — a client asking for the whole tree got one node and no error.
+#[test]
+fn dep_tree_depth_zero_is_unlimited() {
+    let dir = init_repo();
+    let mut s = Session::start(dir.path());
+    let mut previous: Option<String> = None;
+    for i in 0..4 {
+        let args = match &previous {
+            Some(dep) => json!({ "title": format!("level {i}"), "deps": [dep] }),
+            None => json!({ "title": format!("level {i}") }),
+        };
+        let created = s.call(2, "clove_new", args);
+        previous = Some(
+            created["structuredContent"]["id"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        );
+    }
+    let root = previous.unwrap();
+
+    let depth = |v: &Value| -> usize {
+        let mut n = 0;
+        let mut node = v;
+        while node["children"].as_array().map(|c| !c.is_empty()) == Some(true) {
+            node = &node["children"][0];
+            n += 1;
+        }
+        n
+    };
+
+    let full = s.call(3, "clove_dep_tree", json!({ "id": root, "depth": 0 }));
+    assert_eq!(
+        depth(&full["structuredContent"]),
+        3,
+        "depth 0 must return the whole chain, not the root alone"
+    );
+    // A real depth still bounds it.
+    let bounded = s.call(4, "clove_dep_tree", json!({ "id": root, "depth": 1 }));
+    assert_eq!(depth(&bounded["structuredContent"]), 1);
+
+    s.shutdown();
+}
+
 #[test]
 fn tool_error_is_reported_as_is_error() {
     let dir = init_repo();
@@ -448,6 +781,60 @@ fn auto_starts_daemon_and_heartbeats() {
     s.shutdown();
 
     // Tear down the spawned daemon so the test leaves nothing running.
+    if let Ok(pid) = std::fs::read_to_string(clove_dir.join("daemon.pid")) {
+        if let Ok(pid) = pid.trim().parse::<i32>() {
+            unsafe {
+                libc_kill(pid, 15);
+            }
+        }
+    }
+}
+
+/// A write the *daemon* rejects must carry the same error classification the
+/// same failure produces locally. `cloved` used to emit a private code set
+/// (`not_found`, `op_failed`, …) that collapsed distinct failure classes into
+/// one bucket; it now emits `clove_types::error_code`, so the wire code matches
+/// the local one and the numeric exit rides along with it.
+///
+/// Unix-only + escargot-built `cloved`, matching the other daemon tests here.
+#[cfg(unix)]
+#[test]
+fn daemon_rejected_write_carries_the_shared_error_code() {
+    extern "C" {
+        #[link_name = "kill"]
+        fn libc_kill(pid: i32, sig: i32) -> i32;
+    }
+
+    let dir = init_repo();
+    let clove_dir = camino::Utf8PathBuf::from_path_buf(dir.path().join(".clove")).unwrap();
+    let cloved = escargot::CargoBuild::new()
+        .package("cloved")
+        .bin("cloved")
+        .run()
+        .expect("build cloved for the error-classification test");
+
+    let mut cmd = clove(dir.path());
+    cmd.env("CLOVED_PATH", cloved.path())
+        .env("CLOVED_DISABLE_WEB", "1");
+    let mut s = Session::start_cmd(cmd);
+
+    // A well-formed id with no backing item: the write routes to the daemon,
+    // which rejects it. (A malformed id would fail client-side and never reach
+    // the daemon, so it would not exercise the wire at all.)
+    let result = s.call(
+        2,
+        "clove_status",
+        json!({ "id": "proj-ZZZZZZZZ", "status": "closed" }),
+    );
+    assert_eq!(result["isError"], true, "missing item must be an error");
+    let text = result["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(
+        text.contains("ITEM_NOT_FOUND"),
+        "daemon error must carry the shared code, got: {text:?}"
+    );
+
+    s.shutdown();
+
     if let Ok(pid) = std::fs::read_to_string(clove_dir.join("daemon.pid")) {
         if let Ok(pid) = pid.trim().parse::<i32>() {
             unsafe {
@@ -572,4 +959,611 @@ fn subscribed_resource_updated_on_mutation() {
             }
         }
     }
+}
+
+/// The MCP read tools take the same `sort`/`desc` the CLI and web take, and
+/// echo the applied ordering back in the page payload.
+///
+/// `clove_list` reads files directly (no index, no daemon), so this is a third
+/// implementation path over the same `view::Order`; without the argument an
+/// agent asking "what changed most recently" had to pull the whole store and
+/// sort client-side.
+#[test]
+fn read_tools_sort_and_echo_the_order() {
+    let dir = init_repo();
+    let mut s = Session::start(dir.path());
+
+    // Three items whose id order, priority order, and title order all differ.
+    let mut ids = Vec::new();
+    for (title, priority) in [("gamma", 0u8), ("alpha", 4), ("beta", 2)] {
+        let created = s.call(
+            ids.len() as i64 + 2,
+            "clove_new",
+            json!({ "title": title, "priority": priority }),
+        );
+        ids.push((
+            title,
+            created["structuredContent"]["id"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        ));
+    }
+    let titles = |result: &Value| -> Vec<String> {
+        result["structuredContent"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["title"].as_str().unwrap().to_owned())
+            .collect()
+    };
+
+    // Default: rank — priority first.
+    let listed = s.call(10, "clove_list", json!({}));
+    assert_eq!(titles(&listed), vec!["gamma", "beta", "alpha"]);
+    assert_eq!(listed["structuredContent"]["sort"], "rank");
+    assert_eq!(listed["structuredContent"]["dir"], "asc");
+
+    // Sorted by id, which is NOT creation order: clove ids carry a random
+    // suffix, so `want` is sorted rather than assumed. Without that, a `sort`
+    // that was silently ignored would coincide with the expected order about
+    // one run in six and the test would pass on a broken implementation.
+    let by_id = s.call(11, "clove_list", json!({ "sort": "id" }));
+    let mut want: Vec<String> = ids.iter().map(|(_, id)| id.clone()).collect();
+    want.sort();
+    let got: Vec<String> = by_id["structuredContent"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(got, want);
+    assert_eq!(by_id["structuredContent"]["sort"], "id");
+
+    // `desc` reverses.
+    let desc = s.call(
+        12,
+        "clove_list",
+        json!({ "sort": "priority", "desc": true }),
+    );
+    assert_eq!(titles(&desc), vec!["alpha", "beta", "gamma"]);
+    assert_eq!(desc["structuredContent"]["dir"], "desc");
+
+    // `clove_ready` takes it too.
+    let ready = s.call(
+        13,
+        "clove_ready",
+        json!({ "sort": "priority", "desc": true }),
+    );
+    assert_eq!(titles(&ready), vec!["alpha", "beta", "gamma"]);
+
+    // Search keeps relevance as its default and reports it as such.
+    //
+    // The two extra items are arranged so relevance and priority *disagree*: a
+    // title hit at the lowest priority against a body hit at the highest. With
+    // the needle in every title the two orders coincide, and an ignored `sort`
+    // would pass unnoticed.
+    s.call(
+        20,
+        "clove_new",
+        json!({ "title": "zeta needle", "priority": 4 }),
+    );
+    s.call(
+        21,
+        "clove_new",
+        json!({ "title": "omega", "priority": 0, "body": "mentions needle here" }),
+    );
+
+    let found = s.call(22, "clove_search", json!({ "text": "needle" }));
+    assert_eq!(found["structuredContent"]["sort"], "relevance");
+    assert_eq!(
+        titles(&found),
+        vec!["zeta needle", "omega"],
+        "relevance: the title hit leads despite the lower priority"
+    );
+    let sorted = s.call(
+        23,
+        "clove_search",
+        json!({ "text": "needle", "sort": "priority" }),
+    );
+    assert_eq!(sorted["structuredContent"]["sort"], "priority");
+    assert_eq!(
+        titles(&sorted),
+        vec!["omega", "zeta needle"],
+        "an explicit sort replaces the relevance key entirely"
+    );
+
+    // Negative: an unknown field is an error, not a silent default.
+    let bad = s.call(16, "clove_list", json!({ "sort": "nope" }));
+    assert_eq!(bad["isError"], true);
+
+    s.shutdown();
+}
+
+/// Read-path §2 on the MCP surface: the filter arguments take **one value or a
+/// list**, and the single-value spelling means exactly what it always did.
+///
+/// That compatibility is the whole point of the `#[serde(untagged)]` wrapper —
+/// an agent that has been sending `"status": "open"` since before multi-value
+/// existed must not start getting an argument error — so both spellings are
+/// driven here over the real JSON-RPC wire rather than unit-tested on the
+/// deserializer.
+#[test]
+fn filter_args_take_one_value_or_many() {
+    let dir = init_repo();
+    let mut s = Session::start(dir.path());
+
+    // Four items spanning two types, two priorities, and two labels. `alpha`
+    // carries both labels; `beta` carries one — the pair that separates AND-ed
+    // labels from OR-ed ones.
+    let mk = |s: &mut Session, id: i64, title: &str, ty: &str, pri: u8, labels: Value| {
+        let r = s.call(
+            id,
+            "clove_new",
+            json!({ "title": title, "type": ty, "priority": pri, "labels": labels }),
+        );
+        assert_ne!(r["isError"], true, "create failed: {r}");
+        r["structuredContent"]["id"].as_str().unwrap().to_owned()
+    };
+    let alpha = mk(
+        &mut s,
+        2,
+        "alpha widget",
+        "bug",
+        0,
+        json!(["area:core", "area:ios"]),
+    );
+    let beta = mk(&mut s, 3, "beta gizmo", "feature", 1, json!(["area:core"]));
+    let gamma = mk(&mut s, 4, "gamma widget", "chore", 2, json!(["area:ios"]));
+    let delta = mk(&mut s, 5, "delta thing", "docs", 3, json!([]));
+
+    let titles = |s: &mut Session, args: Value| -> Vec<String> {
+        let r = s.call(9, "clove_list", args);
+        assert_ne!(r["isError"], true, "clove_list failed: {r}");
+        let mut out: Vec<String> = r["structuredContent"]["items"]
+            .as_array()
+            .expect("items array")
+            .iter()
+            .map(|i| i["title"].as_str().unwrap().to_owned())
+            .collect();
+        out.sort();
+        out
+    };
+
+    // The scalar spellings, unchanged.
+    assert_eq!(titles(&mut s, json!({ "type": "bug" })), ["alpha widget"]);
+    assert_eq!(titles(&mut s, json!({ "priority": 1 })), ["beta gizmo"]);
+    assert_eq!(
+        titles(&mut s, json!({ "label": "area:ios" })),
+        ["alpha widget", "gamma widget"]
+    );
+    assert_eq!(titles(&mut s, json!({ "status": "open" })).len(), 4);
+
+    // ...and the list spellings, which are new.
+    assert_eq!(
+        titles(&mut s, json!({ "type": ["bug", "docs"] })),
+        ["alpha widget", "delta thing"]
+    );
+    assert_eq!(
+        titles(&mut s, json!({ "priority": [0, 3] })),
+        ["alpha widget", "delta thing"]
+    );
+    assert_eq!(
+        titles(&mut s, json!({ "label": ["area:core", "area:ios"] })),
+        ["alpha widget"],
+        "labels are AND-ed: only the item carrying both survives"
+    );
+    assert_eq!(
+        titles(&mut s, json!({ "status": ["open", "closed"] })).len(),
+        4
+    );
+
+    // `q` filters id/title/labels, never the body.
+    assert_eq!(
+        titles(&mut s, json!({ "q": "widget" })),
+        ["alpha widget", "gamma widget"]
+    );
+    assert_eq!(
+        titles(&mut s, json!({ "q": "area:core" })),
+        ["alpha widget", "beta gizmo"],
+        "`q` sees labels"
+    );
+    assert!(titles(&mut s, json!({ "q": "nothing-here" })).is_empty());
+
+    // Combined across fields, all-of.
+    assert_eq!(
+        titles(
+            &mut s,
+            json!({ "type": ["bug", "chore"], "label": "area:ios", "q": "widget" })
+        ),
+        ["alpha widget", "gamma widget"]
+    );
+
+    // `_meta`-equivalent echo: the page object reports the parsed filter set,
+    // canonicalized (the shouted label comes back lowercased).
+    let page = s.call(
+        10,
+        "clove_list",
+        json!({ "label": ["AREA:Core"], "status": "started" }),
+    );
+    let filters = &page["structuredContent"]["filters"];
+    assert_eq!(filters["labels"], json!(["area:core"]), "{filters}");
+    assert_eq!(
+        filters["status"],
+        json!(["in_progress"]),
+        "the `started` alias is echoed canonically: {filters}"
+    );
+
+    // `clove_blocked` and `clove_ready` share the same argument struct.
+    for tool in ["clove_ready", "clove_blocked"] {
+        let r = s.call(
+            11,
+            tool,
+            json!({ "type": ["bug", "docs"], "label": "area:core" }),
+        );
+        assert_ne!(r["isError"], true, "{tool} rejected a list filter: {r}");
+    }
+
+    // An invalid element is an error, not a filter that quietly matches nothing.
+    let bad = s.call(12, "clove_list", json!({ "status": ["open", "paused"] }));
+    assert_eq!(bad["isError"], true, "{bad}");
+
+    // The published schema advertises both shapes, so an agent reading
+    // `tools/list` knows the list form is legal.
+    let resp = s.request(json!({ "jsonrpc": "2.0", "id": 13, "method": "tools/list" }));
+    let tools = resp["result"]["tools"].as_array().unwrap();
+    let list = tools.iter().find(|t| t["name"] == "clove_list").unwrap();
+    let schema = &list["inputSchema"];
+    assert!(schema["properties"]["q"].is_object(), "q is published");
+    // The multi-value fields are published as `$ref`s to a shared definition,
+    // so the reference has to resolve *inside this document* — a `$ref` with no
+    // matching `$defs` entry is a schema an agent cannot use.
+    for field in ["status", "type", "label"] {
+        let reference = schema["properties"][field]["anyOf"][0]["$ref"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{field} is not a $ref: {schema}"));
+        let name = reference.strip_prefix("#/$defs/").unwrap();
+        let def = &schema["$defs"][name];
+        assert!(!def.is_null(), "{field}: dangling $ref {reference}");
+        let branches: Vec<&str> = def["anyOf"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{field}: {def}"))
+            .iter()
+            .map(|b| b["type"].as_str().unwrap_or(""))
+            .collect();
+        assert!(
+            branches.contains(&"string"),
+            "{field} must still admit a bare string: {def}"
+        );
+        assert!(
+            branches.contains(&"array"),
+            "{field} must admit a list: {def}"
+        );
+    }
+
+    let _ = (alpha, beta, gamma, delta);
+    s.shutdown();
+}
+
+/// The MCP read tools are tiered, and they say which tier answered.
+///
+/// Before read-path §4 every `clove_list`/`clove_ready`/`clove_blocked` call
+/// scanned and parsed the whole store, even with a hot `.clove/index.db` beside
+/// it — the roadmap's "the MCP server pays a full store scan per call while a
+/// hot daemon sits idle". The tools now share `clove-engine`'s cascade with the
+/// CLI, and report the tier in `source` (the MCP page has no `_meta`).
+///
+/// The MCP daemon tier answers, reports itself, and agrees with the files.
+///
+/// Unix-only, like every other daemon test in this repo (`daemon_routing.rs`,
+/// `daemon_cli.rs`, and the `daemon` modules in `sort_order.rs`/`filter_parity.rs`
+/// are all `#[cfg(unix)]`). This one was not, so it was the only daemon test
+/// that ran on Windows — where it failed deterministically, because the
+/// named-pipe name is `FNV-1a` over the **un-canonicalized** `.clove` path
+/// string (`clove_ipc::repo_hash`), and a test that spawns `cloved` with a path
+/// it built itself does not necessarily spell it the way the server's own
+/// `discover()` does. In normal use the client spawns the daemon with its own
+/// string, so the two agree; see the roadmap for the residual fragility.
+#[cfg(unix)]
+///
+/// Every other MCP test sets `CLOVE_MCP_NO_DAEMON=1`, so the tier the engine
+/// extraction added for MCP had no automated coverage at all — and
+/// `read_tools_use_the_index_tier_and_report_it` actively depends on no daemon
+/// being up, so it could not have caught a broken daemon tier either.
+#[test]
+fn read_tools_use_the_daemon_tier_and_agree_with_the_files() {
+    let dir = init_repo();
+    for (title, priority) in [("alpha", 0), ("beta", 2), ("gamma", 1)] {
+        clove(dir.path())
+            .args(["new", title, "-p", &priority.to_string()])
+            .assert()
+            .success();
+    }
+    // Ground truth from the file path, before any daemon exists.
+    let want: Vec<String> = {
+        let out = clove(dir.path())
+            .args(["ls", "--no-index", "--sort", "priority", "-f", "json"])
+            .output()
+            .unwrap();
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+        v["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(want.len(), 3);
+
+    let cloved = escargot::CargoBuild::new()
+        .package("cloved")
+        .bin("cloved")
+        .run()
+        .expect("build cloved");
+    let mut daemon = std::process::Command::new(cloved.path())
+        .arg("run")
+        .arg("--clove-dir")
+        .arg(dir.path().join(".clove"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn cloved");
+    let pid = dir.path().join(".clove/daemon.pid");
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_secs(5) && !pid.exists() {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(pid.exists(), "daemon did not come up");
+
+    // A session WITHOUT the no-daemon opt-out: the engine may route to it.
+    let mut s = Session::start_cmd(clove(dir.path()));
+    let listed = s.call(2, "clove_list", json!({ "sort": "priority" }));
+    let page = &listed["structuredContent"];
+    assert_eq!(
+        page["source"], "daemon",
+        "the daemon tier must answer: {page}"
+    );
+    let got: Vec<String> = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(got, want, "the daemon tier must agree with the files");
+    assert_eq!(page["total"], 3);
+    s.shutdown();
+
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+}
+
+/// The output must not have changed shape: a tier answers the *query* in SQL and
+/// the engine then reads back only the page's item files, so the rows are still
+/// full items, not the five-column lean projection the CLI's `ls` renders.
+#[test]
+fn read_tools_use_the_index_tier_and_report_it() {
+    let dir = init_repo();
+    let a = new_id(
+        &clove(dir.path())
+            .args(["new", "alpha", "--format", "json"])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    let b = new_id(
+        &clove(dir.path())
+            .args(["new", "beta", "--format", "json"])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    clove(dir.path())
+        .args(["dep", "add", &a, &b])
+        .assert()
+        .success();
+    clove(dir.path()).arg("reindex").assert().success();
+
+    let mut s = Session::start(dir.path());
+
+    for (id, tool) in [(2, "clove_list"), (3, "clove_ready"), (4, "clove_blocked")] {
+        let out = s.call(id, tool, json!({ "compact": false }));
+        let page = &out["structuredContent"];
+        assert_eq!(
+            page["source"], "index",
+            "{tool} must answer from the index when one is live: {page}"
+        );
+        // A full row, hydrated per page — the lean projection carries none of
+        // these, so this is what proves the tier did not change the shape.
+        if let Some(row) = page["items"].get(0) {
+            assert!(row.get("created").is_some(), "{tool} row: {row}");
+            assert_eq!(row["schema"], 1, "{tool} row: {row}");
+        }
+    }
+
+    // `clove_blocked` still carries `blocked_by` on the tiered path.
+    let blocked = s.call(5, "clove_blocked", json!({}));
+    assert_eq!(blocked["structuredContent"]["items"][0]["id"], json!(a));
+    assert_eq!(
+        blocked["structuredContent"]["items"][0]["blocked_by"],
+        json!([b])
+    );
+
+    // `clove_search` has one tier by design (read-path §6.1), and says so even
+    // with the index sitting right there.
+    let found = s.call(6, "clove_search", json!({ "text": "alph" }));
+    assert_eq!(found["structuredContent"]["source"], "files");
+    assert_eq!(found["structuredContent"]["total"], 1, "substring match");
+
+    s.shutdown();
+}
+
+/// The tiered answer is the *same* answer: every item the file path returns,
+/// in the same order, with the same fields.
+#[test]
+fn the_index_tier_agrees_with_the_file_tier_for_the_mcp_tools() {
+    let dir = init_repo();
+    for title in ["alpha widget", "beta gizmo", "gamma widget"] {
+        clove(dir.path())
+            .args(["new", title, "--format", "json"])
+            .assert()
+            .success();
+    }
+
+    // No index yet: the file tier answers.
+    let mut s = Session::start(dir.path());
+    let files = s.call(2, "clove_list", json!({ "compact": false, "limit": 0 }));
+    assert_eq!(files["structuredContent"]["source"], "files");
+    s.shutdown();
+
+    clove(dir.path()).arg("reindex").assert().success();
+    let mut s = Session::start(dir.path());
+    let indexed = s.call(2, "clove_list", json!({ "compact": false, "limit": 0 }));
+    assert_eq!(
+        indexed["structuredContent"]["source"], "index",
+        "the index must answer, or this comparison is vacuous"
+    );
+    s.shutdown();
+
+    assert_eq!(
+        indexed["structuredContent"]["items"], files["structuredContent"]["items"],
+        "the tier must not change a single field"
+    );
+    assert_eq!(
+        indexed["structuredContent"]["total"],
+        files["structuredContent"]["total"]
+    );
+}
+
+/// The advertised `outputSchema` is a promise, so what the tools actually put in
+/// `structuredContent` has to keep it (read-path roadmap §7).
+///
+/// The MCP page payload had no published schema on any surface and no
+/// `outputSchema` in `tools/list`, so `limit: 0` meaning *unlimited* — the kind
+/// of thing a schema exists to state — was folklore a client could only learn by
+/// calling the tool. The five page tools now publish one; the MCP contract is
+/// that `structuredContent` validates against it, which is what this asserts,
+/// across the argument combinations that change the payload's shape (a
+/// projection, an explicit `compact: false`, a window, a filter set, the
+/// no-`filters` search page, and the newest-anchored comment page).
+#[test]
+fn published_output_schemas_validate_the_tool_results() {
+    let dir = init_repo();
+    let main = new_id(
+        &clove(dir.path())
+            .args(["new", "alpha widget", "--format", "json"])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    let dep = new_id(
+        &clove(dir.path())
+            .args(["new", "beta gizmo", "--format", "json", "--type", "bug"])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    clove(dir.path())
+        .args(["dep", "add", &main, &dep])
+        .assert()
+        .success();
+    clove(dir.path())
+        .args(["comment", &main, "a note"])
+        .assert()
+        .success();
+
+    let mut s = Session::start(dir.path());
+
+    // Which tools publish a schema is itself the contract: a tool that gains one
+    // has taken on the obligation below, and one that loses it silently stops
+    // being checked.
+    let resp = s.request(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
+    let tools = resp["result"]["tools"].as_array().unwrap().clone();
+    let with_schema: Vec<&str> = tools
+        .iter()
+        .filter(|t| t.get("outputSchema").is_some())
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        with_schema,
+        // `tools/list` is name-ordered.
+        vec![
+            "clove_blocked",
+            "clove_comments",
+            "clove_list",
+            "clove_ready",
+            "clove_search",
+        ],
+        "the set of tools publishing an outputSchema changed"
+    );
+
+    let compiled = |name: &str| {
+        let tool = tools.iter().find(|t| t["name"] == name).unwrap();
+        let schema = tool["outputSchema"].clone();
+        // A schema an agent cannot compile is worse than none.
+        (
+            jsonschema::validator_for(&schema).expect("outputSchema is a valid JSON Schema"),
+            schema,
+        )
+    };
+
+    // Every call below must both succeed *and* validate: an `isError` result has
+    // no `structuredContent`, which would make the validation vacuous.
+    let check = |session: &mut Session, id: i64, tool: &str, args: Value| {
+        let (validator, schema) = compiled(tool);
+        let result = session.call(id, tool, args.clone());
+        assert_ne!(result["isError"], true, "{tool} {args} failed: {result}");
+        let structured = result
+            .get("structuredContent")
+            .unwrap_or_else(|| panic!("{tool} returned no structuredContent: {result}"));
+        if let Err(e) = validator.validate(structured) {
+            panic!("{tool} {args}: {e}\npayload: {structured}\nschema: {schema}");
+        }
+        // The text copy is kept for clients that do not read structured results
+        // (the MCP spec's backwards-compatibility guidance), and it must stay the
+        // same document — a client may parse either one.
+        let text: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap())
+            .expect("content[0].text is the payload as JSON");
+        assert_eq!(&text, structured, "{tool}: the two copies diverged");
+        result.clone()
+    };
+
+    let page = check(&mut s, 3, "clove_list", json!({}));
+    assert_eq!(page["structuredContent"]["total"], 2, "{page}");
+    check(
+        &mut s,
+        4,
+        "clove_list",
+        json!({ "fields": ["id", "title"] }),
+    );
+    check(&mut s, 5, "clove_list", json!({ "compact": false }));
+    check(&mut s, 6, "clove_list", json!({ "limit": 1, "offset": 1 }));
+    check(
+        &mut s,
+        7,
+        "clove_list",
+        json!({ "status": ["open"], "type": "bug", "sort": "created", "desc": true }),
+    );
+    check(&mut s, 8, "clove_ready", json!({ "limit": 0 }));
+    let blocked = check(&mut s, 9, "clove_blocked", json!({}));
+    assert_eq!(
+        blocked["structuredContent"]["returned"], 1,
+        "the blocked page must be non-empty, or its schema check is vacuous"
+    );
+    // `search` is the one page with no `filters` key at all.
+    let found = check(&mut s, 10, "clove_search", json!({ "text": "widget" }));
+    assert_eq!(found["structuredContent"]["sort"], "relevance");
+    assert!(
+        found["structuredContent"].get("filters").is_none(),
+        "search publishes no filter surface: {found}"
+    );
+    let comments = check(&mut s, 11, "clove_comments", json!({ "id": main }));
+    assert_eq!(comments["structuredContent"]["returned"], 1, "{comments}");
+    check(
+        &mut s,
+        12,
+        "clove_comments",
+        json!({ "id": main, "limit": 1, "offset": 1 }),
+    );
+
+    s.shutdown();
 }

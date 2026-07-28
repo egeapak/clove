@@ -59,7 +59,7 @@ providing tools for work-item management. They surface in Claude Code as
 `mcp__plugin_clove_tracker__*`:
 
 - **Read:** `clove_list`, `clove_ready`, `clove_blocked`, `clove_show`,
-  `clove_search`, `clove_dep_tree`, `clove_stats`
+  `clove_search`, `clove_comments`, `clove_dep_tree`, `clove_stats`
 - **Write:** `clove_new`, `clove_edit`, `clove_status`, `clove_comment`,
   `clove_dep_add`, `clove_dep_remove`, `clove_set_parent`
 

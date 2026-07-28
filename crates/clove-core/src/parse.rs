@@ -1,7 +1,11 @@
 //! Frontmatter parsing (DESIGN.md §4, §12.2).
 //!
 //! Pipeline for each file:
-//! 1. Size guard from file metadata (reject absurdly large files before read).
+//! 1. Size guard from the opened file's metadata (reject absurdly large files
+//!    before read). In [`parse_item_file`] this is one `open` + `fstat` with no
+//!    second lookup by path; [`parse_frontmatter_file`] still does the older
+//!    `metadata(path)` + `read(path)` pair (two path resolutions) — see the
+//!    roadmap's follow-up list.
 //! 2. Locate the `---` … `---` frontmatter fences (`memchr`, zero-copy slice).
 //! 3. Enforce the frontmatter byte budget and reject YAML anchors/aliases (bomb
 //!    guard) before handing bytes to the YAML parser.
@@ -20,23 +24,58 @@ use crate::validate::validate_item;
 /// Parse the item file at `path`, validating that its `id` matches the file
 /// name stem.
 pub fn parse_item_file(path: &Utf8Path) -> Result<Item, CloveError> {
-    let metadata = std::fs::metadata(path).map_err(|source| CloveError::Io {
+    // One path resolution, not two. This used to call `std::fs::metadata(path)`
+    // for the size guard and then `std::fs::read(path)` — and `read` itself
+    // opens and fstats the descriptor anyway, so the standalone `metadata` was a
+    // second *by-path* lookup whose answer we already get for free. Locally that
+    // is noise; on a filesystem where every operation is a round trip (NFS, SMB,
+    // a network block device) path resolution is the expensive kind of call, and
+    // `clove search` makes one per item: measured at ~38% of the scan's cost
+    // under injected latency, of which this is roughly half.
+    //
+    // The guard is unchanged — the size is still checked before anything is
+    // allocated for the body.
+    let file = std::fs::File::open(path).map_err(|source| CloveError::Io {
         path: path.to_owned(),
         source,
     })?;
+    let len = file
+        .metadata()
+        .map_err(|source| CloveError::Io {
+            path: path.to_owned(),
+            source,
+        })?
+        .len();
+
     // Cheap early rejection of pathologically large files before we allocate.
     let ceiling = (MAX_FRONTMATTER_BYTES + MAX_BODY_BYTES).saturating_add(4096);
-    if metadata.len() as usize > ceiling {
+    if len as usize > ceiling {
         return Err(CloveError::BodyTooLarge {
             path: path.to_owned(),
             limit: MAX_BODY_BYTES,
         });
     }
 
-    let bytes = std::fs::read(path).map_err(|source| CloveError::Io {
-        path: path.to_owned(),
-        source,
-    })?;
+    // Read through a `Take` rather than calling `read_to_end` on the `File`
+    // directly: std's `File` specialization re-`fstat`s to size its buffer, which
+    // would put the second call straight back. `Take` uses the generic path, and
+    // we already know the size. The limit is the *ceiling*, not `len`, so a file
+    // that grows between the stat and the read is rejected by the guard below
+    // rather than silently truncated.
+    let mut bytes = Vec::with_capacity(len as usize + 1);
+    let limit = ceiling as u64 + 1;
+    std::io::Read::read_to_end(&mut std::io::Read::take(&file, limit), &mut bytes).map_err(
+        |source| CloveError::Io {
+            path: path.to_owned(),
+            source,
+        },
+    )?;
+    if bytes.len() > ceiling {
+        return Err(CloveError::BodyTooLarge {
+            path: path.to_owned(),
+            limit: MAX_BODY_BYTES,
+        });
+    }
 
     let item = parse_item_inner(&bytes, path)?;
 

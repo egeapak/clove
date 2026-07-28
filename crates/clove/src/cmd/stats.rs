@@ -11,7 +11,6 @@
 //! layer carries that table across its reindex/rebuild so history survives a
 //! schema bump or `clove reindex` (only true file corruption loses it).
 
-use chrono::Utc;
 use clove_core::{compute_stats, GraphStore, OutputFormat, StatsOptions, StatsReport};
 use clove_index::{Index, SCHEMA_VERSION};
 use clove_ipc::DaemonClient;
@@ -33,20 +32,23 @@ pub fn run(
     }
 
     let opts = StatsOptions {
-        top: args.top.unwrap_or(10),
+        top: args.top.unwrap_or(clove_core::view::defaults::STATS_TOP),
         include_epics: !args.no_epics,
     };
 
     // Compute analytics from the files (the single source of truth).
     let (frontmatters, _errors) = ctx.store.scan_frontmatter()?;
     let (graph, _dangling) = GraphStore::build(&frontmatters);
-    let now = Utc::now();
+    // Whole seconds, like every stored clove timestamp: this stamps both the
+    // `_meta.generated_at` echo and (with `--snapshot`) the recorded
+    // `captured_at`, and the two must not disagree in precision.
+    let now = crate::util::now_seconds();
     let report = compute_stats(&frontmatters, &graph, now, opts);
 
     // Optionally persist the snapshot into the index database's history table.
     if args.snapshot {
-        let index =
-            Index::open_or_create(&ctx.db_path).map_err(|e| index_error(e, &ctx.db_path))?;
+        let index = Index::open_or_rebuild(&ctx.db_path, &ctx.issues_dir)
+            .map_err(|e| index_error(e, &ctx.db_path))?;
         index
             .record_snapshot(now, &report)
             .map_err(|e| index_error(e, &ctx.db_path))?;
@@ -62,7 +64,7 @@ pub fn run(
                 data,
                 json!({
                     "source": "files",
-                    "generated_at": now.to_rfc3339(),
+                    "generated_at": clove_types::canonical_rfc3339(now),
                     "snapshotted": args.snapshot,
                 }),
             );
@@ -87,10 +89,17 @@ fn show_history(ctx: &Ctx, format: OutputFormat, args: &StatsArgs) -> Result<(),
         return Ok(());
     }
 
-    let index = Index::open_or_create(&ctx.db_path).map_err(|e| index_error(e, &ctx.db_path))?;
-    let snapshots = index
-        .snapshot_history(args.since.as_deref(), args.limit)
+    let index = Index::open_or_rebuild(&ctx.db_path, &ctx.issues_dir)
         .map_err(|e| index_error(e, &ctx.db_path))?;
+    // Fetch the whole series and window it here, through the same contract as
+    // every other list command. Pushing `--limit` into the query made `_meta`
+    // report the *post*-window count as `total`, so a truncated series was
+    // indistinguishable from an exhausted one.
+    let snapshots = index
+        .snapshot_history(args.since.as_deref(), None)
+        .map_err(|e| index_error(e, &ctx.db_path))?;
+    let window = crate::cmd::listing::window(args.offset, args.limit);
+    let (snapshots, total) = window.apply(snapshots);
 
     match format {
         OutputFormat::Json | OutputFormat::Jsonl => {
@@ -103,8 +112,17 @@ fn show_history(ctx: &Ctx, format: OutputFormat, args: &StatsArgs) -> Result<(),
                     })
                 })
                 .collect();
-            let total = items.len();
-            print_json_list(items, json!({ "total": total, "source": "index" }));
+            let returned = items.len();
+            print_json_list(
+                items,
+                json!({
+                    "total": total,
+                    "returned": returned,
+                    "offset": window.offset,
+                    "limit": window.reported_limit(),
+                    "source": "index",
+                }),
+            );
         }
         OutputFormat::Human => {
             if snapshots.is_empty() {
@@ -162,7 +180,13 @@ fn index_telemetry(ctx: &Ctx, no_index: bool) -> Value {
     if no_index || !ctx.db_path.exists() {
         return json!({ "present": false });
     }
-    let Ok(index) = Index::open_or_create(&ctx.db_path) else {
+    // A plain `open`, deliberately: reporting on the index must not *change*
+    // it. `open_or_create` would discard a wrong-version database and hand back
+    // an empty one, and that discard is unrecoverable — the replacement carries
+    // the current version, so no later open can tell it is empty rather than up
+    // to date. `clove stats` runs this on every invocation, so using it here
+    // silently disarmed the rebuild for every other command.
+    let Ok(index) = Index::open(&ctx.db_path) else {
         return json!({ "present": false });
     };
     let items = index.item_count().unwrap_or(0);

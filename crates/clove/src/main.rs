@@ -289,14 +289,16 @@ fn run_repo(
         Commands::Ls(a) => cmd::ls::run(ctx, f, a, no_index, deep).map(|_| ok),
         Commands::Query(a) => cmd::query::run(ctx, f, a, no_index, deep).map(|_| ok),
         Commands::Comment(a) => cmd::comments::add(ctx, f, &a.id, &a.message, quiet).map(|_| ok),
-        Commands::Comments(a) => cmd::comments::list(ctx, f, &a.id, a.limit).map(|_| ok),
-        Commands::Search(a) => cmd::search::run(ctx, f, a, no_index).map(|_| ok),
+        Commands::Comments(a) => {
+            cmd::comments::list(ctx, f, &a.id, a.limit, a.skip_newest).map(|_| ok)
+        }
+        Commands::Search(a) => cmd::search::run(ctx, f, a, no_index, deep).map(|_| ok),
         Commands::Stats(a) => cmd::stats::run(ctx, f, a, no_index).map(|_| ok),
         Commands::Reindex => cmd::reindex::run(ctx, f, quiet).map(|_| ok),
         Commands::Doctor(a) => cmd::doctor::run(ctx, f, a, no_index),
         Commands::Daemon(a) => cmd::daemon::run(ctx, f, a.action),
         Commands::Tui => cmd::tui::run(ctx, f).map(|_| ok),
-        Commands::Serve(a) => cmd::serve::run(ctx, a, quiet).map(|_| ok),
+        Commands::Serve(a) => cmd::serve::run(ctx, a, quiet, no_index, deep).map(|_| ok),
         // `import` mirrors `export`: the built-in native formats (`json`/`jsonl`,
         // clove's own restore) parse their own `rest`; any other provider
         // (`tk`, `beads`, …) falls through to a `clove-import-<provider>` plugin

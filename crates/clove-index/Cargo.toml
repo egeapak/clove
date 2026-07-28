@@ -1,6 +1,6 @@
 [package]
 name = "clove-index"
-description = "clove optional SQLite index: FTS5, staleness detection, reindex"
+description = "clove optional SQLite index: filtered/sorted list queries, staleness detection, reindex"
 edition.workspace = true
 version.workspace = true
 license.workspace = true

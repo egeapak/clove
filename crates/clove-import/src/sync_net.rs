@@ -15,7 +15,7 @@
 //! transient blip or rate-limit doesn't abort a whole sync. `--dry-run` never
 //! enters this module's apply path — it stops at the plan.
 
-use chrono::{DateTime, Timelike, Utc};
+use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
 
 use clove_core::write::write_item_file;
@@ -736,8 +736,14 @@ async fn fetch_comments(
 }
 
 /// Stamp `source_system = github` + `external_ref` onto a local item and persist
-/// it, returning the item's new `updated` (used as the sync fingerprint). This
-/// goes through `store.update`, so it shares the atomic-write + validation path.
+/// it, returning the item's new `updated` (used as the sync fingerprint).
+///
+/// Uses `update_with`, which holds the store-wide write lock across the whole
+/// read-modify-write. A lock-free `get` followed by a locking `update` would let
+/// a concurrent CLI/web/MCP/daemon write land in between and be silently
+/// clobbered — and because the write persists a whole-frontmatter snapshot, the
+/// clobbered edit is lost entirely. The per-repo `.clove/sync/<repo>.lock` this
+/// runs under does not help: it excludes other *syncs*, not other writers.
 fn link_local(
     store: &ItemStore,
     clove_id: &str,
@@ -746,10 +752,11 @@ fn link_local(
     let id = CloveId::new(clove_id).map_err(|e| ImportError::Record {
         message: format!("invalid local id `{clove_id}`: {e}"),
     })?;
-    let mut item = store.get(&id)?;
-    item.frontmatter.source_system = Some(SOURCE_GITHUB.to_owned());
-    item.frontmatter.external_ref = Some(external_ref.to_owned());
-    let saved = store.update(&item, Utc::now())?;
+    let saved = store.update_with(&id, Utc::now(), |item| {
+        item.frontmatter.source_system = Some(SOURCE_GITHUB.to_owned());
+        item.frontmatter.external_ref = Some(external_ref.to_owned());
+        Ok(())
+    })?;
     Ok(saved.frontmatter.updated)
 }
 
@@ -764,7 +771,7 @@ fn value_updated(value: &Value) -> Option<DateTime<Utc>> {
 
 /// Truncate to whole seconds (the canonical on-disk timestamp precision).
 fn truncate(ts: DateTime<Utc>) -> DateTime<Utc> {
-    ts.with_nanosecond(0).expect("zero nanos is valid")
+    clove_types::truncate_to_seconds(ts)
 }
 
 /// The base backoff delay between network retries. Overridable via

@@ -74,6 +74,32 @@ pub fn discover(clove_dir_override: Option<&Utf8Path>) -> Result<Ctx, CloveError
     })
 }
 
+impl Ctx {
+    /// The read engine for this repository.
+    ///
+    /// `no_index` is the `--no-index` flag, and it disables **both** accelerator
+    /// tiers: the flag promises a file scan, and a daemon answering from its hot
+    /// index would be no more of a file scan than the local one. `deep` is
+    /// `--deep`, the thorough per-file staleness pass.
+    ///
+    /// Built per command rather than stored on `Ctx` because the two flags are
+    /// per-invocation and the CLI is a short-lived process — there is nothing to
+    /// amortize across calls, unlike the MCP server and the web, which hold one
+    /// engine (and one cached daemon connection) for their lifetime.
+    pub fn engine(&self, no_index: bool, deep: bool) -> clove_engine::Engine {
+        clove_engine::Engine::new(
+            self.store.clone(),
+            self.clove_dir.clone(),
+            clove_engine::Tiers {
+                daemon: !no_index,
+                index: !no_index,
+                deep,
+                auto_refresh: self.config.index.auto_refresh,
+            },
+        )
+    }
+}
+
 /// A path made relative to the repo root for display (falls back to the input).
 pub fn rel_to_root(root: &Utf8Path, path: &Utf8Path) -> Utf8PathBuf {
     path.strip_prefix(root)

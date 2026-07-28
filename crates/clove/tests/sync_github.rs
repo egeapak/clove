@@ -1779,3 +1779,106 @@ fn manual_skipped_conflict_does_not_restamp_assignee() {
         "the stale assignee must not linger as a phantom human extra: {logins:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Canonical timestamps (READ_PATH_ROADMAP §3)
+// ---------------------------------------------------------------------------
+
+/// Rewrite the local item file's `updated:` line **verbatim**, the way a merge,
+/// a hand-edit, or a tool that renders its own RFC 3339 would leave it.
+///
+/// Deliberately not routed through `clove set`/`apply_edit`: the write path
+/// canonicalizes, so an input built through it could never carry a foreign
+/// spelling and the test would pass no matter what.
+fn rewrite_updated(dir: &Path, id: &str, spelling: &str) {
+    let path = dir.join(".clove").join("issues").join(format!("{id}.md"));
+    let text = std::fs::read_to_string(&path).unwrap();
+    let out: String = text
+        .lines()
+        .map(|line| {
+            if line.starts_with("updated: ") {
+                format!("updated: {spelling}")
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&path, format!("{out}\n")).unwrap();
+    assert!(
+        std::fs::read_to_string(&path).unwrap().contains(spelling),
+        "the fixture must actually hold the non-canonical spelling"
+    );
+}
+
+#[test]
+fn a_re_spelled_local_timestamp_is_not_a_change() {
+    // The round-trip §3 is about: the sync decides "did the local side change?"
+    // by comparing `updated` against the value it recorded last run. Two
+    // spellings of the same instant — a `+00:00` offset, or the sub-second
+    // precision a foreign tool renders — must not read as an edit and push a
+    // no-op PATCH to GitHub.
+    for spelling in [
+        "%Y-%m-%dT%H:%M:%S+00:00",
+        "%Y-%m-%dT%H:%M:%S.904816670+00:00",
+        "%Y-%m-%dT%H:%M:%S.000Z",
+    ] {
+        let mock = MockGitHub::start();
+        let dir = init_repo();
+        clove(dir.path(), mock.addr)
+            .args(["new", "Round trip", "--type", "bug"])
+            .assert()
+            .success();
+
+        let first = sync(dir.path(), mock.addr, &[]);
+        assert_eq!(first["data"]["pushed_created"], 1, "{first}");
+        let id = only_item_id(dir.path(), mock.addr);
+        let patches_before = mock.patch_count();
+
+        // Re-spell the *same* instant the store already holds.
+        let canonical = show(dir.path(), mock.addr, &id)["updated"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let parsed = chrono::DateTime::parse_from_rfc3339(&canonical).unwrap();
+        rewrite_updated(dir.path(), &id, &parsed.format(spelling).to_string());
+
+        let second = sync(dir.path(), mock.addr, &[]);
+        assert_eq!(
+            second["data"]["pushed_updated"], 0,
+            "`{spelling}` must not look like a local edit: {second}"
+        );
+        assert_eq!(second["data"]["in_sync"], 1, "`{spelling}`: {second}");
+        assert_eq!(
+            mock.patch_count(),
+            patches_before,
+            "`{spelling}` must issue no PATCH"
+        );
+    }
+}
+
+#[test]
+fn a_pulled_item_carries_canonical_timestamps() {
+    // The pull side writes local files from remote data; the files it writes are
+    // in the one spelling, so the very next sync compares equal.
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    mock.seed(7, "From GitHub", "Body.", "open");
+
+    sync(dir.path(), mock.addr, &[]);
+    let id = only_item_id(dir.path(), mock.addr);
+    let on_disk =
+        std::fs::read_to_string(dir.path().join(".clove/issues").join(format!("{id}.md"))).unwrap();
+    for line in on_disk.lines() {
+        if let Some(value) = line
+            .strip_prefix("created: ")
+            .or_else(|| line.strip_prefix("updated: "))
+            .or_else(|| line.strip_prefix("closed: "))
+        {
+            assert!(
+                value.ends_with('Z') && !value.contains('.'),
+                "non-canonical timestamp `{value}` in:\n{on_disk}"
+            );
+        }
+    }
+}

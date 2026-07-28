@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://clove.dev/schema/v1/mcp-item-page.json",
+  "title": "clove MCP item page",
+  "description": "The result of the MCP read tools that return a list: clove_list, clove_ready, clove_blocked, clove_search. This is the payload the server puts in `structuredContent` (and, byte-identically, in `content[0].text` for clients that do not read structured results), and it is what those tools advertise as their `outputSchema` in tools/list. It is the CLI's list envelope flattened: an MCP tool result has no `{v, ok, data, _meta}` wrapper, so the keys the CLI reports under `_meta` are plain keys beside `items` here.",
+  "type": "object",
+  "required": ["total", "returned", "offset", "limit", "sort", "dir", "items"],
+  "properties": {
+    "total": {
+      "description": "Matches BEFORE the window — always the full count, never the page size. `returned < total` means there is more to page through.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "returned": {
+      "description": "Elements in `items`.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "offset": {
+      "description": "Rows skipped from the start of the ordered result.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "limit": {
+      "description": "The page size in force, in the same encoding callers pass in: 0 means UNLIMITED, not \"empty page\". Echoed so a caller can read the effective cap rather than assume the MCP default (50).",
+      "type": "integer",
+      "minimum": 0
+    },
+    "sort": {
+      "description": "The ordering field in force. `relevance` is clove_search's default and cannot be requested on the other three.",
+      "enum": ["rank", "priority", "created", "updated", "id", "status", "type", "relevance"]
+    },
+    "dir": { "enum": ["asc", "desc"] },
+    "source": {
+      "description": "Which read tier answered: a running cloved, the SQLite index, or a file scan. The `_meta.source` of the CLI and web, carried as a plain key because this payload has no `_meta`.",
+      "enum": ["daemon", "index", "files"]
+    },
+    "filters": {
+      "title": "the applied filter set",
+      "description": "The parsed, canonicalized filters, echoed so a caller can read back what was applied rather than assume its input survived. Absent on clove_search, which takes no field filters — an empty object there would advertise a surface the tool does not have. Any-of within a field, all-of across fields; `labels` is all-of within the field too. An empty array does not constrain.",
+      "type": "object",
+      "properties": {
+        "status": { "type": "array", "items": { "enum": ["open", "in_progress", "closed"] } },
+        "type": { "type": "array", "items": { "enum": ["bug", "feature", "chore", "docs", "epic"] } },
+        "priority": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0, "maximum": 4 }
+        },
+        "labels": { "type": "array", "items": { "type": "string" } },
+        "assignee": { "type": ["string", "null"] },
+        "q": {
+          "description": "Case-insensitive substring over id/title/labels (NOT bodies — that is clove_search).",
+          "type": ["string", "null"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "items": {
+      "description": "The requested page, already windowed. Elements are item objects whose KEY SET depends on the request: the read tools compact by default (null and empty-list keys, plus the `schema` migration marker, are omitted — a missing `assignee` means unset, never unknown), `fields` projects to exactly the keys asked for, and `compact: false` restores every key. The full key set is item.json; no key is required here because any of them can be projected away.",
+      "type": "array",
+      "items": { "type": "object" }
+    }
+  },
+  "additionalProperties": false
+}

@@ -7,11 +7,12 @@ import type {
   Meta,
   StatsHistoryPoint,
   Envelope,
+  ItemPage,
   ListQuery
 } from './types';
 import type { PatchPayload } from './itemForm';
 import { MOCK_ITEMS, MOCK_COMMENTS, mockHistory } from './mock';
-import { applyFilters } from './filter';
+import { applyFilters, sortItems } from './filter';
 import { queryString } from './query';
 
 const BASE = '/api/v1';
@@ -37,7 +38,11 @@ export class ApiError extends Error {
   }
 }
 
-async function req<T>(path: string, init?: RequestInit): Promise<T> {
+/** Issue a request and return the whole envelope (`data` **and** `_meta`). */
+async function reqEnvelope<T>(
+  path: string,
+  init?: RequestInit
+): Promise<{ data: T; meta: Record<string, unknown> }> {
   const res = await fetch(BASE + path, {
     ...init,
     headers: {
@@ -61,7 +66,17 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
       res.status
     );
   }
-  return env.data as T;
+  return { data: env.data as T, meta: env._meta ?? {} };
+}
+
+async function req<T>(path: string, init?: RequestInit): Promise<T> {
+  return (await reqEnvelope<T>(path, init)).data;
+}
+
+/** Read a numeric `_meta` field, falling back when the server omits it. */
+function metaNum(meta: Record<string, unknown>, key: string, fallback: number): number {
+  const v = meta[key];
+  return typeof v === 'number' && Number.isFinite(v) ? v : fallback;
 }
 
 /** In dev, when no backend responds, fall back to mock data. */
@@ -82,11 +97,28 @@ async function withMock<T>(real: () => Promise<T>, mock: () => T): Promise<T> {
 const qs = queryString;
 
 export const api = {
-  async items(query: ListQuery = {}): Promise<Item[]> {
-    return withMock(
-      () => req<Item[]>('/items' + qs(query)),
-      () => filterMock(query)
-    );
+  /**
+   * `GET /api/v1/items` — one **window** of the list.
+   *
+   * The query carries the filters, the ordering *and* the window, so the server
+   * decides what the page contains; the caller renders the rows in the order it
+   * gets them. `_meta.total` comes back alongside, so a pager can say "1–50 of
+   * 128" without the client ever holding all 128.
+   */
+  async items(query: ListQuery = {}): Promise<ItemPage> {
+    return withMock(async () => {
+      const { data, meta } = await reqEnvelope<Item[]>('/items' + qs(query));
+      const items = data ?? [];
+      return {
+        items,
+        // A server that sends no `_meta` (or an older one) still yields a
+        // coherent page: what arrived is all there is.
+        total: metaNum(meta, 'total', items.length),
+        returned: metaNum(meta, 'returned', items.length),
+        offset: metaNum(meta, 'offset', query.offset ?? 0),
+        limit: metaNum(meta, 'limit', query.limit ?? 0)
+      };
+    }, () => filterMock(query));
   },
 
   async item(id: string): Promise<Item> {
@@ -305,11 +337,40 @@ export const api = {
 };
 
 // ---- mock helpers ----
-// Filtering uses the same shared logic as the live list page so the two can't
-// diverge. The server returns canonical rank order; the mock list is already in
-// that order (MOCK_ITEMS authoring order), so no extra sort is applied here.
-function filterMock(q: ListQuery): Item[] {
-  return applyFilters(MOCK_ITEMS, q);
+
+/**
+ * The mock backend's `GET /api/v1/items`: filter, **sort**, then window — in
+ * that order, which is the order the server does it in and the only one that
+ * gives the same page.
+ *
+ * It has to do all three now. While the SPA fetched everything and sorted in
+ * the browser, the mock could return an unsorted, unwindowed array and the UI
+ * still looked right; now that the list route renders the response as-is, a
+ * mock that ignored `sort`/`limit` would answer differently from the server for
+ * the same query — and the mock is what the frontend tests and `npm run dev`
+ * run against.
+ *
+ * The default when `limit` is absent is **unlimited**, matching
+ * `clove_core::view::defaults::WEB_LIMIT`; `limit: 0` means the same thing.
+ * `total` is the match count *before* the window.
+ */
+export function filterMock(q: ListQuery): ItemPage {
+  // MOCK_ITEMS' authoring order stands in for the server's canonical
+  // (priority, topological rank, id) order, which a client cannot compute.
+  const rank = new Map(MOCK_ITEMS.map((i, idx) => [i.id, idx]));
+  const matched = sortItems(
+    applyFilters(MOCK_ITEMS, q),
+    q.sort || 'rank',
+    // The server's default direction is ascending — never the UI's per-column
+    // `defaultDir`, which is a presentation choice the list route sends
+    // explicitly.
+    q.dir || 'asc',
+    (id) => rank.get(id) ?? Number.MAX_SAFE_INTEGER
+  );
+  const offset = q.offset ?? 0;
+  const limit = q.limit ?? 0;
+  const items = limit > 0 ? matched.slice(offset, offset + limit) : matched.slice(offset);
+  return { items, total: matched.length, returned: items.length, offset, limit };
 }
 
 function mockBoard(): Board {

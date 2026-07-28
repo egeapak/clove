@@ -3,8 +3,9 @@
 Guidance for working in this repo. `clove` is a Cargo workspace (`crates/*`):
 `clove-types` (pure shared data types: model/id/error/validation + the
 create/edit request types), `clove-core` (file store/graph/high-level ops on top
-of `clove-types`), `clove-tui` (the terminal browser + add/edit form),
-`clove-web` (the web UI server + embedded SvelteKit SPA, `clove serve`),
+of `clove-types`), `clove-engine` (the **read tier**: one daemon → index → files
+cascade behind every read surface), `clove-tui` (the terminal browser + add/edit
+form), `clove-web` (the web UI server + embedded SvelteKit SPA, `clove serve`),
 plus `clove` (CLI), `cloved`, `clove-index`, `clove-ipc`, `clove-import`,
 `clove-mcp`, `clove-plugin` (cargo-style subcommand-plugin support), the
 installable plugins `clove-sync-github` / `clove-import-tk` / `clove-import-beads`,
@@ -52,6 +53,38 @@ cycle-validated ops. `ops::edit` / `apply_assignments` are thin shims over
 `EditRequest::from_tokens`, so the CLI `KEY=VALUE` token surface and the
 structured web/MCP/TUI surfaces never diverge. When adding an editable field,
 add it to `EditRequest` once — don't re-implement it per surface.
+
+## Unified read path (`clove-engine`)
+
+The write path is unified (above); the **read** path is `clove-engine`. Every
+read has three possible answers — a running `cloved`, `.clove/index.db`, or a
+file scan — and the engine owns that choice **once per method** (`list`, `ready`,
+`blocked`, `search`, `show`, `comments`, `dep_tree`, `stats`). `clove`'s
+`cmd/{ls,ready,blocked,query,search}`, `clove-mcp`'s tool engine, and
+`clove-web`'s `read.rs` are adapters: parse arguments → call the engine →
+render. `_meta.source` (plain `source` on the MCP page) names the tier that
+answered on the five list commands, where it is `clove_engine::Source::as_str`
+rather than a literal. `stats`/`export`, the TUI, and CLI
+`show`/`comments`/`dep tree` do not route through the engine.
+
+Three things to know before touching it:
+
+- **`Projection` decides whether a tier may answer.** `Lean` = the five columns
+  `ls` renders, returned with no file reads; `Full` = the tier answers the query
+  in SQL and only the *page* is read back from disk; `Files` = a caller policy
+  pinning the answer to the file scan (`clove ls --fields id,created`).
+- **The engine applies the window before returning.** Callers render what they
+  are given — `emit`/`page_payload` must not re-page. `total` is always the
+  pre-window count.
+- **The file tier hands back the graph it built** (`ListAnswer::graph`), so the
+  web derives `ready`/`blocked_by`/`dangling_deps` from it rather than scanning
+  and building a second one; a tiered answer has no graph and derives the same
+  three per item from `ops::graph_terms_detailed`.
+
+`search` has exactly one tier on purpose (roadmap §6.1) — do not add one.
+`crates/clove-engine/tests/tier_parity.rs` is the test this crate lives or dies
+on: it asserts a hydrated index answer is row-for-row the file answer across
+filters, sorts, and windows, with `Source` assertions that stop it going vacuous.
 
 ## GitHub sync (`clove-import`)
 

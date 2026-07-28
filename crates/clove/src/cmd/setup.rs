@@ -53,9 +53,13 @@ const MCP_SERVER_KEY: &str = "clove";
 /// Prefix for a permission entry: `mcp__` + [`MCP_SERVER_KEY`] + `__`.
 const SETTINGS_MCP_PREFIX: &str = "mcp__clove__";
 
-/// Every tool the `clove mcp` server exposes. A test pins this to the live
-/// clove-mcp router (under the `mcp` feature) so a renamed/added tool can't
-/// silently drift and reintroduce per-call permission prompts.
+/// Fallback tool list for builds without the `mcp` feature, where the live
+/// router is not linked and cannot be asked.
+///
+/// With the feature on (the default), [`mcp_tool_names`] reads the router
+/// instead, so adding a tool needs no edit here. `mcp_tool_names_match_server`
+/// keeps this list honest for the `--no-default-features` build.
+#[cfg_attr(feature = "mcp", allow(dead_code))]
 const MCP_TOOL_NAMES: &[&str] = &[
     "clove_ready",
     "clove_blocked",
@@ -68,10 +72,39 @@ const MCP_TOOL_NAMES: &[&str] = &[
     "clove_status",
     "clove_edit",
     "clove_comment",
+    "clove_comments",
     "clove_dep_add",
     "clove_dep_remove",
     "clove_set_parent",
 ];
+
+/// The tool names to grant `mcp__clove__*` permissions for.
+///
+/// Under the `mcp` feature the live rmcp router is the single source of truth —
+/// it is generated from the `#[tool]` set, so it cannot drift. Without the
+/// feature, `clove-mcp` is not linked and the pinned fallback above is used.
+///
+/// Sorted, because the router yields tools in macro-registration order, which is
+/// not a stability contract; without this the generated `settings.json` would
+/// vary between builds. Filtered, because these strings are written into the
+/// user's permission allowlist — a name that does not look like one of ours has
+/// no business becoming a grant.
+fn mcp_tool_names() -> Vec<String> {
+    #[cfg(feature = "mcp")]
+    let mut names = clove_mcp::CloveServer::tool_names();
+    #[cfg(not(feature = "mcp"))]
+    let mut names: Vec<String> = MCP_TOOL_NAMES.iter().map(|s| (*s).to_owned()).collect();
+
+    names.retain(|name| {
+        name.starts_with("clove_")
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+    });
+    names.sort();
+    names.dedup();
+    names
+}
 
 /// Run `clove setup`.
 pub fn run(
@@ -166,8 +199,8 @@ fn write_settings(
         let missing: Vec<String> = {
             let existing: std::collections::HashSet<&str> =
                 allow.iter().filter_map(Value::as_str).collect();
-            MCP_TOOL_NAMES
-                .iter()
+            mcp_tool_names()
+                .into_iter()
                 .map(|tool| format!("{SETTINGS_MCP_PREFIX}{tool}"))
                 .filter(|perm| !existing.contains(perm.as_str()))
                 .collect()
@@ -551,7 +584,12 @@ mod tests {
         assert_eq!(s["mcpServers"]["clove"]["command"], "clove");
         assert_eq!(s["mcpServers"]["clove"]["args"], json!(["mcp"]));
         let allow = s["permissions"]["allow"].as_array().unwrap();
-        for tool in MCP_TOOL_NAMES {
+        let names = mcp_tool_names();
+        // Both sides of the comparisons below come from `mcp_tool_names()`, so
+        // a filter that dropped everything would write zero grants and still
+        // satisfy them. Pin non-emptiness explicitly.
+        assert!(!names.is_empty(), "the permission list must never be empty");
+        for tool in names {
             assert!(allow
                 .iter()
                 .any(|v| v == &json!(format!("{SETTINGS_MCP_PREFIX}{tool}"))));
@@ -586,7 +624,7 @@ mod tests {
         assert_eq!(s["mcpServers"]["clove"]["command"], "clove");
         let allow = s["permissions"]["allow"].as_array().unwrap();
         assert!(allow.iter().any(|v| v == &json!("Bash(ls:*)")));
-        assert_eq!(allow.len(), 1 + MCP_TOOL_NAMES.len());
+        assert_eq!(allow.len(), 1 + mcp_tool_names().len());
     }
 
     #[test]
@@ -613,7 +651,7 @@ mod tests {
         assert_eq!(s["mcpServers"]["clove"]["command"], "clove");
         assert_eq!(
             s["permissions"]["allow"].as_array().unwrap().len(),
-            MCP_TOOL_NAMES.len()
+            mcp_tool_names().len()
         );
     }
 

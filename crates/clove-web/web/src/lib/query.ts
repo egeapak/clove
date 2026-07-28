@@ -20,7 +20,15 @@ function csv(p: URLSearchParams, key: string): string[] {
     .filter(Boolean);
 }
 
-/** Parse URLSearchParams into a ListQuery. Accepts `tab` or `mode`. */
+/**
+ * Parse URLSearchParams into a ListQuery. Accepts `tab` or `mode`.
+ *
+ * The **window** (`limit`/`offset`) is deliberately not read here. This parses
+ * the *browser* URL, whose paging state is a 1-based `?page=` the list route
+ * turns into `limit`/`offset`; `buildParams` writes those two for the *API*
+ * URL. The two query strings have never been the same thing (the browser also
+ * accepts `tab`, which the API does not).
+ */
 export function parseQuery(p: URLSearchParams): ListQuery {
   const rawMode = p.get('mode') ?? p.get('tab') ?? '';
   const mode = MODE_VALUES.has(rawMode) ? (rawMode as 'ready' | 'blocked') : 'list';
@@ -38,6 +46,28 @@ export function parseQuery(p: URLSearchParams): ListQuery {
   return q;
 }
 
+/**
+ * The largest `?page=` we honour. `(page - 1) * PAGE_SIZE` has to stay a plain
+ * integer: the server now rejects a malformed `offset` with a 422 instead of
+ * silently reading it as 0, and `String(1e21)` is `"1e+21"` — which is exactly
+ * the kind of value the stricter parser refuses. A billion pages is past any
+ * real store and keeps the product inside `Number.MAX_SAFE_INTEGER`.
+ */
+const MAX_PAGE = 1_000_000_000;
+
+/**
+ * The 1-based page number in a browser URL, as a safe integer ≥ 1.
+ *
+ * `?page=` is user-editable, so it can hold anything: `abc`, `-3`, `1e400`,
+ * `99999999999999999999`. Each of those must still produce an `offset` the API
+ * accepts — the window is derived from this number and sent to the server.
+ */
+export function parsePage(p: URLSearchParams): number {
+  const n = Number(p.get('page'));
+  if (!Number.isFinite(n) || n < 1) return 1;
+  return Math.min(Math.trunc(n), MAX_PAGE);
+}
+
 /** Serialize a ListQuery into URLSearchParams. Writes `mode` (not `tab`). */
 export function buildParams(query: ListQuery): URLSearchParams {
   const p = new URLSearchParams();
@@ -52,6 +82,13 @@ export function buildParams(query: ListQuery): URLSearchParams {
   if (query.type?.length) p.set('type', query.type.join(','));
   if (query.priority?.length) p.set('priority', query.priority.map(String).join(','));
   if (query.label?.length) p.set('label', query.label.join(','));
+  // The window is sent explicitly, including `limit: 0`: the API default is
+  // unlimited and stays that way (other clients depend on it), so a paging
+  // client has to ask rather than inherit. `offset: 0` is the default on every
+  // surface, so it is omitted — but `limit: 0` is a real request for
+  // "everything" and must survive.
+  if (query.limit !== undefined) p.set('limit', String(query.limit));
+  if (query.offset) p.set('offset', String(query.offset));
   return p;
 }
 

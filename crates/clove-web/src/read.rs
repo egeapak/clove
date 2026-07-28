@@ -1,34 +1,213 @@
-//! Read endpoints. All read from the file store + the in-memory graph (files are
-//! truth), so results match the CLI's `ls`/`ready`/`blocked`/`show` exactly.
+//! Read endpoints.
+//!
+//! The item lists go through [`clove_engine::Engine`], the single daemon → index
+//! → files cascade the CLI and MCP tools also use, so a result here matches
+//! `clove ls`/`ready`/`blocked` exactly and `_meta.source` names the tier that
+//! answered. This endpoint used to read files unconditionally *and* rebuild the
+//! whole dependency graph per request, while reporting the serving mode
+//! (`"standalone"`/`"daemon"`) in the field that everywhere else names a tier
+//! (read-path roadmap §4).
+//!
+//! Engine calls are blocking (SQLite, a daemon RPC on its own runtime, file
+//! parsing), so they run on `spawn_blocking` rather than on an axum worker.
 
 use std::collections::{BTreeSet, HashMap};
 
 use axum::extract::{Path, Query, State};
-use clove_core::{compute_stats, list_comments, GraphStore, StatsOptions};
+use clove_core::StatsOptions;
+use clove_engine::{ListAnswer, Projection, Rows};
 use clove_types::{CloveId, ItemFrontmatter};
 use serde_json::{json, Value};
 
-use crate::dto::{frontmatter_value, item_value, GraphContext};
+use crate::dto::{frontmatter_value, item_value, with_terms, GraphContext};
 use crate::error::{ok, ok_data, ApiError, ApiResult};
 use crate::AppState;
+
+/// Run a blocking engine call off the axum worker threads.
+///
+/// The engine reads SQLite, may drive a daemon RPC on its own tokio runtime, and
+/// parses item files — none of which may happen on an async worker. (`cloved`
+/// hosts this server on a two-worker runtime, so one blocking read there would
+/// stall `ping`, the watcher, and every other request.)
+async fn blocking<T, F>(f: F) -> Result<T, ApiError>
+where
+    F: FnOnce() -> Result<T, ApiError> + Send + 'static,
+    T: Send + 'static,
+{
+    match tokio::task::spawn_blocking(f).await {
+        Ok(result) => result,
+        Err(e) => Err(ApiError::from(clove_types::CloveError::Io {
+            path: camino::Utf8PathBuf::from("<engine>"),
+            source: std::io::Error::other(e.to_string()),
+        })),
+    }
+}
+
+/// Render an engine answer as the web's item objects.
+///
+/// The three tiers produce the same row shape by different routes: the file tier
+/// hands back the graph it built, so `ready`/`blocked_by`/`dangling_deps` come
+/// from the whole-store partition as before, while an index or daemon answer has
+/// no graph and derives the same three values per item from its own dependency
+/// closure (`ops::graph_terms_detailed`). Both go through
+/// [`crate::dto::with_terms`], so the row cannot differ by tier.
+fn values_of(answer: ListAnswer, state: &AppState) -> Result<Vec<Value>, ApiError> {
+    let ListAnswer { rows, graph, .. } = answer;
+    let rows = match rows {
+        Rows::Full(rows) => rows,
+        // Unreachable: every read here asks for `Projection::Full`, because the
+        // lean five columns carry none of the graph terms this API renders.
+        Rows::Lean(_) => return Ok(Vec::new()),
+    };
+    match graph {
+        Some(graph) => {
+            let ctx = GraphContext::from_graph(graph);
+            Ok(rows
+                .iter()
+                .map(|row| Value::Object(frontmatter_value(&row.frontmatter, &ctx)))
+                .collect())
+        }
+        None => rows
+            .iter()
+            .map(|row| {
+                let terms = clove_core::ops::graph_terms_detailed(&state.store, &row.frontmatter)?;
+                Ok(Value::Object(with_terms(&row.frontmatter, &terms)))
+            })
+            .collect(),
+    }
+}
 
 /// Parse `?id=` style path segments into a validated [`CloveId`].
 fn parse_id(raw: &str) -> Result<CloveId, ApiError> {
     CloveId::new(raw).map_err(ApiError::from)
 }
 
-/// Split a repeated/csv query value (`a,b,c`) into trimmed, non-empty parts.
+/// Split a repeated/csv query value (`a,b,c`) into trimmed, non-empty parts,
+/// through the shared splitter so the CLI/MCP/web spellings decode alike.
 fn csv(params: &HashMap<String, String>, key: &str) -> Vec<String> {
-    params
-        .get(key)
-        .map(|v| {
-            v.split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default()
+    clove_core::view::Filters::split_csv(params.get(key).map(String::as_str))
+}
+
+/// How a read result is shaped before it goes on the wire: `?fields=` and
+/// `?compact=`, the last result-shaping gap between the web and the other two
+/// surfaces (read-path roadmap §5).
+///
+/// The semantics are the **CLI's**, not the MCP server's: both default off, so
+/// an unshaped request returns exactly the object it always did. (`clove-mcp`
+/// compacts by default because it is spending a model's context window; a
+/// browser sending no parameters must keep every key, since the SPA reads
+/// `assignee: null` and `labels: []` as answers.)
+///
+/// `fields` is honoured literally — `?fields=assignee` on an unassigned item
+/// still yields `{"assignee": null}`, so a caller can tell "unset" from "not
+/// requested" — and `compact` composes on top of it, exactly as
+/// `clove ls --fields … --compact` does.
+#[derive(Debug, Clone, Default)]
+struct Shape {
+    fields: Option<Vec<String>>,
+    compact: bool,
+}
+
+impl Shape {
+    /// Whether this shape would change any object (the fast path is `false`).
+    fn is_noop(&self) -> bool {
+        self.fields.is_none() && !self.compact
+    }
+
+    /// Shape one item object.
+    fn apply(&self, obj: serde_json::Map<String, Value>) -> Value {
+        let obj = match &self.fields {
+            Some(fields) => clove_core::view::project(obj, fields),
+            None => obj,
+        };
+        let obj = if self.compact {
+            // `compact_read` (not bare `compact`) so `schema` — the per-file
+            // migration marker every surface drops — goes with it.
+            clove_core::view::compact_read(obj)
+        } else {
+            obj
+        };
+        Value::Object(obj)
+    }
+
+    /// Shape a list of already-rendered item objects.
+    fn apply_all(&self, values: Vec<Value>) -> Vec<Value> {
+        if self.is_noop() {
+            return values;
+        }
+        values
+            .into_iter()
+            .map(|v| match v {
+                Value::Object(obj) => self.apply(obj),
+                other => other,
+            })
+            .collect()
+    }
+}
+
+/// Parse a boolean query parameter strictly.
+///
+/// Absent or empty is `false`; `true`/`1` and `false`/`0` are the accepted
+/// spellings; anything else is a `VALIDATION_ERROR` rather than a silent
+/// `false` — the same treatment `?sort=` and `?status=` get, and the reason is
+/// the same: `?compact=yes` quietly returning the full shape is a result a
+/// client cannot distinguish from a server that does not support the parameter.
+fn bool_param(params: &HashMap<String, String>, key: &str) -> Result<bool, ApiError> {
+    match params.get(key).map(String::as_str) {
+        None | Some("") | Some("false") | Some("0") => Ok(false),
+        Some("true") | Some("1") => Ok(true),
+        Some(other) => Err(ApiError::from(clove_types::CloveError::InvalidField {
+            field: key.to_owned(),
+            reason: format!("expected true or false, got `{other}`"),
+        })),
+    }
+}
+
+/// The requested `?fields=`/`?compact=`.
+fn shape_of(params: &HashMap<String, String>) -> Result<Shape, ApiError> {
+    let fields = match csv(params, "fields") {
+        f if f.is_empty() => None,
+        f => Some(f),
+    };
+    Ok(Shape {
+        fields,
+        compact: bool_param(params, "compact")?,
+    })
+}
+
+/// Parse a whole-number query parameter strictly.
+///
+/// Absent or empty is `None` (the caller's default); anything that is not a
+/// non-negative decimal integer is a `VALIDATION_ERROR`, for exactly the reason
+/// [`bool_param`] gives. This is the roadmap's §7 "malformed query value" item:
+/// `?limit=abc` and `?limit=-5` used to fall through `.ok()` to the *default*,
+/// which on the web is **unlimited** — so a client typo returned the whole store
+/// with a 200, and `?offset=-1` silently became `0`. The CLI rejects the same
+/// input (clap parses `--limit` as a `usize`), and `?sort=`/`?status=`/
+/// `?compact=` on this very endpoint reject theirs; only the numbers were lenient.
+fn usize_param(params: &HashMap<String, String>, key: &str) -> Result<Option<usize>, ApiError> {
+    match params.get(key).map(String::as_str) {
+        None | Some("") => Ok(None),
+        Some(raw) => raw.parse::<usize>().map(Some).map_err(|_| {
+            ApiError::from(clove_types::CloveError::InvalidField {
+                field: key.to_owned(),
+                reason: format!("expected a whole number ≥ 0, got `{raw}`"),
+            })
+        }),
+    }
+}
+
+/// Parse `?offset=`/`?limit=` through the shared contract.
+///
+/// `?limit=0` means **unlimited**, as it does on the CLI and MCP. It previously
+/// meant "return nothing" here — the same parameter with the opposite meaning on
+/// one surface out of three.
+fn page_window(params: &HashMap<String, String>) -> Result<clove_core::view::Page, ApiError> {
+    Ok(clove_core::view::Page::new(
+        usize_param(params, "offset")?.unwrap_or(0),
+        usize_param(params, "limit")?,
+        clove_core::view::defaults::WEB_LIMIT,
+    ))
 }
 
 /// Load the whole store's frontmatter and the derived graph context.
@@ -38,138 +217,165 @@ fn load(state: &AppState) -> Result<(Vec<ItemFrontmatter>, GraphContext), ApiErr
     Ok((frontmatters, ctx))
 }
 
-/// Whether `fm` passes the query filters (status/type/priority OR within a field;
-/// labels AND; assignee exact; `q` substring over id/title/labels).
-fn matches(fm: &ItemFrontmatter, params: &HashMap<String, String>) -> bool {
-    let statuses = csv(params, "status");
-    if !statuses.is_empty() && !statuses.iter().any(|s| s == fm.status.as_str()) {
-        return false;
-    }
-    let types = csv(params, "type");
-    if !types.is_empty() && !types.iter().any(|t| t == fm.item_type.as_str()) {
-        return false;
-    }
-    let priorities = csv(params, "priority");
-    if !priorities.is_empty()
-        && !priorities
-            .iter()
-            .any(|p| p == &fm.priority.get().to_string())
-    {
-        return false;
-    }
-    if let Some(assignee) = params.get("assignee").filter(|s| !s.is_empty()) {
-        if fm.assignee.as_deref() != Some(assignee.as_str()) {
-            return false;
-        }
-    }
-    // Labels are AND: every requested label must be present.
-    for label in csv(params, "label") {
-        if !fm.labels.iter().any(|l| l == &label) {
-            return false;
-        }
-    }
-    if let Some(q) = params.get("q").filter(|s| !s.is_empty()) {
-        let needle = q.to_lowercase();
-        let hay = format!(
-            "{} {} {}",
-            fm.id.as_str().to_lowercase(),
-            fm.title.to_lowercase(),
-            fm.labels.join(" ").to_lowercase()
-        );
-        if !hay.contains(&needle) {
-            return false;
-        }
-    }
-    true
+/// The requested `?status=`/`?type=`/`?priority=`/`?label=`/`?assignee=`/`?q=`,
+/// through the shared contract.
+///
+/// This endpoint had the *only* multi-value filter implementation in the project
+/// — a private predicate here comparing raw strings — while the CLI and MCP took
+/// one value per field. It is now `clove_core::view::Filters`, which every
+/// surface shares; the accepted spellings (csv values, AND-ed labels, `q` over
+/// id/title/labels) are unchanged, and the CLI/MCP gained them rather than the
+/// web losing anything.
+///
+/// Two deliberate differences from the predicate this replaces:
+///
+/// - an unrecognized value is a `VALIDATION_ERROR` rather than a filter that
+///   matches nothing (`?status=bogus` used to return `[]`, indistinguishable
+///   from "no open bugs"), the same treatment `?sort=` already gets;
+/// - `q` is matched against id, title, and each label *separately*, where the
+///   old code concatenated the three into one haystack — so a needle containing
+///   a space can no longer match across a field boundary (`?q=x%20y` matching an
+///   id ending `x` beside a title starting `y`). That was an artefact of the
+///   concatenation, not a feature.
+fn filters_of(params: &HashMap<String, String>) -> Result<clove_core::view::Filters, ApiError> {
+    let present = |key: &str| {
+        params
+            .get(key)
+            .filter(|s| !s.is_empty())
+            .map(String::as_str)
+    };
+    clove_core::view::Filters::parse_multi(
+        &csv(params, "status"),
+        &csv(params, "type"),
+        &csv(params, "label"),
+        present("assignee"),
+        &csv(params, "priority"),
+        present("q"),
+    )
+    .map_err(ApiError::from)
 }
 
-/// Sort frontmatter in place by the requested `sort`/`dir` (default `rank`).
-fn sort_items(items: &mut [ItemFrontmatter], params: &HashMap<String, String>, graph: &GraphStore) {
-    let field = params.get("sort").map(String::as_str).unwrap_or("rank");
-    let desc = params.get("dir").map(String::as_str) == Some("desc");
-    let ranks = graph.topological_ranks();
+/// The requested `?sort=`/`?dir=`, through the shared contract.
+///
+/// This endpoint had the *only* sort implementation in the project — a private
+/// comparator here, and no sort argument at all on the CLI or MCP. It is now
+/// `clove_core::view::Order`, which every surface shares; the accepted spellings
+/// (`rank|priority|created|updated|id`, `dir=desc`) are unchanged, and
+/// `status`/`type` come along with the shared enum.
+///
+/// Unlike the old comparator, an unrecognized value is a `VALIDATION_ERROR`
+/// rather than a silent fall-back to `rank` — the same answer `clove ls --sort
+/// nope` gives. Every other parameter on these endpoints now answers the same
+/// way: the numbers go through [`usize_param`] and the flags through
+/// [`bool_param`] (roadmap §7).
+fn order_of(params: &HashMap<String, String>) -> Result<clove_core::view::Order, ApiError> {
+    clove_core::view::Order::parse(
+        params.get("sort").map(String::as_str),
+        params.get("dir").map(String::as_str),
+    )
+    .map_err(ApiError::from)
+}
 
-    items.sort_by(|a, b| {
-        let ord = match field {
-            "priority" => a
-                .priority
-                .get()
-                .cmp(&b.priority.get())
-                .then_with(|| a.id.cmp(&b.id)),
-            "created" => a.created.cmp(&b.created).then_with(|| a.id.cmp(&b.id)),
-            "updated" => a.updated.cmp(&b.updated).then_with(|| a.id.cmp(&b.id)),
-            "id" => a.id.cmp(&b.id),
-            // "rank" (default): (priority, topo rank, id).
-            _ => a
-                .priority
-                .get()
-                .cmp(&b.priority.get())
-                .then_with(|| {
-                    let ra = ranks.get(&a.id).copied().unwrap_or(usize::MAX);
-                    let rb = ranks.get(&b.id).copied().unwrap_or(usize::MAX);
-                    ra.cmp(&rb)
-                })
-                .then_with(|| a.id.cmp(&b.id)),
-        };
-        if desc {
-            ord.reverse()
-        } else {
-            ord
-        }
-    });
+/// Which list an `?mode=` request wants. Parsed strictly (see the call site).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ListMode {
+    All,
+    Ready,
+    Blocked,
 }
 
 /// `GET /api/v1/items` — filtered, sorted, paginated list.
+///
+/// `?mode=ready|blocked` selects the corresponding engine query, so the three
+/// lists share one tiering decision with `clove ready`/`clove blocked` instead
+/// of being a fourth in-memory reimplementation of the partition.
 pub async fn list_items(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
 ) -> ApiResult {
-    let (frontmatters, ctx) = load(&state)?;
-    let mode = params.get("mode").map(String::as_str).unwrap_or("list");
+    let order = order_of(&params)?;
+    let filters = filters_of(&params)?;
+    let shape = shape_of(&params)?;
+    let window = page_window(&params)?;
+    // Strict, like every other parameter on this endpoint. `?mode=redy` used to
+    // fall through to the unfiltered list with a 200 — and `mode` is not echoed
+    // in `_meta`, so a client could not tell a typo from a server that does not
+    // implement the mode it asked for. That is the exact defect the rest of this
+    // module was tightened to remove.
+    let mode = match params.get("mode").map(String::as_str) {
+        None | Some("") | Some("all") | Some("list") => ListMode::All,
+        Some("ready") => ListMode::Ready,
+        Some("blocked") => ListMode::Blocked,
+        Some(other) => {
+            return Err(ApiError::from(clove_types::CloveError::InvalidField {
+                field: "mode".to_owned(),
+                reason: format!("unknown mode `{other}` (expected ready, blocked, or all)"),
+            }))
+        }
+    };
 
-    let mut selected: Vec<ItemFrontmatter> = frontmatters
-        .into_iter()
-        .filter(|fm| matches(fm, &params))
-        .filter(|fm| match mode {
-            "ready" => ctx.is_ready(&fm.id),
-            "blocked" => ctx.is_blocked(&fm.id),
-            _ => true,
-        })
-        .collect();
+    let engine = state.engine.clone();
+    let (f, w) = (filters.clone(), window);
+    let answer = blocking(move || {
+        // Full frontmatter: this API renders every field plus the graph terms,
+        // which no lean row carries.
+        let answer = match mode {
+            ListMode::Ready => engine.ready(&f, order, w, Projection::Full),
+            ListMode::Blocked => engine.blocked(&f, order, w, Projection::Full),
+            ListMode::All => engine.list(&f, order, w, Projection::Full),
+        };
+        answer.map_err(ApiError::from)
+    })
+    .await?;
 
-    sort_items(&mut selected, &params, ctx.graph());
-
-    let total = selected.len();
-    let offset = params
-        .get("offset")
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(0);
-    let limit = params
-        .get("limit")
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(usize::MAX);
-
-    let page: Vec<Value> = selected
-        .iter()
-        .skip(offset)
-        .take(limit)
-        .map(|fm| Value::Object(frontmatter_value(fm, &ctx)))
-        .collect();
+    let source = answer.source.as_str();
+    let total = answer.total;
+    let page = values_of(answer, &state)?;
+    // `returned` counts rows, so it is taken before shaping — a projection
+    // changes each row's keys, never how many rows came back.
     let returned = page.len();
+    let page = shape.apply_all(page);
 
     Ok(ok(
         json!(page),
-        json!({ "total": total, "returned": returned, "offset": offset, "source": state.source }),
+        json!({
+            "total": total,
+            "returned": returned,
+            "offset": window.offset,
+            "limit": window.reported_limit(),
+            "sort": order.field.as_str(),
+            "dir": order.dir_str(),
+            "filters": serde_json::to_value(&filters).unwrap_or(Value::Null),
+            "source": source,
+        }),
     ))
 }
 
 /// `GET /api/v1/items/:id` — full item detail.
-pub async fn get_item(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+///
+/// The graph terms come from the item's own dependency closure
+/// (`ops::graph_terms_detailed`), not from a whole-store graph: rendering one
+/// item used to scan and parse every file in the repo to learn whether *that*
+/// item was ready, which is the per-request rebuild read-path §4 names.
+pub async fn get_item(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> ApiResult {
     let id = parse_id(&id)?;
-    let item = state.store.get(&id)?;
-    let (_frontmatters, ctx) = load(&state)?;
-    let obj = item_value(&item, &state.issues_dir, &ctx);
-    Ok(ok(Value::Object(obj), json!({ "source": state.source })))
+    let shape = shape_of(&params)?;
+    let issues_dir = state.issues_dir.clone();
+    let store = state.store.clone();
+    let obj = blocking(move || {
+        let item = store.get(&id)?;
+        let terms = clove_core::ops::graph_terms_detailed(&store, &item.frontmatter)?;
+        Ok(item_value(&item, &issues_dir, &terms))
+    })
+    .await?;
+    Ok(ok(
+        shape.apply(obj),
+        json!({ "source": clove_engine::Source::Files.as_str() }),
+    ))
 }
 
 /// `GET /api/v1/items/:id/comments`.
@@ -179,20 +385,36 @@ pub async fn get_comments(
     Query(params): Query<HashMap<String, String>>,
 ) -> ApiResult {
     let id = parse_id(&id)?;
-    if !state.store.exists(&id) {
-        return Err(ApiError::from(clove_types::CloveError::NotFound {
-            id: id.to_string(),
-        }));
-    }
-    let mut comments = list_comments(&state.issues_dir, &id)?;
-    if let Some(limit) = params.get("limit").and_then(|s| s.parse::<usize>().ok()) {
-        comments.truncate(limit);
-    }
-    let data: Vec<Value> = comments
-        .into_iter()
-        .map(|c| json!({ "timestamp": c.timestamp.to_rfc3339(), "author": c.author, "body": c.body }))
-        .collect();
-    Ok(ok_data(json!(data)))
+    // Shared with `clove comments` and the `clove_comments` MCP tool. This
+    // endpoint used to `truncate`, keeping the *oldest* n while both other
+    // surfaces kept the newest — the same flag name with the opposite meaning.
+    //
+    // The window is anchored at the newest end, so the skip parameter is
+    // `skip_newest`, not `offset` — the same spelling the CLI and MCP use. The
+    // default is the *web* default (unlimited), like every other read here: the
+    // SPA sends no limit and renders the thread against `comment_count`, so a
+    // cap would show a full count above a truncated list.
+    let window = clove_core::view::Page::new(
+        usize_param(&params, "skip_newest")?.unwrap_or(0),
+        usize_param(&params, "limit")?,
+        clove_core::view::defaults::WEB_LIMIT,
+    );
+    let engine = state.engine.clone();
+    let page = blocking(move || engine.comments(&id, window).map_err(ApiError::from)).await?;
+    let page = page.value;
+    let data = page
+        .get("items")
+        .cloned()
+        .unwrap_or_else(|| Value::Array(Vec::new()));
+    Ok(ok(
+        data,
+        json!({
+            "total": page["total"],
+            "returned": page["returned"],
+            "skip_newest": page["skip_newest"],
+            "limit": page["limit"],
+        }),
+    ))
 }
 
 /// `GET /api/v1/items/:id/deptree?depth=`.
@@ -202,49 +424,98 @@ pub async fn get_deptree(
     Query(params): Query<HashMap<String, String>>,
 ) -> ApiResult {
     let id = parse_id(&id)?;
-    let depth = params
-        .get("depth")
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(5);
-    let (_frontmatters, ctx) = load(&state)?;
-    let tree = ctx
-        .graph()
-        .dep_tree(&id, depth)
-        .ok_or_else(|| ApiError::from(clove_types::CloveError::NotFound { id: id.to_string() }))?;
-    let value = serde_json::to_value(tree).unwrap_or(Value::Null);
-    Ok(ok_data(value))
+    // `?depth=0` is unlimited, matching `--depth 0` and every other bound.
+    let depth = match usize_param(&params, "depth")?
+        .unwrap_or(clove_core::view::defaults::DEP_TREE_DEPTH)
+    {
+        0 => usize::MAX,
+        n => n,
+    };
+    // Tiered: a live daemon answers from its cached graph, so the common case
+    // no longer scans the store to walk one item's subtree.
+    let engine = state.engine.clone();
+    let answer = blocking(move || engine.dep_tree(&id, depth).map_err(ApiError::from)).await?;
+    Ok(ok(
+        answer.value,
+        json!({ "source": answer.source.as_str() }),
+    ))
 }
 
 /// `GET /api/v1/board?group_by=status`.
+///
+/// `limit`/`offset` window each column **independently** — a board caps how tall
+/// a column gets, which is the only reading of a single limit over grouped
+/// columns that means anything. It previously accepted both (it shares
+/// `matches`/`sort_items` with the item list) and silently dropped them.
+///
+/// `count` stays the column's full size, so a header reading "Closed · 412"
+/// over 50 visible cards is honest rather than wrong; `returned` is what came
+/// back.
 pub async fn get_board(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
 ) -> ApiResult {
-    let (frontmatters, ctx) = load(&state)?;
-    let mut selected: Vec<ItemFrontmatter> = frontmatters
-        .into_iter()
-        .filter(|fm| matches(fm, &params))
-        .collect();
-    sort_items(&mut selected, &params, ctx.graph());
+    let order = order_of(&params)?;
+    let filters = filters_of(&params)?;
+    let shape = shape_of(&params)?;
+
+    // The board shows every matching item grouped into columns, so the query is
+    // unwindowed: `limit`/`offset` window each *column* below, not the query.
+    let engine = state.engine.clone();
+    let (f, unwindowed) = (filters.clone(), clove_core::view::Page::unlimited());
+    let answer = blocking(move || {
+        engine
+            .list(&f, order, unwindowed, Projection::Full)
+            .map_err(ApiError::from)
+    })
+    .await?;
+    let source = answer.source.as_str();
+    let selected = values_of(answer, &state)?;
 
     let mut columns: Vec<(&str, &str, Vec<Value>)> = vec![
         ("open", "Open", Vec::new()),
         ("in_progress", "In Progress", Vec::new()),
         ("closed", "Closed", Vec::new()),
     ];
-    for fm in &selected {
-        let value = Value::Object(frontmatter_value(fm, &ctx));
-        if let Some(col) = columns.iter_mut().find(|c| c.0 == fm.status.as_str()) {
+    for value in selected {
+        let status = value
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        if let Some(col) = columns.iter_mut().find(|c| c.0 == status) {
             col.2.push(value);
         }
     }
+    let window = page_window(&params)?;
     let columns: Vec<Value> = columns
         .into_iter()
-        .map(|(key, label, items)| json!({ "key": key, "label": label, "count": items.len(), "items": items }))
+        .map(|(key, label, items)| {
+            let (page, count) = window.apply(items);
+            let returned = page.len();
+            // Shaping runs *after* the grouping, which reads each row's
+            // `status`: projecting first would let `?fields=id` empty every
+            // column instead of returning ids.
+            json!({
+                "key": key,
+                "label": label,
+                "count": count,
+                "returned": returned,
+                "items": shape.apply_all(page),
+            })
+        })
         .collect();
     Ok(ok(
         json!({ "columns": columns }),
-        json!({ "source": state.source }),
+        json!({
+            "source": source,
+            "offset": window.offset,
+            "limit": window.reported_limit(),
+            "sort": order.field.as_str(),
+            "dir": order.dir_str(),
+            "filters": serde_json::to_value(&filters).unwrap_or(Value::Null),
+            "per_column": true,
+        }),
     ))
 }
 
@@ -253,17 +524,24 @@ pub async fn get_stats(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
 ) -> ApiResult {
-    let (frontmatters, ctx) = load(&state)?;
     let opts = StatsOptions {
-        top: params
-            .get("top")
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(10),
-        include_epics: params.get("no_epics").map(String::as_str) != Some("true"),
+        top: usize_param(&params, "top")?.unwrap_or(clove_core::view::defaults::STATS_TOP),
+        // Through `bool_param`, like every other flag here: this was a raw
+        // `== Some("true")`, so `?no_epics=1` silently *kept* the epic rollup —
+        // the spelling the same client would use for `?compact=1`.
+        include_epics: !bool_param(&params, "no_epics")?,
     };
-    let report = compute_stats(&frontmatters, ctx.graph(), chrono::Utc::now(), opts);
-    let value = serde_json::to_value(report).unwrap_or(Value::Null);
-    Ok(ok_data(value))
+    let engine = state.engine.clone();
+    let answer = blocking(move || {
+        engine
+            .stats(opts.top, opts.include_epics, chrono::Utc::now())
+            .map_err(ApiError::from)
+    })
+    .await?;
+    Ok(ok(
+        answer.value,
+        json!({ "source": answer.source.as_str() }),
+    ))
 }
 
 /// Recorded stats snapshots from `.clove/index.db`, mapped to history points
@@ -276,7 +554,11 @@ pub async fn get_stats(
 fn recorded_history_points(
     state: &AppState,
     params: &HashMap<String, String>,
-) -> Option<Vec<Value>> {
+    // Parsed by the caller and passed in: parsing it here too would make a
+    // malformed `?limit=` reject or not depending on whether the repo happened
+    // to have snapshots recorded.
+    window: clove_core::view::Page,
+) -> Option<(Vec<Value>, usize)> {
     use clove_index::Index;
 
     let db_path = state.issues_dir.parent()?.join("index.db");
@@ -285,16 +567,18 @@ fn recorded_history_points(
     }
     let index = Index::open(&db_path).ok()?;
     let since = params.get("since").map(String::as_str);
-    let limit = params
-        .get("limit")
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&n| n > 0);
-    // snapshot_history returns most-recent-first; reverse to chronological order
-    // so the throughput deltas below run forward in time.
-    let mut snapshots = index.snapshot_history(since, limit).ok()?;
+    // Fetch the whole series and window it here rather than pushing the limit
+    // into SQL. Pushing it down cannot honour `?offset=` — which this endpoint
+    // parsed and then dropped — and reports the truncated count as the total,
+    // the same defect the CLI's `stats --history` had.
+    let snapshots = index.snapshot_history(since, None).ok()?;
     if snapshots.is_empty() {
         return None;
     }
+    // `snapshot_history` returns most-recent-first, so the window is applied
+    // here (keeping the newest N, as `--limit` does) and the survivors are then
+    // reversed into chronological order for the throughput deltas below.
+    let (mut snapshots, total) = window.apply(snapshots);
     snapshots.reverse();
 
     let mut points = Vec::with_capacity(snapshots.len());
@@ -330,7 +614,7 @@ fn recorded_history_points(
             "blocked": report.blocked,
         }));
     }
-    Some(points)
+    Some((points, total))
 }
 
 /// `GET /api/v1/stats/history` — the throughput/levels history for the timeline.
@@ -348,18 +632,36 @@ pub async fn get_stats_history(
     use chrono::Duration;
     use std::collections::BTreeMap;
 
+    // The window is parsed *before* either path runs, so a malformed `?limit=`
+    // is a 422 whether or not this repo has recorded snapshots.
+    let window = page_window(&params)?;
+
     // Durable recorded snapshots win when present.
-    if let Some(points) = recorded_history_points(&state, &params) {
+    if let Some((points, total)) = recorded_history_points(&state, &params, window) {
         let recorded = points.len();
         return Ok(ok(
             json!(points),
-            json!({ "source": state.source, "synthesized": false, "snapshots": recorded }),
+            json!({
+                // The tier that answered, like every other read endpoint —
+                // recorded snapshots live in `index.db`. This reported
+                // `state.source` (the serving mode, `standalone`/`daemon`) after
+                // the rest of the API moved to naming the tier, so one endpoint
+                // returned a value outside the enum the published schema lists.
+                "source": clove_engine::Source::Index.as_str(),
+                "synthesized": false,
+                "snapshots": recorded,
+                "total": total,
+                "returned": recorded,
+                "offset": window.offset,
+                "limit": window.reported_limit(),
+            }),
         ));
     }
 
-    let days: i64 = params
-        .get("days")
-        .and_then(|s| s.parse::<i64>().ok())
+    // `?days=` is strict for the same reason as `?limit=` (a typo used to mean
+    // "90 days" silently); the clamp then bounds a legal-but-absurd request.
+    let days: i64 = usize_param(&params, "days")?
+        .map(|n| n.min(i64::MAX as usize) as i64)
         .unwrap_or(90)
         .clamp(1, 365);
 
@@ -406,7 +708,8 @@ pub async fn get_stats_history(
 
     Ok(ok(
         json!(points),
-        json!({ "source": state.source, "synthesized": true }),
+        // Synthesized from the item files, so: `files`.
+        json!({ "source": clove_engine::Source::Files.as_str(), "synthesized": true }),
     ))
 }
 

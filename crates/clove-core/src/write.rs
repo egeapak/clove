@@ -17,7 +17,7 @@ use std::io::{self, Write};
 use std::time::Duration;
 
 use camino::Utf8Path;
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Utc};
 use tempfile::NamedTempFile;
 
 use crate::error::CloveError;
@@ -104,10 +104,11 @@ pub fn write_item_file(item: &Item, path: &Utf8Path) -> Result<(), CloveError> {
     atomic_write(path, &buffer)
 }
 
-/// Render an RFC3339 timestamp with second precision and a `Z` suffix, matching
-/// the canonical on-disk form.
+/// Render an RFC3339 timestamp in the one canonical spelling (UTC, whole
+/// seconds, `Z` suffix) — [`clove_types::canonical_rfc3339`], shared with every
+/// other surface that renders a timestamp.
 fn rfc3339(ts: DateTime<Utc>) -> String {
-    ts.to_rfc3339_opts(SecondsFormat::Secs, true)
+    clove_types::canonical_rfc3339(ts)
 }
 
 /// Render a free-text scalar with correct YAML quoting, delegated to

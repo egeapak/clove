@@ -25,18 +25,49 @@ fn run_in(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
     clove().current_dir(dir).args(args).output().unwrap()
 }
 
-fn spawn_daemon(clove_dir: &std::path::Path, bin: &std::path::Path) -> Child {
+/// A spawned `cloved` that dies with the test, however the test ends.
+///
+/// Without this, a failing assertion skipped the manual `sigterm` at the end of
+/// each test and left the daemon running — holding cargo's captured stdout pipe
+/// open, so `cargo test` **hung** instead of reporting the failure. A pin that
+/// turns into a CI timeout rather than a red test is worse than no pin: the
+/// signal is there, but nobody can read it.
+struct Daemon(Child);
+
+impl Daemon {
+    fn id(&self) -> u32 {
+        self.0.id()
+    }
+
+    /// Wait for a daemon this test has already killed itself.
+    fn reap(&mut self) {
+        let _ = self.0.wait();
+    }
+}
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        sigterm(self.0.id());
+        let _ = self.0.wait();
+    }
+}
+
+fn spawn_daemon(clove_dir: &std::path::Path, bin: &std::path::Path) -> Daemon {
     let child = Command::new(bin)
         .arg("run")
         .arg("--clove-dir")
         .arg(clove_dir)
+        // Detach from cargo's captured pipes: a surviving daemon holding stdout
+        // open is what turned a failed assertion into a hang.
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .spawn()
         .expect("spawn cloved");
     let pid = clove_dir.join("daemon.pid");
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(5) {
         if pid.exists() {
-            return child;
+            return Daemon(child);
         }
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -82,7 +113,7 @@ fn ls_ready_query_route_through_daemon_with_parity() {
     assert!(run_in(root, &["reindex"]).status.success());
 
     let clove_dir = root.join(".clove");
-    let mut daemon = spawn_daemon(&clove_dir, &bin);
+    let daemon = spawn_daemon(&clove_dir, &bin);
 
     // Ground truth: the file-scan path (no index, no daemon).
     let (mut want_ls, _) =
@@ -103,8 +134,7 @@ fn ls_ready_query_route_through_daemon_with_parity() {
         );
     }
 
-    sigterm(daemon.id());
-    let _ = daemon.wait();
+    drop(daemon);
 
     // With the daemon gone, the same read falls back cleanly (index path) and the
     // stale socket/pid are cleaned up by the liveness probe.
@@ -147,12 +177,14 @@ fn tier1_tier2_commands_route_through_daemon_with_parity() {
     let want_tree = tree_shape(&run_in(root, &["dep", "tree", &c, "-f", "json"]).stdout);
 
     let clove_dir = root.join(".clove");
-    let mut daemon = spawn_daemon(&clove_dir, &bin);
+    let daemon = spawn_daemon(&clove_dir, &bin);
 
-    // search → daemon, finds the item by title.
+    // search does NOT route to the daemon — see
+    // `search_is_a_file_scan_even_with_a_live_daemon` for why, and for the
+    // needles that make it observable.
     let (search_ids, search_src) =
         ids_and_source(&run_in(root, &["search", "apple", "-f", "json"]).stdout);
-    assert_eq!(search_src, "daemon", "search routes to the daemon");
+    assert_eq!(search_src, "files", "search has no daemon tier");
     assert_eq!(search_ids, vec![a.clone()], "search finds 'alpha apple'");
 
     // blocked → daemon, same set as the file path.
@@ -182,8 +214,7 @@ fn tier1_tier2_commands_route_through_daemon_with_parity() {
         serde_json::from_slice(&run_in(root, &["reindex", "-f", "json"]).stdout).unwrap();
     assert_eq!(rv["data"]["items_indexed"], serde_json::json!(3));
 
-    sigterm(daemon.id());
-    let _ = daemon.wait();
+    drop(daemon);
 }
 
 fn list_ids(out: &[u8]) -> Vec<String> {
@@ -242,10 +273,11 @@ fn routed_reads_fall_back_after_daemon_crash() {
     let (_, src) = ids_and_source(&run_in(root, &["blocked", "-f", "json"]).stdout);
     assert_eq!(src, "daemon", "blocked routes while the daemon is alive");
 
-    // Hard-kill (no clean shutdown → corpse socket/pid left behind).
+    // Hard-kill (no clean shutdown → corpse socket/pid left behind). The Drop
+    // guard's SIGTERM afterwards is a no-op on an already-dead process.
     sigkill(daemon.id());
     let mut daemon = daemon;
-    let _ = daemon.wait();
+    daemon.reap();
     assert!(
         clove_dir.join("daemon.sock").exists(),
         "corpse socket remains"
@@ -271,4 +303,143 @@ fn routed_reads_fall_back_after_daemon_crash() {
         "corpse socket cleaned by the liveness probe"
     );
     assert!(!clove_dir.join("daemon.pid").exists(), "corpse pid cleaned");
+}
+
+/// `clove search` answers identically with a live daemon, with only a local
+/// index, and with neither — the third leg of the read-path §6.1 invariant
+/// (`crates/clove/tests/cli_commands.rs::search_agrees_across_the_file_and_index_paths`
+/// covers the first two).
+///
+/// Protocol v5 had a `search` RPC that ran the daemon's hot FTS5 index and
+/// returned matched ids. FTS matches whole tokens with ASCII-only case folding,
+/// so the daemon's match set was strictly narrower than the file scan's, and
+/// merely *starting* a daemon changed what `clove search` found. v6 removed the
+/// RPC with the FTS table itself.
+///
+/// The needles below are the ones that make the difference visible: a whole
+/// token agreed on both paths even when the bug was live, which is why the old
+/// test could not see it.
+#[test]
+fn search_is_a_file_scan_even_with_a_live_daemon() {
+    let Some(bin) = cloved_bin() else {
+        eprintln!("skipping: cloved binary not built (run via `cargo test --workspace`)");
+        return;
+    };
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    assert!(run_in(root, &["init", "--prefix", "proj"]).status.success());
+    let issues = root.join(".clove/issues");
+    // `corepart` holds `core` mid-token; `ünicode-tag` holds `icode` mid-token
+    // and is only reachable by a case-folded non-ASCII needle.
+    for (suffix, title, body, label) in [
+        ("AAAAAAAA", "Payments gateway", "unrelated prose", ""),
+        ("BBBBBBBB", "Plain title", "the corepart word", ""),
+        ("CCCCCCCC", "Plain title two", "plain body", "ünicode-tag"),
+    ] {
+        let id = format!("proj-{suffix}");
+        let labels = if label.is_empty() {
+            String::new()
+        } else {
+            format!("labels:\n  - {label}\n")
+        };
+        std::fs::write(
+            issues.join(format!("{id}.md")),
+            format!(
+                "---\nschema: 1\nid: {id}\ntitle: {title}\nstatus: open\ntype: feature\n\
+                 priority: 2\ncreated: 2026-06-02T10:00:00Z\nupdated: 2026-06-02T10:00:00Z\n\
+                 {labels}---\n{body}\n"
+            ),
+        )
+        .unwrap();
+    }
+    assert!(run_in(root, &["reindex"]).status.success());
+
+    let needles = ["gateway", "core", "icode", "Ünicode"];
+    let ground: Vec<Vec<String>> = needles
+        .iter()
+        .map(|n| list_ids(&run_in(root, &["search", n, "--no-index", "-f", "json"]).stdout))
+        .collect();
+    // The fixture must actually discriminate: without hits on the mid-token and
+    // non-ASCII needles this test would pass against the bug it targets.
+    assert_eq!(ground[1], vec!["proj-BBBBBBBB"], "mid-token `core`");
+    assert_eq!(ground[2], vec!["proj-CCCCCCCC"], "mid-token `icode`");
+    assert_eq!(ground[3], vec!["proj-CCCCCCCC"], "non-ASCII `Ünicode`");
+
+    let clove_dir = root.join(".clove");
+    let daemon = spawn_daemon(&clove_dir, &bin);
+
+    // The daemon has to be genuinely live, or "search did not use it" is vacuous.
+    let (_, ls_src) = ids_and_source(&run_in(root, &["ls", "-f", "json"]).stdout);
+    assert_eq!(ls_src, "daemon", "the daemon must be answering something");
+
+    for (needle, want) in needles.iter().zip(&ground) {
+        let (ids, src) = ids_and_source(&run_in(root, &["search", needle, "-f", "json"]).stdout);
+        assert_eq!(src, "files", "search must not route to the daemon");
+        assert_eq!(
+            &ids, want,
+            "{needle:?} must answer identically with a daemon live"
+        );
+    }
+
+    drop(daemon);
+}
+
+/// `--no-index` means a file scan — including past a *live* daemon.
+///
+/// The flag disables both accelerator tiers, not just the local `index.db`: a
+/// daemon answering from its own hot index is no more a file scan than the local
+/// one, and `--no-index` is the escape hatch users reach for when they suspect
+/// an accelerator is lying to them. Every existing parity test spends the flag
+/// on establishing ground truth *before* spawning a daemon, so nothing observed
+/// what it does with one running — and both the pre- and post-`clove-engine`
+/// implementations would have passed those with the daemon tier left on.
+#[test]
+fn no_index_bypasses_a_live_daemon() {
+    let Some(bin) = cloved_bin() else {
+        eprintln!("skipping: cloved binary not built (run via `cargo test --workspace`)");
+        return;
+    };
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    assert!(run_in(root, &["init"]).status.success());
+    let a = new_id(&run_in(root, &["new", "alpha", "-f", "json"]).stdout);
+    let b = new_id(&run_in(root, &["new", "beta", "-f", "json"]).stdout);
+    assert!(run_in(root, &["dep", "add", &a, &b]).status.success());
+    assert!(run_in(root, &["reindex"]).status.success());
+
+    let clove_dir = root.join(".clove");
+    let daemon = spawn_daemon(&clove_dir, &bin);
+
+    // The daemon is live and answering — without this the assertions below are
+    // vacuous, since "files" is also what a *dead* daemon produces.
+    for cmd in [
+        &["ls", "-f", "json"][..],
+        &["ready", "-f", "json"][..],
+        &["blocked", "-f", "json"][..],
+    ] {
+        let (_, src) = ids_and_source(&run_in(root, cmd).stdout);
+        assert_eq!(src, "daemon", "{cmd:?} routes while the daemon is alive");
+    }
+
+    // …and `--no-index` refuses it, with the same answer.
+    for cmd in [
+        &["ls", "-f", "json"][..],
+        &["ready", "-f", "json"][..],
+        &["blocked", "-f", "json"][..],
+        &["query", "-f", "json"][..],
+    ] {
+        let routed = ids_and_source(&run_in(root, cmd).stdout);
+        let mut args = vec!["--no-index"];
+        args.extend_from_slice(cmd);
+        let (ids, src) = ids_and_source(&run_in(root, &args).stdout);
+        assert_eq!(src, "files", "--no-index {cmd:?} must scan the files");
+        assert_eq!(
+            ids, routed.0,
+            "--no-index {cmd:?} must not change the answer"
+        );
+    }
+
+    drop(daemon);
 }

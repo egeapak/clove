@@ -121,7 +121,7 @@ fn index_ls_ready_and_filter_match_file_oracle() {
                 &index,
                 &Filter {
                     mode: QueryMode::Ready,
-                    status: Some(vec![status]),
+                    status: vec![status],
                     ..Default::default()
                 },
             );
@@ -135,7 +135,7 @@ fn index_ls_ready_and_filter_match_file_oracle() {
             &index,
             &Filter {
                 mode: QueryMode::Ready,
-                status: Some(vec![clove_types::ItemStatus::Closed]),
+                status: vec![clove_types::ItemStatus::Closed],
                 ..Default::default()
             },
         )
@@ -152,7 +152,7 @@ fn index_ls_ready_and_filter_match_file_oracle() {
         let index_bugs = index_ids(
             &index,
             &Filter {
-                item_type: Some(ItemType::Bug),
+                item_type: vec![ItemType::Bug],
                 ..Default::default()
             },
         );

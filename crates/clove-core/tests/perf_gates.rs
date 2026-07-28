@@ -92,3 +92,42 @@ fn ls_100_items_scan_under_budget() {
     });
     assert_within("ls_100_scan", elapsed, Duration::from_millis(10));
 }
+
+#[test]
+fn show_one_item_is_independent_of_store_size() {
+    // `ops::show` derives `ready`/`blocked_by` from the item's own dependency
+    // closure rather than a whole-store scan + graph build. The property that
+    // matters is not a wall-clock number but the *shape*: showing one item must
+    // not get slower as the store grows.
+    //
+    // Guarding the shape rather than an absolute budget keeps this meaningful on
+    // a slow or loaded CI box, where any fixed millisecond figure is noise.
+    let (_small, small) = corpus(200);
+    let (_large, large) = corpus(5000);
+
+    let small_ids = small.scan_frontmatter().unwrap().0;
+    let large_ids = large.scan_frontmatter().unwrap().0;
+
+    // Warm the page cache so this measures work, not first-read I/O.
+    let _ = clove_core::ops::show(&small, &small_ids[0].id).unwrap();
+    let _ = clove_core::ops::show(&large, &large_ids[0].id).unwrap();
+
+    let small_t = best_of(10, || {
+        clove_core::ops::show(&small, &small_ids[0].id).unwrap();
+    });
+    let large_t = best_of(10, || {
+        clove_core::ops::show(&large, &large_ids[0].id).unwrap();
+    });
+
+    eprintln!("perf gate show: 200 items {small_t:?}, 5000 items {large_t:?}");
+    if !cfg!(debug_assertions) {
+        // A whole-store implementation would be ~25x slower on the 25x corpus.
+        // Allow a wide margin for timer noise on a small absolute duration and
+        // still fail loudly if the scan ever comes back.
+        assert!(
+            large_t < small_t * 8 + Duration::from_millis(2),
+            "show on 5000 items ({large_t:?}) scaled with store size vs 200 items \
+             ({small_t:?}) — the whole-store scan has returned"
+        );
+    }
+}

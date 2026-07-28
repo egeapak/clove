@@ -652,6 +652,21 @@ mod tests {
     }
 
     #[test]
+    fn tmp_null_bin_names_probe() {
+        let body = r#"{"crate":{"name":"clove-sync-x","description":null,"repository":null,"downloads":5},
+          "versions":[{"id":1,"crate":"clove-sync-x","num":"0.2.0","yanked":false,"bin_names":null}]}"#;
+        let fetch = FakeFetch::ok(body);
+        let client = CratesIo::with_root(&fetch, "https://example.invalid/api/v1");
+        let out = client.crate_exists("clove-sync-x");
+        println!("TMP RESULT: {out:?}");
+        let rd = r#"{"dependencies":[{"version_id":1,"crate_id":"clove-plugin","kind":"normal","downloads":9}],
+          "versions":[{"id":1,"crate":"clove-sync-x","num":"0.2.0","yanked":false,"bin_names":null}]}"#;
+        let fetch2 = FakeFetch::ok(rd);
+        let client2 = CratesIo::with_root(&fetch2, "https://example.invalid/api/v1");
+        println!("TMP RD RESULT: {:?}", client2.reverse_dependents("clove-plugin"));
+    }
+
+    #[test]
     fn a_fully_yanked_crate_reports_no_installable_version() {
         let body = r#"{
           "dependencies":[{"version_id":1,"crate_id":"clove-plugin","kind":"normal"}],

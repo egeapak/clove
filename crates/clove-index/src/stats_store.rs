@@ -140,6 +140,34 @@ pub(crate) fn insert_raw(conn: &Connection, rows: &[RawSnapshot]) -> rusqlite::R
     Ok(())
 }
 
+/// Re-spell every `captured_at` that is not already canonical.
+///
+/// Called from [`Index::record_snapshot`] — i.e. on the next *mutation* of the
+/// history, never on a read. There is no flag day and no `clove migrate`: a repo
+/// that never snapshots again keeps its old rows, and reads canonicalize on the
+/// way out regardless. Cheap by construction (one row per `clove stats
+/// --snapshot`), and a no-op once the table is canonical.
+fn canonicalize_captured_at(conn: &Connection) -> rusqlite::Result<()> {
+    let stale: Vec<(i64, String)> = {
+        let mut stmt = conn.prepare("SELECT id, captured_at FROM snapshots")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .filter_map(|(id, raw)| {
+                let canonical = clove_types::canonicalize_rfc3339(&raw);
+                (canonical != raw).then_some((id, canonical))
+            })
+            .collect()
+    };
+    for (id, canonical) in stale {
+        conn.execute(
+            "UPDATE snapshots SET captured_at = ?1 WHERE id = ?2",
+            params![canonical, id],
+        )?;
+    }
+    Ok(())
+}
+
 /// One recorded analytics snapshot: when it was taken plus the full report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatsSnapshot {
@@ -151,12 +179,21 @@ pub struct StatsSnapshot {
 
 impl Index {
     /// Append one analytics snapshot stamped `captured_at` to the index's history.
+    ///
+    /// The timestamp is written in the one canonical spelling
+    /// ([`clove_types::canonical_rfc3339`]). Rows left by an older clove are
+    /// re-spelled on the way past — the roadmap's "rewrite on the next
+    /// mutation", which for an append-only history table is the next append.
+    /// (The rewrite and the append are separate autocommit statements, not one
+    /// transaction; the rewrite is idempotent, so a crash between them costs
+    /// nothing.)
     pub fn record_snapshot(
         &self,
         captured_at: DateTime<Utc>,
         report: &StatsReport,
     ) -> Result<(), IndexError> {
         ensure_table(self.conn())?;
+        canonicalize_captured_at(self.conn())?;
         let detail_json = serde_json::to_string(report).map_err(|e| {
             IndexError::CorruptIndex(format!("failed to serialize stats report: {e}"))
         })?;
@@ -165,7 +202,7 @@ impl Index {
              (captured_at, total, open, in_progress, closed, ready, blocked, dangling, cycles, detail_json) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
-                captured_at.to_rfc3339(),
+                clove_types::canonical_rfc3339(captured_at),
                 report.total,
                 report.by_status.open,
                 report.by_status.in_progress,
@@ -183,55 +220,77 @@ impl Index {
     /// Read recorded snapshots, most recent first. `since` (an RFC3339 lower
     /// bound, inclusive) and `limit` are optional; `None`/`0` mean unbounded.
     ///
-    /// `captured_at` is stored via [`chrono::DateTime::to_rfc3339`], which always
-    /// renders the `+00:00` UTC offset; the `WHERE captured_at >= ?` comparison is
-    /// lexicographic. So a `since` bound in any other equivalent form (e.g. the
-    /// `Z` suffix, `2026-06-03T00:00:00Z`) is first re-rendered to the same
-    /// canonical `to_rfc3339` form, so the string comparison agrees with the
-    /// instant comparison. An unparseable `since` is used verbatim (best effort).
+    /// Both the `since` comparison and the ordering run over the **parsed
+    /// instant**, in Rust, not over the stored string.
+    ///
+    /// An earlier version compared `substr(captured_at, 1, 19)` in SQL, which is
+    /// the *local wallclock* prefix: a legacy row spelled `…T10:00:00+02:00`
+    /// (08:00Z) sorted as though it were 10:00, so history came back visibly
+    /// unsorted, `--since` selected too many rows, and `--limit` dropped the
+    /// wrong ones. The read path canonicalized the returned *value* while
+    /// ordering on the raw prefix, so the output contradicted itself rather than
+    /// failing loudly. Only clove's own writes are guaranteed UTC; this table is
+    /// carried verbatim across every reindex and schema bump, so it can hold
+    /// anything an older clove or a foreign writer left.
+    ///
+    /// The table holds one row per `clove stats --snapshot`, so reading it whole
+    /// and ordering in memory is cheap and unconditionally correct. Unparseable
+    /// rows sort last, deterministically, rather than being dropped.
+    ///
+    /// The returned `captured_at` is always canonical, whatever the row holds.
     pub fn snapshot_history(
         &self,
         since: Option<&str>,
         limit: Option<usize>,
     ) -> Result<Vec<StatsSnapshot>, IndexError> {
         ensure_table(self.conn())?;
-        let since_canonical: Option<String> = since.map(|s| {
-            chrono::DateTime::parse_from_rfc3339(s)
-                .map(|dt| dt.with_timezone(&chrono::Utc).to_rfc3339())
-                .unwrap_or_else(|_| s.to_owned())
-        });
-
-        let mut sql = String::from("SELECT captured_at, detail_json FROM snapshots");
-        if since_canonical.is_some() {
-            sql.push_str(" WHERE captured_at >= ?1");
-        }
-        sql.push_str(" ORDER BY captured_at DESC, id DESC");
-        if let Some(n) = limit.filter(|&n| n > 0) {
-            sql.push_str(&format!(" LIMIT {n}"));
-        }
+        let since_instant = since.and_then(clove_types::parse_rfc3339);
 
         let conn = self.conn();
-        let mut stmt = conn.prepare(&sql)?;
-        let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(String, String)> {
-            Ok((row.get(0)?, row.get(1)?))
-        };
-        let rows = match &since_canonical {
-            Some(s) => stmt.query_map([s], map_row)?,
-            None => stmt.query_map([], map_row)?,
-        };
+        let mut stmt =
+            conn.prepare("SELECT id, captured_at, detail_json FROM snapshots ORDER BY id DESC")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
 
-        let mut out = Vec::new();
+        let mut parsed = Vec::new();
         for row in rows {
-            let (captured_at, detail_json) = row?;
+            let (id, captured_at, detail_json) = row?;
             let report: StatsReport = serde_json::from_str(&detail_json).map_err(|e| {
                 IndexError::CorruptIndex(format!("corrupt snapshot at {captured_at}: {e}"))
             })?;
-            out.push(StatsSnapshot {
-                captured_at,
-                report,
-            });
+            let instant = clove_types::parse_rfc3339(&captured_at);
+            if let (Some(bound), Some(at)) = (since_instant, instant) {
+                if at < bound {
+                    continue;
+                }
+            }
+            parsed.push((instant, id, captured_at, report));
         }
-        Ok(out)
+
+        // Newest first, by instant. `None` (unparseable) sorts last rather than
+        // being dropped; `id` breaks ties so the order is total.
+        parsed.sort_by(|a, b| match (a.0, b.0) {
+            (Some(x), Some(y)) => y.cmp(&x).then_with(|| b.1.cmp(&a.1)),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => b.1.cmp(&a.1),
+        });
+        if let Some(n) = limit.filter(|&n| n > 0) {
+            parsed.truncate(n);
+        }
+
+        Ok(parsed
+            .into_iter()
+            .map(|(_, _, captured_at, report)| StatsSnapshot {
+                captured_at: clove_types::canonicalize_rfc3339(&captured_at),
+                report,
+            })
+            .collect())
     }
 
     /// Number of recorded snapshots (diagnostic / test helper).
@@ -299,16 +358,16 @@ mod tests {
 
         let all = index.snapshot_history(None, None).unwrap();
         let times: Vec<&str> = all.iter().map(|s| s.captured_at.as_str()).collect();
-        assert_eq!(times[0], "2026-06-03T00:00:00+00:00", "{times:?}");
+        assert_eq!(times[0], "2026-06-03T00:00:00Z", "{times:?}");
 
         let since = index
             .snapshot_history(Some("2026-06-02T00:00:00+00:00"), None)
             .unwrap();
         assert_eq!(since.len(), 2);
 
-        // A `Z`-suffixed bound is equivalent to the stored `+00:00` form and must
-        // include the boundary snapshot (regression: naive lexicographic compare
-        // would drop it because '+' < 'Z').
+        // A `Z`-suffixed bound is equivalent to the `+00:00` one and must include
+        // the boundary snapshot (regression: naive lexicographic compare would
+        // drop it because '+' < 'Z').
         let since_z = index
             .snapshot_history(Some("2026-06-02T00:00:00Z"), None)
             .unwrap();
@@ -321,6 +380,214 @@ mod tests {
         let limited = index.snapshot_history(None, Some(1)).unwrap();
         assert_eq!(limited.len(), 1);
         assert_eq!(limited[0].report.total, 2);
+    }
+
+    /// Insert a snapshot row with a **verbatim** `captured_at` string, bypassing
+    /// `record_snapshot`. Every legacy-spelling test below has to write its rows
+    /// this way: going through the writer would canonicalize the input, and a
+    /// fixture that cannot hold a non-canonical value cannot detect a missing
+    /// canonicalization.
+    fn insert_verbatim(index: &Index, captured_at: &str, total: i64) {
+        let detail = serde_json::to_string(&{
+            let mut r = empty_report();
+            r.total = total as u64;
+            r
+        })
+        .unwrap();
+        index
+            .conn()
+            .execute(
+                "INSERT INTO snapshots (captured_at, total, open, in_progress, closed, \
+                 ready, blocked, dangling, cycles, detail_json) \
+                 VALUES (?1, ?2, 0, 0, 0, 0, 0, 0, 0, ?3)",
+                params![captured_at, total, detail],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn recorded_captured_at_is_canonical() {
+        let (_dir, path) = tmp_db();
+        let index = Index::open(&path).unwrap();
+        // A wall-clock instant with nanoseconds — what `stats --snapshot` used to
+        // store verbatim (`…T10:00:00.904816670+00:00`).
+        let t = DateTime::parse_from_rfc3339("2026-06-01T10:00:00.904816670+00:00")
+            .unwrap()
+            .with_timezone(&Utc);
+        index.record_snapshot(t, &empty_report()).unwrap();
+
+        let raw: String = index
+            .conn()
+            .query_row("SELECT captured_at FROM snapshots", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            raw, "2026-06-01T10:00:00Z",
+            "the stored string itself must be canonical"
+        );
+    }
+
+    #[test]
+    fn legacy_spellings_read_back_canonical() {
+        let (_dir, path) = tmp_db();
+        let index = Index::open(&path).unwrap();
+        ensure_table(index.conn()).unwrap();
+        insert_verbatim(&index, "2026-06-01T10:00:00.904816670+00:00", 1);
+
+        let hist = index.snapshot_history(None, None).unwrap();
+        assert_eq!(
+            hist[0].captured_at, "2026-06-01T10:00:00Z",
+            "a row written by an older clove must still read back canonical"
+        );
+    }
+
+    #[test]
+    fn history_orders_mixed_spellings_by_instant() {
+        // The ordering hazard §3 names: `captured_at` is ordered as TEXT, and the
+        // durable snapshots table survives every rebuild, so rows in the old and
+        // new spellings coexist.
+        //
+        // Rows 0-2 are one second apart in three different spellings. Rows 3-4
+        // are the case that actually discriminates: two rows *inside the same
+        // second*, where the suffix byte is what a raw `ORDER BY captured_at`
+        // would compare ('+' < '.' < 'Z'), and where canonical semantics say the
+        // two are the same instant and the `id DESC` tiebreak decides. Written
+        // canonical-first so the two orders disagree.
+        let (_dir, path) = tmp_db();
+        let index = Index::open(&path).unwrap();
+        ensure_table(index.conn()).unwrap();
+        insert_verbatim(&index, "2026-06-01T10:00:02Z", 2); // canonical
+        insert_verbatim(&index, "2026-06-01T10:00:00.904816670+00:00", 0); // legacy
+        insert_verbatim(&index, "2026-06-01T10:00:01+00:00", 1); // legacy
+        insert_verbatim(&index, "2026-06-01T10:00:03Z", 3); // canonical
+        insert_verbatim(&index, "2026-06-01T10:00:03.500000000+00:00", 4); // legacy
+
+        let totals: Vec<u64> = index
+            .snapshot_history(None, None)
+            .unwrap()
+            .iter()
+            .map(|s| s.report.total)
+            .collect();
+        assert_eq!(totals, vec![4, 3, 2, 1, 0], "newest first, by instant");
+    }
+
+    /// A non-UTC offset sorts and filters by its *instant*, not its wallclock.
+    ///
+    /// Ordering used to compare `substr(captured_at, 1, 19)` — which is the
+    /// local wallclock prefix, not a UTC one. A row spelled `…T10:00:00+02:00`
+    /// is 08:00Z, but sorted as though it were 10:00: history came back visibly
+    /// unsorted, `--since` selected too many rows, and `--limit` dropped the
+    /// wrong ones. Worse, the returned *value* was canonicalized while the
+    /// ordering was not, so the output contradicted itself instead of failing.
+    ///
+    /// Only clove's own writes are guaranteed UTC; this table is carried
+    /// verbatim across every reindex and schema bump, so it can hold whatever an
+    /// older clove or a foreign writer left.
+    #[test]
+    fn a_non_utc_offset_orders_by_instant_not_wallclock() {
+        let (_dir, path) = tmp_db();
+        let index = Index::open(&path).unwrap();
+        ensure_table(index.conn()).unwrap();
+        // 08:00Z, but spelled with a +02:00 offset: its wallclock prefix (10:00)
+        // sorts it above rows that are genuinely later.
+        insert_verbatim(&index, "2026-06-01T10:00:00+02:00", 0); // = 08:00Z
+        insert_verbatim(&index, "2026-06-01T08:30:00Z", 1);
+        insert_verbatim(&index, "2026-06-01T09:00:00Z", 2);
+
+        let totals: Vec<u64> = index
+            .snapshot_history(None, None)
+            .unwrap()
+            .iter()
+            .map(|s| s.report.total)
+            .collect();
+        assert_eq!(totals, vec![2, 1, 0], "newest first, by instant");
+
+        // `--since` uses the instant too: 08:30Z excludes the 08:00Z row.
+        let since: Vec<u64> = index
+            .snapshot_history(Some("2026-06-01T08:30:00Z"), None)
+            .unwrap()
+            .iter()
+            .map(|s| s.report.total)
+            .collect();
+        assert_eq!(
+            since,
+            vec![2, 1],
+            "the +02:00 row is 08:00Z, below the bound"
+        );
+
+        // ...and `limit` keeps the genuinely-newest, not the wallclock-newest.
+        let newest: Vec<u64> = index
+            .snapshot_history(None, Some(1))
+            .unwrap()
+            .iter()
+            .map(|s| s.report.total)
+            .collect();
+        assert_eq!(newest, vec![2]);
+    }
+
+    #[test]
+    fn since_bound_spans_spellings_in_both_directions() {
+        // The `since` bound and the stored rows can each be in either spelling,
+        // and every combination has to agree on the boundary row (inclusive).
+        //
+        // The boundary row is deliberately a *legacy*-spelled one: that is the
+        // combination a raw `captured_at >= ?` drops, because both `'+'` and
+        // `'.'` sort below the `'Z'` of a canonicalized bound — a snapshot
+        // silently missing from `stats --history --since`.
+        let (_dir, path) = tmp_db();
+        let index = Index::open(&path).unwrap();
+        ensure_table(index.conn()).unwrap();
+        insert_verbatim(&index, "2026-06-01T00:00:00+00:00", 0); // before
+        insert_verbatim(&index, "2026-06-02T00:00:00.904816670+00:00", 1); // boundary, legacy
+        insert_verbatim(&index, "2026-06-03T00:00:00Z", 2); // after
+
+        for bound in [
+            "2026-06-02T00:00:00Z",
+            "2026-06-02T00:00:00+00:00",
+            "2026-06-02T00:00:00.000Z",
+            "2026-06-02T02:00:00+02:00",
+        ] {
+            let got = index.snapshot_history(Some(bound), None).unwrap();
+            assert_eq!(
+                got.len(),
+                2,
+                "`{bound}` must select the boundary row and everything after it"
+            );
+        }
+    }
+
+    #[test]
+    fn recording_rewrites_legacy_rows() {
+        // Roadmap §3's "rewrite on the next mutation" — no flag day, no `clove
+        // migrate`. For an append-only history table the next mutation is the
+        // next `stats --snapshot`.
+        let (_dir, path) = tmp_db();
+        let index = Index::open(&path).unwrap();
+        ensure_table(index.conn()).unwrap();
+        insert_verbatim(&index, "2026-06-01T10:00:00.904816670+00:00", 0);
+        insert_verbatim(&index, "2026-06-01T10:00:01+00:00", 1);
+
+        index
+            .record_snapshot("2026-06-01T10:00:02Z".parse().unwrap(), &empty_report())
+            .unwrap();
+
+        let mut stmt = index
+            .conn()
+            .prepare("SELECT captured_at FROM snapshots ORDER BY id")
+            .unwrap();
+        let stored: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            stored,
+            vec![
+                "2026-06-01T10:00:00Z",
+                "2026-06-01T10:00:01Z",
+                "2026-06-01T10:00:02Z"
+            ],
+            "recording a snapshot re-spells the rows already there"
+        );
     }
 
     #[test]

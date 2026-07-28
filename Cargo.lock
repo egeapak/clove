@@ -573,6 +573,7 @@ dependencies = [
  "chrono",
  "clap",
  "clove-core",
+ "clove-engine",
  "clove-import",
  "clove-index",
  "clove-ipc",
@@ -617,6 +618,21 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "toml",
+]
+
+[[package]]
+name = "clove-engine"
+version = "0.1.0"
+dependencies = [
+ "camino",
+ "chrono",
+ "clove-core",
+ "clove-index",
+ "clove-ipc",
+ "clove-types",
+ "rayon",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -716,6 +732,7 @@ dependencies = [
  "camino",
  "chrono",
  "clove-core",
+ "clove-engine",
  "clove-ipc",
  "clove-types",
  "rmcp",
@@ -798,6 +815,7 @@ dependencies = [
  "camino",
  "chrono",
  "clove-core",
+ "clove-engine",
  "clove-index",
  "clove-types",
  "flate2",

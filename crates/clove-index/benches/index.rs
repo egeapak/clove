@@ -99,13 +99,24 @@ fn bench_index(c: &mut Criterion) {
             criterion::black_box(report.change_count());
         });
     });
-    // M1 gate: FTS5 `clove search` at 10k items should be < 20ms. The corpus
-    // bodies all contain "keyword<i>"; "fox" appears in every body, so this is a
-    // realistically broad match.
+    // `clove search` is a file scan on every surface (schema 6 removed the FTS
+    // mirror — read-path roadmap §6.1), so what is worth benching is the scan +
+    // shared ranker, not an index query. "fox" appears in every body, so this is
+    // the broad-match worst case.
+    // `ItemStore::new` takes the repo root; `issues` is `<root>/.clove/issues`.
+    let store =
+        clove_core::ItemStore::new(issues.parent().unwrap().parent().unwrap().to_path_buf());
     c.bench_function(&format!("search_{n}"), |b| {
         b.iter(|| {
-            let rows = index.search("fox", None).unwrap();
-            criterion::black_box(rows.len());
+            let mut hits = clove_core::ops::search_hits(&store, "fox").unwrap();
+            criterion::black_box(
+                clove_core::view::rank_hits(
+                    &mut hits,
+                    clove_core::view::SearchOrder::default(),
+                    &std::collections::HashMap::new(),
+                )
+                .len(),
+            );
         });
     });
 }

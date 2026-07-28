@@ -13,12 +13,24 @@ pub struct Cli {
     #[arg(short = 'f', long, global = true, value_parser = parse_format)]
     pub format: Option<OutputFormat>,
 
-    /// Force a file scan even if an index is present.
+    /// Force a file scan even if an index or daemon is present.
+    ///
+    /// A read-tier flag: it is accepted anywhere (before or after the
+    /// subcommand) but only the commands that *choose a tier* act on it — ls,
+    /// ready, blocked, query, stats, doctor, dep, serve — plus any plugin, which
+    /// receives it as `$CLOVE_NO_INDEX` and decides for itself. It is inert
+    /// everywhere else: `search` has a single file-scan tier by design, and the
+    /// write and metadata commands (new, show, comments, version, …) never
+    /// consult the index at all.
     #[arg(long, global = true)]
     pub no_index: bool,
 
     /// Use the thorough per-file staleness check (stats every file) instead of
     /// the fast directory-level check, when reading via the index.
+    ///
+    /// Same scope as `--no-index`: only the tier-choosing commands (ls, ready,
+    /// blocked, query, stats, doctor, dep, serve) and plugins (`$CLOVE_DEEP`)
+    /// act on it; it is accepted and inert elsewhere.
     #[arg(long, global = true)]
     pub deep: bool,
 
@@ -85,7 +97,7 @@ pub enum Commands {
     Comment(CommentArgs),
     /// List an item's comments.
     Comments(CommentsArgs),
-    /// Full-text search.
+    /// Search titles, labels, and bodies for a case-insensitive substring.
     Search(SearchArgs),
     /// Show work-item analytics (counts, ready/blocked, epics, throughput).
     Stats(StatsArgs),
@@ -299,6 +311,9 @@ pub struct ShowArgs {
     /// Compute `ready`/`blocked_by` even for human output.
     #[arg(short = 'v', long)]
     pub verbose: bool,
+    /// Omit null and empty-list keys from JSON output (as `clove_show` does).
+    #[arg(long)]
+    pub compact: bool,
 }
 
 #[derive(Debug, Args)]
@@ -378,10 +393,10 @@ pub enum DepAction {
 pub struct DepTreeArgs {
     /// The root item id.
     pub id: String,
-    /// Maximum depth (default 5).
-    #[arg(long, default_value_t = 5)]
-    pub depth: usize,
-    /// Remove the depth limit.
+    /// Maximum depth (default 5; use `--depth 0` for no limit).
+    #[arg(long)]
+    pub depth: Option<usize>,
+    /// Remove the depth limit (same as `--depth 0`).
     #[arg(long)]
     pub full: bool,
     /// Emit a flat array with a `depth` field instead of a nested tree.
@@ -399,21 +414,33 @@ pub struct DepCycleArgs {
 /// Shared filter/pagination flags for `ls`, `ready`, `blocked`.
 #[derive(Debug, Args, Default)]
 pub struct FilterArgs {
-    /// Filter by status (`open|in_progress|closed`).
+    /// Filter by status (`open|in_progress|closed`). Repeatable: any of them.
     #[arg(long)]
-    pub status: Option<String>,
-    /// Filter by type.
+    pub status: Vec<String>,
+    /// Filter by type. Repeatable: any of them.
     #[arg(long = "type", value_name = "TYPE")]
-    pub item_type: Option<String>,
-    /// Filter by label (canonicalized before matching).
+    pub item_type: Vec<String>,
+    /// Filter by label (canonicalized before matching). Repeatable: the item
+    /// must carry **all** of them.
     #[arg(long)]
-    pub label: Option<String>,
+    pub label: Vec<String>,
     /// Filter by assignee.
     #[arg(long)]
     pub assignee: Option<String>,
-    /// Filter by priority.
+    /// Filter by priority. Repeatable: any of them.
     #[arg(long)]
-    pub priority: Option<u8>,
+    pub priority: Vec<u8>,
+    /// Keep only items whose id, title, or labels contain this text
+    /// (case-insensitive). A filter, not a search — it never reads the body.
+    #[arg(long, value_name = "TEXT")]
+    pub q: Option<String>,
+    /// Sort by `rank|priority|created|updated|id|status|type` (default `rank`:
+    /// priority, then dependency order, then id).
+    #[arg(long, value_name = "FIELD")]
+    pub sort: Option<String>,
+    /// Reverse the sort order.
+    #[arg(long)]
+    pub desc: bool,
     /// Maximum number of results (default 100; use `--limit 0` for no limit).
     #[arg(long)]
     pub limit: Option<usize>,
@@ -423,9 +450,48 @@ pub struct FilterArgs {
     /// Comma-separated field projection.
     #[arg(long, value_name = "LIST")]
     pub fields: Option<String>,
-    /// Include items with dangling dependencies (ready/blocked).
+    /// Omit null and empty-list keys from JSON output (as the MCP read tools do
+    /// by default).
     #[arg(long)]
-    pub include_warnings: bool,
+    pub compact: bool,
+}
+
+impl FilterArgs {
+    /// The requested ordering, through the shared contract.
+    pub fn order(&self) -> Result<clove_core::view::Order, clove_types::CloveError> {
+        order_of(self.sort.as_deref(), self.desc)
+    }
+
+    /// The requested filter set, through the shared contract.
+    ///
+    /// One place rather than four: `ls`/`ready`/`blocked` all built their own
+    /// `Filters::parse(...)` call, so a new filter flag had to be wired into
+    /// each of them and `query` besides.
+    pub fn filters(&self) -> Result<clove_core::view::Filters, clove_types::CloveError> {
+        // `--priority` is a clap `u8` (so `--priority abc` is still a clap
+        // error, exit 2, as it has always been); the shared parser takes words,
+        // so the validated numbers are spelled back out.
+        let priority: Vec<String> = self.priority.iter().map(u8::to_string).collect();
+        clove_core::view::Filters::parse_multi(
+            &self.status,
+            &self.item_type,
+            &self.label,
+            self.assignee.as_deref(),
+            &priority,
+            self.q.as_deref(),
+        )
+    }
+}
+
+/// Decode `--sort`/`--desc` into the shared [`clove_core::view::Order`].
+///
+/// `--desc` is a boolean flag rather than `--dir <asc|desc>`; it maps onto the
+/// same parser the web's `?dir=` uses so there is one validator, not two.
+pub fn order_of(
+    sort: Option<&str>,
+    desc: bool,
+) -> Result<clove_core::view::Order, clove_types::CloveError> {
+    clove_core::view::Order::parse(sort, desc.then_some("desc"))
 }
 
 #[derive(Debug, Args)]
@@ -436,6 +502,15 @@ pub struct QueryArgs {
     /// Comma-separated field projection.
     #[arg(long, value_name = "LIST")]
     pub fields: Option<String>,
+    /// Omit null and empty-list keys from JSON output.
+    #[arg(long)]
+    pub compact: bool,
+    /// Sort by `rank|priority|created|updated|id|status|type` (default `rank`).
+    #[arg(long, value_name = "FIELD")]
+    pub sort: Option<String>,
+    /// Reverse the sort order.
+    #[arg(long)]
+    pub desc: bool,
     /// Maximum number of results (default 100; use `--limit 0` for no limit).
     #[arg(long)]
     pub limit: Option<usize>,
@@ -459,15 +534,37 @@ pub struct CommentsArgs {
     /// Show at most this many (most recent) comments.
     #[arg(long)]
     pub limit: Option<usize>,
+    /// Skip this many of the *newest* comments, to page back through older
+    /// ones. Named for its direction: unlike `--offset` on the list commands,
+    /// this window is anchored at the newest end, not the start.
+    #[arg(long)]
+    pub skip_newest: Option<usize>,
 }
 
 #[derive(Debug, Args)]
 pub struct SearchArgs {
     /// The search text.
     pub text: String,
+    /// Sort by `rank|priority|created|updated|id|status|type`. Omitted, results
+    /// are ranked by relevance (title hits, then labels, then body); naming a
+    /// field replaces that ranking entirely.
+    #[arg(long, value_name = "FIELD")]
+    pub sort: Option<String>,
+    /// Reverse the sort order (or, with no `--sort`, the relevance ranking).
+    #[arg(long)]
+    pub desc: bool,
     /// Maximum number of results (default 100; use `--limit 0` for no limit).
     #[arg(long)]
     pub limit: Option<usize>,
+    /// Skip this many results.
+    #[arg(long)]
+    pub offset: Option<usize>,
+    /// Comma-separated field projection.
+    #[arg(long, value_name = "LIST")]
+    pub fields: Option<String>,
+    /// Omit null and empty-list keys from JSON output (as `clove_search` does).
+    #[arg(long)]
+    pub compact: bool,
 }
 
 #[derive(Debug, Args)]
@@ -485,12 +582,22 @@ pub struct StatsArgs {
     /// Show the recorded snapshot history instead of a live report.
     #[arg(long)]
     pub history: bool,
+    // The three window flags below are `requires = "history"`: a live report is
+    // a single object with no series to filter or page, so `clove stats --limit
+    // 5` had nothing to apply and used to succeed while ignoring the flag — the
+    // advertised-and-ignored pattern the read-path roadmap §7 exists to remove.
+    // The doc comments already said "With `--history`:"; clap now enforces it,
+    // and prints that requirement instead of the flag quietly doing nothing.
     /// With `--history`: only snapshots at/after this RFC3339 timestamp.
-    #[arg(long, value_name = "RFC3339")]
+    #[arg(long, value_name = "RFC3339", requires = "history")]
     pub since: Option<String>,
-    /// With `--history`: show at most this many (most recent) snapshots.
-    #[arg(long, value_name = "N")]
+    /// With `--history`: show at most this many snapshots (default 100; use
+    /// `--limit 0` for all).
+    #[arg(long, value_name = "N", requires = "history")]
     pub limit: Option<usize>,
+    /// With `--history`: skip this many snapshots.
+    #[arg(long, value_name = "N", requires = "history")]
+    pub offset: Option<usize>,
 }
 
 #[derive(Debug, Args)]
