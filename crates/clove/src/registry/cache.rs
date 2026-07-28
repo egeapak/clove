@@ -27,6 +27,15 @@ pub const TTL: Duration = Duration::hours(24);
 /// The cache file, relative to the clove home directory.
 const FILE_NAME: &str = "registry-cache.json";
 
+/// How many temp-file names to try before giving up on writing the cache.
+const MAX_TEMP_ATTEMPTS: u32 = 8;
+
+/// A ceiling on the cache file read back from disk. The cache is written from
+/// a network response, so a hostile or misconfigured registry could otherwise
+/// persist an arbitrarily large file that is re-read and re-parsed on every
+/// invocation for the next 24 hours.
+const MAX_CACHE_BYTES: u64 = 16 * 1024 * 1024;
+
 #[derive(Debug, Serialize, Deserialize)]
 struct CacheFile {
     schema: u32,
@@ -102,7 +111,12 @@ pub fn read(
     now: DateTime<Utc>,
     ttl: Duration,
 ) -> Option<Option<Vec<RegistryPlugin>>> {
-    let raw = std::fs::read_to_string(path_in(home)).ok()?;
+    let path = path_in(home);
+    // Refuse an implausibly large cache rather than reading it into memory.
+    if std::fs::metadata(&path).ok()?.len() > MAX_CACHE_BYTES {
+        return None;
+    }
+    let raw = std::fs::read_to_string(&path).ok()?;
     let parsed: CacheFile = serde_json::from_str(&raw).ok()?;
     if parsed.schema != CACHE_SCHEMA {
         return None;
@@ -136,12 +150,41 @@ pub fn write(home: &Utf8Path, now: DateTime<Utc>, plugins: Option<&[RegistryPlug
         return;
     }
     // Temp + rename: a torn write can never be observed, even if two runs race.
-    let temp = home.join(format!(".{FILE_NAME}.tmp{}", std::process::id()));
-    if std::fs::write(&temp, encoded).is_err() {
-        return;
-    }
-    if std::fs::rename(&temp, path_in(home)).is_err() {
-        let _ = std::fs::remove_file(&temp);
+    //
+    // The temp file is created with `create_new` (`O_EXCL`), which fails rather
+    // than following a symlink. A predictable name written with plain
+    // `fs::write` is an arbitrary-file-truncation primitive: `O_CREAT|O_TRUNC`
+    // follows symlinks, so anyone able to pre-plant
+    // `.registry-cache.json.tmp<pid>` in the clove home chooses the file that
+    // gets clobbered — and `rename` then moves the *symlink* into place, so it
+    // survives and the victim is re-clobbered on every later run. PIDs are
+    // small and sequential, so blanketing the range is trivial. That needs write
+    // access to the clove home, which the default user-owned path does not give
+    // away — but a shared `$CLOVE_HOME` (a CI cache dir, `/tmp/shared`) does.
+    for attempt in 0..MAX_TEMP_ATTEMPTS {
+        let temp = home.join(format!(".{FILE_NAME}.tmp{}-{attempt}", std::process::id()));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+        {
+            Ok(mut file) => {
+                use std::io::Write;
+                let wrote = file
+                    .write_all(encoded.as_bytes())
+                    .and_then(|()| file.sync_all());
+                drop(file);
+                if wrote.is_err() || std::fs::rename(&temp, path_in(home)).is_err() {
+                    let _ = std::fs::remove_file(&temp);
+                }
+                return;
+            }
+            // Taken (a concurrent run, or a planted symlink): try the next name.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            // Anything else (no permission, missing dir) is not worth failing a
+            // read-only command over.
+            Err(_) => return,
+        }
     }
 }
 
@@ -242,6 +285,46 @@ mod tests {
         // Empty: published, but nothing depends on it yet.
         write(&home, now, Some(&[]));
         assert_eq!(read(&home, now, TTL), Some(Some(vec![])));
+    }
+
+    #[test]
+    fn a_planted_symlink_cannot_redirect_the_cache_write() {
+        // The temp name is predictable (pid-based), so if it were created with
+        // plain `fs::write` (O_CREAT|O_TRUNC, follows symlinks) anyone able to
+        // write to the clove home could pre-plant a link and have clove truncate
+        // an arbitrary file — and `rename` would then move the *symlink* into
+        // place, re-clobbering the victim on every later run.
+        #[cfg(unix)]
+        {
+            let (_dir, home) = home();
+            std::fs::create_dir_all(&home).unwrap();
+            let victim = home.join("victim");
+            std::fs::write(&victim, "ORIGINAL").unwrap();
+
+            // Plant links over the whole name range this pid would use.
+            for attempt in 0..8 {
+                let temp = home.join(format!(".{FILE_NAME}.tmp{}-{attempt}", std::process::id()));
+                std::os::unix::fs::symlink(&victim, &temp).unwrap();
+            }
+
+            write(&home, Utc::now(), Some(&sample()));
+
+            assert_eq!(
+                std::fs::read_to_string(&victim).unwrap(),
+                "ORIGINAL",
+                "the symlink target must not be written through"
+            );
+        }
+    }
+
+    #[test]
+    fn an_oversized_cache_file_is_refused() {
+        let (_dir, home) = home();
+        std::fs::create_dir_all(&home).unwrap();
+        // Valid JSON, but larger than the ceiling: must not be read into memory.
+        let filler = "x".repeat((MAX_CACHE_BYTES + 1) as usize);
+        std::fs::write(path_in(&home), format!(r#"{{"pad":"{filler}"}}"#)).unwrap();
+        assert!(read(&home, Utc::now(), TTL).is_none());
     }
 
     #[test]

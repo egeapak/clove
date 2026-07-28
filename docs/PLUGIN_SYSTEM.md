@@ -209,7 +209,9 @@ executable suffix (`.exe` on Windows). Search, in order:
 2. **`$CLOVE_PLUGIN_PATH`** (`:`-separated, or `;` on Windows) — explicit opt-in
    dirs, for dev/testing and non-standard installs.
 3. **`<clove-home>/bin`** — the clove-managed install root, where
-   `clove plugin install` puts binaries. Resolved from `$CLOVE_HOME`, else
+   `clove plugin install` will put binaries once that command lands (it is
+   deferred; the directory is already searched so an install needs no
+   further change). Resolved from `$CLOVE_HOME`, else
    `$XDG_DATA_HOME/clove`, else `~/.local/share/clove` (`%APPDATA%\clove` on
    Windows). It sits *below* `$CLOVE_PLUGIN_PATH` deliberately: that variable is
    the user's explicit override, and a binary clove fetched from the internet

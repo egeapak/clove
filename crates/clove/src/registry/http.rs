@@ -41,6 +41,14 @@ impl UreqFetch {
     pub fn new() -> Self {
         let config = ureq::Agent::config_builder()
             .timeout_global(Some(TIMEOUT))
+            // crates.io needs no redirects at all. A permissive limit only widens
+            // what a hostile or misconfigured registry root can reach: ureq applies
+            // no scheme or host policy to a `Location`, so an https->http downgrade
+            // or a hop to a link-local address would be followed. Nothing is echoed
+            // back to the user (the response body reaches only serde_json, and
+            // `FetchError`'s Display prints the status alone), so this is blind at
+            // worst — but there is no reason to allow ten hops.
+            .max_redirects(2)
             // Keep non-2xx responses as *values* rather than errors: a 404 is
             // meaningful data ("this crate does not exist") and ureq otherwise
             // discards the body along with the status.
@@ -80,7 +88,13 @@ impl Fetch for UreqFetch {
         let mut attempt = 0;
         loop {
             match self.get_once(url) {
-                Err(error) if error.is_retryable() && attempt < MAX_RETRIES => {
+                // A *transport* failure is not retried: `TIMEOUT` was chosen short
+                // precisely because the probe issues several requests in sequence,
+                // and retrying a timeout spends that budget again — three 8s
+                // timeouts per request turns an optional lookup into ~50s of
+                // apparent hang. A 429/5xx is different: the server answered, fast,
+                // and told us to come back.
+                Err(error) if error.is_retryable_status() && attempt < MAX_RETRIES => {
                     let backoff = error
                         .retry_after()
                         .unwrap_or_else(|| Duration::from_millis(250 * (1 << attempt)));

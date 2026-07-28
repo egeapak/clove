@@ -174,11 +174,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     only if it genuinely depends on it) and cached for 24 hours; `--refresh`
     re-fetches.
   - `clove plugin search <text>` filters published plugins by name or
-    description. When the registry is unavailable it falls back to probing the
+    description. Whenever that filter matches nothing it additionally probes the
     candidate crate names directly — crates.io has no prefix search, but the
-    naming convention is total, so the names can be constructed instead.
+    naming convention is total, so the names can be constructed instead. That
+    also answers the query when discovery is unavailable or the cache is stale.
   - Discovery is strictly additive: if it fails for any reason the installed
-    list still prints and the cause is reported in `_meta.registry_error`.
+    list still prints and the cause is reported in `_meta.warnings`.
     Plain `clove plugin list` remains a pure filesystem walk, and plugin
     dispatch never touches the network.
 - `<clove-home>/bin` joins the plugin search path (between `$CLOVE_PLUGIN_PATH`
@@ -497,9 +498,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   daemon errors as text — so over IPC this change is visible as the error
   *strings* above, with the classification in place for the write routing that
   will use it.
-- `clove plugin list` gained `--all` and `--refresh` (`--refresh` implies
-  `--all`). Its human and JSONL output are unchanged; the JSON `_meta` gains
-  `installed_count`/`available_count` alongside the existing `count`.
 
 ### Performance
 

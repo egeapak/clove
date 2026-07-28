@@ -256,7 +256,9 @@ fn plain_plugin_list_never_consults_the_registry() {
     let v: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
     assert_eq!(v["ok"], true);
     assert!(
-        v["_meta"].get("registry_error").is_none(),
+        v["_meta"]["warnings"]
+            .as_array()
+            .is_some_and(|w| w.is_empty()),
         "plain list must not consult the registry: {v}"
     );
     assert!(v["data"]
@@ -282,7 +284,10 @@ fn list_all_degrades_to_the_installed_set_when_discovery_fails() {
     let v: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
     assert_eq!(v["ok"], true, "envelope: {v}");
     assert!(
-        v["_meta"]["registry_error"].is_string(),
+        !v["_meta"]["warnings"]
+            .as_array()
+            .expect("warnings array")
+            .is_empty(),
         "the failure cause must be reported: {v}"
     );
     assert!(
@@ -296,7 +301,7 @@ fn list_all_degrades_to_the_installed_set_when_discovery_fails() {
 }
 
 #[test]
-fn jsonl_carries_the_registry_error_too() {
+fn jsonl_carries_the_discovery_warning_too() {
     // `print_jsonl_items` has no `_meta` channel, so a discovery failure used to
     // vanish entirely in jsonl — making it indistinguishable from "nothing to
     // report". The trailing meta line closes that.
@@ -323,7 +328,7 @@ fn jsonl_carries_the_registry_error_too() {
     assert!(
         lines.iter().any(|l| l
             .get("_meta")
-            .is_some_and(|m| m["registry_error"].is_string())),
+            .is_some_and(|m| !m["warnings"].as_array().is_some_and(|w| w.is_empty()))),
         "no trailing _meta line carrying the registry error: {out}"
     );
 }

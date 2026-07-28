@@ -10,7 +10,7 @@
 //! crates.io, via the reverse dependencies of `clove-plugin`. Discovery is
 //! strictly additive: if it fails for any reason (offline, rate-limited,
 //! `clove-plugin` not yet published) the installed set still prints and the
-//! reason is reported as `_meta.registry_error`. Dispatch is never affected.
+//! reason is reported in `_meta.warnings`. Dispatch is never affected.
 //!
 //! Human mode renders a `NAME / VERSION / RUN AS / ABOUT` table (with an
 //! *Available* section under `--all`); JSON/JSONL emit the standard
@@ -53,9 +53,13 @@ impl Discovery {
     fn warning(&self) -> Option<String> {
         match self {
             Discovery::Available(Some(_)) => None,
+            // This may be served from a cache up to 24h old, so it is phrased as
+            // what was observed rather than as a fact about right now, and it
+            // names the flag that re-checks.
             Discovery::Available(None) => Some(format!(
-                "the plugin registry is not available yet: `{REGISTRY_ROOT_CRATE}` is not \
-                 published to crates.io, so no plugins can be discovered"
+                "no plugin registry found: `{REGISTRY_ROOT_CRATE}` was not published to \
+                 crates.io as of the last check, so no plugins can be discovered \
+                 (re-check with --refresh)"
             )),
             Discovery::Failed(message) => Some(message.clone()),
         }
@@ -82,14 +86,18 @@ pub fn run_search(format: OutputFormat, args: &PluginSearchArgs) -> Result<(), C
     let discovery = discover(args.refresh);
 
     let needle = args.query.to_lowercase();
+    // `is_dispatchable` is applied here for the same reason `list --all` applies
+    // it: a crate that builds no `clove-`-prefixed binary can never be run as a
+    // clove subcommand, so listing it promises a command that cannot exist.
     let mut matches: Vec<RegistryPlugin> = discovery
         .plugins()
         .iter()
         .filter(|p| {
-            p.crate_name.to_lowercase().contains(&needle)
-                || p.description
-                    .as_deref()
-                    .is_some_and(|d| d.to_lowercase().contains(&needle))
+            is_dispatchable(p)
+                && (p.crate_name.to_lowercase().contains(&needle)
+                    || p.description
+                        .as_deref()
+                        .is_some_and(|d| d.to_lowercase().contains(&needle)))
         })
         .cloned()
         .collect();
@@ -105,13 +113,19 @@ pub fn run_search(format: OutputFormat, args: &PluginSearchArgs) -> Result<(), C
     // the same query would work if the network were down. The probe is exact-name
     // and cheap (at most four requests), so it costs little to always try.
     let mut warning = discovery.warning();
+    // Whether a successful probe *answers* the warning depends on which warning
+    // it is. An absent registry has nothing to report, so a hit resolves it. A
+    // discovery *failure* is different: the probe checked a handful of
+    // constructed names, not the registry, so every other published plugin is
+    // still missing from a result that would otherwise look complete.
+    let probe_can_answer = matches!(discovery, Discovery::Available(None));
     if matches.is_empty() {
         match probe_by_name(&args.query) {
-            // The probe answered the question, so the registry's absence is no
-            // longer something the user needs to act on.
             Ok(found) if !found.is_empty() => {
                 matches = found;
-                warning = None;
+                if probe_can_answer {
+                    warning = None;
+                }
             }
             // Probed, nothing published under any candidate name.
             Ok(_) => {}
@@ -166,8 +180,9 @@ fn probe_by_name(query: &str) -> Result<Vec<RegistryPlugin>, CloveError> {
         // A 404 means "not this one"; a transport failure aborts, so a flaky
         // network can never be reported as "no such plugin".
         match client.crate_exists(&candidate) {
-            Ok(Some(plugin)) => found.push(plugin),
-            Ok(None) => {}
+            // A probe hit still has to be dispatchable to be worth offering.
+            Ok(Some(plugin)) if is_dispatchable(&plugin) => found.push(plugin),
+            Ok(Some(_)) | Ok(None) => {}
             Err(error) => return Err(CloveError::from(error)),
         }
     }
@@ -293,10 +308,10 @@ fn render(
         OutputFormat::Json => {
             print_json_list(items, meta(installed.len(), available.len(), warning))
         }
-        OutputFormat::Jsonl => print_jsonl_items_with_meta(
-            &items,
-            warning.map_or(Value::Null, |w| json!({ "registry_error": w })),
-        ),
+        OutputFormat::Jsonl => {
+            let meta = meta(installed.len(), available.len(), warning);
+            print_jsonl_items_with_meta(&items, meta)
+        }
     }
     Ok(())
 }
@@ -350,23 +365,34 @@ fn render_search(
                 warning,
             ),
         ),
-        OutputFormat::Jsonl => print_jsonl_items_with_meta(
-            &items,
-            warning.map_or(Value::Null, |w| json!({ "registry_error": w })),
-        ),
+        OutputFormat::Jsonl => {
+            let meta = meta(
+                installed_matches,
+                matches.len() - installed_matches,
+                warning,
+            );
+            print_jsonl_items_with_meta(&items, meta)
+        }
     }
     Ok(())
 }
 
 /// The `_meta` object: counts, plus the discovery warning when there is one.
+///
+/// A discovery failure is reported through **`warnings`**, the repo-wide channel
+/// for a non-fatal problem (`item-list.json`'s `listMeta.warnings`, and how
+/// `clove setup` already reports). Inventing a parallel `registry_error` key for
+/// the same purpose would mean a consumer had to learn a second convention to
+/// notice that a command partially failed.
 fn meta(installed: usize, available: usize, warning: Option<String>) -> Value {
     let mut meta = json!({
         "count": installed + available,
         "installed_count": installed,
         "available_count": available,
+        "warnings": Vec::<String>::new(),
     });
     if let Some(warning) = warning {
-        meta["registry_error"] = json!(warning);
+        meta["warnings"] = json!([warning]);
     }
     meta
 }
@@ -404,21 +430,36 @@ fn installed_json(plugin: &EnrichedPlugin) -> Value {
 /// verdict yet and reports `available`, while "a newer release exists" is the
 /// separate `latest_version` field.
 fn available_json(plugin: &RegistryPlugin) -> Value {
+    // Every identifier is derived from the *dispatchable* binaries, so `name`,
+    // `binary` and `commands` agree with each other and with what the resolver
+    // would actually find. Deriving `name` from the crate name instead would
+    // report `gitlab` for a crate `clove-gitlab` that ships only
+    // `clove-sync-gitlab` — a subcommand that does not exist; and mapping
+    // `commands` over *every* bin would emit `clove helper` for a bin named
+    // `helper`, which can never be invoked.
+    let dispatchable: Vec<&str> = plugin
+        .bin_names
+        .iter()
+        .filter_map(|bin| bin.strip_prefix("clove-").filter(|rest| !rest.is_empty()))
+        .collect();
+
     json!({
-        "name": plugin
-            .crate_name
-            .strip_prefix("clove-")
-            .unwrap_or(&plugin.crate_name),
-        "binary": plugin.bin_names.first(),
+        "name": dispatchable
+            .first()
+            .copied()
+            .unwrap_or_else(|| plugin
+                .crate_name
+                .strip_prefix("clove-")
+                .unwrap_or(&plugin.crate_name)),
+        "binary": dispatchable.first().map(|bare| format!("clove-{bare}")),
         "path": Value::Null,
         "version": Value::Null,
         "latest_version": plugin.display_version(),
         "about": plugin.description,
         "provides": Vec::<String>::new(),
-        "commands": plugin
-            .bin_names
+        "commands": dispatchable
             .iter()
-            .map(|bin| plugin::run_as(&[], bin.strip_prefix("clove-").unwrap_or(bin)))
+            .map(|bare| plugin::run_as(&[], bare))
             .collect::<Vec<_>>()
             .concat(),
         "crate": plugin.crate_name,
@@ -702,13 +743,15 @@ mod tests {
     }
 
     #[test]
-    fn meta_carries_the_registry_error_when_discovery_failed() {
+    fn meta_reports_a_discovery_failure_through_warnings() {
+        // `warnings` is the repo-wide non-fatal channel; a parallel key would
+        // make a consumer learn a second convention to notice a partial failure.
         let with_error = meta(1, 0, Some("offline".to_owned()));
-        assert_eq!(with_error["registry_error"], "offline");
+        assert_eq!(with_error["warnings"], json!(["offline"]));
         assert_eq!(with_error["installed_count"], 1);
 
         let clean = meta(1, 2, None);
-        assert_eq!(clean.get("registry_error"), None);
+        assert_eq!(clean["warnings"], json!([]));
         assert_eq!(clean["count"], 3);
     }
 }

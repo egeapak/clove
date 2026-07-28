@@ -140,9 +140,12 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
   published to crates.io (discovered as the reverse dependencies of\n\
   `clove-plugin`), cached for 24h. If discovery fails or the registry is not\n\
   published yet, the installed list still prints and the reason appears in\n\
-  `_meta.registry_error` and the command still exits 0 — a registry outage is\n\
+  `_meta.warnings` and the command still exits 0 — a registry outage is\n\
   never an error, so do not treat a missing Available section as a failure.\n\
-- `clove plugin search <text>` — filter published plugins by name/description.\n\
+- `clove plugin search <text> [--refresh]` — filter published plugins by\n\
+  name/description. When that filter matches nothing, the candidate crate\n\
+  names are constructed and probed directly, so a published plugin is found\n\
+  even when the cached set is stale or discovery is unavailable.\n\
 - `clove init --merge-driver` installs a git merge driver for\n\
   `.clove/issues/*.md`. On `git merge`, same-value scalar edits and dependency/\n\
   label set-unions auto-resolve; only genuinely divergent edits conflict.\n\

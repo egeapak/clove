@@ -357,12 +357,18 @@ set `$CLOVE_HOME`, decides what counts as a verified plugin.
 
 One flat `data` array; human output prints *Installed* / *Available* sections.
 
-**`status` stays the compat verdict.** Revision 1 added `available` to the same
-field that already carries `ok`/`outdated`/`no_info`/`needs_newer_clove`, where
-`outdated` means "host > plugin's `max_clove_plugin_api`" — an API verdict.
-Overloading it leaves no way to say "installed, but crates.io has a newer
-release". Registry freshness is orthogonal: `installed: bool` plus
-`latest_version: Option<String>` and `update_available: bool`.
+**`status` keeps one meaning per value.** For an *installed* plugin it is the
+compat verdict (`ok`/`outdated`/`no_info`/`needs_newer_clove`, where `outdated`
+means "host > plugin's `max_clove_plugin_api`" — an API verdict). An uninstalled
+row has no compat verdict to report and carries `available`, matching the design
+§6 and `PLUGIN_REGISTRY.md` §4 wire contract.
+
+Registry *freshness* stays orthogonal and out of that field: an available row
+carries `latest_version`. **As shipped there is no `update_available` flag** — an
+installed plugin is filtered out of the available set entirely, so `list --all`
+cannot yet report that an installed plugin has a newer release. That is a real
+gap, deferred with install (a version the user cannot act on is noise), and it is
+the reason `latest_version` is a separate field rather than folded into `status`.
 
 Two carrier bugs to fix while here:
 

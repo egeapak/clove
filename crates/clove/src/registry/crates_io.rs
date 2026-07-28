@@ -25,12 +25,29 @@ const PER_PAGE: usize = 100;
 /// cannot spin the client forever.
 const MAX_PAGES: usize = 50;
 
+/// Deserialize a field that crates.io may send as an explicit `null` rather than
+/// omitting it, yielding the default instead of failing.
+///
+/// `#[serde(default)]` alone is not enough: it fires only when the key is
+/// **missing**. crates.io sends `"bin_names": null` for versions that predate
+/// bin-name recording (verified live on `libc` 0.2.141), and one such row
+/// anywhere in a response would otherwise abort the whole parse — discarding
+/// every other crate in it. `FetchError::Decode` is deliberately not retryable,
+/// so that failure would repeat on every invocation, forever.
+fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 /// The subset of `GET /crates/{name}` this client reads.
 #[derive(Debug, Deserialize)]
 struct CrateResponse {
     #[serde(rename = "crate")]
     krate: CrateObject,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     versions: Vec<VersionObject>,
 }
 
@@ -59,7 +76,7 @@ struct VersionObject {
     krate: String,
     #[serde(default)]
     num: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     bin_names: Vec<Option<String>>,
     #[serde(default)]
     description: Option<String>,
@@ -83,9 +100,9 @@ struct PublishedBy {
 /// first page with a silently truncated list. A short page is the reliable signal.
 #[derive(Debug, Deserialize)]
 struct ReverseDepsResponse {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     dependencies: Vec<DependencyObject>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     versions: Vec<VersionObject>,
 }
 
@@ -548,6 +565,55 @@ mod tests {
     }
 
     #[test]
+    fn an_explicitly_null_bin_names_does_not_fail_the_whole_response() {
+        // crates.io emits `"bin_names": null` (not a missing key) for versions
+        // that predate bin-name recording — verified live on libc 0.2.141.
+        // `#[serde(default)]` only covers a *missing* key, so a field-level null
+        // used to abort the entire parse: one such row anywhere in a response
+        // discarded every other crate in it, permanently and unretryably.
+        let body = r#"{
+          "crate":{"name":"libc","description":"d","repository":null,"downloads":9},
+          "versions":[
+            {"id":1,"crate":"libc","num":"0.2.141","yanked":false,"bin_names":null},
+            {"id":2,"crate":"libc","num":"0.2.142","yanked":false,"bin_names":["libc-tool"]}
+          ]
+        }"#;
+        let fetch = FakeFetch::ok(body);
+        let client = CratesIo::with_root(&fetch, "https://example.invalid/api/v1");
+        let found = client
+            .crate_exists("libc")
+            .expect("a null bin_names must not fail the request")
+            .expect("crate exists");
+        assert_eq!(found.crate_name, "libc");
+        assert_eq!(found.bin_names, vec!["libc-tool"]);
+
+        // Same in a reverse-deps page: the null row is tolerated and the other
+        // rows survive.
+        let page = r#"{
+          "dependencies":[
+            {"version_id":1,"crate_id":"clove-plugin","kind":"normal","downloads":1},
+            {"version_id":2,"crate_id":"clove-plugin","kind":"normal","downloads":2}
+          ],
+          "versions":[
+            {"id":1,"crate":"clove-old","num":"0.1.0","yanked":false,"bin_names":null},
+            {"id":2,"crate":"clove-sync-new","num":"0.1.0","yanked":false,"bin_names":["clove-sync-new"]}
+          ]
+        }"#;
+        let fetch = FakeFetch::ok(page);
+        let client = CratesIo::with_root(&fetch, "https://example.invalid/api/v1");
+        let plugins = client
+            .reverse_dependents("clove-plugin")
+            .expect("a null bin_names must not fail the page")
+            .unwrap();
+        assert_eq!(
+            plugins.len(),
+            1,
+            "the null-bin row builds no binary, so it is dropped"
+        );
+        assert_eq!(plugins[0].crate_name, "clove-sync-new");
+    }
+
+    #[test]
     fn library_only_dependents_are_not_listed_as_plugins() {
         // A crate can depend on `clove-plugin` as a *library* (a shared helper, a
         // plugin's own lib half) without building any dispatchable binary. The
@@ -649,21 +715,6 @@ mod tests {
 
         assert_eq!(plugins.len(), 101, "page 2 must still be fetched");
         assert!(plugins.iter().any(|p| p.crate_name == "clove-sync-tail"));
-    }
-
-    #[test]
-    fn tmp_null_bin_names_probe() {
-        let body = r#"{"crate":{"name":"clove-sync-x","description":null,"repository":null,"downloads":5},
-          "versions":[{"id":1,"crate":"clove-sync-x","num":"0.2.0","yanked":false,"bin_names":null}]}"#;
-        let fetch = FakeFetch::ok(body);
-        let client = CratesIo::with_root(&fetch, "https://example.invalid/api/v1");
-        let out = client.crate_exists("clove-sync-x");
-        println!("TMP RESULT: {out:?}");
-        let rd = r#"{"dependencies":[{"version_id":1,"crate_id":"clove-plugin","kind":"normal","downloads":9}],
-          "versions":[{"id":1,"crate":"clove-sync-x","num":"0.2.0","yanked":false,"bin_names":null}]}"#;
-        let fetch2 = FakeFetch::ok(rd);
-        let client2 = CratesIo::with_root(&fetch2, "https://example.invalid/api/v1");
-        println!("TMP RD RESULT: {:?}", client2.reverse_dependents("clove-plugin"));
     }
 
     #[test]

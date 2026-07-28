@@ -90,7 +90,8 @@ with this clove; `clove plugin list --all` and `clove plugin search <text>` also
 report plugins published to crates.io. There is no curated registry — a plugin is
 discoverable because it depends on `clove-plugin`, which is what makes it a
 plugin. Discovery is strictly additive: if it is unavailable, the installed list
-still prints and plugin dispatch is unaffected.
+still prints and plugin dispatch is unaffected; the cause appears in
+`_meta.warnings`.
 
 ## Quick start
 

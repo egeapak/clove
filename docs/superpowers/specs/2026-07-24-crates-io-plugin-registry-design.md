@@ -4,6 +4,17 @@
 > approach in [`docs/PLUGIN_REGISTRY.md`](../../PLUGIN_REGISTRY.md) §1/§4/§5.
 > Builds on the cargo-style dispatch in [`PLUGIN_SYSTEM.md`](../../PLUGIN_SYSTEM.md).
 >
+> **Revised by
+> [`2026-07-25-plugin-registry-implementation-plan.md`](2026-07-25-plugin-registry-implementation-plan.md).**
+> That plan is the live one; where the two disagree it wins. Materially: install
+> (§5, §5.1) is **deferred to its Stage 2** and is not implemented; the
+> `✓ verified clove plugin` string in §5 **must not ship** (the four gates are
+> shape checks, not trust checks — "matches the clove plugin convention (not
+> audited)"); §5's `--yes` "skips for scripts/CI" is inverted to *non-TTY
+> refuses*; and the §4.2 binary-size figure measured ~1.54 MB in practice, not
+> ~1.011 MB. §7's "Phase 2 — `plugin install <name>` works" describes work that
+> has not landed.
+>
 > **Publishing to crates.io is deferred.** Phases 1–2 are buildable and testable
 > today; Phase 3 (live discovery) activates when `clove-plugin` is published, with
 > no redesign. See §7.

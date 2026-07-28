@@ -126,12 +126,18 @@ impl FetchError {
         }
     }
 
-    /// Is this worth retrying at all? 429 and 5xx are transient; a 403 is not.
-    pub fn is_retryable(&self) -> bool {
+    /// Is this a *server-side* failure worth retrying — 429 or 5xx?
+    ///
+    /// Deliberately excludes [`FetchError::Transport`]. A transport failure has
+    /// usually already consumed the full request timeout, and retrying spends
+    /// that budget again; the timeout is short specifically because several
+    /// requests run in sequence. A 403 is not transient either (it is the
+    /// missing-User-Agent case), and a decode failure will fail identically
+    /// every time.
+    pub fn is_retryable_status(&self) -> bool {
         match self {
             FetchError::Status { code, .. } => *code == 429 || (500..600).contains(code),
-            FetchError::Transport(_) => true,
-            FetchError::Decode(_) => false,
+            FetchError::Transport(_) | FetchError::Decode(_) => false,
         }
     }
 }
@@ -283,7 +289,7 @@ mod tests {
             body: None,
         };
         assert!(rate_limited.to_string().contains("rate limit"));
-        assert!(rate_limited.is_retryable());
+        assert!(rate_limited.is_retryable_status());
         assert_eq!(rate_limited.retry_after(), Some(Duration::from_secs(30)));
 
         // A 403 is the missing-User-Agent case, and is *not* worth retrying.
@@ -293,10 +299,20 @@ mod tests {
             body: None,
         };
         assert!(forbidden.to_string().contains("User-Agent"));
-        assert!(!forbidden.is_retryable());
+        assert!(!forbidden.is_retryable_status());
 
-        assert!(FetchError::Transport("dns".to_owned()).is_retryable());
-        assert!(!FetchError::Decode("bad json".to_owned()).is_retryable());
+        // A transport failure has already spent the request timeout; retrying it
+        // spends that budget again, which is what the short timeout exists to
+        // avoid. Only a server that answered quickly and asked us to come back
+        // is retried.
+        assert!(!FetchError::Transport("dns".to_owned()).is_retryable_status());
+        assert!(!FetchError::Decode("bad json".to_owned()).is_retryable_status());
+        assert!(FetchError::Status {
+            code: 503,
+            retry_after: None,
+            body: None
+        }
+        .is_retryable_status());
     }
 
     #[test]
