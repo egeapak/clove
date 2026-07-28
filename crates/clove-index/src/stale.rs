@@ -15,7 +15,7 @@ use clove_types::CloveId;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 use crate::db::{Index, IndexError};
-use crate::write::{content_hash8, fts_rowid, write_row, RowMeta};
+use crate::write::{content_hash8, write_row, RowMeta};
 
 /// Files modified within this window are always hash-checked regardless of the
 /// stored mtime — mtime granularity on some filesystems (HFS+) is too coarse to
@@ -507,19 +507,11 @@ fn upsert_file_mtime(
     Ok(())
 }
 
-/// Remove an item and its edges/labels/FTS shadow row.
+/// Remove an item and its edges/labels.
 fn delete_row(tx: &rusqlite::Transaction<'_>, id: &str) -> Result<(), IndexError> {
     tx.execute("DELETE FROM items WHERE id = ?1", params![id])?;
     tx.execute("DELETE FROM edges WHERE from_id = ?1", params![id])?;
     tx.execute("DELETE FROM labels WHERE item_id = ?1", params![id])?;
-    tx.execute(
-        "DELETE FROM items_fts WHERE rowid = ?1",
-        params![fts_rowid(id)],
-    )?;
-    tx.execute(
-        "DELETE FROM fts_map WHERE fts_rowid = ?1",
-        params![fts_rowid(id)],
-    )?;
     Ok(())
 }
 

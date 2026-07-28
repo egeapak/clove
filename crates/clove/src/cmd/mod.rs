@@ -10,7 +10,6 @@ pub mod doctor;
 pub mod edit;
 pub mod export;
 pub mod import;
-pub mod index_read;
 pub mod init;
 pub mod label;
 pub mod listing;

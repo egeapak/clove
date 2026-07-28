@@ -1,8 +1,8 @@
 //! `clove edit` (T-CLI05) and the shared non-interactive field application used
 //! by `clove set`.
 
-use clove_core::{parse_item_file, OutputFormat};
-use clove_types::{CloveError, ItemFrontmatter};
+use clove_core::{parse_item_file, ItemStore, OutputFormat};
+use clove_types::{CloveError, CloveId};
 use serde_json::Map;
 
 use crate::cli::EditArgs;
@@ -10,13 +10,22 @@ use crate::context::Ctx;
 use crate::item_json::print_item;
 use crate::util::{now_seconds, parse_id};
 
-/// Apply a list of `KEY=VALUE` (and `labels+=`/`labels-=`) edits to frontmatter
-/// (delegates to the shared [`clove_types::apply_assignments`]).
-pub fn apply_assignments(
-    fm: &mut ItemFrontmatter,
+/// Apply `KEY=VALUE` (and `labels+=`/`labels-=`) assignments to `id` atomically,
+/// returning the saved item. Shared by `clove edit --field` and `clove set`.
+///
+/// The read-modify-write runs under one store-wide lock (`update_with`), not a
+/// lock-free `get` followed by a locking `update`: the latter leaves a window in
+/// which a concurrent writer (web, MCP, daemon) can commit between the read and
+/// the write, and have its update silently clobbered (DESIGN §4).
+pub fn apply_assignments_to(
+    store: &ItemStore,
+    id: &CloveId,
     assignments: &[String],
-) -> Result<(), CloveError> {
-    clove_types::apply_assignments(fm, assignments, now_seconds())
+) -> Result<clove_types::Item, CloveError> {
+    let now = now_seconds();
+    store.update_with(id, now, |item| {
+        clove_types::apply_assignments(&mut item.frontmatter, assignments, now)
+    })
 }
 
 pub fn run(ctx: &Ctx, format: OutputFormat, args: EditArgs) -> Result<(), CloveError> {
@@ -26,9 +35,7 @@ pub fn run(ctx: &Ctx, format: OutputFormat, args: EditArgs) -> Result<(), CloveE
         return open_in_editor(ctx, &id);
     }
 
-    let mut item = ctx.store.get(&id)?;
-    apply_assignments(&mut item.frontmatter, &args.fields)?;
-    let saved = ctx.store.update(&item, now_seconds())?;
+    let saved = apply_assignments_to(&ctx.store, &id, &args.fields)?;
     print_item(format, &saved, Map::new());
     Ok(())
 }

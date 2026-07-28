@@ -7,7 +7,7 @@
 //! type) lives in [`crate::service`].
 
 use clove_core::graph::DepTreeNode;
-use clove_types::{ItemStatus, ItemType, Priority};
+use clove_core::view::Order;
 use serde::{Deserialize, Serialize};
 
 /// Wire-protocol version, returned by `ping` so a client can detect a daemon
@@ -19,15 +19,51 @@ use serde::{Deserialize, Serialize};
 /// v4 (MCP resource-push): added the `change_generation()` query, letting the
 /// MCP server poll the cache's monotonic change counter to emit
 /// `resources/updated` notifications when the work graph mutates.
-pub const PROTOCOL_VERSION: u32 = 4;
+///
+/// v5 (read-path §2, shared filters): `QueryRequest`'s five scalar filter fields
+/// collapsed into one `filters: clove_core::view::Filters`, whose status / type
+/// / priority are now **sets** and whose labels are AND-ed, plus a `q`
+/// substring. The codec is length-delimited JSON, so a mixed-version pair would
+/// still *decode* — which is exactly why this needs a version: a v4 client's
+/// `"status": "open"` silently drops against a v5 daemon (wrong field, wrong
+/// shape), and a v4 daemon ignores a v5 client's whole filter set. Both answer
+/// with the unfiltered list rather than an error. The handshake in `client.rs`
+/// turns that into a clean mismatch instead; `clove daemon` restarts are cheap
+/// and the daemon is a cache, not a source of truth.
+///
+/// The same bump removes the dead `GraphRequest::Blocked::include_warnings`
+/// (unreachable — no surface could set it, every caller hard-coded `true`) and
+/// gives `Blocked` the `order` it always needed.
+///
+/// **v6 removes the `search` RPC and `SearchRequest`.** The daemon answered
+/// search by running the index's FTS5 query and returning matched ids; index
+/// schema 6 deleted that table, because FTS matched whole ASCII-folded tokens
+/// where `clove_core::view::match_class` matches Unicode substrings, so
+/// `clove search X` returned different ids depending on whether a daemon or an
+/// index happened to be present (read-path roadmap §6.1). Search is now a
+/// parallel file scan on every surface, which the client does for itself — the
+/// daemon had nothing left to contribute, since the client had to read every
+/// matched file anyway to rank it. Removing the method is what makes the
+/// handshake reject a v5 daemon rather than let it keep answering searches with
+/// the old, narrower match set.
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// A dependency-graph query (DESIGN §8.4 extension for `blocked`/`dep`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum GraphRequest {
-    /// Active items blocked by open or (with `include_warnings`) missing deps,
-    /// in `(priority, topological_rank, id)` order.
-    Blocked { include_warnings: bool },
+    /// Active items blocked by open or missing dependencies, in `order`.
+    ///
+    /// Ordering rides the request because the alternative was the client
+    /// re-sorting the returned ids — a second implementation of `Order`, living
+    /// in `cmd/blocked.rs`, that could only approximate `rank` (it has no
+    /// topological ranks of its own) and so special-cased it. The daemon has the
+    /// graph *and* the index, so it can answer in any order the shared
+    /// comparator defines.
+    Blocked {
+        #[serde(default)]
+        order: Order,
+    },
     /// All hard-dependency cycles.
     Cycles,
     /// The dependency tree rooted at `root`, to `depth` (use `usize::MAX` for full).
@@ -50,16 +86,6 @@ pub enum GraphResponse {
     WouldCycle { would: bool },
 }
 
-/// The payload of a `search` call (the FTS query the daemon runs).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SearchRequest {
-    /// The free-text query.
-    pub text: String,
-    /// Optional result cap.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub limit: Option<usize>,
-}
-
 /// Which lean list a `query` call runs — mirrors `clove_index::QueryMode`. Both
 /// `clove ls` and `clove query` are [`QueryKind::List`]; `clove ready` is
 /// [`QueryKind::Ready`].
@@ -79,16 +105,19 @@ pub enum QueryKind {
 pub struct QueryRequest {
     /// Which lean list this is.
     pub kind: QueryKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<ItemStatus>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub item_type: Option<ItemType>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub priority: Option<Priority>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assignee: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
+    /// The filter set, carried whole rather than field by field.
+    ///
+    /// This was five scalars (`status`/`item_type`/`priority`/`assignee`/
+    /// `label`) that the client unpacked and the daemon repacked — a hand-written
+    /// translation on each side, and therefore two places a newly-added filter
+    /// could be forgotten while every test still passed. Sending
+    /// [`clove_core::view::Filters`] itself removes both.
+    #[serde(default)]
+    pub filters: clove_core::view::Filters,
+    /// The result ordering (`--sort`/`--desc`). Defaults to `rank` ascending,
+    /// which is what every client sent before the field existed.
+    #[serde(default)]
+    pub order: Order,
     /// Page offset (`--offset`).
     pub offset: usize,
     /// Page cap (`--limit`); `None` = unlimited.
@@ -167,7 +196,13 @@ mod tests {
     fn graph_payloads_round_trip() {
         let reqs = vec![
             GraphRequest::Blocked {
-                include_warnings: true,
+                order: Order::default(),
+            },
+            GraphRequest::Blocked {
+                order: Order {
+                    field: clove_core::view::SortField::Updated,
+                    descending: true,
+                },
             },
             GraphRequest::Cycles,
             GraphRequest::Tree {
@@ -206,21 +241,26 @@ mod tests {
         let cases = vec![
             QueryRequest {
                 kind: QueryKind::List,
-                status: Some(ItemStatus::Open),
-                item_type: Some(ItemType::Bug),
-                priority: None,
-                assignee: Some("alice".to_owned()),
-                label: Some("area:core".to_owned()),
+                filters: clove_core::view::Filters::parse_multi(
+                    &["open".to_owned(), "in_progress".to_owned()],
+                    &["bug".to_owned()],
+                    &["area:core".to_owned(), "area:ios".to_owned()],
+                    Some("alice"),
+                    &["1".to_owned(), "2".to_owned()],
+                    Some("needle"),
+                )
+                .unwrap(),
+                order: Order {
+                    field: clove_core::view::SortField::Updated,
+                    descending: true,
+                },
                 offset: 0,
                 limit: Some(100),
             },
             QueryRequest {
                 kind: QueryKind::Ready,
-                status: None,
-                item_type: None,
-                priority: None,
-                assignee: None,
-                label: None,
+                filters: clove_core::view::Filters::default(),
+                order: Order::default(),
                 offset: 20,
                 limit: None,
             },
@@ -258,22 +298,82 @@ mod tests {
         assert_eq!(status, serde_json::from_str(&json).unwrap());
     }
 
-    /// Edge: an empty search query and an absent limit still round-trip.
+    /// Why v5 is a *version bump* and not another compatible field.
+    ///
+    /// The codec is length-delimited JSON, so a v4 frame still **decodes** here
+    /// — and that is the hazard, not the reassurance. A v4 client sends
+    /// `"status": "open"` at the top level; this schema has no such field, so it
+    /// is dropped and the daemon answers the *unfiltered* list. Nothing errors,
+    /// nothing warns, and the client renders a result set that ignores its
+    /// filter. The `ping` handshake in `client.rs` is what turns this into a
+    /// clean mismatch, so the constant must stay ahead of the shape.
     #[test]
-    fn search_request_edges() {
-        let cases = vec![
-            SearchRequest {
-                text: String::new(),
-                limit: None,
-            },
-            SearchRequest {
-                text: "hello world".to_owned(),
-                limit: Some(0),
-            },
-        ];
-        for case in cases {
-            let json = serde_json::to_string(&case).unwrap();
-            assert_eq!(case, serde_json::from_str(&json).unwrap(), "{json}");
+    fn a_v4_frame_decodes_but_loses_its_filters_which_is_why_the_version_moved() {
+        const {
+            assert!(
+                PROTOCOL_VERSION >= 5,
+                "the filter shape changed; the handshake must reject a v4 peer"
+            )
+        };
+        let v4_frame = r#"{"kind":"list","status":"open","label":"area:core","offset":0}"#;
+        let decoded: QueryRequest = serde_json::from_str(v4_frame).unwrap();
+        assert_eq!(
+            decoded.filters,
+            clove_core::view::Filters::default(),
+            "a v4 filter decodes as *no filter* — silently, which is the point"
+        );
+        assert_eq!(decoded.order, Order::default(), "absent order → rank asc");
+
+        // And the reverse: a v5 frame carries the filters somewhere a v4 daemon
+        // would never look.
+        let v5_frame = serde_json::to_string(&QueryRequest {
+            kind: QueryKind::List,
+            filters: clove_core::view::Filters::parse(Some("open"), None, None, None, None)
+                .unwrap(),
+            order: Order::default(),
+            offset: 0,
+            limit: None,
+        })
+        .unwrap();
+        assert!(v5_frame.contains("\"filters\""), "{v5_frame}");
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct V4QueryRequest {
+            kind: QueryKind,
+            #[serde(default)]
+            status: Option<String>,
+            offset: usize,
         }
+        let old: V4QueryRequest = serde_json::from_str(&v5_frame).unwrap();
+        assert!(
+            old.status.is_none(),
+            "a v4 daemon reads no status from a v5 frame"
+        );
+    }
+
+    /// The service *shape* changed in v6 — the `search` RPC and `SearchRequest`
+    /// were removed — so the constant had to move with it.
+    ///
+    /// Unlike the v5 filter change, neither direction of a mismatched pair is
+    /// unsafe here: a v5 client calling a v6 daemon's absent `search` gets an
+    /// error and falls back to its local path, and a v6 client never asks. The
+    /// bump is policy (DESIGN §8.4: the constant gates a mixed-version pair
+    /// whenever the shape changes) and it is what keeps the handshake honest —
+    /// without it, `clove daemon status` would report a peer as compatible when
+    /// its method set is not the one this crate declares.
+    ///
+    /// This assertion is a tripwire, not a proof: nothing can detect an
+    /// added or removed tarpc method at runtime. It exists so that
+    /// re-introducing a daemon-side search — which would put the §6.1
+    /// file-vs-daemon divergence back — cannot be done without landing on this
+    /// comment.
+    #[test]
+    fn removing_the_search_rpc_moved_the_protocol_version() {
+        const {
+            assert!(
+                PROTOCOL_VERSION >= 6,
+                "the service method set changed (search removed); bump the version"
+            )
+        };
     }
 }

@@ -801,6 +801,11 @@ mod tests {
             fm("proj-CCCCCCCC", ItemStatus::InProgress, &[]),
             fm("proj-DDDDDDDD", ItemStatus::Open, &["proj-CCCCCCCC"]),
             fm("proj-EEEEEEEE", ItemStatus::Closed, &[]),
+            // A dangling-only item: its dep id has no backing file. It belongs
+            // to exactly one partition — blocked — and the invariant below is
+            // what stops anyone "fixing" its visibility by also admitting it to
+            // `ready`, which would put one item in both.
+            fm("proj-FFFFFFFF", ItemStatus::Open, &["proj-ZZZZZZZZ"]),
         ];
         let (graph, _) = GraphStore::build(&items);
 
@@ -820,6 +825,13 @@ mod tests {
             .cloned()
             .collect();
         assert_eq!(union, all, "ready ∪ blocked ∪ closed == all");
+
+        // Specifically: the dangling-only item is blocked, not ready, and not
+        // absent. Before this was pinned it fell out of both lists at the
+        // ops/CLI layer and was invisible in either direction.
+        let dangling = CloveId::new("proj-FFFFFFFF").unwrap();
+        assert!(blocked.contains(&dangling), "a dangling ref blocks");
+        assert!(!ready.contains(&dangling), "and is never ready");
     }
 
     // V-U03

@@ -40,9 +40,10 @@ single, dependency-light, cross-platform binary.
 - **Agent-first output** — every command speaks a stable
   `{ v, ok, data, _meta }` JSON envelope with documented exit codes;
   `clove agent-doc` describes the whole agent-facing surface.
-- **Optional accelerators, never required** — an FTS5 SQLite index for fast
-  search/staleness and a `cloved` daemon that keeps the index + graph hot and
-  serves reads over IPC. Delete them and nothing is lost.
+- **Optional accelerators, never required** — a SQLite index for fast
+  listing/staleness and a `cloved` daemon that keeps the index + graph hot and
+  serves reads over IPC. Delete them and nothing is lost. (`clove search` is
+  always a file scan: it matches substrings, which no index can answer.)
 - **Analytics** — `clove stats` (counts, ready/blocked, epics, throughput) with
   recorded history snapshots.
 - **Two UIs** — a `ratatui` terminal browser (`clove tui`) and an embedded
@@ -95,7 +96,7 @@ clove blocked                                # items waiting on open deps
 clove dep tree <id>                          # cargo-tree-style dependency view
 clove ls --status open --label area:core     # filter/list
 clove stats                                  # analytics (counts, ready/blocked, epics, throughput)
-clove search "login"                         # full-text search
+clove search "login"                         # substring search over titles, labels, bodies
 ```
 
 Every command supports `--format json|jsonl` with a stable
@@ -209,7 +210,7 @@ cd crates/clove-web/web && npm run check && npm run test   # svelte-check + vite
 |------|------|
 | `crates/clove-types` | pure shared data types (model/id/error/validation + the create/edit request types) |
 | `crates/clove-core` | file store, dependency-graph engine, high-level ops (pure; no SQLite) |
-| `crates/clove-index` | optional SQLite index (FTS5, staleness, incremental derived state, stats history) |
+| `crates/clove-index` | optional SQLite index (list queries, staleness, incremental derived state, stats history) |
 | `crates/clove` | the `clove` CLI (crate `clove-cli`) |
 | `crates/cloved` | the optional `cloved` daemon (file-watch, IPC, optional git sync, web serving) |
 | `crates/clove-import` | built-in `json`/`jsonl` export, the 3-way merge driver, the `tk`/`beads` importer logic (reused by the import plugins), and the pure GitHub field-mapping + reconciliation (its `github` feature — the octocrab network layer — is enabled only by the `clove-sync-github` plugin) |

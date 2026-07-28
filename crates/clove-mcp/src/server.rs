@@ -1,4 +1,4 @@
-//! The rmcp MCP server: 14 tools spanning the agent read/write loop, each
+//! The rmcp MCP server: 15 tools spanning the agent read/write loop, each
 //! delegating to the [`Engine`]. Tool bodies run on a blocking task (the engine
 //! does file I/O and, for writes, drives the blocking daemon client).
 
@@ -83,7 +83,8 @@ impl CloveServer {
         description = "List work items ready to start now: open/in-progress items \
                        whose hard dependencies are all closed and which have no \
                        dangling dependencies, ordered by (priority, topology). The \
-                       primary 'what should I work on?' query."
+                       primary 'what should I work on?' query.",
+        output_schema = crate::schema::item_page()
     )]
     async fn clove_ready(
         &self,
@@ -94,8 +95,12 @@ impl CloveServer {
     }
 
     #[tool(
-        description = "List work items blocked by open or missing dependencies, \
-                       each with its `blocked_by` ids, ordered by (priority, topology)."
+        description = "List work items blocked by open OR missing dependencies, \
+                       each with its `blocked_by` ids, ordered by (priority, \
+                       topology). An item whose dependency id has no backing \
+                       file is blocked too — that is a broken reference worth \
+                       seeing, not a reason to omit it.",
+        output_schema = crate::schema::item_page()
     )]
     async fn clove_blocked(
         &self,
@@ -105,8 +110,11 @@ impl CloveServer {
         self.run(move || e.blocked(a)).await
     }
 
-    #[tool(description = "List work items with optional filters, ordered by \
-                          (priority, topology, id).")]
+    #[tool(
+        description = "List work items with optional filters, ordered by \
+                       (priority, topology, id).",
+        output_schema = crate::schema::item_page()
+    )]
     async fn clove_list(
         &self,
         Parameters(a): Parameters<ListArgs>,
@@ -116,8 +124,8 @@ impl CloveServer {
     }
 
     #[tool(
-        description = "Show one work item in full: all fields, the Markdown body, \
-                       comment count, and computed `ready`/`blocked_by`."
+        description = "Show one work item: its fields, the Markdown body, comment \
+                       count, and computed `ready`/`blocked_by`."
     )]
     async fn clove_show(
         &self,
@@ -127,14 +135,34 @@ impl CloveServer {
         self.run(move || e.show(a)).await
     }
 
-    #[tool(description = "Full-text search over item titles, labels, and bodies \
-                          (case-insensitive; title matches rank first).")]
+    #[tool(
+        description = "Search item titles, labels, and bodies for a \
+                       case-insensitive SUBSTRING (not whole words: `core` \
+                       matches `corepart`). Title matches rank first, then \
+                       labels, then bodies.",
+        output_schema = crate::schema::item_page()
+    )]
     async fn clove_search(
         &self,
         Parameters(a): Parameters<SearchArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let e = self.engine.clone();
         self.run(move || e.search(a)).await
+    }
+
+    #[tool(
+        description = "Read an item's comment thread, oldest first. The read \
+                       counterpart to clove_comment — clove_show reports only a \
+                       `comment_count`. `limit` keeps the most recent comments; \
+                       `offset` pages back through older ones.",
+        output_schema = crate::schema::comment_page()
+    )]
+    async fn clove_comments(
+        &self,
+        Parameters(a): Parameters<CommentsArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let e = self.engine.clone();
+        self.run(move || e.comments(a)).await
     }
 
     #[tool(description = "Render the dependency tree rooted at an item, with \
@@ -262,10 +290,16 @@ impl ServerHandler for CloveServer {
              to find existing items before creating new ones, then record \
              progress as you go — clove_new to file work, clove_status to \
              transition it (open/in_progress/closed), and clove_comment to note \
-             findings. Explore with clove_show (detail), clove_blocked, and \
-             clove_dep_tree; clove_stats for an overview; clove_dep_add / \
+             findings. Explore with clove_show (detail), clove_comments (the \
+             discussion thread — clove_show gives only a count), clove_blocked, \
+             and clove_dep_tree; clove_stats for an overview; clove_dep_add / \
              clove_dep_remove / clove_set_parent to wire the graph. Ids look like \
-             `proj-7af3q2k9`. Two live resources — clove://ready and \
+             `proj-7af3q2k9`. Read results are compacted: keys that are null or \
+             an empty list are omitted, so a missing `assignee`, `labels`, or \
+             `blocked_by` means unset or empty, never unknown. When scanning \
+             many items pass `fields` to project to just what you need (e.g. \
+             {\"fields\": [\"id\", \"title\", \"status\"]}), which is far \
+             smaller; pass `compact: false` if you need every key present. Two live resources — clove://ready and \
              clove://stats — mirror the ready queue and the repo overview; \
              subscribe to be pushed resources/updated whenever the work graph \
              changes."

@@ -131,7 +131,7 @@ export const MOCK_ITEMS: Item[] = [
   }),
   mk({
     id: '88',
-    title: 'FTS5 search misses unicode',
+    title: 'Search misses unicode',
     type: 'bug',
     status: 'open',
     priority: 1,

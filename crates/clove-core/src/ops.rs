@@ -260,9 +260,237 @@ pub fn set_parent(
     Ok(Value::Object(item_object(&saved)))
 }
 
+/// How many items a single item's hard-dependency closure may reach before
+/// [`local_graph_terms`] gives up and the caller falls back to a whole-store
+/// graph build. Bounds the pathological case (one long chain) while covering
+/// every realistic dependency neighbourhood.
+const LOCAL_CLOSURE_BUDGET: usize = 512;
+
+/// The closure of `id` was too large to walk item-by-item; use the whole-store
+/// graph instead.
+struct BudgetExceeded;
+
+/// `ready` / `blocked_by` for **one** item, without scanning the whole store.
+///
+/// Every term in those two answers is a query rooted at the item, not a global
+/// one (see `GraphStore::{ready_items, blocked_items}`):
+///
+/// - unclosed and dangling hard deps — the item's own `deps`, one level;
+/// - a malformed parent — a walk up the parent chain, which is functional (one
+///   parent each), so an SCC through the item is exactly a cycle back to it;
+/// - a hard-dependency cycle — whether the item is reachable from itself, i.e.
+///   a DFS over its forward `deps` closure.
+///
+/// An item with no `deps` and no `parent` — the common case — needs no extra
+/// reads at all. Returns `Err(BudgetExceeded)` rather than an approximation when
+/// the closure is too large, so the result is always exactly what `GraphStore`
+/// would have said.
+fn local_graph_terms(
+    store: &ItemStore,
+    fm: &ItemFrontmatter,
+) -> Result<(bool, Vec<String>), BudgetExceeded> {
+    local_graph_terms_detailed(store, fm).map(|t| (t.ready, t.blocked_by))
+}
+
+/// The item-local computation behind [`local_graph_terms`], also reporting the
+/// **dangling** subset of `blocked_by`.
+///
+/// Split out rather than widening [`local_graph_terms`] because the web API is
+/// the only surface that renders `dangling_deps` separately, and it needs the
+/// same per-item answer the whole-store `GraphContext` gives it.
+fn local_graph_terms_detailed(
+    store: &ItemStore,
+    fm: &ItemFrontmatter,
+) -> Result<GraphTerms, BudgetExceeded> {
+    // Resolve an id the way the store's own scan does, or not at all. The scan
+    // skips symlinks and non-regular files (DESIGN §12.3), so such a file is not
+    // a graph node and its id must read as dangling here too — reaching it by
+    // path would follow the symlink and disagree with `ready`/`blocked`.
+    let read = |id: &CloveId| -> Option<ItemFrontmatter> {
+        let path = store.path_for(id);
+        let meta = std::fs::symlink_metadata(&path).ok()?;
+        if !meta.is_file() {
+            return None;
+        }
+        crate::parse_frontmatter_file(&path).ok()
+    };
+
+    // Direct hard deps, split into dangling (no such item) and unclosed. Order
+    // matches `GraphStore`: `blocking_deps` sorted, then `dangling_deps` in the
+    // file's own `deps` order.
+    let mut dangling: Vec<CloveId> = Vec::new();
+    let mut open: Vec<CloveId> = Vec::new();
+    for dep in &fm.deps {
+        match read(dep) {
+            None => dangling.push(dep.clone()),
+            Some(target) if target.status != ItemStatus::Closed => open.push(dep.clone()),
+            Some(_) => {}
+        }
+    }
+    // Sorted but NOT deduped, matching `GraphStore::open_hard_dep_targets`: a
+    // `deps` list naming the same id twice builds parallel edges, so the graph
+    // reports it twice. `dep_add` prevents duplicates, but a hand-edit, an
+    // import, or a merge can still produce them, and `clove_show` disagreeing
+    // with `clove_blocked` on the same repo would be worse than the duplicate.
+    open.sort();
+
+    // Malformed parent: self-parent, or a parent chain that cycles back to us.
+    // `visited` bounds a pre-existing cycle that does *not* contain this item.
+    let mut malformed_parent = false;
+    if let Some(parent) = &fm.parent {
+        if parent == &fm.id {
+            malformed_parent = true;
+        } else {
+            let mut visited: std::collections::HashSet<CloveId> =
+                std::collections::HashSet::from([fm.id.clone()]);
+            let mut cursor = Some(parent.clone());
+            while let Some(node) = cursor {
+                if node == fm.id {
+                    malformed_parent = true;
+                    break;
+                }
+                if !visited.insert(node.clone()) {
+                    break;
+                }
+                if visited.len() > LOCAL_CLOSURE_BUDGET {
+                    return Err(BudgetExceeded);
+                }
+                cursor = read(&node).and_then(|p| p.parent);
+            }
+        }
+    }
+
+    // Hard-dependency cycle: is this item reachable from itself? An item with no
+    // deps has no outgoing edges and so cannot be, which skips the walk for the
+    // overwhelmingly common case.
+    let mut in_cycle = false;
+    if !fm.deps.is_empty() {
+        let mut seen: std::collections::HashSet<CloveId> = std::collections::HashSet::new();
+        let mut stack: Vec<CloveId> = fm.deps.clone();
+        while let Some(node) = stack.pop() {
+            if node == fm.id {
+                in_cycle = true;
+                break;
+            }
+            if !seen.insert(node.clone()) {
+                continue;
+            }
+            if seen.len() > LOCAL_CLOSURE_BUDGET {
+                return Err(BudgetExceeded);
+            }
+            if let Some(next) = read(&node) {
+                stack.extend(next.deps);
+            }
+        }
+    }
+
+    let excluded = in_cycle || malformed_parent;
+    let active = fm.status.is_active();
+    let ready = active && dangling.is_empty() && !excluded && open.is_empty();
+    let in_blocked_partition = active && !excluded && !(open.is_empty() && dangling.is_empty());
+    let blocked_by = if in_blocked_partition {
+        open.iter()
+            .chain(dangling.iter())
+            .map(CloveId::to_string)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    // `dangling_deps` mirrors the whole-store `GraphContext`: it is the dangling
+    // subset *of a blocked item*, so an inactive or cycle-excluded item reports
+    // none even when its `deps` name a missing id — that item is in neither the
+    // ready nor the blocked partition.
+    let dangling_deps = if in_blocked_partition {
+        dangling.iter().map(CloveId::to_string).collect()
+    } else {
+        Vec::new()
+    };
+    Ok(GraphTerms {
+        ready,
+        blocked_by,
+        dangling_deps,
+    })
+}
+
+/// The graph-derived terms for one item, as every surface renders them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphTerms {
+    /// Open/in_progress with every hard dependency closed and none dangling.
+    pub ready: bool,
+    /// Unclosed + dangling hard-dependency targets, unclosed first.
+    pub blocked_by: Vec<String>,
+    /// The dangling subset of [`Self::blocked_by`].
+    pub dangling_deps: Vec<String>,
+}
+
+/// The computed `(ready, blocked_by)` pair for one item.
+///
+/// Prefers the item-local computation ([`local_graph_terms`]) and falls back to
+/// a whole-store graph build only when the item's closure is too large, so the
+/// answer is always exactly what `GraphStore` would say — see
+/// `local_terms_match_the_graph_oracle`.
+///
+/// Shared by [`show`] and the CLI's `clove show`, which used to carry its own
+/// copy of the whole-store version.
+pub fn graph_terms(
+    store: &ItemStore,
+    fm: &ItemFrontmatter,
+) -> Result<(bool, Vec<String>), CloveError> {
+    if let Ok(terms) = local_graph_terms(store, fm) {
+        return Ok(terms);
+    }
+    let terms = graph_terms_whole_store(store, fm)?;
+    Ok((terms.ready, terms.blocked_by))
+}
+
+/// [`graph_terms`] plus the dangling subset — the per-item form of what the web
+/// API's whole-store `GraphContext` computes for every row.
+///
+/// Same tiering as [`graph_terms`]: the item-local walk, falling back to a
+/// whole-store graph build only when the closure exceeds its budget.
+pub fn graph_terms_detailed(
+    store: &ItemStore,
+    fm: &ItemFrontmatter,
+) -> Result<GraphTerms, CloveError> {
+    if let Ok(terms) = local_graph_terms_detailed(store, fm) {
+        return Ok(terms);
+    }
+    graph_terms_whole_store(store, fm)
+}
+
+/// The whole-store oracle both `graph_terms*` fall back to when an item's
+/// dependency closure exceeds [`LOCAL_CLOSURE_BUDGET`].
+fn graph_terms_whole_store(
+    store: &ItemStore,
+    fm: &ItemFrontmatter,
+) -> Result<GraphTerms, CloveError> {
+    let (frontmatters, _errors) = store.scan_frontmatter()?;
+    let (graph, _dangling) = GraphStore::build(&frontmatters);
+    let ready = graph.ready_items().contains(&fm.id);
+    let (blocked_by, dangling_deps) = graph
+        .blocked_items()
+        .into_iter()
+        .find(|b| b.id == fm.id)
+        .map(|b| {
+            (
+                b.blocking_deps
+                    .iter()
+                    .chain(b.dangling_deps.iter())
+                    .map(CloveId::to_string)
+                    .collect(),
+                b.dangling_deps.iter().map(CloveId::to_string).collect(),
+            )
+        })
+        .unwrap_or_default();
+    Ok(GraphTerms {
+        ready,
+        blocked_by,
+        dangling_deps,
+    })
+}
+
 /// The full §7.4 item object for `id`: frontmatter + body + comment_count +
-/// computed `ready`/`blocked_by` (a whole-store graph build, like `clove show
-/// --format json`).
+/// computed `ready`/`blocked_by` (the same shape as `clove show --format json`).
 pub fn show(store: &ItemStore, id: &CloveId) -> Result<Value, CloveError> {
     let item = store.get(id)?;
     let comment_count = list_comments(store.issues_dir(), id)
@@ -273,24 +501,61 @@ pub fn show(store: &ItemStore, id: &CloveId) -> Result<Value, CloveError> {
     obj.insert("body".to_owned(), json!(item.body));
     obj.insert("comment_count".to_owned(), json!(comment_count));
 
-    let (frontmatters, _errors) = store.scan_frontmatter()?;
-    let (graph, _dangling) = GraphStore::build(&frontmatters);
-    let ready = graph.ready_items().contains(id);
-    let blocked_by: Vec<String> = graph
-        .blocked_items()
-        .into_iter()
-        .find(|b| &b.id == id)
-        .map(|b| {
-            b.blocking_deps
-                .iter()
-                .chain(b.dangling_deps.iter())
-                .map(CloveId::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
+    let (ready, blocked_by) = graph_terms(store, &item.frontmatter)?;
     obj.insert("ready".to_owned(), json!(ready));
     obj.insert("blocked_by".to_owned(), json!(blocked_by));
     Ok(Value::Object(obj))
+}
+
+/// An item's comment thread, oldest first, optionally capped to the most recent
+/// `limit`. Returns the standard `{ total, returned, offset, items }` page, with
+/// each element in the published `comment-list.json` element shape.
+///
+/// `limit` keeps the **newest** comments (the tail), not the first: a capped
+/// thread is being sampled for what happened most recently. `skip_newest` then
+/// walks backwards through history.
+///
+/// Deliberately *not* called `offset`: `ops::list`'s offset counts forward from
+/// the start, and reusing the name for a window anchored at the opposite end
+/// would let the usual paging idiom read history backwards without erroring.
+pub fn comments(
+    store: &ItemStore,
+    id: &CloveId,
+    window: crate::view::Page,
+) -> Result<Value, CloveError> {
+    if !store.exists(id) {
+        return Err(CloveError::NotFound { id: id.to_string() });
+    }
+    let all = list_comments(store.issues_dir(), id)?;
+    let total = all.len();
+
+    // Window from the newest end: `offset` skips the most recent (hence the
+    // `skip_newest` spelling every surface exposes it under), `limit` caps how
+    // many older ones follow. Saturating throughout so an over-large skip
+    // yields an empty page rather than panicking.
+    let end = total.saturating_sub(window.offset);
+    let start = window.limit.map_or(0, |n| end.saturating_sub(n));
+    let items: Vec<Value> = all[start..end]
+        .iter()
+        .map(|c| {
+            json!({
+                "author": c.author,
+                // The one canonical spelling, so a comment written by an older
+                // clove (nanoseconds, `+00:00`) renders exactly like one written
+                // today — on every surface, since all four share this shape.
+                "timestamp": clove_types::canonical_rfc3339(c.timestamp),
+                "body": c.body,
+            })
+        })
+        .collect();
+
+    Ok(json!({
+        "total": total,
+        "returned": items.len(),
+        "skip_newest": window.offset,
+        "limit": window.reported_limit(),
+        "items": items,
+    }))
 }
 
 /// Compute the work-item analytics report (`clove stats`) from the file store
@@ -314,14 +579,59 @@ pub fn stats(
 
 // ---- Read-list operations (file-based; always correct) -----------------------
 
-/// List items matching `filters`, ordered by `(priority, topo, id)`, paginated.
-/// Returns `{ total, returned, offset, items: [full objects] }`.
+// The four list ops below have no production caller since the read tier moved
+// to `clove-engine` — the engine uses the `*_rows` helpers directly and wraps
+// them with `page_payload`. They are kept because they *are* the file tier's
+// answer in payload form: the shape a tier-served page must match. Their tests
+// are the shape contract, and `clove-engine`'s parity tests compare tier output
+// against these helpers, so a drift here still fails something.
+
+/// List items matching `filters`, ordered by `order` (default `(priority, topo,
+/// id)`), paginated. Returns `{ total, returned, offset, limit, sort, dir,
+/// items: [full objects] }`.
 pub fn list(
     store: &ItemStore,
     filters: &crate::Filters,
-    offset: usize,
-    limit: Option<usize>,
+    order: crate::view::Order,
+    window: crate::view::Page,
 ) -> Result<Value, CloveError> {
+    let objects: Vec<Value> = list_rows(store, filters, order)?
+        .iter()
+        .map(|fm| Value::Object(crate::view::frontmatter_object(fm)))
+        .collect();
+    Ok(page(objects, filters, order, window))
+}
+
+// ---- The file tier, as rows ---------------------------------------------------
+//
+// `clove-engine` owns the daemon → index → files cascade and needs the *rows*
+// each tier produces, not a rendered page: the CLI renders a lean projection,
+// the MCP tools render full item objects, and the web renders those plus graph
+// terms. These four functions are the file tier, and the `list`/`ready`/
+// `blocked`/`search` pages above are the same rows wrapped for the MCP shape —
+// so the file answer cannot differ between the two.
+
+/// The matched, ordered frontmatter for a `list` query (`clove ls`/`clove query`,
+/// `clove_list`, `GET /api/v1/items`) — the file tier, unpaginated.
+pub fn list_rows(
+    store: &ItemStore,
+    filters: &crate::Filters,
+    order: crate::view::Order,
+) -> Result<Vec<ItemFrontmatter>, CloveError> {
+    list_rows_with_graph(store, filters, order).map(|(rows, _)| rows)
+}
+
+/// [`list_rows`] plus the whole-store graph it had to build anyway.
+///
+/// The web renders `ready`/`blocked_by`/`dangling_deps` on every row, which it
+/// derives from that graph. Returning it is what keeps the file tier a *single*
+/// scan-and-build: without it the engine builds a graph for the topological
+/// ranks, throws it away, and the caller scans and builds a second one.
+pub fn list_rows_with_graph(
+    store: &ItemStore,
+    filters: &crate::Filters,
+    order: crate::view::Order,
+) -> Result<(Vec<ItemFrontmatter>, GraphStore), CloveError> {
     let (frontmatters, _errors) = store.scan_frontmatter()?;
     let (graph, _dangling) = GraphStore::build(&frontmatters);
     let ranks = graph.topological_ranks();
@@ -329,21 +639,30 @@ pub fn list(
         .into_iter()
         .filter(|fm| filters.matches(fm))
         .collect();
-    crate::view::sort_by_rank(&mut matched, &ranks);
-    let objects: Vec<Value> = matched
-        .iter()
-        .map(|fm| Value::Object(crate::view::frontmatter_object(fm)))
-        .collect();
-    Ok(page(objects, offset, limit))
+    order.apply(&mut matched, &ranks);
+    Ok((matched, graph))
 }
 
-/// Items ready to work on now (open/in_progress, all hard deps closed, no
-/// dangling), ordered `(priority, topo, id)`, filtered + paginated.
-pub fn ready(
+/// The matched, ordered frontmatter for a `ready` query, plus the warnings about
+/// items excluded from it because they reference missing dependencies.
+///
+/// The warning is returned rather than printed so the surface decides: `clove
+/// ready` prints it to stderr in human format and echoes it in `_meta.warnings`,
+/// while the MCP page has nowhere to put it.
+pub fn ready_rows(
     store: &ItemStore,
     filters: &crate::Filters,
-    limit: Option<usize>,
-) -> Result<Value, CloveError> {
+    order: crate::view::Order,
+) -> Result<(Vec<ItemFrontmatter>, Vec<String>), CloveError> {
+    ready_rows_with_graph(store, filters, order).map(|(rows, warnings, _)| (rows, warnings))
+}
+
+/// [`ready_rows`] plus the whole-store graph — see [`list_rows_with_graph`].
+pub fn ready_rows_with_graph(
+    store: &ItemStore,
+    filters: &crate::Filters,
+    order: crate::view::Order,
+) -> Result<(Vec<ItemFrontmatter>, Vec<String>, GraphStore), CloveError> {
     let (frontmatters, _errors) = store.scan_frontmatter()?;
     let by_id: std::collections::HashMap<CloveId, ItemFrontmatter> = frontmatters
         .iter()
@@ -351,24 +670,63 @@ pub fn ready(
         .map(|fm| (fm.id.clone(), fm))
         .collect();
     let (graph, _dangling) = GraphStore::build(&frontmatters);
-    let objects: Vec<Value> = graph
+    let ranks = graph.topological_ranks();
+    // `ready_items()` is already in `(priority, topo, id)` order, but the sort is
+    // applied unconditionally so a non-default `order` is honoured — and so the
+    // default order goes through the *same* comparator every other surface uses.
+    let mut ordered: Vec<ItemFrontmatter> = graph
         .ready_items()
         .iter()
         .filter_map(|id| by_id.get(id))
         .filter(|fm| filters.matches(fm))
-        .map(|fm| Value::Object(crate::view::frontmatter_object(fm)))
+        .cloned()
         .collect();
-    Ok(page(objects, 0, limit))
+    order.apply(&mut ordered, &ranks);
+
+    // Items excluded from `ready` because they reference missing dependencies.
+    // They are not lost: `blocked` lists them, with the broken ids in
+    // `blocked_by`.
+    let mut warnings = Vec::new();
+    let dangling: Vec<String> = frontmatters
+        .iter()
+        .filter(|fm| {
+            graph
+                .meta(&fm.id)
+                .map(|m| m.has_dangling_deps())
+                .unwrap_or(false)
+        })
+        .map(|fm| fm.id.to_string())
+        .collect();
+    if !dangling.is_empty() {
+        warnings.push(format!(
+            "{} item(s) excluded with dangling deps: {}",
+            dangling.len(),
+            dangling.join(", ")
+        ));
+    }
+    Ok((ordered, warnings, graph))
 }
 
-/// Items blocked by open or (with `include_warnings`) missing deps, each with a
-/// `blocked_by` list, ordered `(priority, topo, id)`, filtered + paginated.
-pub fn blocked(
+/// One row of a `blocked` answer: the item and the ids holding it up (unclosed
+/// hard deps first, then dangling ones).
+pub type BlockedRow = (ItemFrontmatter, Vec<String>);
+
+/// The matched, ordered frontmatter for a `blocked` query, each paired with its
+/// `blocked_by` list.
+pub fn blocked_rows(
     store: &ItemStore,
     filters: &crate::Filters,
-    include_warnings: bool,
-    limit: Option<usize>,
-) -> Result<Value, CloveError> {
+    order: crate::view::Order,
+) -> Result<Vec<BlockedRow>, CloveError> {
+    blocked_rows_with_graph(store, filters, order).map(|(rows, _)| rows)
+}
+
+/// [`blocked_rows`] plus the whole-store graph — see [`list_rows_with_graph`].
+pub fn blocked_rows_with_graph(
+    store: &ItemStore,
+    filters: &crate::Filters,
+    order: crate::view::Order,
+) -> Result<(Vec<BlockedRow>, GraphStore), CloveError> {
     let (frontmatters, _errors) = store.scan_frontmatter()?;
     let by_id: std::collections::HashMap<CloveId, ItemFrontmatter> = frontmatters
         .iter()
@@ -378,10 +736,13 @@ pub fn blocked(
     let (graph, _dangling) = GraphStore::build(&frontmatters);
     let ranks = graph.topological_ranks();
 
-    let mut rows: Vec<(ItemFrontmatter, Vec<String>)> = graph
+    let mut rows: Vec<BlockedRow> = graph
         .blocked_items()
         .into_iter()
-        .filter(|b| include_warnings || !b.blocking_deps.is_empty())
+        // Dangling-only items are included, per DESIGN §5.3: `GraphStore` puts
+        // them in the blocked partition, and filtering them out here made them
+        // invisible in *both* `ready` and `blocked` — a broken reference is a
+        // data problem you need to see, not one to hide.
         .filter_map(|b| {
             by_id.get(&b.id).cloned().map(|fm| {
                 let blocked_by: Vec<String> = b
@@ -395,15 +756,59 @@ pub fn blocked(
         })
         .collect();
     rows.retain(|(fm, _)| filters.matches(fm));
-    rows.sort_by(|a, b| {
-        a.0.priority
-            .cmp(&b.0.priority)
-            .then_with(|| {
-                crate::view::rank_of(&ranks, &a.0.id).cmp(&crate::view::rank_of(&ranks, &b.0.id))
-            })
-            .then_with(|| a.0.id.cmp(&b.0.id))
-    });
-    let objects: Vec<Value> = rows
+    order.apply_by(&mut rows, &ranks, |(fm, _)| fm);
+    Ok((rows, graph))
+}
+
+/// The ranked frontmatter for a `search` query — the file scan, unpaginated.
+pub fn search_rows(
+    store: &ItemStore,
+    text: &str,
+    order: crate::view::SearchOrder,
+) -> Result<Vec<ItemFrontmatter>, CloveError> {
+    let mut hits = search_hits(store, text)?;
+    // Only `--sort rank` needs the graph; every other key (including the
+    // relevance default) reads straight off the frontmatter. It is built from a
+    // body-free frontmatter scan rather than from the hits, because a
+    // topological rank is only meaningful against the whole graph.
+    let ranks = if order.needs_ranks() {
+        let (frontmatters, _errors) = store.scan_frontmatter()?;
+        let (graph, _dangling) = GraphStore::build(&frontmatters);
+        graph.topological_ranks()
+    } else {
+        std::collections::HashMap::new()
+    };
+    Ok(crate::view::rank_hits(&mut hits, order, &ranks)
+        .into_iter()
+        .cloned()
+        .collect())
+}
+
+/// Items ready to work on now (open/in_progress, all hard deps closed, no
+/// dangling), ordered by `order`, filtered + paginated.
+pub fn ready(
+    store: &ItemStore,
+    filters: &crate::Filters,
+    order: crate::view::Order,
+    window: crate::view::Page,
+) -> Result<Value, CloveError> {
+    let (ordered, _warnings) = ready_rows(store, filters, order)?;
+    let objects: Vec<Value> = ordered
+        .iter()
+        .map(|fm| Value::Object(crate::view::frontmatter_object(fm)))
+        .collect();
+    Ok(page(objects, filters, order, window))
+}
+
+/// Items blocked by open or (with `include_warnings`) missing deps, each with a
+/// `blocked_by` list, ordered by `order`, filtered + paginated.
+pub fn blocked(
+    store: &ItemStore,
+    filters: &crate::Filters,
+    order: crate::view::Order,
+    window: crate::view::Page,
+) -> Result<Value, CloveError> {
+    let objects: Vec<Value> = blocked_rows(store, filters, order)?
         .into_iter()
         .map(|(fm, blocked_by)| {
             let mut obj = crate::view::frontmatter_object(&fm);
@@ -411,34 +816,46 @@ pub fn blocked(
             Value::Object(obj)
         })
         .collect();
-    Ok(page(objects, 0, limit))
+    Ok(page(objects, filters, order, window))
 }
 
-/// Case-insensitive substring search over title/labels/body; title matches rank
-/// first, then labels, then body. Returns full item objects, paginated.
-pub fn search(store: &ItemStore, text: &str, limit: Option<usize>) -> Result<Value, CloveError> {
-    let needle = text.to_lowercase();
-    let items = store.list()?;
-    let mut hits: Vec<(u8, Value)> = Vec::new();
-    for item in &items {
-        let fm = &item.frontmatter;
-        let in_title = fm.title.to_lowercase().contains(&needle);
-        let in_label = fm.labels.iter().any(|l| l.to_lowercase().contains(&needle));
-        let in_body = item.body.to_lowercase().contains(&needle);
-        if in_title || in_label || in_body {
-            let rank = if in_title {
-                0
-            } else if in_label {
-                1
-            } else {
-                2
-            };
-            hits.push((rank, Value::Object(item_object(item))));
-        }
-    }
-    hits.sort_by_key(|a| a.0);
-    let objects: Vec<Value> = hits.into_iter().map(|(_, o)| o).collect();
-    Ok(page(objects, 0, limit))
+/// Case-insensitive substring search over title/labels/body. Ordered by
+/// relevance — title matches first, then labels, then body — unless `order`
+/// names a field, which replaces that key entirely. Returns full item objects,
+/// paginated.
+/// Scan the store and return only the items that match `text`, already
+/// classified — the memory-bounded half of search.
+///
+/// Bodies are read, classified, and **dropped** one item at a time rather than
+/// materialized for the whole store. `store.list()` held every body at once, so
+/// peak RSS tracked total store bytes rather than result size: measured 399 MB
+/// on a 381 MB store, and a store of items near the 4 MB body cap would exhaust
+/// memory on a query matching nothing. Only the frontmatter of an actual hit
+/// survives the scan, which is all ranking and rendering need — `item_object`
+/// never reads the body.
+pub fn search_hits(
+    store: &ItemStore,
+    text: &str,
+) -> Result<Vec<(crate::view::MatchClass, ItemFrontmatter)>, CloveError> {
+    let needle = crate::view::fold_needle(text);
+    Ok(store.scan_search_hits(&needle)?.0)
+}
+
+pub fn search(
+    store: &ItemStore,
+    text: &str,
+    order: crate::view::SearchOrder,
+    window: crate::view::Page,
+) -> Result<Value, CloveError> {
+    // Matching and ranking are `view::rank_search_hits`, shared with the CLI's
+    // file and index paths so the three cannot disagree on what counts as a hit.
+    // (The web has no search route; its `?q=` is a separate, narrower predicate
+    // — see the roadmap.)
+    let objects: Vec<Value> = search_rows(store, text, order)?
+        .iter()
+        .map(|fm| Value::Object(crate::view::frontmatter_object(fm)))
+        .collect();
+    Ok(search_page(objects, order, window))
 }
 
 /// The dependency tree rooted at `id` to `depth`, as a nested JSON object.
@@ -466,15 +883,93 @@ fn tree_to_json(node: &crate::DepTreeNode) -> Value {
     })
 }
 
-/// Apply offset/limit and wrap a list of item values into the standard payload.
-fn page(objects: Vec<Value>, offset: usize, limit: Option<usize>) -> Value {
-    let total = objects.len();
-    let items: Vec<Value> = objects
-        .into_iter()
-        .skip(offset)
-        .take(limit.unwrap_or(usize::MAX))
-        .collect();
-    json!({ "total": total, "returned": items.len(), "offset": offset, "items": items })
+/// Apply the window and wrap a list of item values into the standard payload.
+///
+/// `limit` is echoed back so a caller can see the effective page size without
+/// knowing the surface's default (`0` = unlimited, the same encoding it passes
+/// in). `sort`/`dir` are echoed for the same reason: the ordering in force is
+/// then readable from the response rather than being folklore about which
+/// surface defaults to what.
+fn page(
+    objects: Vec<Value>,
+    filters: &crate::Filters,
+    order: crate::view::Order,
+    window: crate::view::Page,
+) -> Value {
+    let (items, total) = window.apply(objects);
+    page_payload(
+        items,
+        total,
+        window,
+        order.field.as_str(),
+        order.dir_str(),
+        Some(filters),
+        None,
+    )
+}
+
+/// [`page`] for search, whose default sort is `relevance` rather than a
+/// [`crate::view::SortField`].
+fn search_page(
+    objects: Vec<Value>,
+    order: crate::view::SearchOrder,
+    window: crate::view::Page,
+) -> Value {
+    // No `filters` key: `search` takes no field filters, and an empty object
+    // would advertise a surface the tool does not have.
+    page_with_sort(objects, order.reported_sort(), order.dir_str(), window)
+}
+
+fn page_with_sort(objects: Vec<Value>, sort: &str, dir: &str, window: crate::view::Page) -> Value {
+    let (items, total) = window.apply(objects);
+    page_payload(items, total, window, sort, dir, None, None)
+}
+
+/// Wrap an **already-windowed** page of item objects into the standard payload.
+///
+/// The functions above apply the window themselves and call this; `clove-engine`
+/// callers (the MCP tools) have a page that a tier already windowed, and call it
+/// directly. One builder either way, so a tier-served page and a file-served one
+/// cannot come back in different shapes.
+///
+/// `source` names the tier that answered — the `_meta.source` of the CLI and web,
+/// carried here as a plain key because the MCP payload has no `_meta`. It is
+/// `None` for the callers above, which predate the engine and never had one.
+pub fn page_payload(
+    items: Vec<Value>,
+    total: usize,
+    window: crate::view::Page,
+    sort: &str,
+    dir: &str,
+    filters: Option<&crate::Filters>,
+    source: Option<&str>,
+) -> Value {
+    let mut out = json!({
+        "total": total,
+        "returned": items.len(),
+        "offset": window.offset,
+        "limit": window.reported_limit(),
+        "sort": sort,
+        "dir": dir,
+        "items": items,
+    });
+    if let Some(map) = out.as_object_mut() {
+        // Echo the parsed filter set, for the same reason `sort`/`limit` are
+        // echoed: a multi-valued filter has several accepted spellings (`"open"`
+        // vs `["open"]`) and every value is canonicalized, so a caller should be
+        // able to read back what was applied rather than assume its input
+        // survived. No `filters` key on `search`, which takes no field filters.
+        if let Some(filters) = filters {
+            map.insert(
+                "filters".to_owned(),
+                serde_json::to_value(filters).unwrap_or(Value::Null),
+            );
+        }
+        if let Some(source) = source {
+            map.insert("source".to_owned(), Value::String(source.to_owned()));
+        }
+    }
+    out
 }
 
 /// The item's relative path under the repo root (best effort).
@@ -494,6 +989,7 @@ pub fn reload(store: &ItemStore, id: &CloveId) -> Result<Item, CloveError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::view::{Order, Page, SearchOrder, SortField};
     use tempfile::TempDir;
 
     fn store() -> (TempDir, ItemStore) {
@@ -885,11 +1381,23 @@ mod tests {
         let b = new_id(&store, "b");
         dep_add(&store, &a, &b, Utc::now()).unwrap(); // a blocked by open b
 
-        let all = list(&store, &crate::Filters::default(), 0, None).unwrap();
+        let all = list(
+            &store,
+            &crate::Filters::default(),
+            Order::default(),
+            Page::unlimited(),
+        )
+        .unwrap();
         assert_eq!(all["total"], 2);
         assert_eq!(all["items"].as_array().unwrap().len(), 2);
 
-        let ready_v = ready(&store, &crate::Filters::default(), None).unwrap();
+        let ready_v = ready(
+            &store,
+            &crate::Filters::default(),
+            Order::default(),
+            Page::unlimited(),
+        )
+        .unwrap();
         let ready_ids: Vec<&str> = ready_v["items"]
             .as_array()
             .unwrap()
@@ -898,7 +1406,13 @@ mod tests {
             .collect();
         assert_eq!(ready_ids, vec![b.as_str()], "only b is ready");
 
-        let blocked_v = blocked(&store, &crate::Filters::default(), false, None).unwrap();
+        let blocked_v = blocked(
+            &store,
+            &crate::Filters::default(),
+            Order::default(),
+            Page::unlimited(),
+        )
+        .unwrap();
         let items = blocked_v["items"].as_array().unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["id"], a.as_str());
@@ -912,19 +1426,172 @@ mod tests {
             new_id(&store, &format!("t{i}"));
         }
         // Edge: limit caps the page but total reflects the full match count.
-        let v = list(&store, &crate::Filters::default(), 0, Some(2)).unwrap();
+        let v = list(
+            &store,
+            &crate::Filters::default(),
+            Order::default(),
+            Page::new(0, Some(2), 0),
+        )
+        .unwrap();
         assert_eq!(v["total"], 5);
         assert_eq!(v["returned"], 2);
         // Filter that matches nothing → empty page, total 0.
         let none = list(
             &store,
             &crate::Filters::parse(Some("closed"), None, None, None, None).unwrap(),
-            0,
-            None,
+            Order::default(),
+            Page::unlimited(),
         )
         .unwrap();
         assert_eq!(none["total"], 0);
         assert!(none["items"].as_array().unwrap().is_empty());
+    }
+
+    /// Every read op honours `Order`, and every page echoes what it applied.
+    ///
+    /// These are the functions the MCP tools and the web call, so a `sort`
+    /// argument dropped here is invisible to the CLI's own tests. The fixture
+    /// ties two items on priority and separates them by dependency, so `rank`
+    /// and `priority` disagree and an ignored order cannot pass by coincidence.
+    #[test]
+    fn read_ops_apply_and_echo_the_order() {
+        let (_d, store) = store();
+        // Ids are random, so the dependency is wired *after* sorting them: the
+        // id-larger item depends on the id-smaller one, which puts the larger id
+        // first topologically and last by id. `rank` and `priority` then
+        // disagree on every run rather than on roughly half of them — with the
+        // edge fixed in advance this test passed or failed by coin flip.
+        // The two titles share a token the blocker's does not, so a search can
+        // address exactly this pair.
+        let mut pair = [new_id(&store, "task one"), new_id(&store, "task two")];
+        pair.sort();
+        let [lo, hi] = pair;
+        let blocker = new_id(&store, "gate");
+        dep_add(&store, &lo, &blocker, Utc::now()).unwrap();
+        dep_add(&store, &hi, &blocker, Utc::now()).unwrap();
+        dep_add(&store, &hi, &lo, Utc::now()).unwrap();
+
+        let ids = |v: &Value| -> Vec<String> {
+            v["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|o| o["id"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let order = |field| Order {
+            field,
+            descending: false,
+        };
+        let filters = crate::Filters::default();
+
+        // Every item is at the default priority, so `rank` is pure topological
+        // order — `hi` depends on both, `lo` on `blocker` — while `priority`
+        // falls through to the id tiebreak. The two are opposite by construction.
+        let topo = vec![hi.to_string(), lo.to_string(), blocker.to_string()];
+        let mut by_id = topo.clone();
+        by_id.sort();
+        assert_ne!(topo, by_id, "fixture must separate rank from priority");
+
+        let by_rank = list(&store, &filters, order(SortField::Rank), Page::unlimited()).unwrap();
+        let by_priority = list(
+            &store,
+            &filters,
+            order(SortField::Priority),
+            Page::unlimited(),
+        )
+        .unwrap();
+        assert_eq!(ids(&by_rank), topo);
+        assert_eq!(ids(&by_priority), by_id);
+        assert_eq!(by_rank["sort"], "rank");
+        assert_eq!(by_rank["dir"], "asc");
+        assert_eq!(by_priority["sort"], "priority");
+
+        // `id` ascending, and `--desc` reverses the whole key.
+        let asc = ids(&list(&store, &filters, order(SortField::Id), Page::unlimited()).unwrap());
+        let desc = list(
+            &store,
+            &filters,
+            Order {
+                field: SortField::Id,
+                descending: true,
+            },
+            Page::unlimited(),
+        )
+        .unwrap();
+        let mut want = asc.clone();
+        want.reverse();
+        assert_eq!(ids(&desc), want);
+        assert_eq!(desc["dir"], "desc");
+
+        // `blocked` — `lo` and `hi`, ordered by the same keys, still opposite.
+        let blocked_rank =
+            blocked(&store, &filters, order(SortField::Rank), Page::unlimited()).unwrap();
+        let blocked_priority = blocked(
+            &store,
+            &filters,
+            order(SortField::Priority),
+            Page::unlimited(),
+        )
+        .unwrap();
+        assert_eq!(ids(&blocked_rank), vec![hi.to_string(), lo.to_string()]);
+        assert_eq!(
+            ids(&blocked_priority),
+            vec![lo.to_string(), hi.to_string()],
+            "blocked must apply the requested order, not a fixed one"
+        );
+        assert_eq!(blocked_priority["sort"], "priority");
+
+        // `ready` — only `blocker` is ready, so check the echo rather than a
+        // sequence; the sequence is covered end-to-end in the CLI tests.
+        let r = ready(
+            &store,
+            &filters,
+            order(SortField::Updated),
+            Page::unlimited(),
+        )
+        .unwrap();
+        assert_eq!(r["sort"], "updated");
+        assert_eq!(ids(&r), vec![blocker.to_string()]);
+
+        // `search` — relevance by default, and the echo says so. The needle hits
+        // `lo` and `hi` (only), both title matches at the same priority, so
+        // relevance resolves to its id tiebreak and `--sort id --desc` inverts it.
+        let relevance = search(&store, "task", SearchOrder::default(), Page::unlimited()).unwrap();
+        assert_eq!(relevance["sort"], "relevance");
+        assert_eq!(relevance["dir"], "asc");
+        assert_eq!(ids(&relevance), vec![lo.to_string(), hi.to_string()]);
+
+        let explicit = search(
+            &store,
+            "task",
+            SearchOrder::parse(Some("id"), Some("desc")).unwrap(),
+            Page::unlimited(),
+        )
+        .unwrap();
+        assert_eq!(explicit["sort"], "id");
+        assert_eq!(explicit["dir"], "desc");
+        assert_eq!(
+            ids(&explicit),
+            vec![hi.to_string(), lo.to_string()],
+            "explicit id sort, descending"
+        );
+
+        // `--sort rank` on a search is the one field that needs the topological
+        // ranks, and `search` does not otherwise build the graph. Without them
+        // `rank` silently degenerates to `(priority, id)` — the `id` answer above.
+        let by_rank = search(
+            &store,
+            "task",
+            SearchOrder::parse(Some("rank"), None).unwrap(),
+            Page::unlimited(),
+        )
+        .unwrap();
+        assert_eq!(
+            ids(&by_rank),
+            vec![hi.to_string(), lo.to_string()],
+            "rank: the dependent leads, which id order does not"
+        );
     }
 
     #[test]
@@ -953,7 +1620,7 @@ mod tests {
             Utc::now(),
         )
         .unwrap();
-        let v = search(&store, "WIDGET", None).unwrap();
+        let v = search(&store, "WIDGET", SearchOrder::default(), Page::unlimited()).unwrap();
         let titles: Vec<&str> = v["items"]
             .as_array()
             .unwrap()
@@ -962,7 +1629,44 @@ mod tests {
             .collect();
         assert_eq!(titles, vec!["widget", "other"], "title hit ranks first");
         // Negative: a needle present nowhere returns nothing.
-        assert_eq!(search(&store, "zzzzz", None).unwrap()["total"], 0);
+        assert_eq!(
+            search(&store, "zzzzz", SearchOrder::default(), Page::unlimited()).unwrap()["total"],
+            0
+        );
+    }
+
+    /// End-to-end: consecutive windows over a search tile the result set exactly
+    /// once, which is what `offset` promises a paging client.
+    #[test]
+    fn search_windows_tile_the_result_set() {
+        let (_d, store) = store();
+        for _ in 0..8 {
+            create(
+                &store,
+                "proj",
+                ItemType::Feature,
+                NewSpec {
+                    title: "widget".to_owned(),
+                    ..Default::default()
+                },
+                Utc::now(),
+            )
+            .unwrap();
+        }
+        let ids = |p: Page| -> Vec<String> {
+            search(&store, "widget", SearchOrder::default(), p).unwrap()["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|o| o["id"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let all = ids(Page::unlimited());
+        assert_eq!(all.len(), 8);
+        let paged: Vec<String> = (0..4)
+            .flat_map(|i| ids(Page::new(i * 2, Some(2), 0)))
+            .collect();
+        assert_eq!(paged, all, "windows must tile without gaps or repeats");
     }
 
     #[test]
@@ -988,6 +1692,314 @@ mod tests {
         assert_eq!(v["total"], 2);
         assert_eq!(v["by_status"]["closed"], 1);
         assert_eq!(v["by_status"]["open"], 1);
+    }
+
+    /// `local_graph_terms` must agree with `GraphStore` for **every** item in a
+    /// store, including the shapes the graph treats specially: hard-dep cycles
+    /// (2-cycle and self-loop), malformed parents (self-parent and parent
+    /// cycle), dangling deps, and a closed dep that still points back.
+    ///
+    /// This is the guard that lets `show` skip the whole-store build: a silent
+    /// `dangling_deps` — the one term only the web renders — must agree with the
+    /// whole-store graph too, and it is *not* simply "the deps that do not
+    /// exist".
+    ///
+    /// The web reads it off `GraphStore::blocked_items`, which contains only
+    /// active, non-excluded items. So a **closed** item naming a missing id has
+    /// no dangling deps as far as that API is concerned, and neither does a
+    /// cycle member. An implementation that reported the raw missing-dep list
+    /// would agree on the ordinary case and disagree on exactly those two — the
+    /// shapes this fixture is built from.
+    #[test]
+    fn detailed_terms_report_the_dangling_subset_like_the_graph() {
+        let (_d, store) = store();
+        let ghost = CloveId::new("proj-ZZZZZZZZ").unwrap();
+        let raw = |id: &CloveId, mutate: &dyn Fn(&mut ItemFrontmatter)| {
+            let mut item = store.get(id).unwrap();
+            mutate(&mut item.frontmatter);
+            store.update(&item, Utc::now()).unwrap();
+        };
+
+        // Active with a dangling dep: blocked *by* the missing id.
+        let dangler = new_id(&store, "dangler");
+        raw(&dangler, &|fm| fm.deps = vec![ghost.clone()]);
+        // Closed with the same dangling dep: inactive, so in neither partition.
+        let closed_dangler = new_id(&store, "closed-dangler");
+        raw(&closed_dangler, &|fm| fm.deps = vec![ghost.clone()]);
+        transition(&store, &closed_dangler, ItemStatus::Closed, Utc::now()).unwrap();
+        // A cycle member that *also* names a missing id: excluded from both.
+        let cyc1 = new_id(&store, "cyc1");
+        let cyc2 = new_id(&store, "cyc2");
+        raw(&cyc1, &|fm| fm.deps = vec![cyc2.clone(), ghost.clone()]);
+        raw(&cyc2, &|fm| fm.deps = vec![cyc1.clone()]);
+        // Blocked by an open dep only: blocked, but nothing dangling.
+        let a = new_id(&store, "a");
+        let b = new_id(&store, "b");
+        dep_add(&store, &a, &b, Utc::now()).unwrap();
+
+        // The oracle: one whole-store graph build, read the way the web reads it.
+        let (frontmatters, _errors) = store.scan_frontmatter().unwrap();
+        let (graph, _dangling) = GraphStore::build(&frontmatters);
+        let blocked = graph.blocked_items();
+        for fm in &frontmatters {
+            let want: Vec<String> = blocked
+                .iter()
+                .find(|x| x.id == fm.id)
+                .map(|x| x.dangling_deps.iter().map(CloveId::to_string).collect())
+                .unwrap_or_default();
+            let got = graph_terms_detailed(&store, fm).unwrap();
+            assert_eq!(got.dangling_deps, want, "dangling mismatch for {}", fm.id);
+        }
+
+        // The fixture discriminates: one item reports the missing id, three name
+        // one and must not.
+        let terms = |id: &CloveId| {
+            graph_terms_detailed(&store, &store.get(id).unwrap().frontmatter).unwrap()
+        };
+        assert_eq!(terms(&dangler).dangling_deps, vec![ghost.to_string()]);
+        assert!(
+            terms(&closed_dangler).dangling_deps.is_empty(),
+            "a closed item is in neither partition"
+        );
+        assert!(
+            terms(&cyc1).dangling_deps.is_empty(),
+            "a cycle member is excluded from both partitions"
+        );
+        assert!(
+            terms(&a).dangling_deps.is_empty(),
+            "blocked, but not dangling"
+        );
+        assert_eq!(terms(&a).blocked_by, vec![b.to_string()]);
+    }
+
+    /// divergence here would be wrong, not merely slow.
+    #[test]
+    fn local_terms_match_the_graph_oracle() {
+        let (_d, store) = store();
+
+        // A plain ready item, and a simple blocked chain.
+        let a = new_id(&store, "a");
+        let b = new_id(&store, "b");
+        dep_add(&store, &a, &b, Utc::now()).unwrap(); // a blocked by open b
+                                                      // A closed dep: the dependent becomes ready again.
+        let c = new_id(&store, "c");
+        let d = new_id(&store, "d");
+        dep_add(&store, &c, &d, Utc::now()).unwrap();
+        transition(&store, &d, ItemStatus::Closed, Utc::now()).unwrap();
+        // An inactive item.
+        let closed = new_id(&store, "closed");
+        transition(&store, &closed, ItemStatus::Closed, Utc::now()).unwrap();
+
+        // Shapes `dep_add`/`set_parent` refuse to create: written directly.
+        let raw = |id: &CloveId, mutate: &dyn Fn(&mut ItemFrontmatter)| {
+            let mut item = store.get(id).unwrap();
+            mutate(&mut item.frontmatter);
+            store.update(&item, Utc::now()).unwrap();
+        };
+        // Dangling dep.
+        let dangler = new_id(&store, "dangler");
+        let ghost = CloveId::new("proj-ZZZZZZZZ").unwrap();
+        raw(&dangler, &|fm| fm.deps = vec![ghost.clone()]);
+        // Hard self-loop.
+        let selfloop = new_id(&store, "selfloop");
+        raw(&selfloop, &|fm| fm.deps = vec![fm.id.clone()]);
+        // A 2-cycle.
+        let cyc1 = new_id(&store, "cyc1");
+        let cyc2 = new_id(&store, "cyc2");
+        raw(&cyc1, &|fm| fm.deps = vec![cyc2.clone()]);
+        raw(&cyc2, &|fm| fm.deps = vec![cyc1.clone()]);
+        // Self-parent.
+        let selfparent = new_id(&store, "selfparent");
+        raw(&selfparent, &|fm| fm.parent = Some(fm.id.clone()));
+        // A parent cycle between two items, plus a child hanging off it (which
+        // is NOT itself in the cycle and must stay unexcluded).
+        let p1 = new_id(&store, "p1");
+        let p2 = new_id(&store, "p2");
+        raw(&p1, &|fm| fm.parent = Some(p2.clone()));
+        raw(&p2, &|fm| fm.parent = Some(p1.clone()));
+        let child = new_id(&store, "child");
+        raw(&child, &|fm| fm.parent = Some(p1.clone()));
+        // An item depending on a cycle member (reaches the cycle but is not in it).
+        let near = new_id(&store, "near");
+        raw(&near, &|fm| fm.deps = vec![cyc1.clone()]);
+        // The same dep listed twice. The frontmatter *writer* sorts and dedups
+        // list fields, so this has to be patched into the file text directly —
+        // going through `store.update` would silently drop the duplicate and
+        // make this fixture vacuous. The graph builds parallel edges and reports
+        // the id twice, so the local walk must not dedup it away either.
+        let dup = new_id(&store, "dup");
+        let dup_path = store.path_for(&dup);
+        let text = std::fs::read_to_string(&dup_path).unwrap();
+        std::fs::write(
+            &dup_path,
+            text.replace("deps: []", &format!("deps: [{b}, {b}]")),
+        )
+        .unwrap();
+
+        // An item whose file is a symlink. The store's scan skips symlinks
+        // (DESIGN §12.3), so it is not a graph node and a dependent sees a
+        // dangling ref.
+        //
+        // Two details make this discriminate. The link target must carry the
+        // *same* id as the link's stem, or `parse_frontmatter_file`'s id/stem
+        // check rejects it and both paths agree by accident. And it must be
+        // `closed`: resolving the link would then report "dependency satisfied"
+        // (ready) where the graph reports "dependency missing" (blocked). An
+        // open target would read as blocked either way and prove nothing.
+        #[cfg(unix)]
+        let via_link = {
+            let linked = new_id(&store, "linked");
+            let via_link = new_id(&store, "via-link");
+            raw(&via_link, &|fm| fm.deps = vec![linked.clone()]);
+
+            // A validly-closed item, re-stamped with `linked`'s id.
+            let sink = new_id(&store, "sink");
+            transition(&store, &sink, ItemStatus::Closed, Utc::now()).unwrap();
+            let closed_text = std::fs::read_to_string(store.path_for(&sink))
+                .unwrap()
+                .replace(sink.as_str(), linked.as_str());
+            // Outside `issues/`, so the scan cannot pick the target up directly.
+            let target = store.repo_root().join("linked-elsewhere.md");
+            std::fs::write(&target, closed_text).unwrap();
+
+            let link_path = store.path_for(&linked);
+            std::fs::remove_file(&link_path).unwrap();
+            std::os::unix::fs::symlink(target.as_std_path(), link_path.as_std_path()).unwrap();
+            via_link
+        };
+
+        // The oracle: one whole-store graph build.
+        let (frontmatters, _errors) = store.scan_frontmatter().unwrap();
+        let (graph, _dangling) = GraphStore::build(&frontmatters);
+        let ready_set = graph.ready_items();
+        let blocked = graph.blocked_items();
+
+        for fm in &frontmatters {
+            let want_ready = ready_set.contains(&fm.id);
+            let want_blocked: Vec<String> = blocked
+                .iter()
+                .find(|b| b.id == fm.id)
+                .map(|b| {
+                    b.blocking_deps
+                        .iter()
+                        .chain(b.dangling_deps.iter())
+                        .map(CloveId::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let (got_ready, got_blocked) = match local_graph_terms(&store, fm) {
+                Ok(terms) => terms,
+                Err(BudgetExceeded) => panic!("{} exceeded the budget unexpectedly", fm.id),
+            };
+            assert_eq!(got_ready, want_ready, "ready mismatch for {}", fm.id);
+            assert_eq!(
+                got_blocked, want_blocked,
+                "blocked_by mismatch for {}",
+                fm.id
+            );
+        }
+
+        // And the shapes above are actually present, so this is not vacuous.
+        assert!(!ready_set.contains(&cyc1), "cycle member must be excluded");
+        assert!(!ready_set.contains(&selfloop), "self-loop must be excluded");
+        assert!(
+            !ready_set.contains(&selfparent),
+            "self-parent must be excluded"
+        );
+        assert!(
+            !ready_set.contains(&p1),
+            "parent-cycle member must be excluded"
+        );
+        assert!(
+            ready_set.contains(&child),
+            "a child of a cycle is not itself in it"
+        );
+        assert!(!ready_set.contains(&dangler), "a dangling dep blocks");
+        // The duplicate really reached disk (the writer would have deduped it).
+        let dup_fm = frontmatters.iter().find(|f| f.id == dup).unwrap();
+        assert_eq!(dup_fm.deps.len(), 2, "duplicate dep fixture must be real");
+        // The symlinked item is not a node, so its dependent is blocked, not
+        // ready — the state that differs from following the link.
+        #[cfg(unix)]
+        assert!(
+            !ready_set.contains(&via_link),
+            "a dep whose file is a symlink must read as dangling, not resolved"
+        );
+    }
+
+    /// A closure larger than the budget falls back rather than answering from a
+    /// partial walk — and `show` still returns the oracle's answer.
+    #[test]
+    fn an_oversized_closure_falls_back_to_the_whole_store_graph() {
+        let (_d, store) = store();
+        let ids: Vec<CloveId> = (0..(LOCAL_CLOSURE_BUDGET + 8))
+            .map(|i| new_id(&store, &format!("n{i}")))
+            .collect();
+        // One long chain: n0 -> n1 -> n2 -> ... so n0's closure is the whole store.
+        for pair in ids.windows(2) {
+            let mut item = store.get(&pair[0]).unwrap();
+            item.frontmatter.deps = vec![pair[1].clone()];
+            store.update(&item, Utc::now()).unwrap();
+        }
+        let head = store.get(&ids[0]).unwrap();
+        assert!(
+            local_graph_terms(&store, &head.frontmatter).is_err(),
+            "a closure past the budget must decline rather than approximate"
+        );
+        // `show` still answers, via the fallback, and correctly: n0 waits on n1.
+        let shown = show(&store, &ids[0]).unwrap();
+        assert_eq!(shown["ready"], false);
+        assert_eq!(shown["blocked_by"], json!([ids[1].as_str()]));
+    }
+
+    #[test]
+    fn comments_page_from_the_newest_end() {
+        let (_d, store) = store();
+        let id = new_id(&store, "chatty");
+        for i in 0..5 {
+            comment(&store, &id, "me", &format!("note {i}")).unwrap();
+        }
+
+        // No limit: the whole thread, oldest first.
+        let all = comments(&store, &id, Page::new(0, None, 0)).unwrap();
+        assert_eq!(all["total"], 5);
+        assert_eq!(all["returned"], 5);
+        assert_eq!(all["items"][0]["body"], "note 0");
+
+        // A limit keeps the NEWEST n, still in chronological order.
+        let last2 = comments(&store, &id, Page::new(0, Some(2), 0)).unwrap();
+        assert_eq!(last2["returned"], 2);
+        assert_eq!(last2["items"][0]["body"], "note 3");
+        assert_eq!(last2["items"][1]["body"], "note 4");
+        assert_eq!(last2["total"], 5, "total is the unpaginated count");
+
+        // `skip_newest` walks backwards through history from the newest end.
+        let older = comments(&store, &id, Page::new(2, Some(2), 0)).unwrap();
+        assert_eq!(older["items"][0]["body"], "note 1");
+        assert_eq!(older["items"][1]["body"], "note 2");
+
+        // Edge: skipping past the end is an empty page, not a panic.
+        let past = comments(&store, &id, Page::new(99, Some(2), 0)).unwrap();
+        assert_eq!(past["returned"], 0);
+        assert_eq!(past["total"], 5);
+
+        // An item with no comments is an empty page, not an error.
+        let quiet = new_id(&store, "quiet");
+        assert_eq!(
+            comments(&store, &quiet, Page::new(0, None, 0)).unwrap()["total"],
+            0
+        );
+
+        // A missing item is NotFound (matching `show`).
+        assert!(matches!(
+            comments(
+                &store,
+                &CloveId::new("proj-ZZZZZZZZ").unwrap(),
+                Page::unlimited()
+            ),
+            Err(CloveError::NotFound { .. })
+        ));
     }
 
     #[test]

@@ -23,8 +23,7 @@ use tokio::runtime::Runtime;
 use tokio::time::timeout;
 
 use crate::protocol::{
-    GraphRequest, GraphResponse, QueryListResponse, QueryRequest, ReindexDone, SearchRequest,
-    StatusResponse,
+    GraphRequest, GraphResponse, QueryListResponse, QueryRequest, ReindexDone, StatusResponse,
 };
 use crate::service::{CloveRpcClient, RpcError};
 use crate::transport::build_transport;
@@ -49,9 +48,60 @@ pub enum ClientError {
     #[error("daemon connect timed out")]
     Timeout,
 
-    /// The daemon replied, but with an error or an unexpected shape.
-    #[error("daemon protocol error: {0}")]
-    Protocol(String),
+    /// The daemon received the call and **reported a decision**, carrying its
+    /// own error classification.
+    ///
+    /// This means the request was processed and answered — *not* that a write
+    /// left the store untouched. Several failures are raised after the mutation
+    /// is already durable: `atomic_write` renames the file and only then fsyncs
+    /// the parent directory, `add_comment_at` creates the comment file before
+    /// writing it, and a panic in the daemon's blocking worker is reported as an
+    /// app-level `internal` error even if it happened after the write.
+    ///
+    /// So a caller must not treat this as "safe to retry locally". What it does
+    /// mean is that the daemon's classification is authoritative and should be
+    /// reported verbatim, rather than reinterpreted.
+    #[error("{0}")]
+    App(RpcError),
+
+    /// The transport failed, or the reply had an unexpected shape or protocol
+    /// version. The call never produced an answer, so its fate is unknown: the
+    /// daemon may have applied a write before the response was lost.
+    ///
+    /// A write that fails this way must surface as an error rather than fall
+    /// back to direct ops, because re-applying is not universally safe — a
+    /// second `add_comment` appends a duplicate comment file rather than
+    /// erroring, so the fallback would silently duplicate data.
+    #[error("daemon transport error: {0}")]
+    Transport(String),
+}
+
+impl From<ClientError> for clove_types::CloveError {
+    /// Carry a daemon failure into the shared error type so callers classify it
+    /// through the one taxonomy (`clove_types::error_code`) rather than
+    /// re-deriving one per surface.
+    ///
+    /// An [`ClientError::App`] carries the daemon's `code` across, so a failure
+    /// it reported classifies exactly as the same failure raised locally. The
+    /// `exit` rides along for clients that do not share the taxonomy (and for
+    /// logs), but `clove_types::error_code` resolves the *code* against its own
+    /// table rather than trusting that number — see its `Remote` arm. Every
+    /// other variant is a communication failure the daemon never classified, and
+    /// becomes `DAEMON_ERROR` / exit 7.
+    fn from(err: ClientError) -> Self {
+        match err {
+            ClientError::App(rpc) => clove_types::CloveError::Remote {
+                code: rpc.code,
+                exit: rpc.exit,
+                message: rpc.message,
+            },
+            other => clove_types::CloveError::Remote {
+                code: "DAEMON_ERROR".to_owned(),
+                exit: 7,
+                message: other.to_string(),
+            },
+        }
+    }
 }
 
 /// The diagnostic state of a daemon footprint, as classified by
@@ -143,7 +193,11 @@ impl DaemonClient {
             Ok(_) => DaemonHealth::Healthy,
             // Answered, but with a mismatched protocol version (or an otherwise
             // incompatible reply): it is alive — do not touch its socket/pid.
-            Err(ClientError::Protocol(_)) => DaemonHealth::Incompatible,
+            // `App` is unreachable today (`ping` is infallible at the app level),
+            // but it is *proof of life*, so it belongs here rather than falling
+            // into `Dead` below — where `doctor --fix` would unlink the socket of
+            // a running daemon.
+            Err(ClientError::Transport(_) | ClientError::App(_)) => DaemonHealth::Incompatible,
             // Could not connect at all (no listener / refused / stale socket):
             // corpse files from a crashed daemon.
             Err(_) => DaemonHealth::Dead,
@@ -173,9 +227,9 @@ impl DaemonClient {
             let version = timeout(CONNECT_TIMEOUT, client.ping(context::current()))
                 .await
                 .map_err(|_| ClientError::Timeout)?
-                .map_err(|e| ClientError::Protocol(e.to_string()))?;
+                .map_err(|e| ClientError::Transport(e.to_string()))?;
             if version != PROTOCOL_VERSION {
-                return Err(ClientError::Protocol(format!(
+                return Err(ClientError::Transport(format!(
                     "daemon protocol version {version} != {PROTOCOL_VERSION}"
                 )));
             }
@@ -190,11 +244,11 @@ impl DaemonClient {
         let version = self
             .rt
             .block_on(self.client.ping(context::current()))
-            .map_err(|e| ClientError::Protocol(e.to_string()))?;
+            .map_err(|e| ClientError::Transport(e.to_string()))?;
         if version == PROTOCOL_VERSION {
             Ok(())
         } else {
-            Err(ClientError::Protocol(format!(
+            Err(ClientError::Transport(format!(
                 "daemon protocol version {version} != {PROTOCOL_VERSION}"
             )))
         }
@@ -203,11 +257,6 @@ impl DaemonClient {
     /// Run a lean list query; returns the rows + total the CLI shapes itself.
     pub fn query_list(&mut self, req: QueryRequest) -> Result<QueryListResponse, ClientError> {
         self.app(self.client.query(context::current(), req))
-    }
-
-    /// Run a full-text search; returns matched ids in FTS-rank order.
-    pub fn search(&mut self, req: SearchRequest) -> Result<Vec<String>, ClientError> {
-        self.app(self.client.search(context::current(), req))
     }
 
     /// Run a dependency-graph query against the daemon's cached graph.
@@ -224,7 +273,7 @@ impl DaemonClient {
     pub fn status(&mut self) -> Result<StatusResponse, ClientError> {
         self.rt
             .block_on(self.client.status(context::current()))
-            .map_err(|e| ClientError::Protocol(e.to_string()))
+            .map_err(|e| ClientError::Transport(e.to_string()))
     }
 
     /// Read the daemon's monotonic graph change-generation counter. Used by the
@@ -232,7 +281,7 @@ impl DaemonClient {
     pub fn change_generation(&mut self) -> Result<u64, ClientError> {
         self.rt
             .block_on(self.client.change_generation(context::current()))
-            .map_err(|e| ClientError::Protocol(e.to_string()))
+            .map_err(|e| ClientError::Transport(e.to_string()))
     }
 
     // ---- M4 mutations + reads (topology B). Each returns the §7.4 item JSON
@@ -296,17 +345,21 @@ impl DaemonClient {
         self.app(self.client.stats(context::current(), top, include_epics))
     }
 
-    /// Drive a fallible RPC call to completion, flattening the transport-level
-    /// error (`tarpc::client::RpcError`) and the application-level [`RpcError`]
-    /// into a single [`ClientError`].
+    /// Drive a fallible RPC call to completion, keeping the application-level
+    /// [`RpcError`] (the daemon answered) distinct from the transport-level
+    /// `tarpc::client::RpcError` (no answer; the call's fate is unknown).
+    ///
+    /// These were previously flattened into one stringly-typed variant, which
+    /// lost both the daemon's error classification and the difference between
+    /// "the daemon decided" and "we never heard back".
     fn app<T, F>(&self, fut: F) -> Result<T, ClientError>
     where
         F: std::future::Future<Output = Result<Result<T, RpcError>, tarpc::client::RpcError>>,
     {
         match self.rt.block_on(fut) {
             Ok(Ok(value)) => Ok(value),
-            Ok(Err(app_err)) => Err(ClientError::Protocol(app_err.to_string())),
-            Err(transport_err) => Err(ClientError::Protocol(transport_err.to_string())),
+            Ok(Err(app_err)) => Err(ClientError::App(app_err)),
+            Err(transport_err) => Err(ClientError::Transport(transport_err.to_string())),
         }
     }
 }
@@ -347,6 +400,92 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let clove_dir = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
         assert!(DaemonClient::probe(&clove_dir).is_none());
+    }
+
+    /// A failure the daemon reports classifies exactly as the same failure
+    /// raised locally — the property the whole seam exists for.
+    ///
+    /// The expected pair is taken from the *local* classifier rather than
+    /// written out here: hardcoding it would only prove that the wire value is
+    /// echoed back, which is true of any implementation.
+    #[test]
+    fn app_error_matches_the_local_classification() {
+        let locals = [
+            clove_types::CloveError::NotFound {
+                id: "proj-0000000A".into(),
+            },
+            clove_types::CloveError::DependencyCycle {
+                from: "a".into(),
+                to: "b".into(),
+                cycle: vec![],
+            },
+            clove_types::CloveError::InvalidField {
+                field: "priority".into(),
+                reason: "out of range".into(),
+            },
+            clove_types::CloveError::Io {
+                path: "/x".into(),
+                source: std::io::Error::other("disk"),
+            },
+        ];
+        for local in locals {
+            let (code, exit) = clove_types::error_code(&local);
+            // What `cloved` would put on the wire for this failure.
+            let remote: clove_types::CloveError =
+                ClientError::App(RpcError::with_exit(code, local.to_string(), exit)).into();
+            assert_eq!(
+                clove_types::error_code(&remote),
+                (code, exit),
+                "`{code}` must classify identically whether local or remote"
+            );
+        }
+    }
+
+    /// A code this build does not recognize must not steer the exit code; it
+    /// degrades to the generic daemon error rather than being trusted.
+    #[test]
+    fn unknown_remote_code_falls_back_to_daemon_error() {
+        let err = ClientError::App(RpcError::with_exit("SOME_FUTURE_CODE", "boom", 42));
+        let core: clove_types::CloveError = err.into();
+        assert_eq!(clove_types::error_code(&core), ("DAEMON_ERROR", 7));
+    }
+
+    /// A known code carrying a bogus exit must not reach the caller. Exit 0 is
+    /// the dangerous one: it would make a failed command report success.
+    #[test]
+    fn a_hostile_remote_exit_cannot_force_success() {
+        let err = ClientError::App(RpcError::with_exit("ITEM_NOT_FOUND", "gone", 0));
+        let core: clove_types::CloveError = err.into();
+        assert_eq!(clove_types::error_code(&core), ("ITEM_NOT_FOUND", 2));
+    }
+
+    /// Every non-`App` variant is a communication failure the daemon never
+    /// classified — exit 7, which is otherwise unreachable.
+    #[test]
+    fn transport_failures_classify_as_daemon_error() {
+        for err in [
+            ClientError::Transport("connection reset".to_owned()),
+            ClientError::Timeout,
+            ClientError::Connect(std::io::Error::other("refused")),
+        ] {
+            let core: clove_types::CloveError = err.into();
+            assert_eq!(clove_types::error_code(&core), ("DAEMON_ERROR", 7));
+        }
+    }
+
+    /// The wire is self-describing JSON, so a reply from a daemon that predates
+    /// the `exit` field still deserializes — defaulting to the daemon error.
+    #[test]
+    fn rpc_error_without_exit_deserializes_to_daemon_error() {
+        let legacy = r#"{"code":"not_found","message":"gone"}"#;
+        let parsed: RpcError = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.exit, 7);
+        assert_eq!(parsed.code, "not_found");
+
+        // And a current reply round-trips its exit unchanged.
+        let current = RpcError::with_exit("ITEM_NOT_FOUND", "gone", 2);
+        let wire = serde_json::to_string(&current).unwrap();
+        assert_eq!(serde_json::from_str::<RpcError>(&wire).unwrap(), current);
     }
 
     #[test]

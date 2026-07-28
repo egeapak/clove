@@ -1,16 +1,28 @@
 //! `clove blocked` (T-CLI10): items blocked by open or missing dependencies.
-
-use std::collections::HashMap;
+//!
+//! A thin adapter over [`clove_engine::Engine`], which owns the tiering. Two
+//! things used to live here and no longer do:
+//!
+//! - the local re-sort of the daemon's ids, a second implementation of
+//!   `view::Order` that could only fake `rank` (it had no topological ranks);
+//!   the sort rides `GraphRequest::Blocked` and the daemon applies it.
+//! - the `blocked_by` decoration, which is now part of the engine's answer —
+//!   derived from each item's own dependency closure via `ops::graph_terms`, so
+//!   it is O(page) rather than a second whole-store graph build, and it is the
+//!   same helper `clove show` and the MCP tools use.
+//!
+//! `blocked` also gained an **index tier** here (read-path roadmap §5): it was
+//! the one list that could not answer from SQL even with a hot index, because
+//! `clove_index` had no blocked query. It has one now — the exact complement of
+//! the `ready` clause — so a repo with an index but no daemon no longer pays a
+//! whole-store file scan for `clove blocked`.
 
 use clove_core::OutputFormat;
-use clove_ipc::{DaemonClient, GraphRequest, GraphResponse};
-use clove_types::{CloveError, CloveId, ItemFrontmatter};
+use clove_engine::Projection;
+use clove_types::CloveError;
 
 use crate::cli::FilterArgs;
-use crate::cmd::listing::{
-    effective_limit, emit, objects_from_frontmatters, ranks_of, sort_by_priority_topo, Filters,
-    ListOpts,
-};
+use crate::cmd::listing::{emit, objects_from_answer, window, ListOpts};
 use crate::context::Ctx;
 use crate::item_json::parse_fields;
 
@@ -21,89 +33,31 @@ pub fn run(
     _quiet: bool,
     no_index: bool,
 ) -> Result<(), CloveError> {
-    let filters = Filters::parse(
-        args.status.as_deref(),
-        args.item_type.as_deref(),
-        args.label.as_deref(),
-        args.assignee.as_deref(),
-        args.priority,
-    )?;
+    let filters = args.filters()?;
+    let order = args.order()?;
     let fields = args.fields.as_deref().map(parse_fields);
+    let window = window(args.offset, args.limit);
 
-    // Daemon fast path: the daemon computes the blocked set + `(priority, topo,
-    // id)` order from its cached graph and returns ordered ids; we read those
-    // files for full detail (filters preserve the daemon's order). Same output as
-    // the file path bar `_meta.source = "daemon"`.
-    if let Some(ids) = blocked_via_daemon(ctx, no_index, args.include_warnings) {
-        let ordered: Vec<ItemFrontmatter> = ids
-            .iter()
-            .filter_map(|id| CloveId::new(id).ok())
-            .filter_map(|id| ctx.store.get(&id).ok())
-            .map(|item| item.frontmatter)
-            .filter(|fm| filters.matches(fm))
-            .collect();
-        let objects = objects_from_frontmatters(&ordered);
-        let total = objects.len();
-        emit(
-            format,
-            objects,
-            ListOpts {
-                total,
-                offset: args.offset.unwrap_or(0),
-                limit: effective_limit(args.limit),
-                fields: fields.as_deref(),
-                source: "daemon",
-                warnings: Vec::new(),
-            },
-        );
-        return Ok(());
-    }
+    // `blocked` has no lean projection — `blocked_by` is the whole point of the
+    // list and no lean row carries it — so the engine always hydrates the page.
+    let answer = ctx
+        .engine(no_index, false)
+        .blocked(&filters, order, window, Projection::Full)?;
 
-    let (frontmatters, _errors) = ctx.store.scan_frontmatter()?;
-    let by_id: HashMap<CloveId, ItemFrontmatter> = frontmatters
-        .iter()
-        .cloned()
-        .map(|fm| (fm.id.clone(), fm))
-        .collect();
-
-    let (graph, ranks) = ranks_of(&frontmatters);
-    let mut ordered: Vec<ItemFrontmatter> = graph
-        .blocked_items()
-        .into_iter()
-        .filter(|b| args.include_warnings || !b.blocking_deps.is_empty())
-        .filter_map(|b| by_id.get(&b.id).cloned())
-        .collect();
-
-    ordered.retain(|fm| filters.matches(fm));
-    sort_by_priority_topo(&mut ordered, &ranks);
-
-    let objects = objects_from_frontmatters(&ordered);
-    let total = objects.len();
     emit(
         format,
-        objects,
+        objects_from_answer(&answer),
         ListOpts {
-            total,
-            offset: args.offset.unwrap_or(0),
-            limit: effective_limit(args.limit),
+            total: answer.total,
+            window,
             fields: fields.as_deref(),
-            source: "files",
-            warnings: Vec::new(),
+            compact: args.compact,
+            source: answer.source.as_str(),
+            sort: order.field.as_str(),
+            dir: order.dir_str(),
+            filters: Some(&filters),
+            warnings: answer.warnings,
         },
     );
     Ok(())
-}
-
-/// Ask a running daemon for the blocked-item ids (ordered). `None` → local
-/// path, forced by `--no-index` (the flag promises a file scan).
-fn blocked_via_daemon(ctx: &Ctx, no_index: bool, include_warnings: bool) -> Option<Vec<String>> {
-    if no_index {
-        return None;
-    }
-    let clove_dir = ctx.issues_dir.parent()?;
-    let mut client = DaemonClient::probe(clove_dir)?;
-    match client.graph(GraphRequest::Blocked { include_warnings }) {
-        Ok(GraphResponse::Blocked { ids }) => Some(ids),
-        _ => None,
-    }
 }

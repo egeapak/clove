@@ -155,10 +155,26 @@ fn snapshot_persists_and_history_reads_back() {
     let hist2 = json(clove(dir.path()).args(["stats", "--history", "--format", "json"]));
     assert_eq!(hist2["data"].as_array().unwrap().len(), 2);
 
-    // --limit caps the series.
+    // --limit caps the series, and `_meta` reports the window honestly: `total`
+    // is the count *before* the cap, so a truncated series is distinguishable
+    // from an exhausted one. It used to report the post-window count (`1` here),
+    // leaving a client no way to tell.
     let limited =
         json(clove(dir.path()).args(["stats", "--history", "--limit", "1", "--format", "json"]));
     assert_eq!(limited["data"].as_array().unwrap().len(), 1);
+    assert_eq!(limited["_meta"]["total"], 2, "total is pre-window");
+    assert_eq!(limited["_meta"]["returned"], 1);
+    assert_eq!(limited["_meta"]["limit"], 1);
+
+    // `--offset` pages into the series, and `--limit 0` is unlimited.
+    let skipped =
+        json(clove(dir.path()).args(["stats", "--history", "--offset", "1", "--format", "json"]));
+    assert_eq!(skipped["data"].as_array().unwrap().len(), 1);
+    assert_eq!(skipped["_meta"]["total"], 2);
+    let all =
+        json(clove(dir.path()).args(["stats", "--history", "--limit", "0", "--format", "json"]));
+    assert_eq!(all["data"].as_array().unwrap().len(), 2);
+    assert_eq!(all["_meta"]["limit"], 0);
 }
 
 #[test]
@@ -199,4 +215,157 @@ fn top_caps_breakdowns() {
     // limits the assignee list to one row.
     let v = json(clove(dir.path()).args(["stats", "--top", "1", "--format", "json"]));
     assert!(v["data"]["by_assignee"].as_array().unwrap().len() <= 1);
+}
+
+// ---------------------------------------------------------------------------
+// Canonical timestamps (READ_PATH_ROADMAP §3)
+// ---------------------------------------------------------------------------
+
+/// Whether `s` is in clove's one canonical spelling: RFC 3339, UTC, whole
+/// seconds, `Z`.
+fn is_canonical(s: &str) -> bool {
+    s.len() == 20
+        && s.ends_with('Z')
+        && !s.contains('.')
+        && s.parse::<chrono::DateTime<chrono::Utc>>().is_ok()
+}
+
+#[test]
+fn snapshot_timestamps_are_canonical_end_to_end() {
+    let dir = init_with_items();
+    let taken = json(clove(dir.path()).args(["stats", "--snapshot", "--format", "json"]));
+    let generated_at = taken["_meta"]["generated_at"].as_str().unwrap();
+    assert!(
+        is_canonical(generated_at),
+        "_meta.generated_at `{generated_at}` is not canonical"
+    );
+
+    let hist = json(clove(dir.path()).args(["stats", "--history", "--format", "json"]));
+    let captured_at = hist["data"][0]["captured_at"].as_str().unwrap();
+    assert!(
+        is_canonical(captured_at),
+        "captured_at `{captured_at}` is not canonical"
+    );
+}
+
+#[test]
+fn history_orders_by_instant_across_stored_spellings() {
+    // `--history` sorts on `captured_at` as a string, and the snapshots table is
+    // durable — it is carried verbatim across every reindex and index-schema
+    // rebuild, so rows an older clove wrote in a different spelling outlive any
+    // bump and sit next to canonical ones. Rows are written straight into the
+    // database here for exactly that reason: routing them through `--snapshot`
+    // would canonicalize them and the fixture would prove nothing.
+    let dir = init_with_items();
+    clove(dir.path())
+        .args(["stats", "--snapshot"])
+        .assert()
+        .success();
+
+    // Reuse the real report blob the snapshot just wrote, so these rows differ
+    // from a genuine one only in the spelling of `captured_at`.
+    let db = dir.path().join(".clove").join("index.db");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let detail: String = conn
+        .query_row("SELECT detail_json FROM snapshots", [], |r| r.get(0))
+        .unwrap();
+    conn.execute("DELETE FROM snapshots", []).unwrap();
+    for captured_at in [
+        "2026-06-01T10:00:02Z",                // canonical
+        "2026-06-01T10:00:00.904816670+00:00", // as an older clove wrote it
+        "2026-06-01T10:00:01+00:00",
+    ] {
+        conn.execute(
+            "INSERT INTO snapshots (captured_at, total, open, in_progress, closed, ready, \
+             blocked, dangling, cycles, detail_json) VALUES (?1, 0, 0, 0, 0, 0, 0, 0, 0, ?2)",
+            rusqlite::params![captured_at, detail],
+        )
+        .unwrap();
+    }
+    drop(conn);
+
+    let hist = json(clove(dir.path()).args(["stats", "--history", "--format", "json"]));
+    let series: Vec<String> = hist["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["captured_at"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        series,
+        vec![
+            "2026-06-01T10:00:02Z",
+            "2026-06-01T10:00:01Z",
+            "2026-06-01T10:00:00Z"
+        ],
+        "newest first by instant, every row canonical"
+    );
+
+    // A `--since` bound at the boundary second is inclusive whatever spelling
+    // either side of the comparison uses.
+    for bound in ["2026-06-01T10:00:01Z", "2026-06-01T10:00:01+00:00"] {
+        let since = json(clove(dir.path()).args([
+            "stats",
+            "--history",
+            "--since",
+            bound,
+            "--format",
+            "json",
+        ]));
+        assert_eq!(
+            since["data"].as_array().unwrap().len(),
+            2,
+            "`{bound}` must include the boundary row"
+        );
+    }
+}
+
+/// `--since`/`--limit`/`--offset` are the `--history` window, and passing one
+/// without `--history` is a usage error rather than a flag that does nothing
+/// (read-path roadmap §7).
+///
+/// A live report is a single object: there is no series to filter or page, so
+/// these three had nothing to apply and were silently dropped — `clove stats
+/// --limit 5` exited 0 with the full report, indistinguishable from a build that
+/// does not support the flag. Their help text already said "With `--history`:";
+/// clap now enforces it and names the missing flag.
+#[test]
+fn the_history_window_flags_require_history() {
+    let dir = init_with_items();
+
+    for args in [
+        vec!["stats", "--limit", "5"],
+        vec!["stats", "--offset", "1"],
+        vec!["stats", "--since", "2000-01-01T00:00:00+00:00"],
+        vec!["stats", "--limit", "5", "--format", "json"],
+    ] {
+        let out = clove(dir.path()).args(&args).output().unwrap();
+        assert!(
+            !out.status.success(),
+            "{args:?} silently ignored the flag: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("--history"),
+            "{args:?}: the error must name the flag that is missing: {stderr}"
+        );
+        // The report must not be printed alongside the error.
+        assert!(
+            String::from_utf8_lossy(&out.stdout).trim().is_empty(),
+            "{args:?}: printed a report anyway"
+        );
+    }
+
+    // With `--history` they are accepted, and a live report still needs none of
+    // them — the rejection is about the *combination*, not the flags.
+    clove(dir.path())
+        .args(["stats", "--history", "--limit", "5", "--offset", "0"])
+        .assert()
+        .success();
+    clove(dir.path()).args(["stats"]).assert().success();
+    clove(dir.path())
+        .args(["stats", "--top", "3", "--no-epics"])
+        .assert()
+        .success();
 }

@@ -13,6 +13,32 @@
 //! - **`chrono`, not `jiff`.** We use `chrono` (as the rest of the crate does)
 //!   for the timestamp; sub-second precision plus the 4-char random suffix gives
 //!   the same practical collision-resistance §2.5 sought from nanosecond `jiff`.
+//!
+//! ## Canonical timestamps (READ_PATH_ROADMAP §3)
+//!
+//! **The file name is the comment's only timestamp** — the file holds the body
+//! and nothing else — so the name is simultaneously the stored value, the
+//! ordering key, and half of the uniqueness key. Canonicalization applies to the
+//! *rendered* timestamp, not to the name:
+//!
+//! - **Rendered** (`ops::comments`, and so the CLI, the web API and the MCP tool
+//!   alike) through [`clove_types::canonical_rfc3339`]: whole seconds, `Z`. This
+//!   is the gap §3 named — comments used to render `to_rfc3339()` of a
+//!   nanosecond `Utc::now()` (`2026-06-02T08:54:22.904816670+00:00`) while item
+//!   timestamps a line above rendered `2026-06-02T08:54:22Z`.
+//! - **Stored** at full precision, deliberately. The name is not RFC 3339 and
+//!   has only ever had one spelling (fixed-length basic ISO, always `Z`, always
+//!   nine fraction digits), so it has no spelling to canonicalize — and its
+//!   fraction is *load-bearing*: comment files are append-only and never
+//!   rewritten, so the name is the only record of the order of two comments
+//!   added in the same second. Truncating it to seconds re-orders such a thread
+//!   arbitrarily (`comments_limit_returns_most_recent_n` in
+//!   `crates/clove/tests/cli_more.rs` catches exactly that), which is a worse
+//!   bug than the one §3 set out to fix.
+//!
+//! Comments written by an older clove therefore need no migration of any kind:
+//! nothing about the name format changed, they parse as they always did, and
+//! they render through the same canonical path as new ones.
 
 use camino::{Utf8Path, Utf8PathBuf};
 use chrono::{DateTime, NaiveDateTime, Utc};
@@ -103,6 +129,12 @@ pub fn add_comment_at(
 /// List all comments for item `id`, sorted chronologically. Returns an empty
 /// list when the item has no comments. Files whose names don't parse are
 /// skipped (defensively), never fatal.
+///
+/// Timestamps are read at whatever precision the name carries (a comment written
+/// by an older clove keeps its nanoseconds *as an ordering key*); only the
+/// rendering is canonicalized, by the surfaces that render it. The sort is
+/// therefore over the full stored precision — see the total-order note on the
+/// tiebreak below.
 pub fn list_comments(issues_dir: &Utf8Path, id: &CloveId) -> Result<Vec<Comment>, CloveError> {
     let dir = comments_dir(issues_dir, id);
     if !dir.is_dir() {
@@ -143,21 +175,34 @@ pub fn list_comments(issues_dir: &Utf8Path, id: &CloveId) -> Result<Vec<Comment>
             path: path.clone(),
             source,
         })?;
-        comments.push(Comment {
-            timestamp,
-            author,
-            body,
-        });
+        comments.push((
+            name.to_owned(),
+            Comment {
+                timestamp,
+                author,
+                body,
+            },
+        ));
     }
 
     // Chronological order (filename lex order already matches, but sort to be
     // robust against clock/format edge cases).
-    comments.sort_by(|a, b| {
+    //
+    // The file name is the final tiebreak, which makes the order **total**.
+    // Without it, two comments sharing a timestamp *and* an author fall back to
+    // whatever order `read_dir` happened to yield — an order that can differ
+    // between two reads of the same directory. That is reachable in practice,
+    // not just in theory: `add_comment_at` takes an explicit timestamp, and the
+    // GitHub comment pull stamps every pulled comment with the remote
+    // `created_at`, which has *second* resolution. Names are unique within the
+    // directory, so this never ties.
+    comments.sort_by(|(a_name, a), (b_name, b)| {
         a.timestamp
             .cmp(&b.timestamp)
             .then_with(|| a.author.cmp(&b.author))
+            .then_with(|| a_name.cmp(b_name))
     });
-    Ok(comments)
+    Ok(comments.into_iter().map(|(_, comment)| comment).collect())
 }
 
 /// The `comments/` directory for an item.

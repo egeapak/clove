@@ -936,3 +936,244 @@ deps:\n- proj-CYCLEXXX\n---\nbody\n";
     assert!(after_codes.contains("DANGLING_REF"));
     assert!(after_codes.contains("CYCLE_DETECTED"));
 }
+
+// ---------------------------------------------------------------------------
+// 11. Canonical timestamps (READ_PATH_ROADMAP §3)
+// ---------------------------------------------------------------------------
+
+/// Every RFC 3339 spelling of **one instant** (2026-06-02T10:00:00 UTC) that a
+/// store can hold: written by an older clove, by a foreign tool, or by hand.
+///
+/// These are string literals on purpose. A fixture built by *rendering* a
+/// `DateTime` — or by writing an item through `ItemStore` and editing it after —
+/// is pre-canonicalized by the very code under test and can never fail.
+const TIMESTAMP_SPELLINGS: &[&str] = &[
+    "2026-06-02T10:00:00Z",
+    "2026-06-02T10:00:00+00:00",
+    "2026-06-02T10:00:00.000Z",
+    "2026-06-02T10:00:00.904816670+00:00",
+    "2026-06-02T12:00:00+02:00",
+    "2026-06-02T04:30:00-05:30",
+];
+
+/// Hand-write an item file (bypassing the canonicalizing writer) whose three
+/// timestamps are all spelled `spelling`, and return its store.
+fn store_with_timestamp_spelling(spelling: &str) -> (tempfile::TempDir, ItemStore, CloveId) {
+    let (tmp, store) = repo();
+    let id = CloveId::new("proj-7AF3K2MN").unwrap();
+    let raw = format!(
+        "---\nschema: 1\nid: {id}\ntitle: Spelled\nstatus: closed\ntype: feature\n\
+         priority: 2\ncreated: {spelling}\nupdated: {spelling}\nclosed: {spelling}\n\
+         labels: []\ndeps: []\nrelates: []\nduplicates: []\nsupersedes: []\n---\nBody.\n"
+    );
+    std::fs::write(store.path_for(&id), raw).unwrap();
+    (tmp, store, id)
+}
+
+#[test]
+fn every_timestamp_spelling_reads_as_one_instant() {
+    let want = ts("2026-06-02T10:00:00Z");
+    for spelling in TIMESTAMP_SPELLINGS {
+        let (_tmp, store, id) = store_with_timestamp_spelling(spelling);
+        let fm = store.get(&id).unwrap().frontmatter;
+        assert_eq!(fm.created, want, "`{spelling}` created");
+        assert_eq!(fm.updated, want, "`{spelling}` updated");
+        assert_eq!(fm.closed, Some(want), "`{spelling}` closed");
+    }
+}
+
+#[test]
+fn every_timestamp_spelling_serializes_identically() {
+    // The JSON every read surface renders from (`clove show`, the web API, the
+    // MCP tools) must not leak the on-disk spelling.
+    let mut rendered: HashSet<String> = HashSet::new();
+    for spelling in TIMESTAMP_SPELLINGS {
+        let (_tmp, store, id) = store_with_timestamp_spelling(spelling);
+        let fm = store.get(&id).unwrap().frontmatter;
+        rendered.insert(serde_json::to_string(&fm).unwrap());
+    }
+    assert_eq!(
+        rendered.len(),
+        1,
+        "one instant must serialize one way, got {rendered:#?}"
+    );
+    let only = rendered.into_iter().next().unwrap();
+    assert!(
+        only.contains(r#""created":"2026-06-02T10:00:00Z""#),
+        "canonical spelling in {only}"
+    );
+}
+
+#[test]
+fn a_mutation_rewrites_a_non_canonical_timestamp() {
+    // Migration on read, rewrite on next mutation — no flag day, no `clove
+    // migrate`. `created`/`closed` are untouched by the edit itself, so what is
+    // asserted here is purely the re-spelling.
+    //
+    // Note the read-side assertion below: the *writer* has always rendered
+    // whole seconds, so asserting only on the rewritten file passes with the
+    // type-boundary normalization entirely reverted. What that normalization
+    // adds is the in-memory value being truncated at parse time, which is what
+    // `import json` and every comparison against a stored timestamp see.
+    for spelling in TIMESTAMP_SPELLINGS {
+        let (_tmp, store, id) = store_with_timestamp_spelling(spelling);
+
+        // Parsed, before any mutation: the instant is normalized on the way in.
+        let parsed = store.get(&id).unwrap().frontmatter;
+        assert_eq!(
+            parsed.created.timestamp_subsec_nanos(),
+            0,
+            "`{spelling}` must lose sub-second precision at parse time"
+        );
+        assert_eq!(
+            clove_types::canonical_rfc3339(parsed.created),
+            "2026-06-02T10:00:00Z",
+            "`{spelling}` must parse to the same instant"
+        );
+        clove_core::apply_edit(
+            &store,
+            &id,
+            &clove_types::EditRequest {
+                title: Some("Renamed".to_owned()),
+                ..Default::default()
+            },
+            ts("2026-06-03T09:00:00Z"),
+        )
+        .unwrap();
+
+        let on_disk = std::fs::read_to_string(store.path_for(&id)).unwrap();
+        assert!(
+            on_disk.contains("created: 2026-06-02T10:00:00Z\n"),
+            "`{spelling}` must be rewritten canonically, got:\n{on_disk}"
+        );
+        assert!(
+            on_disk.contains("closed: 2026-06-02T10:00:00Z\n"),
+            "`{spelling}` must be rewritten canonically, got:\n{on_disk}"
+        );
+        assert!(
+            on_disk.contains("updated: 2026-06-03T09:00:00Z\n"),
+            "the edit's own stamp is canonical too, got:\n{on_disk}"
+        );
+    }
+}
+
+/// Hand-write a comment file the way an **older clove** did: a name whose
+/// timestamp carries nanoseconds. Nothing about the name format changed, so this
+/// is byte-for-byte what such a store holds.
+fn legacy_comment(store: &ItemStore, id: &CloveId, name_ts: &str, author: &str, body: &str) {
+    let dir = store.issues_dir().join(id.as_str()).join("comments");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("{name_ts}-{author}-zzzz.md")), body).unwrap();
+}
+
+#[test]
+fn comment_timestamps_render_canonically_whatever_the_file_name_holds() {
+    let (_tmp, store) = repo();
+    let item = mk(&store, "Commented");
+    let cid = item.frontmatter.id.clone();
+
+    legacy_comment(
+        &store,
+        &cid,
+        "20260602T085422.904816670Z",
+        "ege-example-com",
+        "From an older clove.",
+    );
+    add_comment_at(
+        store.issues_dir(),
+        &cid,
+        "ege@example.com",
+        "From this clove.",
+        ts("2026-06-02T09:00:00Z"),
+    )
+    .unwrap();
+
+    let page =
+        clove_core::ops::comments(&store, &cid, clove_core::view::Page::unlimited()).unwrap();
+    let stamps: Vec<&str> = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["timestamp"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        stamps,
+        vec!["2026-06-02T08:54:22Z", "2026-06-02T09:00:00Z"],
+        "both comments render in the one canonical spelling"
+    );
+}
+
+#[test]
+fn comment_order_is_chronological_across_stored_precisions() {
+    // Comments are append-only: a thread mixes names written by different clove
+    // versions, and they must interleave by instant, not by file-name spelling.
+    let (_tmp, store) = repo();
+    let item = mk(&store, "Long thread");
+    let cid = item.frontmatter.id.clone();
+
+    legacy_comment(
+        &store,
+        &cid,
+        "20260602T100000.500000000Z",
+        "ege-example-com",
+        "second",
+    );
+    legacy_comment(
+        &store,
+        &cid,
+        "20260602T100000.100000000Z",
+        "ege-example-com",
+        "first",
+    );
+    add_comment_at(
+        store.issues_dir(),
+        &cid,
+        "ege@example.com",
+        "third",
+        ts("2026-06-02T10:00:01Z"),
+    )
+    .unwrap();
+
+    let bodies: Vec<String> = list_comments(store.issues_dir(), &cid)
+        .unwrap()
+        .into_iter()
+        .map(|c| c.body)
+        .collect();
+    assert_eq!(bodies, vec!["first", "second", "third"]);
+}
+
+#[test]
+fn comment_order_falls_back_to_file_name_when_timestamps_and_authors_tie() {
+    // Same instant, same author — reachable through `add_comment_at` and through
+    // the GitHub comment pull (remote `created_at` has second resolution). The
+    // sort has to be *total*, and the only remaining key is the file name.
+    //
+    // Asserting against the sorted names rather than against a second read is
+    // the point: `read_dir` returns a stable (if arbitrary) order for an
+    // unchanged directory, so "two reads agree" holds even with no tiebreak at
+    // all and would prove nothing.
+    let (_tmp, store) = repo();
+    let item = mk(&store, "Ties");
+    let cid = item.frontmatter.id.clone();
+    let when = ts("2026-06-02T10:00:00Z");
+    let mut by_name: Vec<(String, String)> = Vec::new();
+    for body in ["a", "b", "c", "d", "e", "f", "g", "h"] {
+        let path = add_comment_at(store.issues_dir(), &cid, "ege@example.com", body, when).unwrap();
+        by_name.push((path.file_name().unwrap().to_owned(), body.to_owned()));
+    }
+    by_name.sort();
+
+    let listed: Vec<String> = list_comments(store.issues_dir(), &cid)
+        .unwrap()
+        .into_iter()
+        .map(|c| c.body)
+        .collect();
+    assert_eq!(
+        listed,
+        by_name
+            .into_iter()
+            .map(|(_, body)| body)
+            .collect::<Vec<_>>(),
+        "a tied thread must come back in file-name order, not directory order"
+    );
+}

@@ -212,9 +212,10 @@ fn open_then_reopen_persists_data() {
     // Reopen via open_or_create: schema already present, the row survives.
     let index = Index::open_or_create(&repo.db).unwrap();
     assert_eq!(index.item_count().unwrap(), 1);
-    let rows = index.search("persisted", None).unwrap();
+    let rows = index.query_list(&Filter::default()).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, "proj-AAAAAAAA");
+    assert_eq!(rows[0].title, "persisted");
 }
 
 #[test]
@@ -238,12 +239,194 @@ fn corrupt_db_is_rebuilt_by_open_or_create() {
     assert_eq!(index.item_count().unwrap(), 0);
 }
 
-// ---------------------------------------------------------------------------
-// 2. upsert + FTS + re-upsert
-// ---------------------------------------------------------------------------
+/// A schema bump must leave a *populated* index, not an empty one.
+///
+/// `open_or_create` recovers the file and stops. Empty is indistinguishable from
+/// "nothing matched" at every call site — `clove search` returned zero rows for
+/// every query after a bump — and the staleness gate then reports every file as
+/// changed, which is over the inline-refresh limit, so the CLI silently falls
+/// back to scanning files for every query until someone reindexes by hand.
+/// The orphan check covers **both** side tables, not just `labels`.
+///
+/// Schema 5's `COUNT(items) == COUNT(fts_map)` covered every item in both
+/// directions. Replacing it with a single-table orphan scan was weaker twice
+/// over: it only sees items carrying a side row, and only the leak direction.
+/// `edges` was outside it entirely, so a torn `DELETE FROM edges` was caught by
+/// nothing — this pins the half that can be pinned.
+#[test]
+fn integrity_check_sees_orphans_in_every_side_table() {
+    let repo = Repo::new();
+    ItemSpec::new("proj-AAAAAAAA").title("kept").write_to(&repo);
+    clove_index::reindex(&repo.issues, &repo.db).unwrap();
+    let index = Index::open(&repo.db).unwrap();
+    assert_eq!(index.integrity_check().unwrap(), None, "clean to start");
+    drop(index);
+
+    // Tear each side table in turn: a row pointing at an id `items` lacks.
+    for (table, sql) in [
+        (
+            "labels",
+            "INSERT INTO labels (item_id, label) VALUES ('proj-GHOSTAAA', 'area:core')",
+        ),
+        (
+            "edges",
+            "INSERT INTO edges (from_id, to_id, kind) VALUES ('proj-GHOSTAAA', 'proj-AAAAAAAA', 0)",
+        ),
+    ] {
+        let conn = rusqlite::Connection::open(&repo.db).unwrap();
+        conn.execute(sql, []).unwrap();
+        drop(conn);
+
+        let index = Index::open(&repo.db).unwrap();
+        let report = index.integrity_check().unwrap();
+        assert!(
+            report.is_some(),
+            "an orphan in `{table}` must be reported, got {report:?}"
+        );
+        drop(index);
+
+        let conn = rusqlite::Connection::open(&repo.db).unwrap();
+        conn.execute(&format!("DELETE FROM {table} WHERE 1=1"), [])
+            .unwrap();
+    }
+}
 
 #[test]
-fn search_finds_by_title_and_body_and_replaces_on_reupsert() {
+fn a_schema_bump_rebuilds_from_the_files_not_to_empty() {
+    let repo = Repo::new();
+    ItemSpec::new("proj-AAAAAAAA")
+        .title("persisted")
+        .write_to(&repo);
+    clove_index::reindex(&repo.issues, &repo.db).unwrap();
+    assert_eq!(Index::open(&repo.db).unwrap().item_count().unwrap(), 1);
+
+    // Simulate an index written by an older (or newer) clove.
+    let stale_version = clove_index::SCHEMA_VERSION - 1;
+    {
+        let conn = rusqlite::Connection::open(&repo.db).unwrap();
+        conn.pragma_update(None, "user_version", stale_version)
+            .unwrap();
+    }
+    assert!(
+        matches!(
+            Index::open(&repo.db),
+            Err(IndexError::SchemaMismatch { .. })
+        ),
+        "the fixture must actually produce a version mismatch"
+    );
+
+    // The old behaviour: a valid, queryable, and *empty* index.
+    assert_eq!(
+        Index::open_or_create(&repo.db)
+            .unwrap()
+            .item_count()
+            .unwrap(),
+        0,
+        "open_or_create still recovers without repopulating"
+    );
+
+    // Put the mismatch back and use the rebuilding open.
+    {
+        let conn = rusqlite::Connection::open(&repo.db).unwrap();
+        conn.pragma_update(None, "user_version", stale_version)
+            .unwrap();
+    }
+    let index = Index::open_or_rebuild(&repo.db, &repo.issues).unwrap();
+    assert_eq!(index.item_count().unwrap(), 1, "rebuilt from the files");
+    assert_eq!(
+        index.query_list(&Filter::default()).unwrap()[0].title,
+        "persisted"
+    );
+}
+
+/// A healthy index is opened as-is, with no rebuild.
+///
+/// Asserted through *contents* rather than a file mtime: the index holds a row
+/// whose file does not exist on disk, so a rebuild would necessarily drop it to
+/// zero. That is a deterministic signal; an mtime comparison depends on
+/// filesystem timestamp resolution and on the rebuild taking measurable time.
+#[test]
+fn open_or_rebuild_does_not_rebuild_a_healthy_index() {
+    let repo = Repo::new();
+    {
+        let mut index = Index::open(&repo.db).unwrap();
+        let spec = ItemSpec::new("proj-AAAAAAAA").title("only in the index");
+        index.upsert_item(&item_from_spec(&spec)).unwrap();
+    }
+    // Nothing was ever written to `issues/`, so a rebuild would find no items.
+    let index = Index::open_or_rebuild(&repo.db, &repo.issues).unwrap();
+    assert_eq!(
+        index.item_count().unwrap(),
+        1,
+        "a healthy index must be opened as-is, not rebuilt"
+    );
+}
+
+/// A rebuild that cannot run leaves the old database in place, so the *next*
+/// open retries.
+///
+/// The first implementation deleted the database before calling `reindex`. When
+/// the rebuild then failed — `AlreadyRunning` whenever another process is
+/// upgrading the same index, which is exactly the concurrent-upgrade case — the
+/// old file was already gone and its replacement carried the current schema
+/// version, so no later open could tell it was empty rather than up to date.
+/// One transient failure meant a permanently empty index.
+#[test]
+fn a_failed_rebuild_is_retried_rather_than_left_empty() {
+    let repo = Repo::new();
+    ItemSpec::new("proj-AAAAAAAA")
+        .title("persisted")
+        .write_to(&repo);
+    clove_index::reindex(&repo.issues, &repo.db).unwrap();
+    let stale = clove_index::SCHEMA_VERSION - 1;
+    let bump_down = || {
+        let conn = rusqlite::Connection::open(&repo.db).unwrap();
+        conn.pragma_update(None, "user_version", stale).unwrap();
+    };
+    bump_down();
+
+    // Hold the rebuild lock, as a concurrent upgrade would.
+    let lock_path = repo.db.parent().unwrap().join("reindex.lock");
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&lock_path)
+        .unwrap();
+    let mut lock = fd_lock::RwLock::new(lock_file);
+    let guard = lock.try_write().unwrap();
+
+    let blocked = Index::open_or_rebuild(&repo.db, &repo.issues);
+    assert!(blocked.is_err(), "the rebuild cannot run while locked");
+
+    // The old database is untouched — still the stale version, still populated.
+    drop(guard);
+    assert!(
+        matches!(
+            Index::open(&repo.db),
+            Err(IndexError::SchemaMismatch { .. })
+        ),
+        "a failed rebuild must not have replaced the database"
+    );
+    let index = Index::open_or_rebuild(&repo.db, &repo.issues).unwrap();
+    assert_eq!(index.item_count().unwrap(), 1, "the retry rebuilds it");
+}
+
+// ---------------------------------------------------------------------------
+// 2. upsert + re-upsert
+// ---------------------------------------------------------------------------
+
+/// Re-upserting an item replaces its row rather than adding one, and the
+/// projected columns reflect the new values.
+///
+/// This was `search_finds_by_title_and_body_and_replaces_on_reupsert`, which
+/// asserted the same replacement through the FTS mirror. Schema 6 removed that
+/// mirror (search is a file scan on every surface — read-path roadmap §6.1), so
+/// the assertion moved to the `items` row itself. The body is no longer indexed
+/// at all, which is the point: an index that stored bodies could only answer a
+/// narrower question than `view::match_class`, and did.
+#[test]
+fn reupsert_replaces_the_row_rather_than_adding_one() {
     let repo = Repo::new();
     let mut index = Index::open(&repo.db).unwrap();
 
@@ -257,29 +440,20 @@ fn search_finds_by_title_and_body_and_replaces_on_reupsert() {
     index.upsert_item(&item_from_spec(&b)).unwrap();
     assert_eq!(index.item_count().unwrap(), 2);
 
-    // Found by a title term...
-    let by_title = index.search("widget", None).unwrap();
-    assert_eq!(by_title.len(), 1);
-    assert_eq!(by_title[0].id, "proj-AAAAAAAA");
-    // ...and by a body term.
-    let by_body = index.search("quokka", None).unwrap();
-    assert_eq!(by_body.len(), 1);
-    assert_eq!(by_body[0].id, "proj-AAAAAAAA");
-
-    // Re-upsert A with a new body: the old term disappears, the new one matches,
-    // and there is no duplicate row.
     let a2 = ItemSpec::new("proj-AAAAAAAA")
-        .title("alpha widget")
+        .title("alpha renamed")
         .body("now featuring a narwhal instead");
     index.upsert_item(&item_from_spec(&a2)).unwrap();
     assert_eq!(index.item_count().unwrap(), 2, "no duplicate row");
-    assert!(
-        index.search("quokka", None).unwrap().is_empty(),
-        "old term gone"
-    );
-    let narwhal = index.search("narwhal", None).unwrap();
-    assert_eq!(narwhal.len(), 1);
-    assert_eq!(narwhal[0].id, "proj-AAAAAAAA");
+    let titles: Vec<String> = index
+        .query_list(&Filter::default())
+        .unwrap()
+        .into_iter()
+        .map(|r| r.title)
+        .collect();
+    assert!(titles.contains(&"alpha renamed".to_owned()), "{titles:?}");
+    assert!(!titles.contains(&"alpha widget".to_owned()), "{titles:?}");
+    assert_eq!(index.integrity_check().unwrap(), None);
 }
 
 // ---------------------------------------------------------------------------
@@ -373,7 +547,7 @@ fn list_filters_by_each_field() {
 
     let by_type = index
         .query_items(&Filter {
-            item_type: Some(ItemType::Bug),
+            item_type: vec![ItemType::Bug],
             ..Default::default()
         })
         .unwrap();
@@ -381,7 +555,7 @@ fn list_filters_by_each_field() {
 
     let by_priority = index
         .query_items(&Filter {
-            priority: Some(Priority(1)),
+            priority: vec![Priority(1)],
             ..Default::default()
         })
         .unwrap();
@@ -397,7 +571,7 @@ fn list_filters_by_each_field() {
 
     let by_label = index
         .query_items(&Filter {
-            label: Some("area:ui".to_owned()),
+            labels: vec!["area:ui".to_owned()],
             ..Default::default()
         })
         .unwrap();
@@ -408,7 +582,7 @@ fn list_filters_by_each_field() {
     // status is a Vec: match several statuses at once.
     let by_status = index
         .query_items(&Filter {
-            status: Some(vec![ItemStatus::Open, ItemStatus::InProgress]),
+            status: vec![ItemStatus::Open, ItemStatus::InProgress],
             ..Default::default()
         })
         .unwrap();
@@ -531,7 +705,14 @@ fn staleness_clean_after_reindex_with_backdated_mtimes() {
 fn staleness_detects_new_deleted_modified_and_apply_resyncs() {
     let repo = Repo::new();
     for id in ["proj-AAAAAAAA", "proj-BBBBBBBB", "proj-CCCCCCCC"] {
-        ItemSpec::new(id).body("initial body").write_to(&repo);
+        // Labels are load-bearing: they are what a delete has to clean up out of
+        // the `labels` side table, and `integrity_check` below is what notices
+        // if it does not. Without them the deletion path has no side-table work
+        // to get wrong and the check passes vacuously.
+        ItemSpec::new(id)
+            .body("initial body")
+            .labels(&["area:core", "kind:perf"])
+            .write_to(&repo);
     }
     reindex(&repo.issues, &repo.db).unwrap();
 
@@ -539,6 +720,7 @@ fn staleness_detects_new_deleted_modified_and_apply_resyncs() {
     // file lands inside the recent-window guard, forcing the content-hash check).
     ItemSpec::new("proj-DDDDDDDD")
         .body("brand new searchterm")
+        .labels(&["area:core"])
         .write_to(&repo);
     repo.remove("proj-CCCCCCCC");
     ItemSpec::new("proj-AAAAAAAA")
@@ -559,8 +741,23 @@ fn staleness_detects_new_deleted_modified_and_apply_resyncs() {
     index.apply_staleness(&report, &repo.issues).unwrap();
     assert_eq!(index.item_count().unwrap(), 3, "C removed, D added");
 
-    // The new item is searchable; the deleted one is gone.
-    assert_eq!(index.search("searchterm", None).unwrap().len(), 1);
+    // The new item is in the index; the deleted one is gone.
+    let ids: Vec<String> = index
+        .query_list(&Filter::default())
+        .unwrap()
+        .into_iter()
+        .map(|r| r.id.to_string())
+        .collect();
+    assert!(ids.contains(&"proj-DDDDDDDD".to_owned()), "{ids:?}");
+    assert!(!ids.contains(&"proj-CCCCCCCC".to_owned()), "{ids:?}");
+    // ...and the deleted item left nothing behind in the side tables. Schema 5
+    // guarded this through the FTS row-count cross-check; schema 6 has no FTS,
+    // so the side tables are where a torn delete shows up.
+    assert_eq!(
+        index.integrity_check().unwrap(),
+        None,
+        "a deleted item must not leave orphan side rows"
+    );
     // A subsequent check no longer reports the resynced rows as stale/deleted.
     let after = index.check_staleness(&repo.issues).unwrap();
     assert!(
@@ -630,56 +827,123 @@ fn ready_set_matches_clove_core_graph() {
     assert!(!graph_ready.is_empty() && graph_ready.len() < frontmatters.len());
 }
 
-// ---------------------------------------------------------------------------
-// 8. search: limit, punctuation-safety, empty result
-// ---------------------------------------------------------------------------
-
+/// The SQL `blocked` set equals `GraphStore::blocked_items`, and the two modes
+/// partition the store exactly as the graph does.
+///
+/// `blocked` had no index query at all until read-path §4, so `clove blocked`
+/// scanned every file even with a hot index. The new clause is the `ready`
+/// clause with its last conjuncts negated as a disjunction — which is a place a
+/// subtle disagreement could hide, since "not ready" is *not* the same as
+/// "blocked": a closed item is neither, and so is a hard-cycle member.
+///
+/// The fixture is deliberately built so each of those distinctions is load
+/// bearing: a closed item with an open dep (not blocked — inactive), a cycle
+/// pair (not blocked — excluded), a dangling-only item (blocked with no unclosed
+/// dep at all), an item whose only dep is closed (ready, not blocked), and a
+/// plain unblocked item.
 #[test]
-fn search_limit_is_honored() {
+fn blocked_set_matches_the_graph_and_partitions_with_ready() {
     let repo = Repo::new();
-    let mut index = Index::open(&repo.db).unwrap();
-    for id in [
-        "proj-AAAAAAAA",
-        "proj-BBBBBBBB",
-        "proj-CCCCCCCC",
-        "proj-DDDDDDDD",
-    ] {
+    // ready: no deps
+    ItemSpec::new("proj-AAAAAAAA").write_to(&repo);
+    // blocked: dep on the open A
+    ItemSpec::new("proj-BBBBBBBB")
+        .deps(&["proj-AAAAAAAA"])
+        .write_to(&repo);
+    // ready: its only dep is closed
+    ItemSpec::new("proj-CCCCCCCC")
+        .deps(&["proj-DDDDDDDD"])
+        .write_to(&repo);
+    ItemSpec::new("proj-DDDDDDDD")
+        .status("closed")
+        .write_to(&repo);
+    // blocked by a *missing* id only — no unclosed dep exists, so a clause that
+    // only negated the `EXISTS` would lose this one.
+    ItemSpec::new("proj-EEEEEEEE")
+        .deps(&["proj-MISSING1"])
+        .write_to(&repo);
+    // closed *and* holding an open dep: not ready and not blocked (inactive).
+    ItemSpec::new("proj-FFFFFFFF")
+        .status("closed")
+        .deps(&["proj-AAAAAAAA"])
+        .write_to(&repo);
+    // a hard-dependency cycle: excluded from both partitions.
+    ItemSpec::new("proj-GGGGGGGG")
+        .deps(&["proj-HHHHHHHH"])
+        .write_to(&repo);
+    ItemSpec::new("proj-HHHHHHHH")
+        .deps(&["proj-GGGGGGGG"])
+        .write_to(&repo);
+    reindex(&repo.issues, &repo.db).unwrap();
+
+    let index = Index::open(&repo.db).unwrap();
+    let ids = |mode| -> HashSet<String> {
         index
-            .upsert_item(&item_from_spec(
-                &ItemSpec::new(id).body("shared common token"),
-            ))
-            .unwrap();
-    }
-    assert_eq!(index.search("shared", None).unwrap().len(), 4);
-    assert_eq!(index.search("shared", Some(2)).unwrap().len(), 2);
-    assert_eq!(index.search("shared", Some(0)).unwrap().len(), 0);
-}
+            .query_items(&Filter {
+                mode,
+                ..Default::default()
+            })
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect()
+    };
+    let index_blocked = ids(QueryMode::Blocked);
+    let index_ready = ids(QueryMode::Ready);
 
-#[test]
-fn search_is_quoting_safe_and_empty_on_no_match() {
-    let repo = Repo::new();
-    let mut index = Index::open(&repo.db).unwrap();
-    index
-        .upsert_item(&item_from_spec(
-            &ItemSpec::new("proj-AAAAAAAA").body("normal content here"),
-        ))
+    let frontmatters = parse_frontmatters(&repo.issues);
+    let (graph, _dangling) = GraphStore::build(&frontmatters);
+    let graph_blocked: HashSet<String> = graph
+        .blocked_items()
+        .into_iter()
+        .map(|b| b.id.as_str().to_owned())
+        .collect();
+
+    assert_eq!(
+        index_blocked, graph_blocked,
+        "index blocked set must equal the clove-core graph blocked set"
+    );
+    // The fixture has to discriminate: both partitions non-empty and neither is
+    // simply "every active item".
+    assert_eq!(
+        graph_blocked,
+        HashSet::from(["proj-BBBBBBBB".to_owned(), "proj-EEEEEEEE".to_owned()])
+    );
+    assert_eq!(
+        index_ready,
+        HashSet::from(["proj-AAAAAAAA".to_owned(), "proj-CCCCCCCC".to_owned()])
+    );
+    assert!(
+        index_ready.is_disjoint(&index_blocked),
+        "ready and blocked must not overlap"
+    );
+    // …and together they are exactly the active, non-excluded items — which is
+    // what makes "the complement of ready" a correct reading of the clause.
+    let both: HashSet<String> = index_ready.union(&index_blocked).cloned().collect();
+    let excluded: HashSet<String> = graph
+        .excluded_ids()
+        .into_iter()
+        .map(|id| id.as_str().to_owned())
+        .collect();
+    let active_not_excluded: HashSet<String> = frontmatters
+        .iter()
+        .filter(|fm| fm.status.is_active())
+        .map(|fm| fm.id.as_str().to_owned())
+        .filter(|id| !excluded.contains(id))
+        .collect();
+    assert_eq!(both, active_not_excluded);
+
+    // A `--status` filter narrows *within* the blocked set rather than replacing
+    // it, exactly as it does for `ready`.
+    let in_progress = index
+        .query_items(&Filter {
+            mode: QueryMode::Blocked,
+            status: vec![ItemStatus::InProgress],
+            ..Default::default()
+        })
         .unwrap();
-
-    // Input full of FTS metacharacters / punctuation must not error or inject
-    // query syntax — it's treated as a literal phrase that simply matches nothing.
-    for tricky in [
-        "\"quote injection\" OR 1",
-        "foo* AND bar",
-        "(unbalanced",
-        "co-lon: semi; comma,",
-    ] {
-        let res = index.search(tricky, None).unwrap();
-        assert!(
-            res.is_empty(),
-            "tricky input matched unexpectedly: {tricky:?}"
-        );
-    }
-
-    // A clean non-matching term is also empty.
-    assert!(index.search("absentword", None).unwrap().is_empty());
+    assert!(
+        in_progress.is_empty(),
+        "no blocked item is in_progress in this fixture"
+    );
 }

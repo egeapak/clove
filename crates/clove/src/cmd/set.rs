@@ -5,16 +5,14 @@ use clove_types::CloveError;
 use serde_json::Map;
 
 use crate::cli::SetArgs;
-use crate::cmd::edit::apply_assignments;
+use crate::cmd::edit::apply_assignments_to;
 use crate::context::Ctx;
 use crate::item_json::print_item;
-use crate::util::{now_seconds, parse_id};
+use crate::util::parse_id;
 
 pub fn run(ctx: &Ctx, format: OutputFormat, args: SetArgs) -> Result<(), CloveError> {
     let id = parse_id(&args.id)?;
-    let mut item = ctx.store.get(&id)?;
-    apply_assignments(&mut item.frontmatter, &args.assignments)?;
-    let saved = ctx.store.update(&item, now_seconds())?;
+    let saved = apply_assignments_to(&ctx.store, &id, &args.assignments)?;
     print_item(format, &saved, Map::new());
     Ok(())
 }

@@ -14,7 +14,8 @@ clove/                          (workspace root)
   Cargo.toml                    [workspace] + [workspace.dependencies]
   crates/
     clove-core/                 lib — item model, file store, DAG engine, ID gen
-    clove-index/                lib — SQLite index, FTS5, staleness, reindex
+    clove-index/                lib — SQLite index, staleness, reindex
+    clove-engine/               lib — the read tier: one daemon -> index -> files cascade (§6.8)
     clove-import/               lib — json/jsonl export, merge driver, tk/beads importer logic, pure GitHub mapping
     clove-plugin/               lib — cargo-style plugin support (PluginContext + envelope harness)
     clove-sync-github/          bin — the `clove-sync-github` plugin (two-way GitHub sync, octocrab)
@@ -35,8 +36,10 @@ clove/                          (workspace root)
 clove-core   (no SQLite, no async, no IPC, no clap)
     ↑
 clove-index  (rusqlite bundled, depends on clove-core)
-    ↑         ↑
-clove        cloved        (both depend on clove-core + clove-index)
+    ↑
+clove-engine (clove-core + clove-index + clove-ipc; the read cascade, §6.8)
+    ↑         ↑          ↑
+clove      clove-mcp   clove-web        cloved (clove-core + clove-index, serves the cascade)
     ↑
 clove-import (depends on clove-core; also tokio + octocrab for GitHub import/export)
 ```
@@ -164,6 +167,30 @@ Fields absent because null/empty: `closed`, `duplicates`, `supersedes`, `source_
 omitted. Null scalars serialize as `null`, never omitted. **This is enforced by a hand-rolled
 `FrontmatterWriter` (see §4), not by serde library defaults.**
 
+**Timestamp canonicalization rule (one RFC 3339 spelling):** RFC 3339 has several
+equivalent spellings of the same instant — `Z` vs `+00:00`, an equivalent non-UTC offset, any
+amount of sub-second precision — and clove compares timestamp *strings* in places where a
+difference in spelling would read as a difference in content (the GitHub sync's change
+detection, `stats --history` ordering). So there is exactly one spelling clove ever **writes**:
+**UTC, whole seconds, `Z` suffix** (`2026-06-02T10:00:00Z`), rendered by
+`clove_types::canonical_rfc3339`. Every **read** accepts any parseable RFC 3339 and normalizes
+it — `ItemFrontmatter` does this at the type boundary (`clove_types::time::serde_ts`), so YAML
+frontmatter and `import json` — the two surfaces that carry an `ItemFrontmatter` —
+cannot diverge, and a
+hand-edited or foreign-written value is simply re-spelled on the next write. **There is no
+migration step and no flag day** (no `clove migrate` pass, no index-schema bump): the store is
+files, and files are rewritten as they are touched. Two deliberate exceptions, both because
+the value is not a rendered RFC 3339 string:
+
+- **Comment file names** keep nanosecond precision (§2.5). The name is a comment's only
+  timestamp *and* its only record of the order of two comments added in the same second, so
+  truncating it would re-order a thread. Its format is fixed and single-spelled already; only
+  its rendering is canonicalized.
+- **The index's `created_at`/`updated_at`/`closed_at` columns** keep chrono's `+00:00`
+  rendering (§6). They are an internal ordering key that no surface renders; re-spelling them
+  would force a `SCHEMA_VERSION` bump — a full rebuild for every user — for no visible change.
+  The *values* they are written from are canonical, so the index and file paths always agree.
+
 **Label normalization rule (case-insensitive labels):** Labels are **canonicalized to
 lowercase on every write** — `clove new -l`, `clove label add`, `clove edit labels+=`, and all
 importers pass each label through `normalize_label()` (Unicode lowercase via
@@ -260,6 +287,15 @@ are added or reordered.
 - **Timestamp:** nanosecond-precision RFC3339 (`2026-06-02T10:00:00.123456789Z`) so
   lexicographic sort == chronological sort. The nanosecond portion plus the 4-char random
   suffix makes same-clock-second collisions astronomically unlikely.
+  **This is the one stored timestamp that is not truncated to whole seconds**, and it is an
+  exception on purpose (see the canonicalization rule in §2.2): comment files are append-only
+  and never rewritten, so the name is the only record of the order of two comments added
+  within the same second. The *rendered* timestamp (`clove comments`, the web API, the
+  `clove_comments` MCP tool) is canonical like every other one. Because the name format is
+  unchanged, comments written by any earlier clove read back unchanged. Listing sorts by
+  timestamp, then author, then file name — a **total** order, so a thread whose timestamps
+  tie (e.g. comments pulled from GitHub, whose `created_at` has second resolution) cannot come
+  back in `readdir` order.
 - **Author slug:** `git user.email` lowercased, non-alphanumeric → `-`, truncated at 32 chars.
 - **Body:** plain Markdown, no frontmatter.
 - **Why the 4-char random suffix:** covers HFS+ (1-second mtime granularity) and any network
@@ -509,7 +545,7 @@ CREATE TABLE items (
     topological_rank INTEGER,
     has_dangling_deps BOOLEAN NOT NULL DEFAULT FALSE,
     labels TEXT NOT NULL DEFAULT '[]',   -- JSON array
-    created_at TEXT NOT NULL,            -- RFC3339
+    created_at TEXT NOT NULL,            -- RFC3339, chrono `+00:00` form (see below)
     updated_at TEXT NOT NULL,
     closed_at TEXT,
     file_mtime INTEGER NOT NULL,         -- Unix epoch ms
@@ -531,17 +567,26 @@ CREATE TABLE labels (
     PRIMARY KEY (item_id, label)
 ) WITHOUT ROWID;
 
-CREATE VIRTUAL TABLE items_fts USING fts5(
-    id UNINDEXED,
-    title,
-    body,
-    content='',         -- contentless: FTS index is self-contained; rows managed by upsert_item()
-    tokenize='ascii'    -- faster than unicode61 for ASCII-dominant content
-);
--- Note: `body` here is the item body text passed explicitly on insert; it is NOT a reference
--- to a column in the `items` table (which has no body column). The `content=''` declaration
--- makes this a contentless FTS5 table — all content must be provided via explicit
--- INSERT/DELETE in upsert_item(). See §6.3 and T-S02.
+-- There is deliberately NO full-text table. Schemas 1-5 carried a contentless `items_fts`
+-- (plus an `fts_map` rowid→id side table) that `clove search` used as a candidate prefilter;
+-- v6 removed both. FTS5 matches whole tokens with ASCII-only case folding, while every other
+-- clove surface matches a full-Unicode substring, so the FTS answered a strictly narrower
+-- question and `clove search X` returned different ids depending on whether an index existed.
+-- Search is a parallel file scan on every surface now — see §6.7 and read-path roadmap §6.1.
+
+-- The three timestamp columns keep chrono's `to_rfc3339()` `+00:00` rendering rather than the
+-- canonical `Z` one clove writes into files (§2.2). They are an internal ordering key: the list
+-- projection carries no timestamps at all, so nothing renders them, and re-spelling them would
+-- change the bytes of every row in every existing index — only safe behind a SCHEMA_VERSION
+-- bump, i.e. a full rebuild for every user, to change a string no surface shows. The *values*
+-- they are written from are canonical (ItemFrontmatter normalizes on deserialize), so the index
+-- and file paths cannot rank two items differently for anything written since.
+An index built *before* canonicalization can still hold a sub-second value where
+the file now parses to a truncated one, and staleness is mtime/hash-based, so an
+untouched file is never re-indexed: `clove reindex` is the remedy. Not worth a
+forced rebuild for everyone, since reaching it needs a hand-edited sub-second
+timestamp *and* a pre-upgrade index. Pinned by
+-- `timestamp_columns_keep_their_stored_spelling` in clove-index.
 
 -- Staleness oracle (exactly one row enforced by the CHECK constraint)
 CREATE TABLE meta (
@@ -576,13 +621,31 @@ avoids the hidden integer rowid and gives O(log n) point lookups directly on the
 and SIMD-accelerated). Stored as `BLOB(8)`.
 
 **Schema version** is stored in `PRAGMA user_version` (built-in SQLite mechanism, more
-reliable than a custom table row). Checked on every `Index::open`. Mismatch → drop and
-rebuild. Current version is **v4** (v2 covering index + sentinel rank; v3
-`file_mtimes.synced_at`; v4 `items.excluded`, the persisted hard-cycle /
-malformed-parent flag the SQL `ready` query filters on — see §6.5). The same `index.db`
+reliable than a custom table row). Checked on every `Index::open`. Current version is
+**v6** (v2 covering index + sentinel rank; v3 `file_mtimes.synced_at`; v4
+`items.excluded`, the persisted hard-cycle / malformed-parent flag the SQL `ready` query
+filters on — see §6.5; v5 `items_fts.labels`; v6 **dropped `items_fts`/`fts_map`**, which
+also took the index from ~21 MB to ~4.8 MB and `clove reindex` from ~1.46 s to ~0.39 s on a
+10,000-item store).
+
+On a mismatch, `Index::open_or_rebuild` **rebuilds from the files**: `reindex` builds a
+temp database under the reindex lock and renames it over the live one, so a rebuild that
+cannot run leaves the old database in place and the next open retries. The older
+`Index::open_or_create` discards and returns an *empty* index — it has no store to
+rebuild from — and that discard is unrecoverable, since the replacement carries the
+current version and no later open can distinguish empty from up-to-date. Read paths must
+use `open_or_rebuild`. The same `index.db`
 also holds a durable `snapshots` history table (`clove stats --snapshot`/`--history`),
 created idempotently and **carried across reindex / schema-rebuild** so it is not a
 cache-only artifact (M4).
+
+Because that table is durable, it is the one place where rows written by *different clove
+versions* coexist indefinitely — a schema bump would not migrate it, since it is preserved
+verbatim across the rebuild. `captured_at` is therefore written canonically (§2.2),
+canonicalized again on read, and both the `ORDER BY` and the `--since` bound compare
+`substr(captured_at, 1, 19)` — the second-precision prefix every RFC 3339 spelling of a UTC
+instant shares — rather than resting on the byte order of the suffix. Rows an older clove
+wrote are re-spelled in place on the next `--snapshot` ("rewrite on the next mutation").
 
 ### 6.2 Staleness Detection (Two-Level)
 
@@ -608,15 +671,15 @@ targeted). Update `last_git_head` after.
 
 Every CLI command that mutates a file (new, edit, status, label, dep, assign, priority) does:
 1. Write the `.md` file (atomic rename, see §4).
-2. Upsert the SQLite rows (items + edges + labels + FTS5 sync) in a single `BEGIN IMMEDIATE`
+2. Upsert the SQLite rows (items + edges + labels) in a single `BEGIN IMMEDIATE`
    transaction.
 
 If the SQLite upsert fails: log to stderr and continue (file is the truth; index is stale
 but recoverable). File writes are always attempted first.
 
-**FTS5 sync:** All item upserts must use the encapsulated `upsert_item(conn, item)` function —
-the single write path — which always syncs FTS5 in the same transaction. Direct SQL writes to
-`items` outside this function are forbidden.
+**Side-table sync:** All item upserts must use the encapsulated `upsert_item(conn, item)`
+function — the single write path — which replaces the item's `edges` and `labels` rows in the
+same transaction. Direct SQL writes to `items` outside this function are forbidden.
 
 ### 6.4 Auto-Refresh Threshold
 
@@ -673,9 +736,60 @@ with the understanding that a crash during reindex is detected via `PRAGMA user_
 Missing `index.db`:
 - Print to stderr (not stdout): `note: no index found, using file scan (run 'clove reindex' to build)`
 - Use file-scan for all operations.
-- `clove search` degrades to parallel rayon substring scan over file content.
+- `clove search` is **always** a parallel rayon substring scan over file content, index or
+  no index — it has no index tier and no daemon tier to degrade from. See §7.8 "Search
+  semantics" and read-path roadmap §6.1; its `_meta.source` is therefore always `"files"`.
 
-All JSON responses include `"_meta": { "source": "files" | "index", "took_ms": N }`.
+All JSON responses include `"_meta": { "source": "daemon" | "index" | "files", "took_ms": N }`.
+
+### 6.8 The read tier (`clove-engine`)
+
+Every read has the same three possible answers — a running `cloved`, the local
+`index.db`, or a scan of the files — and `clove-engine` owns that choice **once
+per method** (`list`, `ready`, `blocked`, `search`, `show`, `comments`,
+`dep_tree`, `stats`). The CLI's `ls`/`ready`/`blocked`/`query`/`search`,
+`clove-mcp`'s tool engine, and `clove-web`'s `read.rs` are adapters over it:
+parse arguments → call the engine → render. `_meta.source` (`source` on the MCP
+page, which has no `_meta`) names the tier that answered.
+
+Before this, the CLI re-implemented the cascade per command with slightly
+different fallback conditions, the MCP server always read files — paying a full
+store scan per tool call while a hot daemon sat idle — and the web always read
+files *and* rebuilt the whole dependency graph per request while reporting its
+**serving mode** (`"standalone"`/`"daemon"`) in the field that names a tier
+everywhere else.
+
+**Projection decides whether a tier may answer at all.**
+
+| `Projection` | Meaning | Used by |
+|---|---|---|
+| `Lean` | The five columns `ls` renders suffice, so an index/daemon row is returned as-is and **no** item file is read. | `clove ls`/`ready`/`query` |
+| `Full` | Full frontmatter is required. A tier still answers the *query* — filtering, ordering, and counting stay in SQL — and only the returned page is read back from disk (frontmatter only, in parallel above 500 rows). | `clove blocked`, the MCP read tools, the web |
+| `Files` | Full frontmatter required **and** no tier may answer. A caller policy, not a property of the store. | `clove ls --fields id,created` (a field outside the lean row) |
+
+**Fallback conditions** for the list reads, in one place (`clove dep tree` and
+`clove stats` still gate on `--no-index` themselves — they do not route through
+the engine): `--no-index` (which disables the
+daemon tier too — the flag promises a file scan, and a daemon answering from its
+hot index is no more of one); no daemon or any IPC error; a missing, broken, or
+too-stale index (> 20 changed items); and a query SQLite cannot *shape*
+(`Expression tree is too large`, `too many SQL variables`, `parser stack
+overflow` — the index is a cache, so "too big for SQLite" selects the other path
+rather than failing).
+
+**The engine applies the window before it returns**, so a caller renders what it
+is given and cannot double-page. `total` is always the pre-window match count,
+including on the residue path where `COUNT(*)` is not the total.
+
+**`search` has one tier by design** — see §6.7 and read-path roadmap §6.1 — so
+its `Source` is always `files`, honestly rather than as a fallback.
+
+**`blocked` has an index tier** (`clove_index::QueryMode::Blocked`): the `ready`
+clause with its last conjuncts negated as a disjunction, so
+`ready ⊎ blocked = active ∧ ¬excluded` holds in SQL as it does in the graph. It
+is `Projection::Full` on every tier because `blocked_by` — the point of the list
+— is not a lean column; it is derived per page row from the item's own dependency
+closure (`ops::graph_terms`), not from a second whole-store graph build.
 
 ---
 
@@ -691,10 +805,22 @@ Global flags:
                                     Overridden by CLOVE_FORMAT env var
                                     Precedence: flag > CLOVE_FORMAT > config.toml default > human
   --no-index                        Force file-scan even if index.db present
+  --deep                            Thorough per-file index staleness check
   --quiet                           Suppress informational stderr
   --color <auto|always|never>       Terminal color control
   --clove-dir <PATH>                Override .clove/ discovery
 ```
+
+`--no-index` and `--deep` are **read-tier** flags: global (so they parse before
+or after the subcommand, like every other global) but acted on only by the
+commands that choose a tier — `ls`, `ready`, `blocked`, `query`, `stats`,
+`doctor`, `dep`, `serve` — plus any plugin, which receives them as
+`$CLOVE_NO_INDEX` / `$CLOVE_DEEP` and decides for itself. They are accepted and
+inert elsewhere: `search` has a single file-scan tier by design (§6.7), and the
+write and metadata commands never consult the index. That leniency is kept
+deliberately — scoping them per command would break `clove --no-index <cmd>`,
+the spelling the docs use, and the acting set is not static once plugins are in
+it — so their `--help` text names the scope instead of leaving it silent.
 
 ### 7.2 Complete Command Table
 
@@ -719,21 +845,32 @@ clove dep add <id> <dep-id>
 clove dep rm <id> <dep-id>
 clove dep tree <id> [--depth N] [--full] [--flat] [--format json]
 clove dep cycle [--fail-on-cycle] [--format json]
-clove ready [--status open|in_progress] [--type T] [--label L]
-            [--assignee A] [--priority N] [--limit N] [--offset N]
-            [--format json] [--fields F,...] [--include-warnings]
-clove blocked [same filters] [--format json] [--fields F,...]
-clove ls [--status S] [--type T] [--label L] [--assignee A]
-         [--priority N] [--sort id|priority|created|updated]
-         [--asc|--desc] [--limit N] [--offset N]
-         [--format json] [--fields F,...]
-clove query [--filter EXPR] [--format json] [--fields F,...]
+clove ready [--status S ...] [--type T ...] [--label L ...]
+            [--assignee A] [--priority N ...] [--q TEXT]
+            [--sort FIELD] [--desc] [--limit N] [--offset N]
+            [--format json] [--fields F,...] [--compact]
+            # --status/--type/--priority repeat as "any of"; --label repeats as
+            # "all of"; --q is a substring over id/title/labels (never the body)
+clove blocked [same filters] [--sort FIELD] [--desc] [--limit N] [--offset N]
+              [--format json] [--fields F,...] [--compact]
+clove ls [same filters] [--sort FIELD] [--desc] [--limit N] [--offset N]
+         [--format json] [--fields F,...] [--compact]
+clove query [--filter EXPR] [--sort FIELD] [--desc] [--limit N] [--offset N]
+            [--format json] [--fields F,...] [--compact]
             # also reads JSON filter object from stdin when stdin is non-TTY
-clove search <text> [--limit N] [--format json]
+            # (the JSON object accepts `sort`/`desc` too. `--sort` overrides the
+            #  JSON's field; `--desc` is a bare bool flag so it ORs with the
+            #  JSON's direction — there is no way to force ascending from the
+            #  flag side once the JSON asked for descending. Its filter fields
+            #  each take one value or a list: {"status": ["open","in_progress"],
+            #  "label": ["area:core","area:ios"], "priority": [0,1], "q": "..."})
+clove search <text> [--sort FIELD] [--desc] [--limit N] [--offset N]
+             [--format json] [--fields F,...] [--compact]
+             # --sort FIELD is rank|priority|created|updated|id|status|type
 clove stats [--top N] [--no-epics] [--snapshot]      # work-item analytics + daemon/index telemetry
-            [--history [--since RFC3339] [--limit N]] [--format json]
+            [--history [--since RFC3339] [--limit N] [--offset N]] [--format json]
 clove comment <id> <message> [--format json]
-clove comments <id> [--limit N] [--format json]
+clove comments <id> [--limit N] [--skip-newest N] [--format json]
 clove reindex [--force] [--format json]
 clove import [--format json] <json|jsonl> <file> [--dry-run] [--overwrite]  # BUILT-IN native restore (inverse of export);
 clove import [--format json] <beads|tk> <src> [--dry-run]   # tk/beads are clove-import-<p> plugins;
@@ -839,18 +976,69 @@ regardless of warnings.
   "v": 1, "ok": true,
   "data": [{ ...item... }],
   "_meta": {
-    "took_ms": 4,
     "source": "index",
     "total": 250,
     "returned": 100,
     "offset": 0,
-    "warnings": [],
-    "stale_index": false
+    "limit": 100,
+    "sort": "rank",
+    "dir": "asc",
+    "filters": {
+      "status": ["open"], "type": [], "priority": [],
+      "labels": ["area:core"], "assignee": null, "q": null
+    },
+    "warnings": []
   }
 }
 ```
 
-`total` is the unfiltered count; `returned` is `len(data)` after `--limit`.
+`_meta.filters` is the **parsed** filter set (§7.8), echoed for the same reason
+`limit`/`sort` are: the values are canonicalized (label case, status aliases)
+and multi-valued, so a client should read back what was applied rather than
+assume its input survived. `search` omits the key — it takes no field filters.
+
+`total` is the match count *before* the window — the number of items the filters
+selected, not the number returned. `returned` is `len(data)` after `--limit`, and
+`limit` is the limit actually in force (`0` = unlimited), echoed so a client can
+tell a short page from an exhausted one without knowing the surface's default.
+
+**`_meta` is schema'd, not free-form.** `docs/json-schema/v1/item-list.json`
+describes each key above — including that `limit: 0` means unlimited — and sets
+`additionalProperties: false`, so a new `_meta` key has to be documented there
+rather than shipping invisible to a client generated from the published schema.
+The same is true of `comment-list.json` (the newest-anchored `skip_newest`
+window), `stats.json` (`generated_at`/`snapshotted`), and the
+`{ "warnings": [] }` `_meta` of the single-object responses. One schema covers
+every producer of the list envelope, so each key is optional: `search` emits no
+`filters`, and `export json` emits `source` + `clove_export` and no window at
+all. `crates/clove/tests/schema_validation.rs` validates real command output
+against these and asserts a wrong-typed key is rejected.
+
+**The MCP page is the same response with the envelope flattened.** A tool result
+has no `{v, ok, data, _meta}` wrapper, so what the CLI reports under `_meta`
+travels as plain keys beside `items`:
+`{ total, returned, offset, limit, sort, dir, filters?, source, items }`
+(`clove_comments` instead pages from the newest end:
+`{ total, returned, skip_newest, limit, items }`). Both shapes are published —
+`docs/json-schema/v1/mcp-item-page.json` and `mcp-comment-page.json` — and
+`clove_list`/`clove_ready`/`clove_blocked`/`clove_search`/`clove_comments`
+advertise them as their **`outputSchema`** in `tools/list`, so a client can
+generate types for a result instead of learning the shape by calling the tool.
+The schema text lives in `clove-mcp`'s `schema.rs` (`docs/` is outside that
+crate's package) with a test pinning it to the published file, and
+`crates/clove/tests/mcp.rs` validates real `structuredContent` against what
+`tools/list` advertised — the MCP contract is that the two agree. Tools whose
+payload this crate does not fully own (`clove_show`, `clove_stats`,
+`clove_dep_tree`, and the writes) advertise nothing rather than a schema that
+holds most of the time.
+
+Every tool result still carries the payload **twice** — `content[0].text` holds
+the same JSON as `structuredContent`. Publishing an `outputSchema` is what would
+let a client drop the text copy, but the MCP spec asks a server returning
+structured content to keep serializing it into a text block for clients that do
+not read structured results, and nothing in the handshake says whether this
+client is one of them. The cost is IPC bytes, not model context (a client feeds
+the model one copy), so both stay.
 
 ### 7.6 Exit Code Table
 
@@ -901,7 +1089,7 @@ with `clove init`, so the two never drift.
 checks via the non-healing `Index::open` (so problems are reported, not silently
 rebuilt away): **schema-version mismatch** (`INDEX_SCHEMA_MISMATCH`, warning),
 **internal corruption** (`INDEX_CORRUPT`, error — `PRAGMA quick_check` plus a
-contentless-FTS `fts_map`↔`items` row-count cross-check), and **index↔files
+`labels`→`items` orphan cross-check), and **index↔files
 divergence** (`INDEX_DIVERGENCE`, warning, counts/hashes via the staleness
 machinery). All three are fixable: `--fix` triggers a single `reindex` from the
 files (the source of truth) and re-checks. Skipped under `--no-index`.
@@ -937,11 +1125,230 @@ CI to get exit 3.
 Clap's default exit code (2 for argument errors) is overridden to match this table. Use
 `std::process::ExitCode` (stable since Rust 1.61), never `process::exit()` directly.
 
-### 7.8 Pagination
+### 7.8 Pagination, ordering, and filtering
 
-All list commands support `--limit N` (default 0 = unlimited for `--format json`; 50 for
-human) and `--offset N`. Cursor-based pagination is deferred to post-v1; offset is sufficient
-for M0–M2.
+Every list read on every surface — the CLI (file, index, and daemon paths), the
+MCP tools, the web API, and `cloved`'s query RPC — decodes `offset`/`limit`
+through one implementation, `clove_core::view::Page`:
+
+- **absent** → that surface's default,
+- **`0`** → unlimited,
+- **`n`** → at most `n`.
+
+The defaults differ (a terminal, an agent's context budget, and an HTTP client
+that states its own window have different cost functions) but live in exactly
+one place, `clove_core::view::defaults`: CLI 100, MCP 50, web unlimited. A
+comment thread pages on the same per-surface default as an item list.
+`_meta.total` is always the match count *before* the window, and `_meta.limit`
+echoes the effective limit, so the default is discoverable from a response rather
+than by reading this document.
+
+Reads that return a *fixed* shape rather than a list — `GET /api/v1/cycles`,
+`/meta`, and `clove show` — carry no window and no counts.
+
+`clove comments` / `clove_comments` / `GET /items/:id/comments` page from the
+opposite end — the window is anchored at the *newest* comment — so their skip
+argument is named `--skip-newest` / `skip_newest` rather than `offset`.
+
+`--depth` on `dep tree` follows the same `0 = unlimited` rule (so `--depth 0` and
+`--full` are one request), as does `--top` on `stats`.
+
+**A malformed window value is rejected, never defaulted.** `--limit abc` is a
+clap parse error on the CLI, and `?limit=abc` / `?limit=-5` / `?offset=-1` are a
+`VALIDATION_ERROR` (HTTP 422) on the web, as are the other numbers the read
+endpoints take (`skip_newest`, `depth`, `top`, `days`) and the flags
+(`?compact=`, `?no_epics=`). The web used to parse these with `.ok()` and fall
+through to the endpoint default — which here is *unlimited* — so a typo returned
+the whole store with a 200, a result a client cannot tell from a server that does
+not implement the parameter. `?limit=` (empty) still means "not specified", which
+is what a form submits for an untouched field.
+
+`GET /api/v1/board` applies the window to **each column independently** — a
+board caps how tall a column gets. Each column reports `count` (its full size,
+before the window) and `returned`; `_meta.per_column` marks the difference from
+a flat list.
+
+Cursor-based pagination is deferred to post-v1; offset is sufficient for M0–M2.
+
+**The bundled SPA pages; it does not hold the store.** `clove-web`'s Svelte app
+is query-driven: a view declares what it needs (`store.setQuery(…)`) and the
+server answers it. The list route asks for one page at a time (`limit=100` plus
+an offset derived from a 1-based `?page=` in the browser URL) and renders the
+response as-is — no client-side filtering, ordering or slicing. The board and
+the timeline, which genuinely render every item, ask for `limit=0`. The pager's
+range and the active tab's count both come from the **response** — its
+`_meta.offset` and `_meta.total`, not the URL — so neither can state a number
+the visible rows contradict. Deriving the range from `?page=` instead was
+briefly how it worked, and it labelled the *previous* page's rows with the new
+page's range whenever a fetch was slow, and permanently whenever one failed.
+Startup loads `/meta` alone.
+
+The **API** default is nevertheless still unlimited (`view::defaults::WEB_LIMIT
+= 0`), and deliberately: that one constant is the default for `GET /items`, the
+board's per-column window, `GET /stats/history` *and* `GET /items/:id/comments`,
+so a non-zero value would cap four endpoints, three of which have no pager. On
+comments it would put a full `comment_count` heading over a truncated thread —
+the reason that endpoint's default was chosen in the first place.
+
+**Result shaping** is the third shared decoder, spelled `--fields F,...` /
+`--compact` on the CLI, `fields` / `compact` on the MCP read tools, and
+`?fields=` (csv) / `?compact=true` on the web API. `clove_core::view::project`
+restricts an item object to the named keys (unknown names are ignored);
+`view::compact_read` drops keys whose value carries no information — JSON `null`
+and empty arrays — plus `view::READ_NOISE` (`schema`, a per-file migration
+marker). `false`, `0` and `""` are always kept: they are answers, not absences.
+
+Two rules make the combination predictable:
+
+- **A projection is honoured literally.** `--fields assignee` on an unassigned
+  item returns `{"assignee": null}`, so a caller can tell "unset" from "not
+  requested". Compaction applies on top only when it was asked for explicitly.
+- **The default differs by surface, and only there.** The CLI and the web API
+  shape nothing unless asked; the MCP tools compact by default, because they are
+  spending a model's context window rather than a pipe or a browser. Everything
+  downstream of that choice is the same code.
+
+On `GET /api/v1/board` the shaping runs *after* the grouping, which reads each
+row's `status` — projecting first would empty every column. A boolean query
+parameter is parsed strictly (`true|1|false|0`, absent or empty = false);
+anything else is a `VALIDATION_ERROR`, since a silently-ignored `?compact=yes`
+is indistinguishable from a server that does not implement the parameter.
+
+**Ordering** decodes through one implementation too, `clove_core::view::Order`
+(`SortField` + a direction), spelled `--sort FIELD` / `--desc` on the CLI,
+`sort` / `desc` on the MCP read tools, `?sort=` / `?dir=asc|desc` on the web API,
+and carried on `clove_ipc::QueryRequest.order` for the daemon. The fields are:
+
+| `--sort` | key |
+|---|---|
+| `rank` *(default)* | `(priority, topological rank, id)` |
+| `priority` | `(priority, id)` |
+| `created` | `(created, id)` |
+| `updated` | `(updated, id)` |
+| `id` | `(id)` |
+| `status` | `(open → in_progress → closed, id)` |
+| `type` | `(bug → feature → chore → docs → epic, id)` |
+
+Three properties are load-bearing:
+
+- **Every key is a total order, ending in an id tiebreak**, and `--desc`
+  reverses the whole key (id included) rather than only its head. Paging over a
+  partial order silently repeats and skips rows, because ties resolve to
+  whatever the input order happened to be — raw `read_dir` order for the file
+  paths, scan order for SQLite.
+- **`status` and `type` sort in declared order, not alphabetically.** The index
+  path builds a SQL `CASE` from the same arrays the file path ranks by
+  (`SortField::{STATUS_ORDER, TYPE_ORDER}`), because `ORDER BY status` on the
+  stored words would give `closed < in_progress < open`.
+- **`search` is the exception**: its default is *relevance* (match class, then
+  priority, then id — §6.1). An explicit `--sort` replaces that key entirely
+  rather than tie-breaking within it, and `--desc` with no `--sort` reverses the
+  relevance ranking. `_meta.sort` reads `relevance` in the default case.
+
+`_meta.sort` and `_meta.dir` echo the ordering actually applied, for the same
+reason `_meta.limit` echoes the effective limit. An unrecognized field or
+direction is a `VALIDATION_ERROR` on every surface, including the web API (which
+previously fell back to `rank` silently).
+
+The file, index, and daemon paths must return identical id sequences for every
+field: the index pushes `LIMIT offset + limit` into SQL, so a clause that
+disagrees with the in-memory comparator returns the wrong *rows*, not merely the
+wrong sequence. That triple comparison is pinned by
+`crates/clove/tests/sort_order.rs`.
+
+**Filtering** is one type as well, `clove_core::view::Filters`, spelled
+`--status/--type/--label/--priority/--assignee/--q` on the CLI, the same names
+on the MCP read tools, `?status=…` (csv) on the web API, and carried whole on
+`clove_ipc::QueryRequest.filters` for the daemon. The semantics are **any-of
+within a field, all-of across fields**, with `labels` the exception:
+
+| filter | shape | rule |
+|---|---|---|
+| `status` | `open\|in_progress\|closed` (aliases `started`/`done` accepted) | any of |
+| `type` | `bug\|feature\|chore\|docs\|epic` | any of |
+| `priority` | `0`–`4` | any of |
+| `label` | canonical `key:value` (§2.2) | **all** of |
+| `assignee` | exact string | equals |
+| `q` | free text | case-insensitive substring over **id, title, and labels** — never the body |
+
+An **empty set does not constrain**, so a request with no filters matches
+everything and a single value is just the one-element case. Each surface spells
+"several values" in its own idiom and they all mean the same thing:
+
+```
+clove ls --status open --status in_progress --label area:core --label area:ios
+{"status": ["open","in_progress"], "label": ["area:core","area:ios"]}   # clove query, MCP
+GET /api/v1/items?status=open,in_progress&label=area:core,area:ios      # web
+```
+
+Every element is validated and canonicalized before matching: an unknown status
+word or an out-of-range priority is a `VALIDATION_ERROR` on every surface,
+including the web API (which previously compared raw strings, so `?status=bogus`
+returned an empty list a client could not distinguish from "no matches").
+
+**The push-down is exhaustive.** `clove_index::push_down(&Filters)` splits the
+set into a SQL `Filter` and an optional in-memory `PostFilter` residue, and it
+destructures `Filters` with **no `..` rest pattern** — so adding a filter field
+is a compile error rather than a constraint that quietly stops applying whenever
+`.clove/index.db` happens to exist. Filter values are always *bound* parameters,
+never formatted into the statement text.
+
+`q` is the one field held back as residue, deliberately: SQLite's `LIKE` and
+`lower()` case-fold ASCII only while `str::to_lowercase` is full Unicode, so a
+pushed-down `q=Ünicode` would miss a stored `ünicode-tag` that the file path
+finds. A residue also changes the *mechanics* of the query — the `LIMIT` may no
+longer be pushed into SQL (it would slice before the residue removes rows) and
+`COUNT(*)` is no longer `_meta.total` — which `clove_index::query_filtered`
+owns in one place.
+
+`_meta.filters` echoes the parsed set (§7.5). The file, index, and daemon paths
+must return identical results for every filter combination, pinned by
+`crates/clove/tests/filter_parity.rs`.
+
+#### `q` (a filter) vs. `search` (a search) — two different questions
+
+These are deliberately **not** the same predicate, and neither one is a bug:
+
+| | `q` | `search` |
+|---|---|---|
+| spelled | `--q TEXT`, `{"q": …}`, `?q=` | `clove search TEXT`, `clove_search` |
+| reads | id, title, labels | title, labels, body |
+| combines with `--status`/`--label`/… | yes — it is one filter among several | no — `search` takes no field filters |
+| ranks | no (the list's `--sort` applies) | yes — title, then label, then body |
+| implementation | `clove_core::view::q_matches` | `clove_core::view::rank_search_hits` |
+
+`q` narrows a list you are already looking at, cheaply and without reading
+bodies; `search` is the "where did I write that?" question, which has to read
+bodies and has to rank. Folding `q` into `search` would make `clove ls --q x`
+read every body and lose its composability with the other filters; folding
+`search` into `q` would lose ranking and body matching. Both spellings match a
+**case-insensitive Unicode substring**, so `--q Ünicode` and `search Ünicode`
+agree about what "matches" means even though they look in different places.
+
+#### Search matching is a substring, everywhere
+
+`clove search X` returns **identical ids in identical order** whether or not
+`.clove/index.db` exists and whether or not a daemon is running. That is achieved
+by having exactly one implementation — `clove_core::view::rank_search_hits` over
+a parallel file scan — and *no* index or daemon tier at all. `_meta.source` on a
+search is therefore always `"files"`.
+
+A needle matches a case-insensitive **substring** over a full-Unicode lowercase,
+so `core` finds `corepart`, `icode` finds the label `ünicode-tag`, and `Ünicode`
+finds it too. The needle is a literal, never a query language: `clove search
+'"quoted" OR x*'` looks for that exact character sequence.
+
+Until index schema 6 this was not true. The index path ran an FTS5 phrase query,
+which matches whole tokens with ASCII-only case folding, so it was a strictly
+*narrower* prefilter and the three needles above answered differently depending
+on whether an index or a daemon happened to be present. No FTS query is a
+superset of substring matching (a prefix match reaches `corepart` but never
+`icode`), so the choice was between removing mid-word matching — a capability
+users have — and removing the prefilter. Measured over a 10,000-item store, the
+file scan costs 65 ms for a selective needle and 220 ms when nearly everything
+matches, against 22 ms and 350 ms for the index path, which had to re-read every
+matched file anyway in order to rank it: the FTS won only for highly selective
+needles and lost outright otherwise. It was removed. See read-path roadmap §6.1.
 
 ### 7.9 `clove agent-doc`
 
@@ -1019,6 +1426,24 @@ QUERY { filter, format, fields } → { ok, data, _meta }
 REINDEX → REINDEX_DONE { items_indexed, duration_ms, warnings }
 STATUS → { uptime_s, items_indexed, watcher_state, last_event_ms }
 ```
+
+**`PROTOCOL_VERSION`** (returned by `PING`) gates a mixed-version pair; the
+client fails a mismatch and falls back, which is safe because the daemon is a
+cache, not a source of truth. It is **6**:
+
+| v | change |
+|---|---|
+| 3 | `apply_edit(EditRequest)` / `dep_remove` / `set_parent` mutations |
+| 4 | `change_generation()` for MCP `resources/updated` push |
+| 5 | `QueryRequest`'s five scalar filter fields → one `filters: view::Filters`; `GraphRequest::Blocked` carries an `order` and drops the dead `include_warnings` |
+| 6 | `search` RPC and `SearchRequest` **removed** — search is a file scan on every surface (§7.8, read-path roadmap §6.1), so the daemon has nothing to answer with |
+
+The v5 bump is worth spelling out because the codec is JSON and a v4 frame still
+*decodes*: its `"status": "open"` simply lands nowhere, and the daemon answers
+the **unfiltered** list. Nothing errors. A shape change whose failure mode is a
+silently wrong answer is exactly what the handshake exists for. Additive fields
+that only *widen* behaviour (e.g. `QueryRequest.order` in §7.8) stay compatible
+and do not bump.
 
 ### 8.5 File-Watcher
 
@@ -1440,13 +1865,20 @@ All wall-clock, measured with `hyperfine --warmup 3 --runs 20`. Cold = OS page c
 | `clove ls` 1,000 items, index | — | < 5 ms |
 | `clove ls` 10,000 items, index | — | < 10 ms |
 | `clove ready` 10,000 items, index | — | < 10 ms |
-| `clove search` 10,000 items, FTS5 | — | < 20 ms |
+| `clove search` 10,000 items, file scan (selective needle) | — | < 400 ms (measured ~65 ms) |
+| `clove search` 10,000 items, file scan (matches nearly all) | — | measured ~220 ms |
 | `clove ready` 100,000 items, index | — | < 100 ms |
 | `clove reindex` 1,000 items | — | < 500 ms |
 | `clove reindex` 10,000 items | — | < 1,000 ms |
 
-File-scan path at > 50,000 items is out-of-target for the 100 ms bound; the index is
-required above that threshold.
+File-scan path at > 50,000 items is out-of-target for the 100 ms bound for the
+*list* reads; the index carries them above that threshold.
+
+**`clove search` has no index tier at any size** (§6.1), so its cost is the scan
+plus classification: measured 62–216 ms warm at 10k depending on selectivity, and
+0.4–1.4 s at 50k. That is the accepted price of one substring answer everywhere;
+if it bites, the shape that fixes it is a prefilter with *substring* semantics
+(trigram) or a streaming scan, not the whole-token index that was removed.
 
 ### 13.2 I/O Strategy
 
@@ -1464,11 +1896,21 @@ required above that threshold.
 | `clove ls` 10,000 items | < 50 MB |
 | `clove ready` 100,000 items (index) | < 8 MB |
 | `clove reindex` 100,000 items | < 500 MB |
+| `clove search`, any store size | < 20 MB |
 
 Body text is never materialized during `ls`/`ready`/`blocked`/`query`. The `scan_lazy()`
 path parses only `ItemFrontmatter` (no body allocation). `Item { frontmatter, body: String }`
-is constructed only on the full-load path (`clove show`, FTS5 indexing, reindex). This keeps
+is constructed only on the full-load path (`clove show`, reindex). This keeps
 peak RSS low for bulk scan operations.
+
+**`clove search` reads every body but holds none of them.** It has to read them —
+a substring match against body text cannot be answered from frontmatter — but
+`ItemStore::scan_search_hits` classifies each item and drops its body before
+moving on, keeping only the frontmatter of an actual hit. Peak RSS therefore
+tracks the *result* size, not the store size: measured 8 MB on a 111 MB store,
+whether the query matches nothing or everything. Loading the store first (which
+is what `store.scan()` does) put that at 399 MB on a 381 MB store and would
+exhaust memory on a store of items near the 4 MB body cap.
 
 ### 13.4 Comparative Benchmark Methodology
 

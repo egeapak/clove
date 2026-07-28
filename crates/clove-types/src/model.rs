@@ -189,11 +189,18 @@ pub struct ItemFrontmatter {
     #[serde(rename = "type")]
     pub item_type: ItemType,
     pub priority: Priority,
+    // Timestamps are normalized at the type boundary — see [`crate::time`]. Any
+    // parseable RFC 3339 spelling is accepted on the way in and re-spelled
+    // canonically on the way out, so a hand-edited `+00:00` or a nanosecond
+    // precision written by an older clove (or a foreign tool) can never read as
+    // a *content* difference on a surface that compares the strings.
+    #[serde(with = "crate::time::serde_ts")]
     pub created: DateTime<Utc>,
+    #[serde(with = "crate::time::serde_ts")]
     pub updated: DateTime<Utc>,
 
     // Optional fields (after the required block, in canonical order).
-    #[serde(default)]
+    #[serde(default, with = "crate::time::serde_ts_opt")]
     pub closed: Option<DateTime<Utc>>,
     #[serde(default)]
     pub assignee: Option<String>,
@@ -235,19 +242,6 @@ pub fn normalize_label(raw: &str) -> Result<String, CloveError> {
         });
     }
     Ok(canonical)
-}
-
-/// Truncate a timestamp to whole seconds — the canonical on-disk precision
-/// (the frontmatter writer renders RFC 3339 with seconds precision).
-///
-/// Every place that *stamps* a timestamp destined for frontmatter
-/// (`ItemStore::create`/`update`, [`crate::set_status`]) truncates through this
-/// one helper, so the in-memory value a mutation returns is byte-identical to
-/// what a re-read parses back from disk.
-pub fn truncate_to_seconds(ts: DateTime<Utc>) -> DateTime<Utc> {
-    use chrono::Timelike;
-    ts.with_nanosecond(0)
-        .expect("zero nanoseconds is always valid")
 }
 
 #[cfg(test)]

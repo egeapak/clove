@@ -59,6 +59,14 @@ Every JSON response is `{{ \"v\": 1, \"ok\": <bool>, ... }}`:\n\
 - success: `{{ \"v\":1, \"ok\":true, \"data\": <value>, \"_meta\": {{...}} }}`\n\
 - error:   `{{ \"v\":1, \"ok\":false, \"error\": {{ \"code\": <STR>, \"message\": <STR>, \"exit\": <N> }} }}`\n\
 \n\
+`_meta` is described by the published JSON Schemas under\n\
+`docs/json-schema/v1/` (`item-list.json` for every list command,\n\
+`comment-list.json`, `stats.json`, and `{{ \"warnings\": [] }}` for the\n\
+single-object responses), so a key like `_meta.limit` — where `0` means\n\
+*unlimited* — is readable from the schema rather than by experiment. Those\n\
+schemas set `additionalProperties: false`: a new `_meta` key is documented\n\
+before it ships.\n\
+\n\
 The item `schema` version is currently **{schema}**. Re-read this document if it\n\
 changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
 \n\
@@ -81,17 +89,25 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
 - `clove setup [--global] [--dry-run]` — register the `clove mcp` server (+ tool\n\
   permissions) with Claude Code and write `CLOVE.md` agent directives.\n\
 - `clove new <title> [--type T] [-p N] [-l LABEL]... [--dep ID]... [--parent ID] [-a WHO] [-b TEXT]`\n\
-- `clove show <id> [--fields LIST] [-v]` — one item (`-v`/json compute `ready`/`blocked_by`).\n\
+- `clove show <id> [--fields LIST] [--compact]` — one item. `ready`/`blocked_by` are always computed (`-v` is accepted but no longer needed for them).\n\
 - `clove edit <id> [--field KEY=VALUE]...` / `clove set <id> KEY=VALUE...`\n\
 - `clove status <id> <open|in_progress|closed>` (aliases `start`, `close`).\n\
 - `clove label <id> <add|rm> <label>`, `clove assign <id> <who|--clear>`, `clove priority <id> <0-4>`.\n\
 - `clove dep add <id> <dep-id>` / `dep rm` / `dep tree <id> [--depth N|--full] [--flat]` / `dep cycle [--fail-on-cycle]`.\n\
-- `clove ready` / `clove blocked` — work queues (filters: `--status --type --label --assignee --priority`).\n\
-- `clove ls` / `clove query [--filter JSON]` — list/query (`--fields`, `--limit`, `--offset`). Lists are capped at 100 by default (`_meta.total` is the full count; `--limit 0` for all).\n\
-- `clove comment <id> <message>` / `clove comments <id> [--limit N]`.\n\
-- `clove search <text> [--limit N]` — full-text (index) or substring (files) search.\n\
-- `clove stats [--top N] [--no-epics] [--snapshot] [--history [--since RFC3339] [--limit N]]` — work-item analytics (counts by status/type/priority/assignee/label, ready/blocked, cycles, epic rollups, throughput) plus daemon/index telemetry. `--snapshot` persists to the index's durable history (`.clove/index.db`); `--history` replays the series.\n\
+- `clove ready` / `clove blocked` — work queues (filters: `--status --type --label --assignee --priority --q`; also `--sort --desc --limit --offset --fields --compact`).\n\
+- `clove ls` / `clove query [--filter JSON]` — list/query (`--sort`, `--desc`, `--fields`, `--limit`, `--offset`).\n\
+- `ls`, `ready` and `blocked` take the same repeatable filter flags. `--status`, `--type` and `--priority` repeat as **any of** (`--status open --status in_progress`); `--label` repeats as **all of** (`--label area:core --label area:ios` needs both); `--assignee` is an exact match; `--q TEXT` is a case-insensitive substring over the **id, title, and labels** only — it never reads the body, so it is a filter, not a search. Omitting a filter does not constrain. `_meta.filters` echoes the parsed set, canonicalized (`--status started` comes back as `in_progress`). `clove query` takes the same filter *set* but only as JSON (`--filter '{{\"status\":[\"open\",\"in_progress\"]}}'`), not as flags. An unknown filter value is a `VALIDATION_ERROR` (exit 4) rather than an empty list (`--priority 9`, `--status bogus`); a value of the wrong type is still an argument-parse error (exit 1), so `--priority abc` never reaches clove.\n\
+- `clove query --filter JSON` takes the same filters as JSON, each accepting one value or a list: `{{\"status\": [\"open\", \"in_progress\"], \"label\": [\"area:core\", \"area:ios\"], \"priority\": [0, 1], \"q\": \"login\"}}`.\n\
+- Every list read (`ls`, `query`, `ready`, `blocked`, `search`) takes the same `--limit`/`--offset`: no flag caps at 100, `--limit 0` returns everything, `_meta.total` is always the full match count and `_meta.limit` echoes the one in force.\n\
+- They also take the same `--sort <rank|priority|created|updated|id|status|type>` and `--desc`. The default is `rank` — priority, then dependency order, then id — except on `search`, whose default is relevance (title hits, then labels, then body); naming a field there replaces that ranking entirely. `status` sorts open → in_progress → closed and `type` sorts bug → feature → chore → docs → epic (declared order, not alphabetical). Every order ends in an id tiebreak, so paging with `--offset` is stable. `_meta.sort`/`_meta.dir` echo what was applied. Prefer `--sort updated --desc --limit N` over pulling the store and sorting yourself.\n\
+- `clove comment <id> <message>` / `clove comments <id> [--limit N] [--skip-newest N]` — `--limit` keeps the *newest* N (default 100, `--limit 0` for all); `--skip-newest` pages back into older ones. `_meta.total` is the full thread length.\n\
+- `clove search <text> [--sort FIELD] [--desc] [--limit N] [--offset N] [--fields LIST] [--compact]` — searches **titles, labels, and bodies**, relevance-ranked by default (title hits, then labels, then body).\n\
+- Search matches a **case-insensitive substring**, not whole words: `clove search core` finds a body reading `the corepart word` and a label `area:core` alike, and `clove search icode` finds the label `ünicode-tag`. Case folding is full Unicode, so `Ünicode` finds `ünicode-tag`. The text is a literal — there is no query language, so `clove search '\"a b\" OR c*'` looks for that exact character sequence, and quoting/wildcards buy you nothing.\n\
+- `clove search` always scans the item files: it has no index or daemon fast path, so `_meta.source` is always `files`, `--no-index` changes nothing, and the same query gives the same ids whether or not `.clove/index.db` exists or a daemon is running. It reads every body, so prefer `--q` on `ls`/`ready` when id/title/labels are enough.\n\
+- `clove stats [--top N] [--no-epics] [--snapshot] [--history [--since RFC3339] [--limit N] [--offset N]]` — work-item analytics (counts by status/type/priority/assignee/label, ready/blocked, cycles, epic rollups, throughput) plus daemon/index telemetry. `--snapshot` persists to the index's durable history (`.clove/index.db`); `--history` replays the series.\n\
+- `--since`/`--limit`/`--offset` window the **history series** and require `--history`: a live report is a single object with nothing to page, so passing one without it is a usage error (exit 1) rather than a flag that is silently dropped.\n\
 - `clove reindex` — rebuild the SQLite index. `clove doctor [--fix] [--strict]` — health check.\n\
+- `--no-index` (force a file scan) and `--deep` (thorough index staleness check) are global flags acted on only by the commands that choose a read tier — `ls`, `ready`, `blocked`, `query`, `stats`, `doctor`, `dep`, `serve` — and by plugins (`$CLOVE_NO_INDEX`/`$CLOVE_DEEP`). They are accepted and inert everywhere else, which their `--help` says; `--no-index` never changes an *answer*, only which tier produced it.\n\
 - `clove version` — `{{ clove, schema, git_hash, build_date }}`.\n\
 \n\
 ## Interop (import / export / merge)\n\
@@ -146,10 +162,42 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
 - `clove mcp` runs a Model Context Protocol server over stdio (newline-delimited\n\
   JSON-RPC), exposing clove as native tools so an agent need not shell out:\n\
   `clove_ready`, `clove_blocked`, `clove_list`, `clove_show`, `clove_search`,\n\
-  `clove_dep_tree`, `clove_stats` (reads) and `clove_new`, `clove_status`,\n\
-  `clove_edit`, `clove_comment`, `clove_dep_add` (writes). Tool results carry the\n\
-  same item JSON as the CLI. Configure it as an MCP server with command `clove`\n\
-  and arg `mcp`, launched in the repository.\n\
+  `clove_comments`, `clove_dep_tree`, `clove_stats` (reads) and `clove_new`, `clove_status`,\n\
+  `clove_edit`, `clove_comment`, `clove_dep_add`, `clove_dep_remove`, `clove_set_parent`\n\
+  (writes). Configure it as an MCP server with command `clove` and arg `mcp`,\n\
+  launched in the repository.\n\
+- Tool results are the same item JSON as the CLI's, with two differences worth\n\
+  knowing: reads are **compacted by default** (null and empty-list keys, plus\n\
+  `schema`, are omitted — pass `compact: false` for the full shape), and the\n\
+  read tools' default `limit` is **50**, not the CLI's 100. `limit: 0` is\n\
+  unlimited on both, and every list result carries `total`/`returned`/`limit`.\n\
+- `clove_list`, `clove_ready`, `clove_blocked`, `clove_search` and\n\
+  `clove_comments` advertise an **`outputSchema`** in `tools/list` (published as\n\
+  `docs/json-schema/v1/mcp-item-page.json` / `mcp-comment-page.json`), so the\n\
+  page shape — `{{total, returned, offset, limit, sort, dir, filters?, source,\n\
+  items}}`, with `skip_newest` in place of `offset` on comments — can be read\n\
+  rather than discovered. `structuredContent` validates against it; the identical\n\
+  JSON is also in `content[0].text` for clients that do not read structured\n\
+  results, so parse whichever you prefer, not both.\n\
+- `fields` and `compact` are accepted by every read tool, and by `clove ls`,\n\
+  `ready`, `blocked`, `query`, `search`, and `show` as `--fields`/`--compact`.\n\
+  Use them: a two-field projection cuts a list result by roughly 80%.\n\
+- `sort` and `desc` are accepted by `clove_ready`, `clove_blocked`, `clove_list`,\n\
+  and `clove_search`, with the same vocabulary and defaults as the CLI's\n\
+  `--sort`/`--desc`. `{{\"sort\": \"updated\", \"desc\": true, \"limit\": 10}}` answers\n\
+  \"what changed most recently\" in one call instead of pulling the store.\n\
+- `status`, `type`, `label` and `priority` on `clove_ready`/`clove_blocked`/\n\
+  `clove_list` each accept **one value or a list**, with the CLI's meaning:\n\
+  status/type/priority are any-of, labels are all-of. `q` is there too.\n\
+  `{{\"status\": [\"open\", \"in_progress\"], \"label\": [\"area:core\", \"area:ios\"]}}`\n\
+  is one call for a question that used to need several. The result object\n\
+  carries a `filters` key echoing the parsed set.\n\
+- `q` (on the filtering tools) and `clove_search` are different questions, not\n\
+  two spellings of one. `q` is a filter over **id, title, and labels**, composes\n\
+  with the other filters, and never reads a body; `clove_search` reads **titles,\n\
+  labels, and bodies**, ranks the hits, and takes no field filters. Both match a\n\
+  case-insensitive Unicode *substring*. Reach for `q` to narrow a list and\n\
+  `clove_search` to find where something was written.\n\
 - Writes are coordinated through a running daemon when present (so concurrent\n\
   agents share one writer) and fall back to direct file writes otherwise.\n\
 \n\

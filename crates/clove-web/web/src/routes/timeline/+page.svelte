@@ -14,6 +14,12 @@
     api.history().then((h) => (history = h)).catch(() => (history = []));
   });
 
+  // The Gantt spans every item's created→closed interval, so like the board it
+  // asks for the whole store explicitly rather than inheriting the API default.
+  $effect(() => {
+    store.setQuery({ limit: 0 });
+  });
+
   // ---- Gantt domain: created → (closed | now) ----
   const items = $derived(store.all);
   // id -> item map, built once and reused (avoids O(n²) find() in arrows).

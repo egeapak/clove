@@ -24,7 +24,7 @@ pub mod write;
 // `crate::error`, `crate::model`, `crate::id`, `crate::validate`, `crate::fields`,
 // and `crate::limits` unchanged. These are NOT public: downstream crates depend
 // on `clove-types` and import the types from there directly.
-pub(crate) use clove_types::{error, fields, id, limits, model, validate};
+pub(crate) use clove_types::{error, fields, id, limits, model, time, validate};
 
 pub use comments::{add_comment, list_comments, Comment};
 pub use config::{
@@ -45,7 +45,9 @@ pub use stats::{
     Throughput, TypeCounts,
 };
 pub use store::{ItemStore, NewItem, RestoreOutcome, ScanError};
-pub use view::{frontmatter_object, item_object, project, rank_of, sort_by_rank, Filters};
+pub use view::{
+    frontmatter_object, item_object, project, rank_of, Filters, Order, SearchOrder, SortField,
+};
 
 // Bring the `clove-types` data types the lib uses into this crate's namespace
 // for internal use (`crate::CloveError`, `crate::Item`, …). Crate-internal only —

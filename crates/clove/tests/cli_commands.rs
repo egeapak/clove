@@ -125,6 +125,13 @@ fn close_sets_then_clears_closed_timestamp() {
     let closed = json_ok(clove(dir.path()).arg("close").arg(&id));
     assert_eq!(closed["data"]["status"], "closed");
     assert!(closed["data"]["closed"].is_string());
+    // The transition samples the clock once and uses that single timestamp for
+    // both the `closed` field and the write's `updated`. Sampling twice (as the
+    // pre-`update_with` code did) let them land a second apart.
+    assert_eq!(
+        closed["data"]["closed"], closed["data"]["updated"],
+        "closed and updated must come from one clock sample"
+    );
 
     let reopened = json_ok(clove(dir.path()).args(["status", &id, "open"]));
     assert_eq!(reopened["data"]["status"], "open");
@@ -243,8 +250,16 @@ fn show_missing_item_json_error_envelope() {
     assert_eq!(v["error"]["exit"], 2);
 }
 
+/// `clove search` scans files whether or not an index exists — and reports so.
+///
+/// This test used to assert the opposite (`source == "index"` after a reindex).
+/// The index tier is gone: it ran an FTS5 phrase query, which matches whole
+/// ASCII-folded tokens, so it could not answer the substring question the file
+/// path answers, and `clove search` gave different results depending on whether
+/// `.clove/index.db` existed (read-path roadmap §6.1). `--no-index` is still
+/// accepted on `search`; it is now a no-op.
 #[test]
-fn reindex_then_search_uses_index() {
+fn search_scans_files_even_with_an_index_present() {
     let dir = init_repo();
     new_item(
         dir.path(),
@@ -254,15 +269,24 @@ fn reindex_then_search_uses_index() {
     new_item(dir.path(), "Other", &[]);
 
     clove(dir.path()).arg("reindex").assert().success();
+    // The index has to be real, or "search used files" says nothing.
+    assert_eq!(
+        json_ok(clove(dir.path()).args(["ls"]))["_meta"]["source"],
+        "index"
+    );
 
     let v = json_ok(clove(dir.path()).args(["search", "sprockets"]));
-    assert_eq!(v["_meta"]["source"], "index");
+    assert_eq!(v["_meta"]["source"], "files");
     assert_eq!(v["data"].as_array().unwrap().len(), 1);
 
-    // Without an index (forced), it falls back to a file scan.
-    let v2 = json_ok(clove(dir.path()).args(["search", "widget", "--no-index"]));
+    // `--no-index` changes nothing, because there was nothing to opt out of.
+    let v2 = json_ok(clove(dir.path()).args(["search", "sprockets", "--no-index"]));
     assert_eq!(v2["_meta"]["source"], "files");
-    assert_eq!(v2["data"].as_array().unwrap().len(), 1);
+    assert_eq!(v2["data"], v["data"]);
+
+    let v3 = json_ok(clove(dir.path()).args(["search", "widget", "--no-index"]));
+    assert_eq!(v3["_meta"]["source"], "files");
+    assert_eq!(v3["data"].as_array().unwrap().len(), 1);
 }
 
 #[test]
@@ -419,6 +443,296 @@ fn search_follows_the_shared_limit_contract() {
     let idx = json_ok(clove(dir.path()).args(["search", "needle", "--limit", "5"]));
     assert_eq!(idx["_meta"]["returned"], 5);
     assert_eq!(idx["_meta"]["total"], 120);
+}
+
+/// `clove search` returns identical ids in identical order whether or not
+/// `.clove/index.db` exists.
+///
+/// Scoped to the CLI, which is what this drives; the MCP tool shares the same
+/// `rank_search_hits`, and the daemon leg is
+/// `search_does_not_route_through_the_daemon` in `daemon_routing.rs`.
+///
+/// **The needles are the point.** This test used whole-token needles only for
+/// most of its life, and that is exactly why it could not see the bug roadmap
+/// §6.1 recorded: the index path ran an FTS5 phrase query, which matches whole
+/// tokens with ASCII-only case folding, while `view::match_class` is
+/// `str::contains` over a full-Unicode lowercase. Three divergent rows, all
+/// covered below:
+///
+/// | needle | fixture | before: `--no-index` | before: index |
+/// |---|---|---|---|
+/// | `core` | label `area:core`, body `the corepart word` | 2 | 1 |
+/// | `icode` | label `ünicode-tag` | 1 | 0 |
+/// | `Ünicode` | label `ünicode-tag` | 1 | 0 |
+///
+/// The last row is a second axis: `tokenize='ascii'` folds ASCII only, so a
+/// non-ASCII *needle* differing in case from the stored text was found by the
+/// file path and missed by the index. Labels are lowercased on write, so the
+/// case difference has to come from the query — `ünicode` against `ünicode-tag`
+/// matched on both paths, and a fixture written that way round proves nothing.
+///
+/// Resolved by dropping the FTS entirely (index schema 6): search is a file scan
+/// on every surface. So the assertion that an index is *present* and search
+/// still reports `source: "files"` is load-bearing — it is what fails the moment
+/// anyone reintroduces an index tier, before the id sets even get compared.
+///
+/// The `gateway` rows are the older half of this test: the CLI once matched
+/// title and body only, so a label-only hit was invisible to it while
+/// `ops::search` returned it, and ranking differed (two match classes vs three).
+#[test]
+fn search_agrees_across_the_file_and_index_paths() {
+    let dir = init_repo();
+    let issues = dir.path().join(".clove/issues");
+    // One item per match class, so ranking is observable, plus a non-match.
+    // Match class runs **counter to id order** on purpose: every item is
+    // priority 2, so class is the only thing that can produce the expected
+    // sequence, and a ranker that fell back to the id tiebreak alone would
+    // return the exact reverse. An earlier version of this fixture had the
+    // title hit on the lowest id, so sorting by id passed it.
+    let rows = [
+        ("AAAAAAAA", "Unrelated title", "the gateway times out", ""),
+        (
+            "BBBBBBBB",
+            "Another title",
+            "unrelated prose",
+            "area:gateway",
+        ),
+        ("CCCCCCCC", "Payments gateway", "unrelated prose", ""),
+        // Mid-token in the body: `core` lives inside `corepart`, which no FTS
+        // query can reach (a prefix match `"core"*` would not help either).
+        ("DDDDDDDD", "Nothing here", "the corepart word", ""),
+        ("EEEEEEEE", "Plain title", "nothing at all", "area:core"),
+        // Non-ASCII label, for the `icode` (mid-token) and `Ünicode`
+        // (non-ASCII case-folded needle) rows.
+        ("FFFFFFFF", "Plain title two", "plain body", "ünicode-tag"),
+    ];
+    for (suffix, title, body, label) in rows {
+        let id = format!("proj-{suffix}");
+        let labels = if label.is_empty() {
+            String::new()
+        } else {
+            format!("labels:\n  - {label}\n")
+        };
+        std::fs::write(
+            issues.join(format!("{id}.md")),
+            format!(
+                "---\nschema: 1\nid: {id}\ntitle: {title}\nstatus: open\ntype: feature\n\
+                 priority: 2\ncreated: 2026-06-02T10:00:00Z\nupdated: 2026-06-02T10:00:00Z\n\
+                 {labels}---\n{body}\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    let ids_of = |v: &Value| -> Vec<String> {
+        v["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+
+    // (needle, expected ids in relevance order, what it exercises)
+    let cases: [(&str, Vec<&str>, &str); 6] = [
+        (
+            "gateway",
+            vec!["proj-CCCCCCCC", "proj-BBBBBBBB", "proj-AAAAAAAA"],
+            "whole token: title, then label, then body — the reverse of id order",
+        ),
+        (
+            "core",
+            vec!["proj-EEEEEEEE", "proj-DDDDDDDD"],
+            "mid-token in a body (`corepart`) beside a whole-token label hit",
+        ),
+        (
+            "icode",
+            vec!["proj-FFFFFFFF"],
+            "mid-token inside a non-ASCII label",
+        ),
+        (
+            "Ünicode",
+            vec!["proj-FFFFFFFF"],
+            "non-ASCII needle, case-folded against a lowercase label",
+        ),
+        (
+            "COREPART",
+            vec!["proj-DDDDDDDD"],
+            "ASCII needle case-folded against a body",
+        ),
+        (
+            "\"quote injection\" OR gateway*",
+            Vec::new(),
+            "the needle is a literal substring, not a query language",
+        ),
+    ];
+
+    // Leg 1: no index on disk at all.
+    let mut want: Vec<(&str, Vec<String>)> = Vec::new();
+    for (needle, expected, why) in &cases {
+        let v = json_ok(clove(dir.path()).args(["search", needle, "--no-index"]));
+        assert_eq!(v["_meta"]["source"], "files");
+        assert_eq!(ids_of(&v), *expected, "file path, {needle:?}: {why}");
+        want.push((needle, ids_of(&v)));
+    }
+
+    // Leg 2: a fresh, complete index on disk. `search` must not consult it — and
+    // the index has to genuinely exist, or this leg proves nothing.
+    clove(dir.path()).arg("reindex").assert().success();
+    assert!(
+        dir.path().join(".clove/index.db").exists(),
+        "the index must exist for this leg to mean anything"
+    );
+    let listed = json_ok(clove(dir.path()).args(["ls", "--limit", "0"]));
+    assert_eq!(
+        listed["_meta"]["source"], "index",
+        "the index must be live enough to answer a list, or `search` \
+         falling back to files would be trivially true"
+    );
+
+    for (needle, expected) in &want {
+        let v = json_ok(clove(dir.path()).args(["search", needle]));
+        assert_eq!(
+            v["_meta"]["source"], "files",
+            "search has no index tier ({needle:?}); reintroducing one \
+             reintroduces roadmap §6.1"
+        );
+        assert_eq!(
+            &ids_of(&v),
+            expected,
+            "with an index present, {needle:?} must answer identically"
+        );
+    }
+}
+
+/// An index left over from an older clove is rebuilt, and stays rebuilt, no
+/// matter which command opens it first.
+///
+/// The first version of the rebuild discarded the old database inside the
+/// *detection* step, so whichever command opened the index first consumed the
+/// signal. `clove stats` runs a telemetry open on every invocation — documented
+/// in its own comment as "side-effect-free" — and used the non-rebuilding
+/// variant, so a single `clove stats` replaced the index with an empty one
+/// carrying the *current* version. No later open could tell it was empty rather
+/// than up to date, so every subsequent query silently fell back to scanning
+/// files, permanently, until someone ran `clove reindex` by hand.
+///
+/// The store here is deliberately larger than `STALE_REFRESH_LIMIT` so the
+/// staleness path cannot paper over an empty index by refreshing it inline.
+#[test]
+fn a_stale_schema_index_is_rebuilt_whichever_command_opens_it_first() {
+    let dir = init_repo();
+    let issues = dir.path().join(".clove/issues");
+    for i in 0..30u32 {
+        let id = format!("proj-S{i:07}");
+        std::fs::write(
+            issues.join(format!("{id}.md")),
+            format!(
+                "---\nschema: 1\nid: {id}\ntitle: Widget {i}\nstatus: open\ntype: feature\n\
+                 priority: 2\ncreated: 2026-06-02T10:00:00Z\nupdated: 2026-06-02T10:00:00Z\n---\nbody\n"
+            ),
+        )
+        .unwrap();
+    }
+    clove(dir.path()).arg("reindex").assert().success();
+
+    let db = dir.path().join(".clove/index.db");
+    let downgrade = || {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.pragma_update(None, "user_version", clove_index::SCHEMA_VERSION - 1)
+            .unwrap();
+    };
+
+    // `clove stats` first: it must not consume the rebuild.
+    downgrade();
+    clove(dir.path()).arg("stats").assert().success();
+    let v = json_ok(clove(dir.path()).args(["ls", "--limit", "0"]));
+    assert_eq!(
+        v["_meta"]["source"], "index",
+        "the index must still answer after `stats` opened it"
+    );
+    assert_eq!(v["data"].as_array().unwrap().len(), 30);
+
+    // And directly, with a list command opening it first.
+    downgrade();
+    let v = json_ok(clove(dir.path()).args(["ls", "--limit", "0"]));
+    assert_eq!(v["_meta"]["source"], "index");
+    assert_eq!(v["data"].as_array().unwrap().len(), 30);
+}
+
+/// `--fields` returns the same keys whether or not an index exists.
+///
+/// The index and daemon fast paths select a lean five-column row, so any field
+/// outside `{id,status,type,priority,title}` was silently absent from the
+/// result — `clove ls --fields id,created` gave `[{"id": …}]` on a machine with
+/// an index and both keys on one without. The answer depended on whether
+/// `.clove/index.db` happened to exist.
+#[test]
+fn fields_outside_the_lean_row_fall_back_to_the_files() {
+    let dir = init_repo();
+    new_item(dir.path(), "Widget", &[]);
+    clove(dir.path()).arg("reindex").assert().success();
+
+    // Outside the lean set: must fall back and still answer in full.
+    let v = json_ok(clove(dir.path()).args(["ls", "--fields", "id,created"]));
+    let mut keys: Vec<&str> = v["data"][0]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|k| k.as_str())
+        .collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec!["created", "id"],
+        "requested fields must be present"
+    );
+    assert_eq!(
+        v["_meta"]["source"], "files",
+        "the lean row cannot serve these"
+    );
+
+    // Inside the lean set: the index still serves it.
+    let v = json_ok(clove(dir.path()).args(["ls", "--fields", "id,title"]));
+    assert_eq!(
+        v["_meta"]["source"], "index",
+        "no need to give up the index"
+    );
+    let mut keys: Vec<&str> = v["data"][0]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|k| k.as_str())
+        .collect();
+    keys.sort();
+    assert_eq!(keys, vec!["id", "title"]);
+
+    // `ready` shares the tiering and the same guard.
+    let v = json_ok(clove(dir.path()).args(["ready", "--fields", "id,updated"]));
+    assert!(
+        v["data"][0].get("updated").is_some(),
+        "ready must honour it too: {v}"
+    );
+}
+
+/// `--compact` produces the same key set as the MCP tools' `compact`.
+///
+/// It did not: the MCP path additionally drops `schema`, so the two surfaces
+/// disagreed by exactly one silent key while the changelog claimed they shaped
+/// identically.
+#[test]
+fn compact_drops_the_same_keys_as_the_mcp_tools() {
+    let dir = init_repo();
+    new_item(dir.path(), "Widget", &[]);
+    let v = json_ok(clove(dir.path()).args(["ls", "--no-index", "--compact"]));
+    let obj = v["data"][0].as_object().unwrap();
+    assert!(obj.get("schema").is_none(), "schema is dropped: {v}");
+    for absent in ["assignee", "parent", "closed", "labels", "deps"] {
+        assert!(obj.get(absent).is_none(), "`{absent}` should be compacted");
+    }
+    // Without --compact the full shape, `schema` included, is unchanged.
+    let full = json_ok(clove(dir.path()).args(["ls", "--no-index"]));
+    assert_eq!(full["data"][0]["schema"], 1);
 }
 
 #[test]
@@ -692,4 +1006,120 @@ fn env_clove_format_json_without_flag() {
     assert!(out.status.success());
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["ok"], true);
+}
+
+/// `clove blocked` answers from the index, and answers *identically*.
+///
+/// Until read-path §4 it was the one list with no index tier at all: with a hot
+/// `.clove/index.db` and no daemon it still scanned and parsed every file in the
+/// store. `clove_index` now has a `Blocked` query — the exact complement of the
+/// `ready` clause within the active, non-excluded set — so the SQL and the
+/// in-memory `GraphStore` partition the store the same way.
+///
+/// The comparison is against `--no-index`, and the `source` assertions are what
+/// keep it from being vacuous: without them this would pass with both runs on
+/// the file path.
+#[test]
+fn blocked_answers_from_the_index_and_agrees_with_the_files() {
+    let dir = init_repo();
+    let a = new_item(dir.path(), "alpha", &[]);
+    let b = new_item(dir.path(), "beta", &[]);
+    let c = new_item(dir.path(), "gamma", &[]);
+    // a is blocked by the open b; c is blocked by a missing id.
+    clove(dir.path())
+        .args(["dep", "add", &a, &b])
+        .assert()
+        .success();
+    clove(dir.path())
+        .args(["dep", "add", &c, &b])
+        .assert()
+        .success();
+    clove(dir.path()).arg("reindex").assert().success();
+
+    let files = json_ok(clove(dir.path()).args(["--no-index", "blocked"]));
+    assert_eq!(files["_meta"]["source"], "files");
+    let indexed = json_ok(clove(dir.path()).args(["blocked"]));
+    assert_eq!(
+        indexed["_meta"]["source"], "index",
+        "blocked must have an index tier, or the comparison below is vacuous"
+    );
+
+    assert_eq!(indexed["data"], files["data"], "row for row, tier for tier");
+    assert_eq!(indexed["_meta"]["total"], files["_meta"]["total"]);
+    // `blocked_by` is the point of the list and no lean row carries it, so the
+    // index tier has to hydrate the page rather than serve the projection.
+    assert_eq!(
+        indexed["data"][0]["blocked_by"],
+        serde_json::json!([b]),
+        "the index tier still reports what blocks each item: {indexed}"
+    );
+    // A hydrated row is a *full* row: the lean five columns would not have this.
+    assert!(
+        indexed["data"][0].get("created").is_some(),
+        "blocked rows are full items, not the lean projection: {indexed}"
+    );
+}
+
+/// `clove ready` warns about the items it silently left out.
+///
+/// An item whose `deps` name a missing id is excluded from `ready` — correctly,
+/// since nothing can say the dependency is done — and the only signal a user
+/// gets is this warning: `_meta.warnings` in JSON, stderr in human format. It is
+/// also the one warning the accelerator tiers cannot produce, because the SQL
+/// `ready` query never builds the dangling set, so the message must survive the
+/// hand-off from `clove_core::ops::ready_rows` all the way to `_meta`.
+///
+/// The `--no-index` run is what makes the check meaningful: the file tier is the
+/// only one that has the warning to give.
+#[test]
+fn ready_warns_about_items_excluded_for_dangling_deps() {
+    let dir = init_repo();
+    let ok = new_item(dir.path(), "unblocked", &[]);
+    let broken = new_item(dir.path(), "names a ghost", &[]);
+    // Hand-write a reference to an id that does not exist (`dep add` refuses).
+    let path = dir.path().join(format!(".clove/issues/{broken}.md"));
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, text.replace("deps: []", "deps: [proj-ZZZZZZZZ]")).unwrap();
+
+    let v = json_ok(clove(dir.path()).args(["--no-index", "ready"]));
+    let ids: Vec<&str> = v["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec![ok.as_str()], "the dangling item is not ready");
+
+    let warnings = v["_meta"]["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1, "exactly one warning: {v}");
+    let msg = warnings[0].as_str().unwrap();
+    assert!(
+        msg.contains("dangling") && msg.contains(&broken),
+        "the warning must name the excluded item: {msg}"
+    );
+
+    // Human format puts it on stderr, so an interactive run cannot miss it —
+    // and `--quiet` is what turns it off.
+    let out = clove(dir.path())
+        .args(["--no-index", "ready"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("dangling"), "stderr: {stderr}");
+    let quiet = clove(dir.path())
+        .args(["--no-index", "--quiet", "ready"])
+        .output()
+        .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&quiet.stderr).contains("dangling"),
+        "--quiet silences it"
+    );
+
+    // It is not lost: `blocked` is where the item went, with the broken id named.
+    let blocked = json_ok(clove(dir.path()).args(["--no-index", "blocked"]));
+    assert_eq!(blocked["data"][0]["id"], serde_json::json!(broken));
+    assert_eq!(
+        blocked["data"][0]["blocked_by"],
+        serde_json::json!(["proj-ZZZZZZZZ"])
+    );
 }

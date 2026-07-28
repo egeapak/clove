@@ -3,8 +3,8 @@
 //! [`Index`] owns a private [`rusqlite::Connection`]. The connection is never
 //! handed out mutably: every write goes through the single encapsulated path in
 //! [`crate::write::upsert_item`] (and the bulk path in [`crate::reindex`]), so
-//! the FTS5 mirror can never silently drift from the `items` table (DESIGN §6.3,
-//! T-S02). Schema version lives in `PRAGMA user_version`; on mismatch or
+//! the derived columns can never silently drift from the item files (DESIGN
+//! §6.3, T-S02). Schema version lives in `PRAGMA user_version`; on mismatch or
 //! corruption the database is dropped and rebuilt (DESIGN §6.1).
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -20,29 +20,29 @@ use thiserror::Error;
 /// malformed-parent exclusion flag) so the SQL `ready` query matches the
 /// in-memory `ready_items` exactly, and the incremental path now keeps
 /// `topological_rank`/`has_dangling_deps`/`excluded` exact (no longer
-/// reindex-only). The index is a rebuildable cache, so each bump just rebuilds.
-pub const SCHEMA_VERSION: i64 = 4;
+/// reindex-only). v5 added labels to the `items_fts` full-text mirror. v6
+/// **removed** `items_fts`/`fts_map` outright: search no longer runs through the
+/// index at all (read-path roadmap §6.1 — the FTS matched whole ASCII-folded
+/// tokens where every other surface matches Unicode substrings, so it answered
+/// a narrower question, and it was 77% of the file on a 10k store). The index is
+/// a rebuildable cache, so each bump just rebuilds.
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// Complete DDL for the index (DESIGN §6.1). Kept as one reviewable block.
 /// PRAGMAs that must run per-connection (not persisted) are applied separately
 /// in [`set_pragmas`].
 ///
-/// Two deviations from the DESIGN §6.1 DDL, both forced by combining a
-/// contentless FTS5 table with a `WITHOUT ROWID` `items` table:
-///
-/// 1. `items_fts` adds `contentless_delete=1`. The plan (T-S02) reached for the
-///    FTS5 `'delete'` command, but that requires the *previous* column values to
-///    undo a row — values we don't have when an item's body changed or its file
-///    was removed. `contentless_delete=1` (SQLite ≥3.43, in the bundled build)
-///    lets us delete a shadow row by rowid alone, correct across edits/deletes.
-///
-/// 2. A `fts_map(fts_rowid → item_id)` side table is added. A contentless FTS5
-///    table returns NULL for all columns (even `UNINDEXED id`), and `items` has
-///    no integer rowid to join on, so a full-text match cannot otherwise be
-///    mapped back to an item id. `fts_map` is that mapping; it is tiny (one
-///    integer + id per item) and preserves the contentless space win for bodies.
-///
-/// Both are maintained by [`crate::write::write_row`].
+/// **There is no full-text table here, and that is deliberate.** Schemas 1–5
+/// carried a contentless `items_fts` mirror plus an `fts_map` side table to map
+/// matched rowids back to item ids; `clove search` used it as a candidate
+/// prefilter. It was removed in schema 6 because FTS5 answers a *different*
+/// question from the one every other clove surface answers — whole tokens with
+/// ASCII-only case folding, against `str::contains` over a full-Unicode
+/// lowercase — so the same `clove search X` returned different ids depending on
+/// whether `.clove/index.db` happened to exist. Search now always scans files
+/// (measured: 62–216 ms over 10k items, *faster* than the index path for any
+/// needle matching more than a few percent of the store, because that path had
+/// to re-read every matched file anyway). See `docs/READ_PATH_ROADMAP.md` §6.1.
 const SCHEMA_DDL: &str = "\
 CREATE TABLE items (
     id TEXT PRIMARY KEY,
@@ -78,15 +78,6 @@ CREATE TABLE labels (
     PRIMARY KEY (item_id, label)
 ) WITHOUT ROWID;
 
-CREATE VIRTUAL TABLE items_fts USING fts5(
-    id UNINDEXED,
-    title,
-    body,
-    content='',
-    contentless_delete=1,
-    tokenize='ascii'
-);
-
 CREATE TABLE meta (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     dir_mtime INTEGER NOT NULL,
@@ -99,11 +90,6 @@ CREATE TABLE file_mtimes (
     mtime_ns INTEGER NOT NULL,
     content_hash BLOB NOT NULL,
     synced_at INTEGER
-);
-
-CREATE TABLE fts_map (
-    fts_rowid INTEGER PRIMARY KEY,
-    item_id TEXT NOT NULL
 );
 
 CREATE INDEX idx_items_status ON items(status);
@@ -278,6 +264,22 @@ impl ItemListRow {
             title: row.get(4)?,
         })
     }
+
+    /// Project a full [`ItemRow`] onto the lean shape.
+    ///
+    /// Used by the residue path in `query::query_filtered`: a `q` filter reads
+    /// labels, which [`LIST_COLUMNS`] does not select, so that query has to ask
+    /// for full rows and narrow afterwards. The projection lives here so the
+    /// lean shape has exactly one definition.
+    pub fn from_item_row(row: &ItemRow) -> ItemListRow {
+        ItemListRow {
+            id: SmolStr::new(&row.id),
+            status: SmolStr::new(&row.status),
+            item_type: SmolStr::new(&row.item_type),
+            priority: row.priority,
+            title: row.title.clone(),
+        }
+    }
 }
 
 /// A handle to an opened SQLite index.
@@ -328,6 +330,11 @@ impl Index {
     /// The public entry point: open the index, rebuilding from scratch if it is
     /// the wrong schema version or corrupt (DESIGN §6.1). A corrupt file is
     /// logged to stderr before rebuilding.
+    /// Prefer [`Index::open_or_rebuild`] wherever the issues directory is known.
+    /// This variant cannot repopulate, so it returns a valid but **empty** index
+    /// after discarding one — and discarding is a one-way door: the next open
+    /// sees a matching version and has no way to tell that the contents are
+    /// missing. Reserved for callers with no store to rebuild from.
     pub fn open_or_create(path: &Utf8Path) -> Result<Index, IndexError> {
         match Index::open(path) {
             Ok(index) => Ok(index),
@@ -359,6 +366,45 @@ impl Index {
         }
     }
 
+    /// [`Index::open_or_create`], but *repopulated* from `issues_dir` when the
+    /// open had to discard the old database.
+    ///
+    /// `open_or_create` recovers the file and stops there, leaving a valid but
+    /// **empty** index. Empty is indistinguishable from "nothing matched" at
+    /// every call site: `clove search` returned zero rows for every query after
+    /// a schema bump until that was patched defensively at the call site, and a
+    /// list command sees a store that appears to have no items. The staleness
+    /// gate then reports every file as changed, which is over the inline-refresh
+    /// limit, so the CLI silently falls back to scanning files for every query
+    /// until someone runs `clove reindex` by hand.
+    ///
+    /// Prefer this wherever the issues directory is known — which is every read
+    /// path. Rebuilding costs one scan, once, at the moment the schema changed.
+    pub fn open_or_rebuild(path: &Utf8Path, issues_dir: &Utf8Path) -> Result<Index, IndexError> {
+        let reason = match Index::open(path) {
+            Ok(index) => return Ok(index),
+            Err(IndexError::SchemaMismatch { found, expected }) => {
+                format!("schema changed (found {found}, expected {expected})")
+            }
+            Err(IndexError::CorruptIndex(msg)) => format!("corrupt ({msg})"),
+            Err(IndexError::SqliteError(e)) if is_corrupt(&e) => format!("corrupt ({e})"),
+            Err(other) => return Err(other),
+        };
+        eprintln!("note: index at {path} {reason}; rebuilding from {issues_dir}");
+        // Nothing is destroyed here. `reindex` builds into `<path>.tmp` under the
+        // rebuild lock and renames it over the live file, carrying the durable
+        // stats history across, so a rebuild that fails — most likely
+        // `AlreadyRunning`, when a concurrent process is upgrading the same
+        // index — leaves the old database in place and the *next* open retries.
+        //
+        // Deleting first (as `open_or_create` must, having nothing to rebuild
+        // from) makes that failure permanent: the file is gone, and whatever
+        // replaces it carries the current version, so no later open can tell it
+        // is empty rather than genuinely up to date.
+        crate::reindex::reindex(issues_dir, path)?;
+        Index::open(path)
+    }
+
     /// Borrow the connection for reads (queries, staleness checks). Not a write
     /// path — mutations go through [`Index::upsert_item`].
     pub(crate) fn conn(&self) -> &Connection {
@@ -385,11 +431,21 @@ impl Index {
     ///    variant of `integrity_check`; it skips the exhaustive index/content
     ///    cross-validation but catches the page-level corruption that the shallow
     ///    open-time [`is_corrupt`] probe misses).
-    /// 2. The contentless-FTS mirror: `fts_map` must have exactly one row per
-    ///    `items` row. Because `items_fts` is contentless and joined back through
-    ///    `fts_map` (see the schema notes above), a torn `fts_map` is a
-    ///    clove-specific corruption that `quick_check` cannot see but that would
-    ///    silently drop or misattribute search hits.
+    /// 2. Neither side table — `labels` nor `edges` — may reference an id that
+    ///    is not in `items`. Every side row is written in the same transaction
+    ///    as its item, so an orphan is a clove-specific tear that `quick_check`
+    ///    cannot see (it is referentially, not structurally, broken) but that
+    ///    makes a `--label` query or a graph walk resolve an id the store does
+    ///    not have.
+    ///
+    /// Schema 5 checked the contentless-FTS mirror instead: `fts_map` had one
+    /// row per item, so `COUNT(items) == COUNT(fts_map)` covered **every** item
+    /// unconditionally and in **both** directions — a leaked shadow after a
+    /// delete and a missing one after an insert. A plain orphan scan is weaker
+    /// on both counts: it only sees items that carry a side row at all, and only
+    /// the leak direction. `edges` was added here because the first version of
+    /// this check covered `labels` alone, so a torn `DELETE FROM edges` was
+    /// caught by nothing.
     pub fn integrity_check(&self) -> Result<Option<String>, IndexError> {
         let mut stmt = self.conn.prepare("PRAGMA quick_check")?;
         let problems: Vec<String> = stmt
@@ -402,16 +458,21 @@ impl Index {
             return Ok(Some(format!("quick_check: {}", problems.join("; "))));
         }
 
-        let items: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))?;
-        let fts: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM fts_map", [], |r| r.get(0))?;
-        if items != fts {
-            return Ok(Some(format!(
-                "full-text index out of sync ({fts} fts row(s) vs {items} item(s))"
-            )));
+        for (table, column, what) in [("labels", "item_id", "label"), ("edges", "from_id", "edge")]
+        {
+            let orphans: i64 = self.conn.query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM {table} \
+                     WHERE {column} NOT IN (SELECT id FROM items)"
+                ),
+                [],
+                |r| r.get(0),
+            )?;
+            if orphans != 0 {
+                return Ok(Some(format!(
+                    "{what} index out of sync ({orphans} {what} row(s) with no item)"
+                )));
+            }
         }
         Ok(None)
     }
@@ -543,22 +604,41 @@ mod tests {
     }
 
     #[test]
-    fn integrity_check_passes_clean_and_catches_fts_drift() {
+    fn integrity_check_passes_clean_and_catches_side_table_drift() {
         let (_dir, path) = tmp_db();
         let index = Index::open(&path).unwrap();
         // A fresh index is internally consistent.
         assert_eq!(index.integrity_check().unwrap(), None);
-        // Tear the FTS mirror: a stray fts_map row with no matching item makes
-        // the contentless-FTS cross-check fail even though quick_check is happy.
+        // Tear the label side table: a row for an item that does not exist is
+        // referentially broken, which `quick_check` cannot see.
         index
             .conn()
             .execute(
-                "INSERT INTO fts_map(fts_rowid, item_id) VALUES (1, 'ghost')",
+                "INSERT INTO labels(item_id, label) VALUES ('ghost', 'area:core')",
                 [],
             )
             .unwrap();
         let reason = index.integrity_check().unwrap().unwrap();
-        assert!(reason.contains("full-text index"), "{reason}");
+        assert!(reason.contains("label index"), "{reason}");
+    }
+
+    /// Schema 6 carries **no** full-text tables. Search is a file scan on every
+    /// surface (read-path roadmap §6.1); an `items_fts` reintroduced here would
+    /// be a prefilter answering a narrower question than `view::match_class`,
+    /// which is exactly the divergence §6.1 removed.
+    #[test]
+    fn schema_has_no_full_text_tables() {
+        let (_dir, path) = tmp_db();
+        let index = Index::open(&path).unwrap();
+        let names: Vec<String> = index
+            .conn()
+            .prepare("SELECT name FROM sqlite_master WHERE name LIKE '%fts%'")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(names.is_empty(), "schema 6 must carry no FTS: {names:?}");
     }
 
     /// T-D01 / schema v3: `file_mtimes` carries the nullable `synced_at` column
@@ -578,9 +658,13 @@ mod tests {
             )
             .unwrap();
         assert!(has_col, "file_mtimes.synced_at must exist at schema v3+");
+        // A tripwire, on purpose: bumping the version invalidates every index in
+        // the wild, so it should never happen as a side effect. v6 drops
+        // `items_fts`/`fts_map` — search no longer touches the index, so the FTS
+        // was 77% of a 10k index file maintained for nothing.
         assert_eq!(
-            SCHEMA_VERSION, 4,
-            "M4 incremental graph ships index schema v4"
+            SCHEMA_VERSION, 6,
+            "index schema v6 removed the full-text tables"
         );
     }
 }

@@ -23,7 +23,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 pub use client::{cleanup_stale, ClientError, DaemonClient, DaemonHealth};
 pub use protocol::{
     GraphRequest, GraphResponse, LeanRow, QueryKind, QueryListResponse, QueryRequest, ReindexDone,
-    SearchRequest, StatusResponse, PROTOCOL_VERSION,
+    StatusResponse, PROTOCOL_VERSION,
 };
 pub use service::{CloveRpc, CloveRpcClient, RpcError};
 pub use spawn::{cloved_path, ensure_daemon, spawn_daemon};
