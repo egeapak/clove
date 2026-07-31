@@ -186,6 +186,71 @@ pub enum PluginAction {
     /// Filters the discovered set locally: crates.io's own `?q=` is fuzzy
     /// full-text and returns nothing useful for a prefix like `clove-sync`.
     Search(PluginSearchArgs),
+
+    /// Build and install a published plugin.
+    ///
+    /// This compiles and runs third-party code, so it always asks first. A
+    /// non-interactive run refuses rather than proceeding — automation states
+    /// its intent with `--yes`.
+    Install(PluginInstallArgs),
+
+    /// Remove a plugin clove installed. Needs no network.
+    Uninstall(PluginUninstallArgs),
+
+    /// Re-resolve installed plugins to their newest published version.
+    Update(PluginUpdateArgs),
+}
+
+/// `clove plugin install <name> […]`.
+#[derive(Debug, Args)]
+pub struct PluginInstallArgs {
+    /// The plugin to install: a provider (`gitlab`) or an exact crate name.
+    ///
+    /// A bare provider is resolved by constructing the candidate crate names;
+    /// if several exist the command asks for the exact one rather than guessing
+    /// which multiplexer wins.
+    pub name: String,
+
+    /// Skip the confirmation. Required for any non-interactive run.
+    #[arg(long)]
+    pub yes: bool,
+
+    /// Reinstall even if the plugin is already present.
+    #[arg(long)]
+    pub force: bool,
+
+    /// Treat an unverifiable `clove-plugin` dependency as fatal.
+    ///
+    /// Without this, a registry that cannot be reached downgrades the check to a
+    /// warning shown in the prompt; with it, the install refuses instead.
+    #[arg(long)]
+    pub strict: bool,
+
+    /// Install even when every published version is yanked.
+    #[arg(long)]
+    pub allow_yanked: bool,
+}
+
+/// `clove plugin uninstall <name>`.
+#[derive(Debug, Args)]
+pub struct PluginUninstallArgs {
+    /// The plugin subcommand to remove, e.g. `sync-github`.
+    pub name: String,
+}
+
+/// `clove plugin update [<name>] [--all]`.
+#[derive(Debug, Args)]
+pub struct PluginUpdateArgs {
+    /// The plugin to update. Omit (or pass `--all`) to check every one.
+    pub name: Option<String>,
+
+    /// Check every clove-installed plugin.
+    #[arg(long)]
+    pub all: bool,
+
+    /// Skip the confirmation. Required for any non-interactive run.
+    #[arg(long)]
+    pub yes: bool,
 }
 
 /// `clove plugin list [--all] [--refresh]`.

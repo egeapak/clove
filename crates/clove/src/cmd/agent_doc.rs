@@ -142,6 +142,20 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
   published yet, the installed list still prints and the reason appears in\n\
   `_meta.warnings` and the command still exits 0 — a registry outage is\n\
   never an error, so do not treat a missing Available section as a failure.\n\
+- `clove plugin install <name> [--yes] [--force] [--strict] [--allow-yanked]` —\n\
+  build and install a published plugin. This compiles and runs third-party code,\n\
+  so it always requires an explicit decision: a non-interactive run (no TTY, or\n\
+  `--format json`) **refuses** unless `--yes` is given. A bare provider name is\n\
+  resolved by constructing the candidate crate names; if several exist the\n\
+  command refuses and asks for the exact crate rather than guessing.\n\
+- `clove plugin uninstall <name>` — remove a plugin clove installed. Needs no\n\
+  network: the package is resolved from cargo's own bookkeeping. A plugin\n\
+  installed by something else (e.g. `cargo install` into ~/.cargo/bin) is\n\
+  reported as unmanaged rather than failing obscurely.\n\
+- `clove plugin update [<name>] [--all] [--yes]` — re-resolve installed plugins.\n\
+  Shows each old -> new version before changing anything, and only re-resolves\n\
+  crates.io installs (a git-sourced plugin is left alone, not silently swapped\n\
+  for a same-named crate).\n\
 - `clove plugin search <text> [--refresh]` — filter published plugins by\n\
   name/description. When that filter matches nothing, the candidate crate\n\
   names are constructed and probed directly, so a published plugin is found\n\

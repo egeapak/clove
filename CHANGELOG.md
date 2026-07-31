@@ -182,6 +182,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     list still prints and the cause is reported in `_meta.warnings`.
     Plain `clove plugin list` remains a pure filesystem walk, and plugin
     dispatch never touches the network.
+- **`clove plugin install` / `uninstall` / `update`.** Installing builds and runs
+  third-party code, so the command is built around that rather than around
+  convenience:
+  - **A non-interactive run refuses** unless `--yes` is passed. Silence is not
+    consent, and CI/agent runs are exactly where an unvetted build does the most
+    damage unobserved.
+  - The confirmation states what it is authorizing and makes **no safety claim**.
+    Every check is forgeable by the crate's publisher, so they are described as
+    shape checks ("matches the clove plugin convention — not audited").
+  - `cargo install` is pinned to the approved version and to the **single**
+    binary (`--bin`), so a crate cannot land extra binaries in the search path,
+    where they would receive the full inherited environment on the next dispatch.
+  - The post-install compatibility probe **rolls the install back** when it
+    fails, rather than leaving a rejected binary resolvable.
+  - An ambiguous bare name (both `clove-sync-x` and `clove-import-x` published)
+    refuses and asks for the exact crate instead of guessing which multiplexer
+    wins — a guess would disagree with dispatch.
+  - `uninstall` works offline, resolving the cargo *package* from cargo's own
+    bookkeeping (the package and the binary routinely differ). `update` shows
+    each old → new version first, and never re-resolves a git-sourced install
+    through crates.io.
 - `<clove-home>/bin` joins the plugin search path (between `$CLOVE_PLUGIN_PATH`
   and `$PATH`), resolved from `$CLOVE_HOME`, else `$XDG_DATA_HOME/clove`, else
   `~/.local/share/clove` (`%APPDATA%\clove` on Windows).

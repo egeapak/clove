@@ -132,6 +132,9 @@ fn dispatch(cli: Cli) -> (OutputFormat, Result<ExitCode, CloveError>) {
             let result = match &args.action {
                 cli::PluginAction::List(list) => cmd::plugin::run_list(f, list),
                 cli::PluginAction::Search(search) => cmd::plugin::run_search(f, search),
+                cli::PluginAction::Install(args) => cmd::plugin_install::run_install(f, args),
+                cli::PluginAction::Uninstall(args) => cmd::plugin_install::run_uninstall(f, args),
+                cli::PluginAction::Update(args) => cmd::plugin_install::run_update(f, args),
             };
             (f, result.map(|_| ExitCode::Success))
         }
