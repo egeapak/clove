@@ -148,6 +148,12 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
   `--format json`) **refuses** unless `--yes` is given. A bare provider name is\n\
   resolved by constructing the candidate crate names; if several exist the\n\
   command refuses and asks for the exact crate rather than guessing.\n\
+- `clove plugin install --git <url> [--tag T | --rev R | --branch B] [--package P]`\n\
+  — install from any git forge (plain `git`, not `gh`). The repository is cloned\n\
+  shallowly and inspected: a package counts as a plugin only if it depends on\n\
+  `clove-plugin`, builds a `clove-*` binary, AND is publishable. Several\n\
+  candidates means `--package` is required rather than clove guessing. Without\n\
+  `--tag`/`--rev` it warns that the default branch moves.\n\
 - `clove plugin uninstall <name>` — remove a plugin clove installed. Needs no\n\
   network: the package is resolved from cargo's own bookkeeping. A plugin\n\
   installed by something else (e.g. `cargo install` into ~/.cargo/bin) is\n\

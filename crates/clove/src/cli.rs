@@ -208,8 +208,32 @@ pub struct PluginInstallArgs {
     ///
     /// A bare provider is resolved by constructing the candidate crate names;
     /// if several exist the command asks for the exact one rather than guessing
-    /// which multiplexer wins.
-    pub name: String,
+    /// which multiplexer wins. Omit it when installing with `--git`.
+    pub name: Option<String>,
+
+    /// Install from a git repository instead of crates.io.
+    ///
+    /// Uses plain `git`, so any forge works. The repository is cloned shallowly
+    /// and its packages inspected; a package qualifies as a plugin only if it
+    /// depends on `clove-plugin`, builds a `clove-*` binary, and is publishable.
+    #[arg(long, value_name = "URL")]
+    pub git: Option<String>,
+
+    /// With `--git`: install this tag (pins the code being installed).
+    #[arg(long, value_name = "TAG", requires = "git")]
+    pub tag: Option<String>,
+
+    /// With `--git`: install this exact revision.
+    #[arg(long, value_name = "REV", requires = "git", conflicts_with = "tag")]
+    pub rev: Option<String>,
+
+    /// With `--git`: install this branch. It moves, so prefer --tag or --rev.
+    #[arg(long, value_name = "BRANCH", requires = "git", conflicts_with_all = ["tag", "rev"])]
+    pub branch: Option<String>,
+
+    /// With `--git`: which package to install, when the repository has several.
+    #[arg(long, value_name = "NAME", requires = "git")]
+    pub package: Option<String>,
 
     /// Skip the confirmation. Required for any non-interactive run.
     #[arg(long)]

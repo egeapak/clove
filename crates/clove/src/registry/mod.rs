@@ -30,6 +30,7 @@
 
 pub mod cache;
 pub mod crates_io;
+pub mod git_source;
 pub mod http;
 pub mod install;
 pub mod provenance;

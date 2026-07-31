@@ -25,13 +25,147 @@ use crate::registry::install::{
 use crate::registry::provenance::{self, Installed};
 use crate::registry::RegistryPlugin;
 
-/// `clove plugin install <name>`.
+/// `clove plugin install <name>` or `--git <url>`.
 pub fn run_install(format: OutputFormat, args: &PluginInstallArgs) -> Result<(), CloveError> {
+    match (&args.git, &args.name) {
+        (Some(url), _) => install_from_git(format, args, url),
+        (None, Some(name)) => install_from_registry(format, args, name),
+        (None, None) => Err(CloveError::InvalidField {
+            field: "name".to_owned(),
+            reason: "name a plugin to install, or pass --git <url>".to_owned(),
+        }),
+    }
+}
+
+/// Install from a git repository.
+fn install_from_git(
+    format: OutputFormat,
+    args: &PluginInstallArgs,
+    url: &str,
+) -> Result<(), CloveError> {
+    use crate::registry::git_source::{self, GitRef};
+
+    let home = crate::clove_home::clove_home()?;
+    git_source::validate_git_url(url)?;
+
+    let reference = match (&args.tag, &args.rev, &args.branch) {
+        (Some(t), _, _) => {
+            git_source::validate_git_ref("--tag", t)?;
+            Some(GitRef::Tag(t.clone()))
+        }
+        (_, Some(r), _) => {
+            git_source::validate_git_ref("--rev", r)?;
+            Some(GitRef::Rev(r.clone()))
+        }
+        (_, _, Some(b)) => {
+            git_source::validate_git_ref("--branch", b)?;
+            Some(GitRef::Branch(b.clone()))
+        }
+        _ => None,
+    };
+    if let Some(p) = &args.package {
+        crate::registry::validate_crate_name(p)?;
+    }
+
+    git_source::probe_remote(url)?;
+
+    // Clone into a temp dir purely to read the manifests; the actual build is
+    // done by `cargo install --git`, which does its own clone. Inspecting first
+    // is what lets the user be told *what* they are about to build.
+    let (_guard, clone) = git_source::temp_clone_dir()?;
+    git_source::shallow_clone(url, reference.as_ref(), &clone)?;
+    let found = git_source::find_plugins(&clone)?;
+    let chosen = git_source::select(&found, args.package.as_deref())?;
+
+    let mut warnings = Vec::new();
+    if reference.is_none() {
+        warnings.push(git_source::unpinned_warning(url));
+    }
+
+    // The same consent rule as the crates.io path — this builds and runs
+    // third-party code too, and from a source clove knows even less about.
+    match consent_policy(
+        args.yes,
+        format == OutputFormat::Human,
+        is_tty_stdin(),
+        is_tty_stderr(),
+    ) {
+        Consent::Granted => {}
+        Consent::Ask => {
+            for warning in &warnings {
+                eprintln!("warning: {warning}");
+            }
+            let prompt = format!(
+                "  {} from {url}\n  builds:    {}\n  checks:    depends on                  {REGISTRY_ROOT_CRATE}; matches the clove plugin convention — not audited\n\n                   Installing builds and runs third-party code as you. Continue? [y/N] ",
+                chosen.package, chosen.bin
+            );
+            if !install::ask_confirmation(&prompt) {
+                emit(
+                    format,
+                    json!({ "installed": false, "declined": true }),
+                    "not installed",
+                );
+                return Ok(());
+            }
+        }
+        Consent::Refuse => {
+            return Err(CloveError::InvalidField {
+                field: "--yes".to_owned(),
+                reason: install::refusal_message(),
+            })
+        }
+    }
+
+    let argv = git_source::cargo_install_argv(
+        url,
+        reference.as_ref(),
+        &chosen.package,
+        &chosen.bin,
+        &home,
+        args.force,
+    );
+    run_cargo(&argv, "install")?;
+
+    let installed_path = install::bin_dir(&home).join(&chosen.bin);
+    if let Some(reason) = incompatible_reason(&chosen.package, &installed_path) {
+        let _ = run_cargo(&rollback_argv(&chosen.package, &home), "uninstall");
+        return Err(CloveError::InvalidField {
+            field: "--git".to_owned(),
+            reason,
+        });
+    }
+
+    for warning in &warnings {
+        if format == OutputFormat::Human {
+            eprintln!("warning: {warning}");
+        }
+    }
+    emit_with_warnings(
+        format,
+        json!({
+            "installed": true,
+            "package": chosen.package,
+            "binary": chosen.bin,
+            "source": url,
+            "path": installed_path.as_str(),
+        }),
+        &format!("installed {} from {url} as {}", chosen.package, chosen.bin),
+        warnings,
+    );
+    Ok(())
+}
+
+/// Install from crates.io.
+fn install_from_registry(
+    format: OutputFormat,
+    args: &PluginInstallArgs,
+    name: &str,
+) -> Result<(), CloveError> {
     let home = crate::clove_home::clove_home()?;
     let fetch = UreqFetch::new();
     let client = CratesIo::new(&fetch);
 
-    let candidate = resolve_candidate(&client, &args.name)?;
+    let candidate = resolve_candidate(&client, name)?;
 
     // Gate 1 evidence, fetched live. `None` = the registry could not be
     // consulted, which is reported rather than silently treated as a pass.
@@ -125,20 +259,12 @@ pub fn run_install(format: OutputFormat, args: &PluginInstallArgs) -> Result<(),
     // left resolvable on the search path.
     let installed_path = install::bin_dir(&home).join(bin);
     let probe = crate::plugin::probe_info(&installed_path);
-    if let Some(info) = &probe {
-        if info.min_clove_plugin_api > clove_plugin::CLOVE_PLUGIN_API {
-            let _ = run_cargo(&rollback_argv(&candidate.crate_name, &home), "uninstall");
-            return Err(CloveError::InvalidField {
-                field: "name".to_owned(),
-                reason: format!(
-                    "`{}` needs a newer clove (it requires plugin API {}, this clove \
-                     provides {}); the install has been rolled back",
-                    candidate.crate_name,
-                    info.min_clove_plugin_api,
-                    clove_plugin::CLOVE_PLUGIN_API
-                ),
-            });
-        }
+    if let Some(reason) = incompatible_reason(&candidate.crate_name, &installed_path) {
+        let _ = run_cargo(&rollback_argv(&candidate.crate_name, &home), "uninstall");
+        return Err(CloveError::InvalidField {
+            field: "name".to_owned(),
+            reason,
+        });
     }
 
     let warnings = match &probe {
@@ -179,6 +305,24 @@ pub fn run_install(format: OutputFormat, args: &PluginInstallArgs) -> Result<(),
         warnings,
     );
     Ok(())
+}
+
+/// Why the freshly-installed binary is unusable with this clove, if it is.
+///
+/// This is gate 3, and it runs *after* cargo has built and therefore already
+/// executed the crate's build script — so it is a compatibility check, not a
+/// safety one. A failure must roll the install back: the binary is already in
+/// `<clove-home>/bin`, which is on the plugin search path.
+fn incompatible_reason(package: &str, installed_path: &Utf8Path) -> Option<String> {
+    let info = crate::plugin::probe_info(installed_path)?;
+    (info.min_clove_plugin_api > clove_plugin::CLOVE_PLUGIN_API).then(|| {
+        format!(
+            "`{package}` needs a newer clove (it requires plugin API {}, this clove \
+             provides {}); the install has been rolled back",
+            info.min_clove_plugin_api,
+            clove_plugin::CLOVE_PLUGIN_API
+        )
+    })
 }
 
 /// `clove plugin uninstall <name>` — offline, resolved from cargo's bookkeeping.

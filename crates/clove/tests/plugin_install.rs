@@ -169,6 +169,20 @@ fn handle(mut stream: TcpStream, state: &Arc<Mutex<Registry>>) {
 // Fake cargo
 // ---------------------------------------------------------------------------
 
+/// The real `cargo`, resolved before the shim shadows it.
+fn which_cargo() -> std::path::PathBuf {
+    if let Ok(explicit) = std::env::var("CARGO") {
+        return std::path::PathBuf::from(explicit);
+    }
+    for dir in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
+        let candidate = dir.join("cargo");
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    std::path::PathBuf::from("cargo")
+}
+
 /// A directory holding a `cargo` shim, to be prepended to `PATH`.
 ///
 /// The shim appends its argv to `<dir>/argv.log` and, for `install`, creates the
@@ -177,8 +191,17 @@ fn handle(mut stream: TcpStream, state: &Arc<Mutex<Registry>>) {
 /// the post-install gate and its rollback are exercised.
 fn fake_cargo(dir: &Path, plugin_behavior: &str) {
     let log = dir.join("argv.log");
+    // Only `install`/`uninstall` are faked. Everything else — notably
+    // `cargo metadata`, which the git path uses to work out which package in a
+    // repository is a plugin — is passed through to the real cargo, or the shim
+    // would be answering questions it knows nothing about.
+    let real_cargo = which_cargo();
     let script = format!(
         r#"#!/bin/sh
+case "$1" in
+  install|uninstall) ;;
+  *) exec "{real_cargo}" "$@" ;;
+esac
 printf '%s\n' "$*" >> "{log}"
 if [ "$1" = "install" ]; then
   root=""; bin=""
@@ -198,6 +221,7 @@ fi
 exit 0
 "#,
         log = log.display(),
+        real_cargo = real_cargo.display(),
     );
     let path = dir.join("cargo");
     std::fs::write(&path, script).unwrap();
@@ -565,4 +589,267 @@ fn a_traversal_or_flag_shaped_name_never_reaches_cargo_or_a_url() {
         cargo_log(&env.bin).is_empty(),
         "cargo must never be invoked for an invalid name"
     );
+}
+
+// ---------------------------------------------------------------------------
+// `install --git`
+//
+// These build real local git repositories and let clove clone them over
+// `file://`, so the clone, the manifest inspection and the package selection are
+// all exercised for real — only the final `cargo install` is faked.
+// ---------------------------------------------------------------------------
+
+fn run(cmd: &mut Command) {
+    let out = cmd.output().expect("spawn");
+    assert!(
+        out.status.success(),
+        "{:?} failed: {}",
+        cmd,
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A git repository containing `members`, each `(package, bin, extra_manifest)`.
+fn make_repo(dir: &Path, members: &[(&str, &str, &str)]) {
+    std::fs::create_dir_all(dir).unwrap();
+    let names: Vec<String> = members
+        .iter()
+        .map(|(p, _, _)| format!("\"crates/{p}\""))
+        .collect();
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        format!(
+            "[workspace]\nresolver = \"2\"\nmembers = [{}]\n",
+            names.join(", ")
+        ),
+    )
+    .unwrap();
+
+    for (package, bin, extra) in members {
+        let crate_dir = dir.join("crates").join(package);
+        std::fs::create_dir_all(crate_dir.join("src")).unwrap();
+        std::fs::write(
+            crate_dir.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"{package}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+                 {extra}\n[[bin]]\nname = \"{bin}\"\npath = \"src/main.rs\"\n\
+                 [dependencies]\nclove-plugin = \"1\"\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(crate_dir.join("src/main.rs"), "fn main() {}\n").unwrap();
+    }
+
+    run(Command::new("git").arg("init").arg("-q").current_dir(dir));
+    run(Command::new("git")
+        .args(["config", "user.email", "t@example.com"])
+        .current_dir(dir));
+    run(Command::new("git")
+        .args(["config", "user.name", "t"])
+        .current_dir(dir));
+    run(Command::new("git").args(["add", "-A"]).current_dir(dir));
+    run(Command::new("git")
+        .args(["commit", "-q", "-m", "init"])
+        .current_dir(dir));
+}
+
+#[test]
+fn install_from_a_git_repo_with_one_plugin() {
+    let env = env_with(&compatible_plugin());
+    let repo = env._tmp.path().join("srcrepo");
+    make_repo(&repo, &[("clove-sync-gitlab", "clove-sync-gitlab", "")]);
+
+    let assert = env
+        .clove()
+        .args([
+            "--format",
+            "json",
+            "plugin",
+            "install",
+            "--git",
+            &format!("file://{}", repo.display()),
+            "--yes",
+        ])
+        .assert()
+        .success();
+    let v: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(v["data"]["package"], "clove-sync-gitlab", "{v}");
+
+    let log = cargo_log(&env.bin);
+    assert!(log.contains("--git"), "{log}");
+    assert!(log.contains("--bin clove-sync-gitlab"), "{log}");
+    // An unpinned install must warn that the branch moves.
+    assert!(
+        v["_meta"]["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("--tag")),
+        "{v}"
+    );
+}
+
+#[test]
+fn a_workspace_shaped_like_clove_offers_only_the_real_plugins() {
+    // The over-match this filter exists for: three real plugins, plus the host
+    // (a `clove-plugin` dependent that builds `clove`) and a `publish = false`
+    // fixture. Selecting without --package must name exactly the three.
+    let env = env_with(&compatible_plugin());
+    let repo = env._tmp.path().join("srcrepo");
+    make_repo(
+        &repo,
+        &[
+            ("clove-sync-github", "clove-sync-github", ""),
+            ("clove-import-tk", "clove-import-tk", ""),
+            ("clove-import-beads", "clove-import-beads", ""),
+            ("clove-cli", "clove", ""),
+            ("clove-plugin-echo", "clove-echo", "publish = false"),
+        ],
+    );
+
+    let assert = env
+        .clove()
+        .args([
+            "plugin",
+            "install",
+            "--git",
+            &format!("file://{}", repo.display()),
+            "--yes",
+        ])
+        .assert()
+        .failure();
+    let err = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+
+    assert!(err.contains("several"), "{err}");
+    for expected in ["clove-sync-github", "clove-import-tk", "clove-import-beads"] {
+        assert!(err.contains(expected), "{expected} missing from: {err}");
+    }
+    assert!(
+        !err.contains("clove-cli"),
+        "the host must not be offered as a plugin: {err}"
+    );
+    assert!(
+        !err.contains("clove-plugin-echo"),
+        "a publish=false fixture must not be offered: {err}"
+    );
+    assert!(!cargo_log(&env.bin).contains("install"));
+}
+
+#[test]
+fn package_selects_one_plugin_from_a_multi_plugin_repo() {
+    let env = env_with(&compatible_plugin());
+    let repo = env._tmp.path().join("srcrepo");
+    make_repo(
+        &repo,
+        &[
+            ("clove-sync-github", "clove-sync-github", ""),
+            ("clove-import-tk", "clove-import-tk", ""),
+        ],
+    );
+
+    env.clove()
+        .args([
+            "plugin",
+            "install",
+            "--git",
+            &format!("file://{}", repo.display()),
+            "--package",
+            "clove-import-tk",
+            "--yes",
+        ])
+        .assert()
+        .success();
+
+    let log = cargo_log(&env.bin);
+    assert!(log.contains("--bin clove-import-tk"), "{log}");
+    assert!(!log.contains("clove-sync-github"), "{log}");
+}
+
+#[test]
+fn a_repo_with_no_clove_plugin_is_refused() {
+    let env = env_with(&compatible_plugin());
+    let repo = env._tmp.path().join("srcrepo");
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    std::fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"unrelated\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(repo.join("src/main.rs"), "fn main() {}\n").unwrap();
+    run(Command::new("git").arg("init").arg("-q").current_dir(&repo));
+    run(Command::new("git")
+        .args(["config", "user.email", "t@example.com"])
+        .current_dir(&repo));
+    run(Command::new("git")
+        .args(["config", "user.name", "t"])
+        .current_dir(&repo));
+    run(Command::new("git").args(["add", "-A"]).current_dir(&repo));
+    run(Command::new("git")
+        .args(["commit", "-q", "-m", "init"])
+        .current_dir(&repo));
+
+    env.clove()
+        .args([
+            "plugin",
+            "install",
+            "--git",
+            &format!("file://{}", repo.display()),
+            "--yes",
+        ])
+        .assert()
+        .failure();
+    assert!(!cargo_log(&env.bin).contains("install"));
+}
+
+#[test]
+fn a_tag_pins_the_install_and_suppresses_the_moving_branch_warning() {
+    let env = env_with(&compatible_plugin());
+    let repo = env._tmp.path().join("srcrepo");
+    make_repo(&repo, &[("clove-sync-gitlab", "clove-sync-gitlab", "")]);
+    run(Command::new("git")
+        .args(["tag", "v1.0.0"])
+        .current_dir(&repo));
+
+    let assert = env
+        .clove()
+        .args([
+            "--format",
+            "json",
+            "plugin",
+            "install",
+            "--git",
+            &format!("file://{}", repo.display()),
+            "--tag",
+            "v1.0.0",
+            "--yes",
+        ])
+        .assert()
+        .success();
+    let v: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert!(
+        v["_meta"]["warnings"].as_array().unwrap().is_empty(),
+        "a pinned install has nothing to warn about: {v}"
+    );
+
+    let log = cargo_log(&env.bin);
+    assert!(
+        log.contains("--tag v1.0.0"),
+        "the pin must reach cargo: {log}"
+    );
+}
+
+#[test]
+fn a_flag_shaped_git_url_never_reaches_git() {
+    let env = env_with(&compatible_plugin());
+    for url in [
+        "--upload-pack=/bin/sh",
+        "--template=/tmp/evil",
+        "ext::sh -c id",
+    ] {
+        env.clove()
+            .args(["plugin", "install", "--git", url, "--yes"])
+            .assert()
+            .failure();
+    }
+    assert!(cargo_log(&env.bin).is_empty());
 }

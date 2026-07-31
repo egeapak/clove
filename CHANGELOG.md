@@ -199,6 +199,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - An ambiguous bare name (both `clove-sync-x` and `clove-import-x` published)
     refuses and asks for the exact crate instead of guessing which multiplexer
     wins — a guess would disagree with dispatch.
+  - **`--git <url>`** installs from any forge, using plain `git`. The repository
+    is cloned shallowly (`--filter=blob:none --depth 1`, no submodules) and its
+    packages resolved through `cargo metadata`, so workspace globs, `exclude`
+    and `default-members` are handled by cargo rather than re-implemented. A
+    package qualifies only if it depends on `clove-plugin`, **builds a `clove-*`
+    binary, and is publishable** — filtering on the dependency alone matches five
+    members of clove's own repo, including the host CLI and a `publish = false`
+    test fixture. Git subprocesses are bounded by a timeout and run with
+    `GIT_TERMINAL_PROMPT=0`, so a 401 cannot surface a credential prompt
+    mid-install; the URL is checked against a scheme allow-list first, because a
+    value starting with `-` is read by git as an option and several of those
+    (`--upload-pack`, `--template`, `--config`) execute code.
   - `uninstall` works offline, resolving the cargo *package* from cargo's own
     bookkeeping (the package and the binary routinely differ). `update` shows
     each old → new version first, and never re-resolves a git-sourced install
