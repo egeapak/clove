@@ -58,22 +58,6 @@ pub fn print_jsonl_items(items: &[Value]) {
     }
 }
 
-/// Print JSONL items, then a trailing `{ v, ok, _meta }` line carrying
-/// command-level metadata.
-///
-/// The plain [`print_jsonl_items`] has nowhere to put `_meta`, which silently
-/// drops warnings that the `json` envelope carries — for example a registry
-/// lookup that failed, which would otherwise be indistinguishable from "there is
-/// nothing to report". The trailing line has no `data` key, so a consumer
-/// reading `data` per line skips it naturally.
-pub fn print_jsonl_items_with_meta(items: &[Value], meta: Value) {
-    print_jsonl_items(items);
-    if !meta.is_null() {
-        let line = json!({ "v": ENVELOPE_VERSION, "ok": true, "_meta": meta });
-        println!("{line}");
-    }
-}
-
 /// Print an error envelope `{ v, ok: false, error: { code, message, exit } }`
 /// to stdout (JSON mode) or a human message to stderr, and return the exit code.
 pub fn emit_error(format: OutputFormat, error: &CloveError, quiet: bool) -> ExitCode {

@@ -23,7 +23,7 @@
 use camino::{Utf8Path, Utf8PathBuf};
 use clove_types::CloveError;
 
-use super::provenance::{self, Installed, Source};
+use super::provenance::{Installed, Source};
 use super::RegistryPlugin;
 
 /// The crate whose reverse dependencies define the registry.
@@ -51,8 +51,10 @@ pub enum DependsOnPlugin {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Gates {
     pub depends_on_plugin: DependsOnPlugin,
-    /// The crate builds a binary the resolver can actually dispatch to.
+    /// The binary that will be installed — the crate's own, validated name.
     pub dispatchable_bin: Option<String>,
+    /// Why no binary qualified, when none did.
+    pub bin_problem: Option<String>,
     /// The version that will be installed.
     pub version: Option<String>,
     /// True when the resolved version is yanked.
@@ -79,15 +81,12 @@ impl Gates {
                  (registry unavailable), and --strict was given"
             ));
         }
-        let Some(bin) = &self.dispatchable_bin else {
-            return Some(
+        if self.dispatchable_bin.is_none() {
+            return Some(self.bin_problem.clone().unwrap_or_else(|| {
                 "this crate builds no `clove-*` binary, so nothing it installs could be \
                  run as a clove subcommand"
-                    .to_owned(),
-            );
-        };
-        if bin.is_empty() {
-            return Some("this crate builds no usable binary name".to_owned());
+                    .to_owned()
+            }));
         }
         None
     }
@@ -111,20 +110,65 @@ pub fn evaluate(candidate: &RegistryPlugin, dependents: Option<&[String]>) -> Ga
         None => DependsOnPlugin::Unverifiable,
     };
 
+    let (dispatchable, bin_problem) = match dispatchable_bin(candidate) {
+        Ok(bin) => (Some(bin.to_owned()), None),
+        Err(e) => (None, Some(e.to_string())),
+    };
+
     Gates {
         depends_on_plugin,
-        dispatchable_bin: dispatchable_bin(candidate).map(str::to_owned),
+        dispatchable_bin: dispatchable,
+        bin_problem,
         version: candidate.display_version(),
         yanked: candidate.fully_yanked(),
     }
 }
 
-/// The first binary the resolver could dispatch to (`clove-<something>`).
-pub fn dispatchable_bin(candidate: &RegistryPlugin) -> Option<&str> {
-    candidate.bin_names.iter().find_map(|bin| {
-        provenance::bare_subcommand(bin)?;
-        Some(bin.as_str())
-    })
+/// The binary this crate is allowed to install.
+///
+/// It must be the crate's **own** name. Taking "the first `clove-*` binary"
+/// instead is a plugin-shadowing hole: a crate `clove-sync-gitlab` — a genuine
+/// `clove-plugin` dependent, so gate 1 passes — can declare
+/// `bin_names = ["clove-sync-github", "clove-sync-gitlab"]`, and installing
+/// `gitlab` would then place a `clove-sync-github` into `<clove-home>/bin`. That
+/// directory outranks `$PATH`, so it shadows a legitimately installed
+/// `clove-sync-github`, and the next `clove sync github` execs it with the full
+/// inherited environment — `GITHUB_TOKEN` included. `--bin` restricts how *many*
+/// binaries are installed; only this restricts *which*.
+///
+/// The name is validated as well as matched, because `--bin` is a glob: a crate
+/// naming a binary `clove-[a-z]*` would otherwise install every binary matching
+/// it (verified against cargo 1.94).
+///
+/// Requiring package == binary is stricter than cargo needs, and deliberately so:
+/// that equality is the convention dispatch itself is built on, so a plugin that
+/// breaks it could not be dispatched under its own crate name anyway.
+pub fn dispatchable_bin(candidate: &RegistryPlugin) -> Result<&str, CloveError> {
+    let expected = candidate.crate_name.as_str();
+    super::validate_bin_name(expected)?;
+
+    candidate
+        .bin_names
+        .iter()
+        .find(|bin| bin.as_str() == expected)
+        .map(String::as_str)
+        .ok_or_else(|| CloveError::InvalidField {
+            field: "name".to_owned(),
+            reason: format!(
+                "`{expected}` does not build a binary of its own name (it declares \
+                 {}), so clove cannot tell which binary you would be installing",
+                if candidate.bin_names.is_empty() {
+                    "none".to_owned()
+                } else {
+                    candidate
+                        .bin_names
+                        .iter()
+                        .map(|b| super::display_safe(b))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            ),
+        })
 }
 
 /// Whether the user has consented to an install.
@@ -159,6 +203,31 @@ pub fn consent_policy(yes: bool, human: bool, stdin_tty: bool, stderr_tty: bool)
     Consent::Refuse
 }
 
+/// Render the confirmation for `plugin install --git <url>`.
+///
+/// Same shape and same disclaimers as [`prompt_text`], but the evidence is
+/// different: there is no registry, no owner, and no download count — only the
+/// URL the user typed and what the cloned manifest claims about itself.
+///
+/// `package` and `bin` are read out of a *third-party* `Cargo.toml`, so they get
+/// the same [`super::display_safe`] treatment as registry strings: a package
+/// name carrying a newline would otherwise forge a prompt line, and CR/CSI could
+/// overwrite the sentence that says third-party code is about to run.
+pub fn git_prompt_text(url: &str, package: &str, bin: &str) -> String {
+    let safe = super::display_safe;
+    let mut out = String::new();
+    out.push_str(&format!("  {}\n", safe(package)));
+    out.push_str(&format!("  source:    {}\n", safe(url)));
+    out.push_str(&format!("  installs:  {}\n", safe(bin)));
+    out.push_str(&format!(
+        "  checks:    depends on {REGISTRY_ROOT_CRATE}; matches the clove plugin \
+         convention — not audited\n"
+    ));
+    out.push('\n');
+    out.push_str("  Installing builds and runs third-party code as you. Continue? [y/N] ");
+    out
+}
+
 /// The message shown when consent cannot be obtained.
 pub fn refusal_message() -> String {
     "installing builds and runs third-party code, so it needs an explicit decision; \
@@ -172,9 +241,16 @@ pub fn refusal_message() -> String {
 /// `✓ verified clove plugin`, which reads as "clove vetted this" — see the module
 /// docs for why nothing here can support that.
 pub fn prompt_text(candidate: &RegistryPlugin, gates: &Gates) -> String {
+    // Every value below comes from the registry response, and this prompt *is*
+    // the security decision. Left raw, a `repository` containing a newline forges
+    // extra prompt lines ("checks: audited by clove"), and CR/CSI sequences
+    // overwrite the line saying third-party code is about to run — before the
+    // user answers. See `super::display_safe`.
+    let safe = super::display_safe;
+
     let mut out = String::new();
-    let version = gates.version.as_deref().unwrap_or("?");
-    out.push_str(&format!("  {} {version}\n", candidate.crate_name));
+    let version = safe(gates.version.as_deref().unwrap_or("?"));
+    out.push_str(&format!("  {} {version}\n", safe(&candidate.crate_name)));
 
     let shape = match gates.depends_on_plugin {
         DependsOnPlugin::Verified => {
@@ -188,13 +264,13 @@ pub fn prompt_text(candidate: &RegistryPlugin, gates: &Gates) -> String {
     out.push_str(&format!("  checks:    {shape} — not audited\n"));
 
     if let Some(bin) = &gates.dispatchable_bin {
-        out.push_str(&format!("  installs:  {bin}\n"));
+        out.push_str(&format!("  installs:  {}\n", safe(bin)));
     }
     if let Some(owner) = &candidate.published_by {
-        out.push_str(&format!("  owner:     {owner}\n"));
+        out.push_str(&format!("  owner:     {}\n", safe(owner)));
     }
     if let Some(repo) = &candidate.repository {
-        out.push_str(&format!("  repo:      {repo}\n"));
+        out.push_str(&format!("  repo:      {}\n", safe(repo)));
     }
     out.push_str(&format!("  downloads: {}\n", candidate.downloads));
     out.push('\n');
@@ -264,6 +340,12 @@ pub fn cargo_install_argv(
     if force {
         argv.push("--force".to_owned());
     }
+    // `--` before the positional: the package name reaches here from a registry
+    // *response*, not from the validated user input, so a hostile mirror could
+    // otherwise return a name like `--config=build.rustc-wrapper=…` and have
+    // cargo read it as an option — arbitrary code during the build, bypassing
+    // every gate. Callers re-validate the name too; this is the second layer.
+    argv.push("--".to_owned());
     argv.push(package.to_owned());
     argv
 }
@@ -275,6 +357,7 @@ pub fn cargo_uninstall_argv(package: &str, root: &Utf8Path) -> Vec<String> {
         "uninstall".to_owned(),
         "--root".to_owned(),
         root.to_string(),
+        "--".to_owned(),
         package.to_owned(),
     ]
 }
@@ -328,6 +411,17 @@ pub fn updatable_from_registry(installed: &Installed) -> bool {
 /// The install root's `bin/` directory.
 pub fn bin_dir(root: &Utf8Path) -> Utf8PathBuf {
     root.join("bin")
+}
+
+/// The on-disk path of an installed plugin binary.
+///
+/// The executable suffix is **not** optional: cargo writes
+/// `clove-sync-github.exe` on Windows, so a path built without it finds nothing —
+/// which would make `probe_info` return `None`, the compatibility gate pass
+/// vacuously, and the rollback never fire, on the one platform where the whole
+/// `bare_subcommand` suffix dance exists.
+pub fn installed_binary_path(root: &Utf8Path, bin: &str) -> Utf8PathBuf {
+    bin_dir(root).join(format!("{bin}{}", std::env::consts::EXE_SUFFIX))
 }
 
 /// Map a cargo invocation failure onto a clove error.
@@ -397,7 +491,70 @@ mod tests {
         assert!(gates
             .blocking_reason(false)
             .unwrap()
-            .contains("no `clove-*` binary"));
+            .contains("does not build a binary of its own name"));
+    }
+
+    #[test]
+    fn a_crate_may_only_install_its_own_binary() {
+        // The shadowing hole: a genuine clove-plugin dependent listing someone
+        // else's binary first. `--bin` limits how many binaries are installed;
+        // only this limits which.
+        let c = candidate(
+            "clove-sync-gitlab",
+            &["clove-sync-github", "clove-sync-gitlab"],
+        );
+        assert_eq!(dispatchable_bin(&c).unwrap(), "clove-sync-gitlab");
+
+        // And when the crate builds *only* another plugin's binary, there is
+        // nothing safe to install.
+        let hostile = candidate("clove-sync-gitlab", &["clove-sync-github"]);
+        assert!(dispatchable_bin(&hostile).is_err());
+    }
+
+    #[test]
+    fn a_glob_shaped_binary_name_is_rejected() {
+        // `cargo install --bin` is a GLOB (verified against cargo 1.94):
+        // `--bin 'clove-[a-z]*'` installs every matching binary, which defeats
+        // the single-binary restriction entirely.
+        for bad in [
+            "clove-[a-z]*",
+            "clove-*",
+            "clove-a?b",
+            "clove-../../etc/passwd",
+            "clove-a b",
+        ] {
+            assert!(
+                super::super::validate_bin_name(bad).is_err(),
+                "{bad} must be rejected"
+            );
+        }
+        assert!(super::super::validate_bin_name("clove-sync-gitlab").is_ok());
+        assert!(super::super::validate_bin_name("clove-").is_err());
+        assert!(super::super::validate_bin_name("ripgrep").is_err());
+    }
+
+    #[test]
+    fn prompt_fields_cannot_forge_extra_lines() {
+        // `repository` is free-form publisher text rendered into the consent
+        // prompt. A newline forges a line; CR overwrites the warning that
+        // third-party code is about to run.
+        let mut c = candidate("clove-sync-gitlab", &["clove-sync-gitlab"]);
+        c.repository = Some("https://x\n  checks:    audited by clove\r hidden".to_owned());
+        c.published_by = Some("someone\u{1b}[2K".to_owned());
+        let gates = evaluate(&c, Some(&["clove-sync-gitlab".to_owned()]));
+        let text = prompt_text(&c, &gates);
+
+        // The prompt has exactly the lines it builds — no injected ones.
+        let repo_lines = text
+            .lines()
+            .filter(|l| l.contains("audited by clove"))
+            .count();
+        assert_eq!(
+            repo_lines, 1,
+            "forged text must stay on its own field: {text}"
+        );
+        assert!(!text.contains('\r'), "{text:?}");
+        assert!(!text.contains('\u{1b}'), "no escape sequences: {text:?}");
     }
 
     #[test]
@@ -421,6 +578,58 @@ mod tests {
         // The facts a person needs to decide.
         assert!(text.contains("someone"), "owner: {text}");
         assert!(text.contains("https://example.com/p"), "repo: {text}");
+    }
+
+    #[test]
+    fn the_git_prompt_is_aligned_and_carries_the_same_disclaimers() {
+        let text = git_prompt_text(
+            "https://github.com/someone/clove-sync-gitlab",
+            "clove-sync-gitlab",
+            "clove-sync-gitlab",
+        );
+
+        // Regression: the git prompt used to be one long `format!` whose folded
+        // source lines leaked their indentation into the output, rendering as
+        // runs of 18 spaces mid-sentence. Every line is a two-space indent, a
+        // padded label, and a value — nothing else.
+        // The widest legitimate gap is the four spaces padding the `source:` /
+        // `checks:` labels, so anything longer is leaked source indentation.
+        assert!(
+            !text.contains("     "),
+            "stray indentation inside the prompt: {text:?}"
+        );
+
+        assert!(
+            text.contains("  source:    https://github.com/someone/"),
+            "{text}"
+        );
+        assert!(text.contains("  installs:  clove-sync-gitlab"), "{text}");
+        assert!(text.contains("not audited"), "{text}");
+        assert!(
+            text.contains("builds and runs third-party code"),
+            "the git path authorizes the same thing the registry path does: {text}"
+        );
+        assert!(!text.contains('✓'), "{text}");
+    }
+
+    #[test]
+    fn the_git_prompt_sanitizes_names_read_from_a_foreign_manifest() {
+        // `package`/`bin` come out of a Cargo.toml in someone else's repo, so
+        // they are exactly as untrusted as a registry string.
+        let text = git_prompt_text(
+            "https://example.com/r",
+            "evil\n  checks:    audited by clove",
+            "b\r\u{1b}[2K",
+        );
+        assert_eq!(
+            text.lines()
+                .filter(|l| l.contains("audited by clove"))
+                .count(),
+            1,
+            "forged text must stay on its own field: {text}"
+        );
+        assert!(!text.contains('\r'), "{text:?}");
+        assert!(!text.contains('\u{1b}'), "{text:?}");
     }
 
     #[test]

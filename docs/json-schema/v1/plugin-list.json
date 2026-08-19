@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://clove.dev/schema/v1/plugin-list.json",
+  "title": "clove plugin list/search envelope",
+  "description": "A `clove plugin list [--all]` or `clove plugin search <text>` response. One row per plugin. Rows come from two sources that share this shape: a plugin installed on this machine (`installed: true`, with a real `path` and a probed `version`) and one discovered on crates.io but not installed (`installed: false`, `path`/`version` null, `latest_version` set). `status` is always the host<->plugin *compatibility* verdict, never registry freshness — an uninstalled row has no compatibility verdict yet and reports `available`. Discovery is strictly additive: when crates.io cannot be reached the installed rows still print, `ok` stays true, and the cause appears in `_meta.warnings`.",
+  "type": "object",
+  "required": ["v", "ok", "data"],
+  "properties": {
+    "v": { "const": 1 },
+    "ok": { "const": true },
+    "data": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/plugin" }
+    },
+    "_meta": { "$ref": "#/$defs/pluginListMeta" }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "plugin": {
+      "type": "object",
+      "required": [
+        "name",
+        "binary",
+        "path",
+        "version",
+        "about",
+        "provides",
+        "commands",
+        "installed",
+        "status"
+      ],
+      "properties": {
+        "name": {
+          "description": "The bare plugin name — the binary with its `clove-` prefix removed. Derived from a *dispatchable* binary, so it always names something the resolver could actually find.",
+          "type": "string"
+        },
+        "binary": {
+          "description": "The executable clove would dispatch to. Null only when a discovered crate ships no `clove-`-prefixed binary at all.",
+          "type": ["string", "null"]
+        },
+        "path": {
+          "description": "Absolute path of the installed executable; null for a discovered-but-not-installed plugin.",
+          "type": ["string", "null"]
+        },
+        "version": {
+          "description": "The version the installed binary reports when probed. Null when the plugin is not installed, or when the probe failed (`status: \"no_info\"`).",
+          "type": ["string", "null"]
+        },
+        "latest_version": {
+          "description": "The newest version published to crates.io. Present only on rows that came from discovery. This — not `status` — is where \"a newer release exists\" lives.",
+          "type": ["string", "null"]
+        },
+        "about": {
+          "description": "One-line description: the plugin's own `--help` summary when installed, the crates.io description when discovered.",
+          "type": ["string", "null"]
+        },
+        "provides": {
+          "description": "Multiplexer providers the plugin claims (e.g. `github` for `clove sync github`). Empty for a discovered plugin — only a probe of the installed binary can answer this.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "commands": {
+          "description": "The `clove ...` invocations that resolve to this plugin.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "installed": { "type": "boolean" },
+        "status": {
+          "description": "Host<->plugin compatibility verdict (PLUGIN_REGISTRY §4). `available` means \"not installed here, so not yet judged\".",
+          "enum": [
+            "ok",
+            "outdated",
+            "needs_newer_clove",
+            "no_info",
+            "available"
+          ]
+        },
+        "crate": {
+          "description": "The crates.io crate name. Present on discovered rows; it can differ from `binary` (a crate may publish a binary under another name).",
+          "type": "string"
+        },
+        "repository": { "type": ["string", "null"] },
+        "published_by": { "type": ["string", "null"] },
+        "downloads": { "type": "integer", "minimum": 0 },
+        "yanked": {
+          "description": "Every published version of the crate is yanked.",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "pluginListMeta": {
+      "title": "plugin list `_meta`",
+      "description": "Row counts split by where each row came from, plus the non-fatal warnings channel. `installed_count + available_count == count` always — on `search` the counts are computed from the rows' own `installed` flags, so they cannot contradict them. `additionalProperties` is false so a new key has to be described here rather than shipping invisible to a generated client.",
+      "type": "object",
+      "properties": {
+        "count": { "type": "integer", "minimum": 0 },
+        "installed_count": { "type": "integer", "minimum": 0 },
+        "available_count": { "type": "integer", "minimum": 0 },
+        "warnings": {
+          "description": "Non-fatal problems — notably a discovery failure, which degrades the response rather than failing it. This is the repo-wide warnings channel, not a plugin-specific invention.",
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -93,6 +93,28 @@ plugin. Discovery is strictly additive: if it is unavailable, the installed list
 still prints and plugin dispatch is unaffected; the cause appears in
 `_meta.warnings`.
 
+`clove plugin` also installs and removes them, so you never have to translate a
+provider name into a crate name by hand:
+
+```sh
+clove plugin install sync-github     # resolves to the clove-sync-github crate
+clove plugin install --git https://github.com/you/clove-sync-gitlab   # unpublished
+clove plugin update                  # re-resolve every clove-installed plugin
+clove plugin uninstall sync-github
+```
+
+Installing builds and runs third-party code, so `install`/`update` print what
+they resolved — crate, version, binary, owner, downloads — and **ask before
+proceeding**. They never claim a plugin is vetted; clove does not audit
+plugins, and every signal in that prompt is one the publisher controls. A run
+with no terminal to ask on (CI, an agent) **refuses** rather than proceeding
+silently — pass `--yes` to state the decision explicitly. Plugins land in
+clove's own install root, not `~/.cargo/bin`, so `clove plugin uninstall` only
+ever removes something clove put there. `--git` builds a specific commit: the
+tree clove inspected is the tree cargo builds, even if you named a mutable
+branch or tag. See [`docs/PLUGIN_REGISTRY.md`](docs/PLUGIN_REGISTRY.md) for the
+gates, the install root, and the JSON shapes.
+
 ## Quick start
 
 ```sh

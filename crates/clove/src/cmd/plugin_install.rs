@@ -77,6 +77,12 @@ fn install_from_git(
     let found = git_source::find_plugins(&clone)?;
     let chosen = git_source::select(&found, args.package.as_deref())?;
 
+    // Build exactly the commit that was just inspected. cargo does its own
+    // clone, so without this the user approves one tree and cargo builds
+    // whatever the host serves the second time; a tag or branch is a mutable
+    // name, not a commitment.
+    let pinned = GitRef::Rev(git_source::resolve_head(&clone)?);
+
     let mut warnings = Vec::new();
     if reference.is_none() {
         warnings.push(git_source::unpinned_warning(url));
@@ -95,10 +101,7 @@ fn install_from_git(
             for warning in &warnings {
                 eprintln!("warning: {warning}");
             }
-            let prompt = format!(
-                "  {} from {url}\n  builds:    {}\n  checks:    depends on                  {REGISTRY_ROOT_CRATE}; matches the clove plugin convention — not audited\n\n                   Installing builds and runs third-party code as you. Continue? [y/N] ",
-                chosen.package, chosen.bin
-            );
+            let prompt = install::git_prompt_text(url, &chosen.package, &chosen.bin);
             if !install::ask_confirmation(&prompt) {
                 emit(
                     format,
@@ -118,7 +121,7 @@ fn install_from_git(
 
     let argv = git_source::cargo_install_argv(
         url,
-        reference.as_ref(),
+        Some(&pinned),
         &chosen.package,
         &chosen.bin,
         &home,
@@ -126,12 +129,12 @@ fn install_from_git(
     );
     run_cargo(&argv, "install")?;
 
-    let installed_path = install::bin_dir(&home).join(&chosen.bin);
-    if let Some(reason) = incompatible_reason(&chosen.package, &installed_path) {
-        let _ = run_cargo(&rollback_argv(&chosen.package, &home), "uninstall");
+    let installed_path = install::installed_binary_path(&home, &chosen.bin);
+    let probe = crate::plugin::probe_info(&installed_path);
+    if let Some(reason) = incompatible_reason(&chosen.package, probe.as_ref()) {
         return Err(CloveError::InvalidField {
             field: "--git".to_owned(),
-            reason,
+            reason: roll_back(&chosen.package, &home, &installed_path, reason),
         });
     }
 
@@ -147,6 +150,7 @@ fn install_from_git(
             "package": chosen.package,
             "binary": chosen.bin,
             "source": url,
+            "commit": match &pinned { GitRef::Rev(sha) => sha.as_str(), _ => "" },
             "path": installed_path.as_str(),
         }),
         &format!("installed {} from {url} as {}", chosen.package, chosen.bin),
@@ -166,6 +170,11 @@ fn install_from_registry(
     let client = CratesIo::new(&fetch);
 
     let candidate = resolve_candidate(&client, name)?;
+    // The name that reaches cargo's argv comes from the registry response, not
+    // from the validated user input, so it is re-checked here. `validate_crate_name`
+    // documents itself as the single choke point for anything entering a URL or a
+    // subprocess argv; this is the call that makes that true on the way back.
+    crate::registry::validate_crate_name(&candidate.crate_name)?;
 
     // Gate 1 evidence, fetched live. `None` = the registry could not be
     // consulted, which is reported rather than silently treated as a pass.
@@ -257,13 +266,12 @@ fn install_from_registry(
     // executed the crate's build scripts, so it is not a safety check — it is a
     // compatibility check, and an incompatible plugin must be removed rather than
     // left resolvable on the search path.
-    let installed_path = install::bin_dir(&home).join(bin);
+    let installed_path = install::installed_binary_path(&home, bin);
     let probe = crate::plugin::probe_info(&installed_path);
-    if let Some(reason) = incompatible_reason(&candidate.crate_name, &installed_path) {
-        let _ = run_cargo(&rollback_argv(&candidate.crate_name, &home), "uninstall");
+    if let Some(reason) = incompatible_reason(&candidate.crate_name, probe.as_ref()) {
         return Err(CloveError::InvalidField {
             field: "name".to_owned(),
-            reason,
+            reason: roll_back(&candidate.crate_name, &home, &installed_path, reason),
         });
     }
 
@@ -307,14 +315,36 @@ fn install_from_registry(
     Ok(())
 }
 
+/// Remove a rejected install, and report honestly whether that worked.
+///
+/// The previous code discarded the uninstall's result while telling the user
+/// "the install has been rolled back" unconditionally. If the rollback fails the
+/// rejected binary is still in `<clove-home>/bin`, which outranks `$PATH` — so
+/// the message must not assert an action that did not happen, and must say what
+/// to delete.
+fn roll_back(package: &str, home: &Utf8Path, installed_path: &Utf8Path, reason: String) -> String {
+    match run_cargo(&rollback_argv(package, home), "uninstall") {
+        Ok(()) => format!("{reason}; the install has been rolled back"),
+        Err(_) => format!(
+            "{reason}. Rolling the install back FAILED — `{installed_path}` is still \
+             present and is on the plugin search path. Remove it manually."
+        ),
+    }
+}
+
 /// Why the freshly-installed binary is unusable with this clove, if it is.
 ///
 /// This is gate 3, and it runs *after* cargo has built and therefore already
 /// executed the crate's build script — so it is a compatibility check, not a
 /// safety one. A failure must roll the install back: the binary is already in
 /// `<clove-home>/bin`, which is on the plugin search path.
-fn incompatible_reason(package: &str, installed_path: &Utf8Path) -> Option<String> {
-    let info = crate::plugin::probe_info(installed_path)?;
+///
+/// The probe is taken as an argument rather than performed here so the caller
+/// spawns the just-downloaded third-party binary exactly **once**. Probing again
+/// internally meant two executions of an unvetted program, and two places whose
+/// verdicts could disagree if the second one answered differently.
+fn incompatible_reason(package: &str, probe: Option<&crate::plugin::ProbedInfo>) -> Option<String> {
+    let info = probe?;
     (info.min_clove_plugin_api > clove_plugin::CLOVE_PLUGIN_API).then(|| {
         format!(
             "`{package}` needs a newer clove (it requires plugin API {}, this clove \
@@ -325,12 +355,57 @@ fn incompatible_reason(package: &str, installed_path: &Utf8Path) -> Option<Strin
     })
 }
 
+/// Find the clove-installed plugin a user-typed name refers to.
+///
+/// `install` resolves a bare name through a candidate ladder (`gitlab` →
+/// `clove-sync-gitlab`), so `uninstall` and `update` must resolve it the same
+/// way or the name that installed a plugin cannot remove or update it. Matching
+/// only the literal subcommand meant `clove plugin install gitlab` succeeded and
+/// `clove plugin uninstall gitlab` answered "no plugin `gitlab` was installed by
+/// clove" — about a plugin clove had just installed.
+///
+/// An exact subcommand match wins outright (`uninstall sync-gitlab` is
+/// unambiguous by construction). Only when there is none does the mux ladder
+/// apply, and a name that expands to more than one installed plugin is refused
+/// rather than guessed at — the same rule `install` applies to an ambiguous
+/// name, and removing the wrong plugin is not recoverable by re-running.
+fn find_installed(home: &Utf8Path, name: &str) -> Result<Option<Installed>, CloveError> {
+    let bare = name.strip_prefix("clove-").unwrap_or(name);
+    if let Some(found) = provenance::find_by_subcommand(home, bare) {
+        return Ok(Some(found));
+    }
+
+    let mut matches: Vec<Installed> = crate::registry::candidate_crate_names(bare)
+        .iter()
+        .filter_map(|crate_name| {
+            let subcommand = crate_name.strip_prefix("clove-")?;
+            provenance::find_by_subcommand(home, subcommand)
+        })
+        .collect();
+
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(Some(matches.remove(0))),
+        _ => Err(CloveError::InvalidField {
+            field: "name".to_owned(),
+            reason: format!(
+                "`{bare}` is ambiguous — {} are all installed. Name one exactly.",
+                matches
+                    .iter()
+                    .map(|i| i.package.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }),
+    }
+}
+
 /// `clove plugin uninstall <name>` — offline, resolved from cargo's bookkeeping.
 pub fn run_uninstall(format: OutputFormat, args: &PluginUninstallArgs) -> Result<(), CloveError> {
     let home = crate::clove_home::clove_home()?;
-    let name = args.name.trim_start_matches("clove-");
+    let name = args.name.strip_prefix("clove-").unwrap_or(&args.name);
 
-    let Some(installed) = provenance::find_by_subcommand(&home, name) else {
+    let Some(installed) = find_installed(&home, &args.name)? else {
         // Distinguish "clove did not install this" from "nothing by that name":
         // an existing plugin from `cargo install` resolves, but not from our root.
         if let Some(path) = crate::plugin::resolve(&[name]) {
@@ -366,26 +441,37 @@ pub fn run_update(format: OutputFormat, args: &PluginUpdateArgs) -> Result<(), C
     let home = crate::clove_home::clove_home()?;
     let all = provenance::installed_under(&home);
 
+    // `--all` is the explicit spelling of the no-name default — clap rejects it
+    // alongside a name, so it never changes *which* plugins are checked. It is
+    // read rather than ignored so the scope reaches the JSON: a caller can tell
+    // "checked everything" from "checked the one I named" without re-parsing
+    // argv, and `checked: 0` stops being ambiguous between the two.
+    let scope = if args.all || args.name.is_none() {
+        "all"
+    } else {
+        "one"
+    };
+
     let targets: Vec<Installed> = match &args.name {
-        Some(name) => {
-            let bare = name.trim_start_matches("clove-");
-            match all.into_iter().find(|i| i.provides_subcommand(bare)) {
-                Some(found) => vec![found],
-                None => {
-                    return Err(CloveError::InvalidField {
-                        field: "name".to_owned(),
-                        reason: format!("no plugin `{bare}` was installed by clove"),
-                    })
-                }
+        Some(name) => match find_installed(&home, name)? {
+            Some(found) => vec![found],
+            None => {
+                return Err(CloveError::InvalidField {
+                    field: "name".to_owned(),
+                    reason: format!(
+                        "no plugin `{}` was installed by clove",
+                        name.strip_prefix("clove-").unwrap_or(name)
+                    ),
+                })
             }
-        }
+        },
         None => all,
     };
 
     if targets.is_empty() {
         emit(
             format,
-            json!({ "updated": [], "checked": 0 }),
+            json!({ "updated": [], "checked": 0, "scope": scope }),
             "no clove-installed plugins to update",
         );
         return Ok(());
@@ -395,34 +481,85 @@ pub fn run_update(format: OutputFormat, args: &PluginUpdateArgs) -> Result<(), C
     let client = CratesIo::new(&fetch);
 
     // Resolve what each would move to, and show it before doing anything.
-    let mut plans: Vec<(Installed, Option<String>)> = Vec::new();
+    //
+    // A *transport* failure aborts rather than being folded into "no newer
+    // version known". Swallowing it made `update` print "everything is up to
+    // date" while offline — the exact conflation `resolve_candidate` refuses to
+    // make, and the worst possible answer for a scheduled job whose whole purpose
+    // is picking up security fixes.
+    let mut plans: Vec<(Installed, Option<RegistryPlugin>)> = Vec::new();
     for installed in targets {
         let latest = if install::updatable_from_registry(&installed) {
+            crate::registry::validate_crate_name(&installed.package)?;
             client
                 .crate_exists(&installed.package)
-                .ok()
-                .flatten()
-                .and_then(|c| c.display_version())
+                .map_err(CloveError::from)?
         } else {
             None
         };
         plans.push((installed, latest));
     }
 
-    let upgradable: Vec<&(Installed, Option<String>)> = plans
-        .iter()
-        .filter(|(i, latest)| latest.as_deref().is_some_and(|v| v != i.version))
-        .collect();
+    // An update installs *newer* third-party code, so every pre-install gate is
+    // re-run per package. Skipping them meant a crate that had since stopped
+    // depending on `clove-plugin` — the shape of an account takeover publishing a
+    // non-plugin follow-up — was refused by `install` and accepted by `update`.
+    let dependents: Option<Vec<String>> = client
+        .reverse_dependents(REGISTRY_ROOT_CRATE)
+        .map_err(CloveError::from)?
+        .map(|plugins| plugins.into_iter().map(|p| p.crate_name).collect());
 
+    let mut upgradable: Vec<(&Installed, String, String)> = Vec::new();
+    let mut blocked: Vec<String> = Vec::new();
+    for (installed, latest) in &plans {
+        let Some(candidate) = latest else { continue };
+        let Some(version) = candidate.display_version() else {
+            continue;
+        };
+        if version == installed.version {
+            continue;
+        }
+        let gates = install::evaluate(candidate, dependents.as_deref());
+        if let Some(reason) = gates.blocking_reason(args.strict) {
+            blocked.push(format!("  {} is not updated: {reason}", installed.package));
+            continue;
+        }
+        // A yank is the standard response to a compromised release, so it must
+        // never be *offered* as an upgrade.
+        if gates.yanked && !args.allow_yanked {
+            blocked.push(format!(
+                "  {} is not updated: version {version} is yanked",
+                installed.package
+            ));
+            continue;
+        }
+        let Some(bin) = gates.dispatchable_bin.clone() else {
+            continue;
+        };
+        upgradable.push((installed, version, bin));
+    }
+
+    // The plan goes to stderr, the same stream the question is asked on, so
+    // `clove plugin update > log` cannot show a bare [y/N] with the facts
+    // redirected away.
     if format == OutputFormat::Human {
         for (installed, latest) in &plans {
-            println!("{}", install::update_line(installed, latest.as_deref()));
+            eprintln!(
+                "{}",
+                install::update_line(
+                    installed,
+                    latest.as_ref().and_then(|c| c.display_version()).as_deref()
+                )
+            );
+        }
+        for line in &blocked {
+            eprintln!("{line}");
         }
     }
     if upgradable.is_empty() {
         emit(
             format,
-            json!({ "updated": [], "checked": plans.len() }),
+            json!({ "updated": [], "checked": plans.len(), "scope": scope }),
             "everything is up to date",
         );
         return Ok(());
@@ -442,7 +579,7 @@ pub fn run_update(format: OutputFormat, args: &PluginUpdateArgs) -> Result<(), C
             if !install::ask_confirmation("  Update these plugins? [y/N] ") {
                 emit(
                     format,
-                    json!({ "updated": [], "declined": true }),
+                    json!({ "updated": [], "declined": true, "scope": scope }),
                     "not updated",
                 );
                 return Ok(());
@@ -457,23 +594,39 @@ pub fn run_update(format: OutputFormat, args: &PluginUpdateArgs) -> Result<(), C
     }
 
     let mut updated = Vec::new();
-    for (installed, latest) in &upgradable {
-        let Some(bin) = installed.bins.first() else {
+    for (installed, version, bin) in &upgradable {
+        let argv = cargo_install_argv(&installed.package, Some(version), bin, &home, true);
+        // One package failing must not discard the record of those already
+        // updated, so the loop reports what it did rather than aborting.
+        if let Err(error) = run_cargo(&argv, "install") {
+            if format == OutputFormat::Human {
+                eprintln!("warning: {} was not updated: {error}", installed.package);
+            }
             continue;
-        };
-        let argv = cargo_install_argv(&installed.package, latest.as_deref(), bin, &home, true);
-        run_cargo(&argv, "install")?;
+        }
+        // The same post-install compatibility gate as a fresh install, with the
+        // same rollback — an update can just as easily land an incompatible
+        // build, and leaving it resolvable is what the gate exists to prevent.
+        let installed_path = install::installed_binary_path(&home, bin);
+        let probe = crate::plugin::probe_info(&installed_path);
+        if let Some(reason) = incompatible_reason(&installed.package, probe.as_ref()) {
+            let message = roll_back(&installed.package, &home, &installed_path, reason);
+            if format == OutputFormat::Human {
+                eprintln!("warning: {message}");
+            }
+            continue;
+        }
         updated.push(json!({
             "package": installed.package,
             "from": installed.version,
-            "to": latest,
+            "to": version,
         }));
     }
 
     let count = updated.len();
     emit(
         format,
-        json!({ "updated": updated, "checked": plans.len() }),
+        json!({ "updated": updated, "checked": plans.len(), "scope": scope }),
         &format!("updated {count} plugin(s)"),
     );
     Ok(())
@@ -491,32 +644,39 @@ pub fn run_update(format: OutputFormat, args: &PluginUpdateArgs) -> Result<(), C
 fn resolve_candidate(client: &CratesIo, name: &str) -> Result<RegistryPlugin, CloveError> {
     crate::registry::validate_crate_name(name)?;
 
-    let candidates: Vec<String> = if name.starts_with("clove-") {
-        vec![name.to_owned()]
-    } else {
-        ["sync", "import", "export"]
-            .iter()
-            .map(|mux| format!("clove-{mux}-{name}"))
-            .chain(std::iter::once(format!("clove-{name}")))
-            .collect()
-    };
+    // The same ladder `plugin search` probes, from the same function — the two
+    // must agree about what a bare name could mean.
+    let candidates = crate::registry::candidate_crate_names(name);
 
     let mut found: Vec<RegistryPlugin> = Vec::new();
     for candidate in &candidates {
         // A transport failure aborts: a flaky network must never be reported as
         // "no such plugin", which would send the user hunting for a typo.
         match client.crate_exists(candidate) {
-            Ok(Some(plugin)) => found.push(plugin),
-            Ok(None) => {}
+            // ...and the same dispatchability filter. A crate that builds no
+            // `clove-*` binary can never be run as a subcommand, so it is not a
+            // meaning this name could have. Without this, a lib-only
+            // `clove-gitlab` published next to a real `clove-sync-gitlab` made
+            // `search gitlab` show one plugin while `install gitlab` refused the
+            // identical query as ambiguous.
+            Ok(Some(plugin)) if crate::cmd::plugin::is_dispatchable(&plugin) => found.push(plugin),
+            Ok(Some(_)) | Ok(None) => {}
             Err(error) => return Err(CloveError::from(error)),
         }
     }
 
     match found.len() {
+        // "Not found" is the *expected* answer for most names: the plugin
+        // ecosystem is young, so a miss is far more often "nobody has published
+        // that yet" than "you typed it wrong". The message says so, and points
+        // at the two things that actually help — the list of what does exist,
+        // and the escape hatch for something that exists but isn't published.
         0 => Err(CloveError::InvalidField {
             field: "name".to_owned(),
             reason: format!(
-                "no published plugin matches `{name}` (looked for {})",
+                "no plugin named `{name}` is published on crates.io (looked for {}). \
+                 Run `clove plugin list --all` to see what is published, or install \
+                 from source with `clove plugin install --git <url>`.",
                 candidates.join(", ")
             ),
         }),
@@ -579,10 +739,4 @@ fn emit_with_warnings(format: OutputFormat, data: Value, human: &str, warnings: 
             print_json_success(data, json!({ "warnings": warnings }))
         }
     }
-}
-
-/// The install root, for messages that need to name it.
-#[allow(dead_code)]
-fn root_label(home: &Utf8Path) -> String {
-    home.to_string()
 }

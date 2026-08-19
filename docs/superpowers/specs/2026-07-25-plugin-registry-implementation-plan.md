@@ -1,5 +1,25 @@
 # Plugin registry — implementation plan (Stages 1–3)
 
+> ## Status update (2026-08-19): **Stage 2 has shipped.**
+>
+> This document was written when Stage 2 (work items **E** — git source — and
+> **F** — `install`/`uninstall`/`update`) was deferred, and the text below still
+> reads that way in places. It shipped on this same branch:
+>
+> - `2c63fc1` — item F: `clove plugin install|uninstall|update` against crates.io
+> - `ccc617c` — item E: `clove plugin install --git <url>`
+>
+> So read every "deferred", "when Stage 2 lands", and the whole of **§7** as a
+> record of *why it was deferred at the time* and what changed — not as a
+> description of the current tree. §7 in particular is preserved deliberately:
+> its three reasons are what the shipped implementation had to answer, and it
+> now carries a note saying how each was answered. The **requirements in §5 are
+> still live** — they are the checklist the implementation was built against.
+>
+> The shipped behaviour is specified in
+> [`docs/PLUGIN_REGISTRY.md`](../../PLUGIN_REGISTRY.md) §5, which is the
+> authority; this plan is a historical record of how the work was sequenced.
+
 > **Revision 2 (2026-07-25)** — revised after a four-lens adversarial review
 > (Rust/API correctness, codebase fit, security, completeness). 40 findings; the
 > material ones are folded in below and summarized in §8. Two changes are
@@ -88,7 +108,7 @@ download). Both are addressed; neither name is reused.
 | G | Docs + `RELEASE.md` `-A` fix |
 | H | CI: `aws-lc-sys` absence assertion |
 
-### Stage 2 — install (deferred; §7)
+### Stage 2 — install (deferred at the time; **shipped in `2c63fc1`/`ccc617c`** — see §7)
 
 Work items E (git source) and F (install/uninstall/update). The full
 requirement set, including everything the security review surfaced, is recorded
@@ -349,7 +369,7 @@ cause rather than letting §4D's degradation swallow it as an ordinary outage.
 path handles it either way, but preventing beats recovering). The clock is a
 parameter, not `Utc::now()` inline.
 
-**The cache is for `list --all`/`search` only.** When Stage 2 lands, install
+**The cache is for `list --all`/`search` only.** This is what Stage 2 shipped: install
 gates must fetch evidence live — otherwise anyone who can write that file, or
 set `$CLOVE_HOME`, decides what counts as a verified plugin.
 
@@ -420,7 +440,7 @@ Exit code cannot be the signal: absent-from-lockfile exits 101, present-but-
 filtered-out exits 0 with "nothing to print" on stderr. `aws-lc-sys` stays in
 `Cargo.lock` via `clove-sync-github`, so the check asserts **empty stdout**.
 
-## 5. Stage 2 requirements (deferred, recorded so they survive)
+## 5. Stage 2 requirements (recorded here while deferred; **this is the checklist the shipped implementation was built against**)
 
 The security review found the install path materially under-specified. Recording
 the full set here is the point of deferring rather than dropping it.
@@ -521,9 +541,13 @@ Also required, none of it in revision 1:
 `cargo test --workspace`, plus `cargo deny check` for item B. No `clove-web`
 change, so the npm checks are not required.
 
-## 7. Why Stage 2 is deferred
+## 7. Why Stage 2 was deferred — and what answered each reason
 
-Not scope-trimming for its own sake — three independent reasons converge:
+> **Historical.** Stage 2 shipped in `2c63fc1` / `ccc617c` (see the banner at the
+> top of this file). This section is kept because its three reasons are exactly
+> what the implementation had to satisfy; each now carries how it was answered.
+
+Not scope-trimming for its own sake — three independent reasons converged:
 
 1. **It is sequencing-blocked.** `plugin install` against crates.io should not
    ship before the first-party names are published, and publishing is an owner
@@ -538,6 +562,27 @@ Not scope-trimming for its own sake — three independent reasons converge:
    them is provisional or waiting on a publish.
 
 Shipping a half-hardened installer would be worse than shipping none.
+
+**How each was answered when Stage 2 landed:**
+
+1. *Sequencing.* Still true, and now handled in the release runbook rather than
+   by deferring code: `docs/RELEASE.md` §2a makes publishing the three
+   first-party plugin crates a **gate before `clove-cli`**, so the shorthand
+   `clove plugin install sync-github` can never go live pointing at a name
+   someone else owns. The test suite proves the behaviour without publishing
+   anything — `crates/clove/tests/plugin_install.rs` runs an in-process mock
+   crates.io, so the code is exercised *as if* the crates were published.
+2. *Code-execution risk.* Landed as the one coherent design this section asked
+   for, in a single stage: argv validation (`validate_crate_name` /
+   `validate_bin_name` as the sole choke point), the consent rule
+   (non-interactive **refuses** — `install::consent_policy`), `--bin` pinned to
+   the crate's own name (a glob-shaped or foreign binary name is refused),
+   `--version =X.Y.Z` pinning, post-install rollback on the compatibility gate,
+   `.crates2.json` provenance so `uninstall` can only remove what clove
+   installed, and commit-pinning on the `--git` path so the inspected tree is
+   the built tree.
+3. *Stage 1 independence.* Held — Stage 1 shipped and was useful on its own for
+   the two commits before Stage 2 arrived.
 
 ## 8. Findings ledger
 

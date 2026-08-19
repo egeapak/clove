@@ -27,8 +27,6 @@ use std::time::Duration;
 use camino::{Utf8Path, Utf8PathBuf};
 use clove_types::CloveError;
 
-use super::provenance;
-
 /// How long any single git subprocess may run.
 ///
 /// The `--clove-plugin-info` probe is bounded at 500ms and the HTTP client at 8s;
@@ -251,6 +249,31 @@ pub fn shallow_clone(
     Ok(())
 }
 
+/// The commit the working clone is actually at.
+///
+/// This closes the gap between "what clove inspected and showed the user" and
+/// "what cargo builds". `cargo install --git` performs its **own** clone, so the
+/// two fetches are independent: `--tag` and `--branch` are server-side mutable
+/// names that cargo re-resolves, and a hostile or compromised host can serve a
+/// different commit the second time. Only a commit id is content-addressed, so
+/// the resolved sha is what gets passed on — the user's `--tag`/`--branch` selects
+/// the commit, and this pins it.
+pub fn resolve_head(clone: &Utf8Path) -> Result<String, CloveError> {
+    let output = git(&["rev-parse", "HEAD"], Some(clone))?;
+    if !output.status.success() {
+        return Err(CloveError::Registry {
+            message: "could not resolve the cloned commit".to_owned(),
+        });
+    }
+    let sha = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if sha.len() < 40 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(CloveError::Registry {
+            message: format!("git returned an implausible commit id `{sha}`"),
+        });
+    }
+    Ok(sha)
+}
+
 /// Which revision of a repository to install.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GitRef {
@@ -310,8 +333,15 @@ pub fn find_plugins(clone: &Utf8Path) -> Result<Vec<GitPlugin>, CloveError> {
         ])
         .stdin(Stdio::null())
         .output()
-        .map_err(|e| CloveError::Registry {
-            message: format!("could not run cargo metadata: {e}"),
+        // A missing cargo is the single most likely failure here and has a
+        // specific remedy, so it gets the same actionable message the install
+        // path gives rather than a bare OS error. `git` is already handled this
+        // way in this module; cargo was the one that was not.
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => super::install::cargo_missing(),
+            _ => CloveError::Registry {
+                message: format!("could not run cargo metadata: {e}"),
+            },
         })?;
     if !output.status.success() {
         return Err(CloveError::Registry {
@@ -351,16 +381,25 @@ pub fn plugins_from_metadata(metadata: &serde_json::Value) -> Vec<GitPlugin> {
             continue;
         }
         // 2. builds a dispatchable binary.
+        let Some(package_name) = package["name"].as_str() else {
+            continue;
+        };
+        // The binary must be the package's own, validated name — the same rule
+        // the crates.io path applies, and for the same reason: taking "the first
+        // clove-* target" lets a package install a binary belonging to a
+        // different plugin into a directory that outranks `$PATH`. The name is
+        // also validated because `--bin` is a glob.
         let bin = package["targets"].as_array().and_then(|targets| {
             targets.iter().find_map(|t| {
                 let is_bin = t["kind"]
                     .as_array()
                     .is_some_and(|k| k.iter().any(|k| k == "bin"));
                 let name = t["name"].as_str()?;
-                (is_bin && provenance::bare_subcommand(name).is_some()).then(|| name.to_owned())
+                (is_bin && name == package_name && super::validate_bin_name(name).is_ok())
+                    .then(|| name.to_owned())
             })
         });
-        let (Some(bin), Some(package_name)) = (bin, package["name"].as_str()) else {
+        let Some(bin) = bin else {
             continue;
         };
         out.push(GitPlugin {

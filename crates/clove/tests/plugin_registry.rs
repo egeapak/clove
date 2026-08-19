@@ -301,10 +301,12 @@ fn list_all_degrades_to_the_installed_set_when_discovery_fails() {
 }
 
 #[test]
-fn jsonl_carries_the_discovery_warning_too() {
-    // `print_jsonl_items` has no `_meta` channel, so a discovery failure used to
-    // vanish entirely in jsonl — making it indistinguishable from "nothing to
-    // report". The trailing meta line closes that.
+fn jsonl_reports_the_discovery_warning_without_breaking_its_line_shape() {
+    // jsonl is "one envelope per line, `data` is a single item" (DESIGN §7.3).
+    // A discovery failure must still be reported, but not by appending a
+    // `_meta`-only line to stdout: that line has no `data`, so `jq -r .data.name`
+    // emits a spurious `null` for it, and this was the only jsonl surface in the
+    // repo that did it. The warning goes to stderr, where human mode prints it.
     let (plugin_dir, _echo) = install_echo_as("clove-echo");
     let home = tempfile::tempdir().unwrap();
 
@@ -325,11 +327,17 @@ fn jsonl_carries_the_discovery_warning_too() {
         lines.iter().any(|l| l["data"]["name"] == "echo"),
         "installed plugin missing: {out}"
     );
+    for line in &lines {
+        assert!(
+            line.get("data").is_some(),
+            "every jsonl line is an item envelope: {out}"
+        );
+    }
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(
-        lines.iter().any(|l| l
-            .get("_meta")
-            .is_some_and(|m| !m["warnings"].as_array().is_some_and(|w| w.is_empty()))),
-        "no trailing _meta line carrying the registry error: {out}"
+        stderr.contains("warning:"),
+        "the discovery failure must still reach the user: stderr={stderr:?} stdout={out}"
     );
 }
 

@@ -265,16 +265,28 @@ pub struct PluginUninstallArgs {
 /// `clove plugin update [<name>] [--all]`.
 #[derive(Debug, Args)]
 pub struct PluginUpdateArgs {
-    /// The plugin to update. Omit (or pass `--all`) to check every one.
+    /// The plugin to update. Omit to check every one.
     pub name: Option<String>,
 
-    /// Check every clove-installed plugin.
-    #[arg(long)]
+    /// Check every clove-installed plugin. This is the default when no name is
+    /// given; the flag exists so the intent can be stated explicitly.
+    #[arg(long, conflicts_with = "name")]
     pub all: bool,
 
     /// Skip the confirmation. Required for any non-interactive run.
     #[arg(long)]
     pub yes: bool,
+
+    /// Treat an unverifiable `clove-plugin` dependency as fatal, as on install.
+    #[arg(long)]
+    pub strict: bool,
+
+    /// Update to a version even when it is yanked.
+    ///
+    /// A yank is the usual response to a compromised or broken release, so an
+    /// update never moves to one without this.
+    #[arg(long)]
+    pub allow_yanked: bool,
 }
 
 /// `clove plugin list [--all] [--refresh]`.

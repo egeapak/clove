@@ -213,15 +213,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     (`--upload-pack`, `--template`, `--config`) execute code.
   - `uninstall` works offline, resolving the cargo *package* from cargo's own
     bookkeeping (the package and the binary routinely differ). `update` shows
-    each old → new version first, and never re-resolves a git-sourced install
-    through crates.io.
+    each old → new version first, re-runs every pre-install gate (an update
+    installs *newer* third-party code, so a crate that has since stopped
+    depending on `clove-plugin` is refused, and a yanked release is never
+    offered without `--allow-yanked`), and never re-resolves a git-sourced
+    install through crates.io.
+  - `uninstall` and `update` accept the **same bare name that installed** the
+    plugin: `install gitlab` → `uninstall gitlab`, resolved through the same
+    candidate ladder. An exact subcommand match still wins outright, and a bare
+    name matching two installed plugins is refused rather than guessed at.
+  - Published JSON schemas: `docs/json-schema/v1/plugin-list.json` for
+    `list`/`search` and `plugin-install.json` for the mutating commands, both
+    validated against real command output. `ok: true` does not mean something
+    changed — "declined", "already installed" and "nothing to update" are all
+    successful outcomes, and the schema says which payload means which.
 - `<clove-home>/bin` joins the plugin search path (between `$CLOVE_PLUGIN_PATH`
   and `$PATH`), resolved from `$CLOVE_HOME`, else `$XDG_DATA_HOME/clove`, else
   `~/.local/share/clove` (`%APPDATA%\clove` on Windows).
 - New `REGISTRY_ERROR` error classification (exit 5) for registry failures.
-  No shipped command returns it: discovery degrades to a warning at exit 0
-  by design. It is the classification for callers where a registry failure
-  is fatal, which today means none of them.
+  `plugin install`/`uninstall`/`update` return it when the registry, `cargo` or
+  `git` cannot be reached — a failed install must not look like a successful
+  one. `plugin list`/`search` deliberately do not: discovery is optional, so
+  they degrade to a warning at exit 0.
 
 ### Changed
 
@@ -548,6 +561,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`clove plugin list --format jsonl` no longer appends a non-item line.** It
+  had grown a trailing `{v, ok, _meta}` line to carry the discovery warning,
+  making it the only jsonl surface in the repo whose last line has no `data` —
+  so `jq -r .data.name` emitted a spurious `null`, contradicting the documented
+  "one envelope per line, `data` is a single item" contract. The warning now
+  goes to stderr, as it already did in human mode; `--format json` remains the
+  way to consume it structurally.
 - **A malformed number in a web query string silently meant the default.**
   `?limit=abc` and `?limit=-5` fell through `.ok()` to the endpoint default —
   which on the web is *unlimited* — so a client typo asking for one page

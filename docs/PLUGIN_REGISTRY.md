@@ -7,7 +7,7 @@
 > |---|---|
 > | §2 compat probe, §3 enriched `list`, §6 dynamic `--help` | **Shipped** (`cdea402`) |
 > | §7 search path & install root | **Shipped**, with one correction — the root is *not* `~/.clove`; see below |
-> | §1 registry manifest, §4 `list --all`, §5 `install` | **Superseded** by [`crates.io as the clove plugin registry`](superpowers/specs/2026-07-24-crates-io-plugin-registry-design.md). `list --all`/`search` shipped against crates.io; install is deferred to Stage 2 of the [implementation plan](superpowers/specs/2026-07-25-plugin-registry-implementation-plan.md) |
+> | §1 registry manifest, §4 `list --all`, §5 `install` | **Superseded** by [`crates.io as the clove plugin registry`](superpowers/specs/2026-07-24-crates-io-plugin-registry-design.md). All of `list --all`, `search`, `install`, `uninstall` and `update` have shipped against crates.io — but **not** as §5 describes them; see the §5 banner |
 > | §8 Phase 3 (prebuilt download, sha256, `plugins.json`, `CLOVE_PLUGINS`) | **Superseded, not scheduled** — `cargo install` replaces it, and `release.yml` already bundles the plugin binaries |
 >
 > Two adopted decisions below did not survive contact with reality:
@@ -213,15 +213,18 @@ clean); human output shows an *Installed* and an *Available* section. A
 registry-fetch failure **degrades** — the Installed section still prints, with the
 error as a warning (`_meta.warnings`).
 
-## 5. `clove plugin install / uninstall / update` — SUPERSEDED (deferred)
+## 5. `clove plugin install / uninstall / update` — SUPERSEDED (shipped, differently)
 
-> Install is **not implemented**. The crates.io design replaces the
-> curated-manifest resolution here, and the security review of the
-> implementation plan found this section materially under-specified —
-> notably the **"non-TTY/JSON proceeds (scriptable)"** rule below, which is
-> **dead**: proceeding without a prompt is unattended execution of
-> third-party code. The full corrected requirement set lives in §5 of the
-> [implementation plan](superpowers/specs/2026-07-25-plugin-registry-implementation-plan.md).
+> Install **has shipped**, but resolves against crates.io rather than the
+> curated manifest, and with a materially different security posture than this
+> section describes. The rule below that reads **"non-TTY/JSON proceeds
+> (scriptable)"** is **dead and inverted**: a non-interactive run now *refuses*,
+> because proceeding without a prompt is unattended execution of third-party
+> code. Also changed: `--bin` restricts the install to the crate's own binary,
+> the post-install probe rolls a rejected install back, and the confirmation
+> makes no "verified" claim. The shipped behaviour is described in §5 of the
+> [implementation plan](superpowers/specs/2026-07-25-plugin-registry-implementation-plan.md)
+> and in `clove agent-doc`.
 
 
 - **`install <name>`** resolves `name` **only** through the curated manifest,
@@ -333,9 +336,12 @@ with no user `PATH` edits, and cargo's `--root` metadata enumerates them for
 
 ## 9. Implementation surface (host-only; no new published crate) — SUPERSEDED
 
-> The shipped layout is `crates/clove/src/registry/{mod,http,crates_io,cache}.rs`
-> plus `crates/clove/src/clove_home.rs` — not the `{manifest,fetch,install}.rs`
-> named below. `registry/plugins.toml` was never created (§1).
+> The shipped layout is
+> `crates/clove/src/registry/{mod,http,crates_io,cache,install,provenance,git_source}.rs`
+> plus `crates/clove/src/clove_home.rs` and the two command modules
+> `crates/clove/src/cmd/{plugin,plugin_install}.rs` — not the
+> `{manifest,fetch,install}.rs` named below. `registry/plugins.toml` was never
+> created (§1).
 
 
 - `crates/clove-plugin/src/run.rs` — the compat fields on `PluginInfo` + its JSON.

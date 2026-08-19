@@ -15,6 +15,30 @@ pub const DEFAULT_API_ROOT: &str = "https://crates.io/api/v1";
 /// Overrides the API root — for tests (pointing at a local mock or a dead
 /// address) and for a registry mirror. Mirrors the existing
 /// `CLOVE_GITHUB_API_URL` seam used by the GitHub sync tests.
+///
+/// # Why this is trusted when the discovery cache is not
+///
+/// `install` refuses to read the TTL cache (`cache.rs`) on the grounds that it
+/// is writable by anyone who can set `$CLOVE_HOME` — which invites the obvious
+/// objection that this variable is settable by that same actor, and controls the
+/// *whole* registry answer including gate 1. The two are genuinely different,
+/// and the difference is **when** the influence is exercised:
+///
+/// - The environment of the running process is already fully trusted, and
+///   necessarily so. Whoever sets `$CLOVE_REGISTRY_URL` for this run can equally
+///   set `$PATH` or `$CLOVE_PLUGIN_PATH` and simply have clove exec their own
+///   binary — no registry required. Defending the registry root against an actor
+///   who already chooses what clove executes buys nothing.
+/// - The cache is a **file that outlives the run that wrote it**. A later
+///   `clove plugin install`, in a clean environment, with no attacker present,
+///   would read it and let it decide what counts as a plugin. That is influence
+///   crossing a trust boundary, and it is the one worth closing.
+///
+/// Consequently this is a plain override with no scheme restriction (the test
+/// harness points it at `http://127.0.0.1:<port>`), while the cache exclusion is
+/// absolute. If clove ever grows a *persisted* registry-root setting — a config
+/// file rather than an env var — it lands on the cache's side of this line and
+/// needs the same treatment.
 pub const API_ROOT_ENV: &str = "CLOVE_REGISTRY_URL";
 
 /// crates.io caps `per_page` at 100 — `per_page=200` is an HTTP 400, not a

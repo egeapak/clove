@@ -155,6 +155,15 @@ fn parse_pkgid(pkgid: &str) -> Option<(String, String, Source)> {
     if name.is_empty() || version.is_empty() {
         return None;
     }
+    // The package name is handed to `cargo uninstall`/`cargo install` as argv,
+    // and this file lives in `$CLOVE_HOME`, which the rest of this module already
+    // treats as attacker-writable. An entry whose name is not a legal crate name
+    // is dropped rather than passed on — a name like
+    // `--config=build.rustc-wrapper=…` would otherwise be read by cargo as an
+    // option. Same discipline as "an unparseable key is skipped, not guessed at".
+    if super::validate_crate_name(name).is_err() {
+        return None;
+    }
     Some((name.to_owned(), version.to_owned(), parse_source(source)))
 }
 

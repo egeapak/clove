@@ -96,6 +96,20 @@ impl MockCratesIo {
             .insert(name.to_owned(), body);
     }
 
+    /// Publish a crate whose only version is yanked.
+    fn publish_yanked(&self, name: &str, version: &str, bin: &str) {
+        let body = json!({
+            "crate": {"name": name, "description": "y", "repository": null, "downloads": 1},
+            "versions": [{
+                "id": 1, "crate": name, "num": version, "yanked": true,
+                "bin_names": [bin], "published_by": {"login": "publisher"}
+            }]
+        });
+        let mut s = self.state.lock().unwrap();
+        s.crates.insert(name.to_owned(), body);
+        s.dependents.push(name.to_owned());
+    }
+
     fn unpublish_registry_root(&self) {
         self.state.lock().unwrap().registry_published = false;
     }
@@ -351,10 +365,16 @@ fn a_crate_the_registry_does_not_vouch_for_is_refused() {
     env.registry
         .publish_plugin("clove-sync-gitlab", "0.2.0", "clove-sync-gitlab");
 
-    env.clove()
+    let assert = env
+        .clove()
         .args(["plugin", "install", "evil", "--yes"])
         .assert()
         .failure();
+    let err = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        err.contains("does not depend on `clove-plugin`"),
+        "must fail on gate 1 specifically, not resolution or ambiguity: {err}"
+    );
     assert!(
         !cargo_log(&env.bin).contains("install"),
         "cargo must never be invoked for a crate the registry disowns"
@@ -579,11 +599,20 @@ fn installing_something_already_installed_is_a_no_op_without_force() {
 #[test]
 fn a_traversal_or_flag_shaped_name_never_reaches_cargo_or_a_url() {
     let env = env_with(&compatible_plugin());
+    // `--yes` goes *before* `--`, or clap rejects it as a second positional and
+    // the command dies in argument parsing — passing the test without ever
+    // reaching `validate_crate_name`.
     for name in ["../../summary", "--config=x"] {
-        env.clove()
-            .args(["plugin", "install", "--", name, "--yes"])
+        let assert = env
+            .clove()
+            .args(["plugin", "install", "--yes", "--", name])
             .assert()
             .failure();
+        let err = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+        assert!(
+            err.contains("crate name"),
+            "must fail on name validation, not argument parsing: {err}"
+        );
     }
     assert!(
         cargo_log(&env.bin).is_empty(),
@@ -831,10 +860,17 @@ fn a_tag_pins_the_install_and_suppresses_the_moving_branch_warning() {
         "a pinned install has nothing to warn about: {v}"
     );
 
+    // cargo is given the resolved commit, not the tag: a tag is a mutable
+    // server-side name that cargo would re-resolve in its own clone, so only the
+    // sha ties what clove inspected to what cargo builds.
     let log = cargo_log(&env.bin);
     assert!(
-        log.contains("--tag v1.0.0"),
-        "the pin must reach cargo: {log}"
+        log.contains("--rev "),
+        "the commit pin must reach cargo: {log}"
+    );
+    assert!(
+        !log.contains("--tag"),
+        "the mutable tag must not be what cargo resolves: {log}"
     );
 }
 
@@ -852,4 +888,420 @@ fn a_flag_shaped_git_url_never_reaches_git() {
             .failure();
     }
     assert!(cargo_log(&env.bin).is_empty());
+}
+
+#[test]
+fn a_crate_cannot_install_a_binary_belonging_to_another_plugin() {
+    // The shadowing hole: `clove-sync-gitlab` is a genuine clove-plugin
+    // dependent, so gate 1 passes — but it declares someone else's binary first.
+    // Installing it must not place a `clove-sync-github` into <clove-home>/bin,
+    // which outranks $PATH and would receive GITHUB_TOKEN on the next dispatch.
+    let env = env_with(&compatible_plugin());
+    env.registry.publish(
+        "clove-sync-gitlab",
+        "1.0.0",
+        &["clove-sync-github", "clove-sync-gitlab"],
+    );
+    env.registry
+        .state
+        .lock()
+        .unwrap()
+        .dependents
+        .push("clove-sync-gitlab".to_owned());
+
+    env.clove()
+        .args(["plugin", "install", "gitlab", "--yes"])
+        .assert()
+        .success();
+
+    // The crate's *own* binary is installed; the one it listed first, belonging
+    // to another plugin, is ignored entirely.
+    let log = cargo_log(&env.bin);
+    assert!(log.contains("--bin clove-sync-gitlab"), "{log}");
+    assert!(
+        !log.contains("clove-sync-github"),
+        "another plugin's binary must never be installed: {log}"
+    );
+}
+
+#[test]
+fn a_crate_that_builds_no_binary_of_its_own_name_is_refused() {
+    // If the only clove-* binary belongs to someone else, there is nothing safe
+    // to install and clove must not pick it.
+    let env = env_with(&compatible_plugin());
+    env.registry
+        .publish("clove-sync-gitlab", "1.0.0", &["clove-sync-github"]);
+    env.registry
+        .state
+        .lock()
+        .unwrap()
+        .dependents
+        .push("clove-sync-gitlab".to_owned());
+
+    let assert = env
+        .clove()
+        .args(["plugin", "install", "gitlab", "--yes"])
+        .assert()
+        .failure();
+    let err = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        err.contains("does not build a binary of its own name"),
+        "{err}"
+    );
+    assert!(!cargo_log(&env.bin).contains("install"));
+}
+
+#[test]
+fn a_glob_shaped_binary_name_is_refused() {
+    // `cargo install --bin` takes a GLOB. A crate naming a binary
+    // `clove-[a-z]*` would otherwise install every binary matching it —
+    // verified against cargo 1.94 — defeating the single-binary restriction.
+    let env = env_with(&compatible_plugin());
+    env.registry
+        .publish_plugin("clove-sync-gitlab", "1.0.0", "clove-[a-z]*");
+
+    env.clove()
+        .args(["plugin", "install", "gitlab", "--yes"])
+        .assert()
+        .failure();
+    assert!(
+        !cargo_log(&env.bin).contains("install"),
+        "a glob-shaped bin name must never reach cargo"
+    );
+}
+
+#[test]
+fn update_re_runs_the_gates_that_install_applies() {
+    // A crate that has since stopped depending on clove-plugin — the shape of an
+    // account takeover publishing a non-plugin follow-up — is refused by
+    // `install`, and must be by `update`.
+    let env = env_with(&compatible_plugin());
+    env.seed_installed(
+        "clove-sync-gitlab 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+        &["clove-sync-gitlab"],
+    );
+    env.registry
+        .publish("clove-sync-gitlab", "2.0.0", &["clove-sync-gitlab"]);
+    env.registry
+        .publish_plugin("clove-sync-other", "1.0.0", "clove-sync-other");
+
+    let assert = env
+        .clove()
+        .args(["--format", "json", "plugin", "update", "--yes"])
+        .assert()
+        .success();
+    let v: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(
+        v["data"]["updated"].as_array().unwrap().len(),
+        0,
+        "a crate that is no longer a plugin must not be updated into place: {v}"
+    );
+    assert!(!cargo_log(&env.bin).contains("install"));
+}
+
+#[test]
+fn update_does_not_move_to_a_yanked_version() {
+    // A yank is the standard response to a compromised release.
+    let env = env_with(&compatible_plugin());
+    env.seed_installed(
+        "clove-sync-gitlab 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+        &["clove-sync-gitlab"],
+    );
+    env.registry
+        .publish_yanked("clove-sync-gitlab", "0.9.9", "clove-sync-gitlab");
+
+    let assert = env
+        .clove()
+        .args(["--format", "json", "plugin", "update", "--yes"])
+        .assert()
+        .success();
+    let v: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(v["data"]["updated"].as_array().unwrap().len(), 0, "{v}");
+    assert!(!cargo_log(&env.bin).contains("install"));
+}
+
+#[test]
+fn update_fails_loudly_when_the_registry_is_unreachable() {
+    // It used to print "everything is up to date" while offline — the worst
+    // possible answer for a scheduled job whose purpose is picking up fixes.
+    let env = env_with(&compatible_plugin());
+    env.seed_installed(
+        "clove-sync-gitlab 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+        &["clove-sync-gitlab"],
+    );
+
+    let assert = env
+        .clove()
+        .env("CLOVE_REGISTRY_URL", "http://127.0.0.1:1/api/v1")
+        .args(["plugin", "update", "--yes"])
+        .assert()
+        .failure();
+    let out = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(!out.contains("up to date"), "{out}");
+}
+
+#[test]
+fn a_git_install_is_pinned_to_the_commit_that_was_inspected() {
+    // cargo does its own clone, so a tag or branch is a mutable name the host
+    // re-resolves. Only the resolved sha ties what was shown to what is built.
+    let env = env_with(&compatible_plugin());
+    let repo = env._tmp.path().join("srcrepo");
+    make_repo(&repo, &[("clove-sync-gitlab", "clove-sync-gitlab", "")]);
+    run(Command::new("git")
+        .args(["tag", "v1.0.0"])
+        .current_dir(&repo));
+
+    let assert = env
+        .clove()
+        .args([
+            "--format",
+            "json",
+            "plugin",
+            "install",
+            "--git",
+            &format!("file://{}", repo.display()),
+            "--tag",
+            "v1.0.0",
+            "--yes",
+        ])
+        .assert()
+        .success();
+    let v: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    let commit = v["data"]["commit"].as_str().unwrap_or_default();
+    assert_eq!(commit.len(), 40, "a full sha must be recorded: {v}");
+
+    let log = cargo_log(&env.bin);
+    assert!(
+        log.contains(&format!("--rev {commit}")),
+        "cargo must build the inspected commit, not re-resolve the tag: {log}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Published JSON schemas
+// ---------------------------------------------------------------------------
+//
+// `clove plugin` is the newest machine-readable surface in the CLI, and it was
+// the only one shipping without a schema — so a client generated from
+// `docs/json-schema/v1/` simply could not see it. These tests hold the two
+// schemas to the same contract every other command's schema has: every key the
+// command actually emits is described, and `additionalProperties: false` means
+// a new key cannot ship invisibly.
+
+/// Compile a schema from `docs/json-schema/v1/<name>`.
+fn plugin_schema(name: &str) -> jsonschema::Validator {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/json-schema/v1")
+        .join(name);
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    jsonschema::validator_for(&serde_json::from_str(&text).unwrap()).expect("valid schema")
+}
+
+fn assert_matches(validator: &jsonschema::Validator, instance: &Value) {
+    if let Err(error) = validator.validate(instance) {
+        panic!("schema violation: {error} in {instance:#}");
+    }
+}
+
+/// The row for plugin `name`, which must be present.
+fn row<'a>(envelope: &'a Value, name: &str) -> &'a Value {
+    envelope["data"]
+        .as_array()
+        .expect("data is an array")
+        .iter()
+        .find(|row| row["name"] == name)
+        .unwrap_or_else(|| panic!("no `{name}` row in {envelope:#}"))
+}
+
+fn json_of(assert: &assert_cmd::assert::Assert) -> Value {
+    serde_json::from_slice(assert.get_output().stdout.as_slice()).expect("valid JSON")
+}
+
+#[test]
+fn every_install_outcome_matches_the_published_schema() {
+    let schema = plugin_schema("plugin-install.json");
+    let env = env_with(&compatible_plugin());
+    env.registry
+        .publish_plugin("clove-sync-gitlab", "0.2.0", "clove-sync-gitlab");
+
+    // 1. A fresh install.
+    let installed = json_of(
+        &env.clove()
+            .args(["--format", "json", "plugin", "install", "gitlab", "--yes"])
+            .assert()
+            .success(),
+    );
+    assert_matches(&schema, &installed);
+    assert_eq!(installed["data"]["installed"], true, "{installed}");
+
+    // The fake cargo does not keep cargo's books, so record the install the way
+    // cargo would. Everything after this reads `.crates2.json`.
+    env.seed_installed(
+        "clove-sync-gitlab 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+        &["clove-sync-gitlab"],
+    );
+
+    // 2. The no-op: already installed, no --force. `ok` is true and nothing
+    //    changed — the payload is the only thing that says so.
+    let already = json_of(
+        &env.clove()
+            .args(["--format", "json", "plugin", "install", "gitlab", "--yes"])
+            .assert()
+            .success(),
+    );
+    assert_matches(&schema, &already);
+    assert_eq!(already["data"]["already_installed"], true, "{already}");
+
+    // 3. Nothing newer to move to.
+    let current = json_of(
+        &env.clove()
+            .args(["--format", "json", "plugin", "update", "--yes"])
+            .assert()
+            .success(),
+    );
+    assert_matches(&schema, &current);
+    assert_eq!(current["data"]["scope"], "all", "{current}");
+
+    // 4. An actual upgrade.
+    env.registry
+        .publish_plugin("clove-sync-gitlab", "0.3.0", "clove-sync-gitlab");
+    let updated = json_of(
+        &env.clove()
+            .args(["--format", "json", "plugin", "update", "--yes"])
+            .assert()
+            .success(),
+    );
+    assert_matches(&schema, &updated);
+    assert_eq!(updated["data"]["updated"][0]["to"], "0.3.0", "{updated}");
+
+    // 5. Removal — by the same bare name that installed it.
+    let removed = json_of(
+        &env.clove()
+            .args(["--format", "json", "plugin", "uninstall", "gitlab"])
+            .assert()
+            .success(),
+    );
+    assert_matches(&schema, &removed);
+    assert_eq!(removed["data"]["uninstalled"], true, "{removed}");
+}
+
+#[test]
+fn install_from_git_matches_the_published_schema() {
+    // The `--git` payload carries `source`/`commit` instead of `version`, so it
+    // is a distinct branch of the schema's `oneOf`.
+    let env = env_with(&compatible_plugin());
+    let repo = env.home.parent().unwrap().join("gitrepo");
+    make_repo(&repo, &[("clove-sync-gitlab", "clove-sync-gitlab", "")]);
+
+    let out = json_of(
+        &env.clove()
+            .args([
+                "--format",
+                "json",
+                "plugin",
+                "install",
+                "--git",
+                &format!("file://{}", repo.display()),
+                "--yes",
+            ])
+            .assert()
+            .success(),
+    );
+    assert_matches(&plugin_schema("plugin-install.json"), &out);
+    assert!(out["data"]["commit"].as_str().is_some(), "{out}");
+}
+
+#[test]
+fn plugin_list_and_search_match_the_published_schema() {
+    let schema = plugin_schema("plugin-list.json");
+    let env = env_with(&compatible_plugin());
+    env.registry
+        .publish_plugin("clove-sync-gitlab", "0.2.0", "clove-sync-gitlab");
+    env.registry
+        .publish_plugin("clove-import-jira", "1.1.0", "clove-import-jira");
+
+    // Discovery only: both rows are `installed: false`, so the schema sees the
+    // registry-derived fields (`crate`, `downloads`, `latest_version`, `yanked`).
+    let discovered = json_of(
+        &env.clove()
+            .args(["--format", "json", "plugin", "list", "--all"])
+            .assert()
+            .success(),
+    );
+    assert_matches(&schema, &discovered);
+    // The ambient `$PATH` carries this repo's own built plugins, so the counts
+    // are not fixed — assert on the rows this test actually published.
+    assert_eq!(
+        row(&discovered, "sync-gitlab")["installed"],
+        false,
+        "{discovered}"
+    );
+    assert!(
+        row(&discovered, "import-jira")["latest_version"]
+            .as_str()
+            .is_some(),
+        "a discovered row carries the published version: {discovered}"
+    );
+
+    // Install one, so the same schema now has to cover a row that is both
+    // discovered and installed — the merge that carries a real `path`,
+    // a probed `version`, and a compat `status` rather than `available`.
+    env.clove()
+        .args(["--format", "json", "plugin", "install", "gitlab", "--yes"])
+        .assert()
+        .success();
+
+    let mixed = json_of(
+        &env.clove()
+            .args(["--format", "json", "plugin", "list", "--all"])
+            .assert()
+            .success(),
+    );
+    assert_matches(&schema, &mixed);
+    let gitlab = row(&mixed, "sync-gitlab");
+    assert_eq!(gitlab["installed"], true, "{mixed}");
+    assert!(
+        gitlab["path"]
+            .as_str()
+            .is_some_and(|p| p.contains("clove-home")),
+        "an installed row must carry the real path from clove's install root: {mixed}"
+    );
+    assert_eq!(
+        gitlab["status"], "ok",
+        "an installed row reports the compat verdict, not `available`: {mixed}"
+    );
+
+    let searched = json_of(
+        &env.clove()
+            .args(["--format", "json", "plugin", "search", "gitlab"])
+            .assert()
+            .success(),
+    );
+    assert_matches(&schema, &searched);
+    assert_eq!(
+        row(&searched, "sync-gitlab")["installed"],
+        true,
+        "{searched}"
+    );
+}
+
+#[test]
+fn a_degraded_discovery_still_matches_the_list_schema() {
+    // Discovery is additive: with crates.io unreachable the command still
+    // succeeds, and the failure has to travel in `_meta.warnings` — which is
+    // only a real contract if the schema describes it.
+    let env = env_with(&compatible_plugin());
+    let mut cmd = env.clove();
+    cmd.env("CLOVE_REGISTRY_URL", "http://127.0.0.1:1/api/v1");
+    let out = json_of(
+        &cmd.args(["--format", "json", "plugin", "list", "--all"])
+            .assert()
+            .success(),
+    );
+    assert_matches(&plugin_schema("plugin-list.json"), &out);
+    assert!(
+        !out["_meta"]["warnings"].as_array().unwrap().is_empty(),
+        "an unreachable registry must be reported, not silently empty: {out}"
+    );
 }

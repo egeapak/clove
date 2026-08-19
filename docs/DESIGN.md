@@ -932,6 +932,14 @@ regardless of warnings.
 **`jsonl` format:** one envelope per line, `"data"` is a single item (not array). Enables
 `clove ls --format jsonl | while read line; do ...; done`.
 
+Every line is an item envelope — jsonl carries **no `_meta`**, and no command
+appends a trailing metadata line. A line without `data` would make
+`jq -r .data.<field>` emit a spurious `null` at the end of the stream, which is
+exactly the per-line consumption this format exists for. A command with warnings
+to report (a failed plugin-registry lookup, say) prints them to **stderr** in
+this format, as human mode does; use `--format json` when the warnings must be
+machine-readable.
+
 ### 7.4 Item JSON Schema (v1)
 
 `clove show <id> --format json` returns:
@@ -1014,6 +1022,14 @@ every producer of the list envelope, so each key is optional: `search` emits no
 all. `crates/clove/tests/schema_validation.rs` validates real command output
 against these and asserts a wrong-typed key is rejected.
 
+`clove plugin` has its own two schemas, because its rows are plugins rather than
+items: `plugin-list.json` (the `list`/`search` envelope, whose `_meta` carries
+`count`/`installed_count`/`available_count` alongside `warnings`) and
+`plugin-install.json` (the `install`/`uninstall`/`update` payloads — a `oneOf`,
+since `ok: true` covers "installed", "declined", "already installed" and
+"nothing to update", and only the payload distinguishes them). Both are
+validated against real command output in `crates/clove/tests/plugin_install.rs`.
+
 **The MCP page is the same response with the envelope flattened.** A tool result
 has no `{v, ok, data, _meta}` wrapper, so what the CLI reports under `_meta`
 travels as plain keys beside `items`:
@@ -1049,7 +1065,7 @@ the model one copy), so both stay.
 | 2 | NotFound | Item does not exist |
 | 3 | CycleDetected | `dep add` when a cycle-path is detected; also used with `--fail-on-cycle` flag on `dep cycle` |
 | 4 | ValidationError | Bad field value, ID collision, invalid priority |
-| 5 | IoError | `.clove/` missing, file unreadable, filesystem error; also the plugin registry being unreachable (`REGISTRY_ERROR`), which is reserved for callers where that is fatal — `plugin list`/`search` deliberately degrade to a warning at exit 0 instead |
+| 5 | IoError | `.clove/` missing, file unreadable, filesystem error; also `REGISTRY_ERROR` — the plugin registry, `cargo` or `git` unreachable, returned by `plugin install`/`uninstall`/`update`. `plugin list`/`search` instead degrade to a warning at exit 0, since discovery is optional |
 | 6 | IndexError | Stale index with `--strict`; index unrecoverable |
 | 7 | DaemonError | Daemon communication failure |
 

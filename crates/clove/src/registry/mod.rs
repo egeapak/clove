@@ -165,6 +165,82 @@ pub trait Fetch {
     fn get(&self, url: &str) -> Result<Option<String>, FetchError>;
 }
 
+/// The maximum length of a plugin binary name.
+const MAX_BIN_NAME: usize = 64;
+
+/// Validate a binary name that will become a `cargo install --bin` argument.
+///
+/// **`--bin` is a glob pattern, not a literal.** Verified against cargo 1.94:
+/// a crate declaring `[[bin]] name = "clove-[a-z]*"` alongside
+/// `clove-import-thing` and `clove-sync-github`, installed with
+/// `--bin 'clove-[a-z]*'`, installs **both** real binaries. So the
+/// "only the binary the user approved" restriction is worth exactly as much as
+/// this validation: without it, a crate picks its own glob and lands any number
+/// of binaries in `<clove-home>/bin` — which outranks `$PATH` and whose contents
+/// receive the full inherited environment, `GITHUB_TOKEN` included, on the next
+/// dispatch.
+///
+/// The name arrives from the registry response or a cloned `Cargo.toml`, neither
+/// of which clove controls and neither of which cargo validates for this purpose,
+/// so it is checked here before it becomes argv. Rejecting everything outside
+/// `[A-Za-z0-9_-]` closes the glob metacharacters (`*?[]{}`), path separators and
+/// `..` in one rule.
+pub fn validate_bin_name(name: &str) -> Result<(), clove_types::CloveError> {
+    let invalid = |reason: String| clove_types::CloveError::InvalidField {
+        field: "bin".to_owned(),
+        reason,
+    };
+
+    let Some(rest) = name.strip_prefix("clove-") else {
+        return Err(invalid(format!(
+            "`{name}` is not a dispatchable plugin binary (must be `clove-<name>`)"
+        )));
+    };
+    if rest.is_empty() {
+        return Err(invalid(
+            "a plugin binary needs a name after `clove-`".to_owned(),
+        ));
+    }
+    if name.len() > MAX_BIN_NAME {
+        return Err(invalid(format!(
+            "binary name is longer than {MAX_BIN_NAME} characters"
+        )));
+    }
+    if let Some(bad) = name
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || *c == '-' || *c == '_'))
+    {
+        return Err(invalid(format!(
+            "binary name {name:?} contains {bad:?}; only letters, digits, `-` and `_`              are allowed (cargo treats `--bin` as a glob, so a name containing              `*`, `?` or `[` would install binaries the user never approved)"
+        )));
+    }
+    Ok(())
+}
+
+/// Render an untrusted string for display on a single terminal line.
+///
+/// Every field shown in the install confirmation — crate name, binary, owner,
+/// repository, git URL — comes from a registry response or a cloned manifest, and
+/// the confirmation *is* the security decision. Left raw, a `repository` value
+/// containing a newline forges extra prompt lines ("checks: audited by clove"),
+/// and CR or CSI sequences overwrite the line stating that third-party code is
+/// about to run, before the user answers.
+///
+/// So: control characters (C0, DEL and C1) are dropped rather than escaped —
+/// nothing legitimate needs them — and the result is clamped, because a very long
+/// value scrolls the real facts off screen just as effectively.
+pub fn display_safe(value: &str) -> String {
+    const MAX: usize = 200;
+    let mut out: String = value
+        .chars()
+        .filter(|c| !c.is_control() && !('\u{80}'..='\u{9f}').contains(c))
+        .collect();
+    if out.chars().count() > MAX {
+        out = out.chars().take(MAX).collect::<String>() + "…";
+    }
+    out
+}
+
 /// The maximum length crates.io allows for a crate name.
 const MAX_CRATE_NAME: usize = 64;
 
@@ -213,6 +289,33 @@ pub fn validate_crate_name(name: &str) -> Result<(), clove_types::CloveError> {
         )));
     }
     Ok(())
+}
+
+/// The crate names a bare plugin name could refer to, in probe order.
+///
+/// `clove plugin search gitlab` and `clove plugin install gitlab` ask the same
+/// question — "what could `gitlab` be?" — so they must build the same list. They
+/// used to build it from two copy-pasted literals, which is how they drifted:
+/// `search` filtered its hits for dispatchability and `install` did not, so a
+/// lib-only `clove-gitlab` published alongside a real `clove-sync-gitlab` made
+/// `search` show one result while `install` refused the same query as ambiguous.
+///
+/// A name already carrying the `clove-` prefix is exact — it names a crate, not a
+/// provider, and must not be expanded into `clove-sync-clove-foo`.
+///
+/// The caller is responsible for validating `name` first; this only assembles
+/// strings.
+pub fn candidate_crate_names(name: &str) -> Vec<String> {
+    if name.starts_with("clove-") {
+        return vec![name.to_owned()];
+    }
+    // Multiplexer providers first (`clove sync gitlab` is the common shape), then
+    // the plain top-level subcommand.
+    ["sync", "import", "export"]
+        .iter()
+        .map(|mux| format!("clove-{mux}-{name}"))
+        .chain(std::iter::once(format!("clove-{name}")))
+        .collect()
 }
 
 #[cfg(test)]

@@ -24,13 +24,17 @@ use clove_types::CloveError;
 use serde_json::{json, Value};
 
 use crate::cli::{PluginListArgs, PluginSearchArgs};
-use crate::output::{print_json_list, print_jsonl_items_with_meta};
+use crate::output::{print_json_list, print_jsonl_items};
 use crate::plugin::{self, EnrichedPlugin, PluginStatus};
 use crate::registry::{self, crates_io::CratesIo, http::UreqFetch, RegistryPlugin};
 
-/// The crate whose reverse dependencies *are* the plugin registry: depending on
-/// `clove-plugin` is what makes a crate a clove plugin.
-const REGISTRY_ROOT_CRATE: &str = "clove-plugin";
+// The crate whose reverse dependencies *are* the plugin registry: depending on
+// `clove-plugin` is what makes a crate a clove plugin. Imported from
+// `registry::install` rather than redeclared here — the two copies held the same
+// value, and a registry whose root differed between `list` and `install` would
+// discover one set of plugins and refuse another.
+use crate::registry::install::REGISTRY_ROOT_CRATE;
+use crate::registry::provenance;
 
 /// The outcome of a discovery attempt.
 enum Discovery {
@@ -163,15 +167,7 @@ fn probe_by_name(query: &str) -> Result<Vec<RegistryPlugin>, CloveError> {
         return Ok(Vec::new());
     }
 
-    let candidates: Vec<String> = if query.starts_with("clove-") {
-        vec![query.to_owned()]
-    } else {
-        ["sync", "import", "export"]
-            .iter()
-            .map(|mux| format!("clove-{mux}-{query}"))
-            .chain(std::iter::once(format!("clove-{query}")))
-            .collect()
-    };
+    let candidates = registry::candidate_crate_names(query);
 
     let fetch = UreqFetch::new();
     let client = CratesIo::new(&fetch);
@@ -261,13 +257,17 @@ fn not_installed(
 /// differently-named binary could never be run as `clove <something>`. Offering
 /// it under "Available" would promise a command that cannot exist.
 ///
-/// The naming convention lives here rather than in the crates.io client so that
-/// client stays a general-purpose registry reader.
-fn is_dispatchable(candidate: &RegistryPlugin) -> bool {
-    candidate.bin_names.iter().any(|bin| {
-        bin.strip_prefix("clove-")
-            .is_some_and(|rest| !rest.is_empty())
-    })
+/// The naming convention lives in [`provenance::bare_subcommand`] rather than in
+/// the crates.io client, so that client stays a general-purpose registry reader —
+/// and rather than inline here, so every "is this binary dispatchable?" answer in
+/// the codebase comes from one function. The inline copies this replaced were not
+/// suffix-aware, so they disagreed with the installed-side check about a
+/// `clove-x.exe`.
+pub fn is_dispatchable(candidate: &RegistryPlugin) -> bool {
+    candidate
+        .bin_names
+        .iter()
+        .any(|bin| provenance::bare_subcommand(bin).is_some())
 }
 
 fn is_installed(candidate: &RegistryPlugin, installed: &[EnrichedPlugin]) -> bool {
@@ -288,7 +288,7 @@ fn installed_match<'a>(
     installed: &'a [EnrichedPlugin],
 ) -> Option<&'a EnrichedPlugin> {
     candidate.bin_names.iter().find_map(|bin| {
-        let bare = bin.strip_prefix("clove-")?;
+        let bare = provenance::bare_subcommand(bin)?;
         installed.iter().find(|p| p.info.name == bare)
     })
 }
@@ -308,9 +308,15 @@ fn render(
         OutputFormat::Json => {
             print_json_list(items, meta(installed.len(), available.len(), warning))
         }
+        // jsonl is "one envelope per line, `data` is a single item"
+        // (DESIGN §7.3), so it carries no `_meta` and a discovery warning goes
+        // to stderr — where human mode already prints it. A trailing
+        // `_meta`-only line would make `jq -r .data.name` emit a spurious
+        // `null` on the last record, and this was the only jsonl surface in the
+        // repo emitting one.
         OutputFormat::Jsonl => {
-            let meta = meta(installed.len(), available.len(), warning);
-            print_jsonl_items_with_meta(&items, meta)
+            warn_on_stderr(warning.as_deref());
+            print_jsonl_items(&items)
         }
     }
     Ok(())
@@ -365,16 +371,23 @@ fn render_search(
                 warning,
             ),
         ),
+        // See the note in `render`: jsonl lines are items only.
         OutputFormat::Jsonl => {
-            let meta = meta(
-                installed_matches,
-                matches.len() - installed_matches,
-                warning,
-            );
-            print_jsonl_items_with_meta(&items, meta)
+            warn_on_stderr(warning.as_deref());
+            print_jsonl_items(&items)
         }
     }
     Ok(())
+}
+
+/// Report a discovery warning on stderr.
+///
+/// Used by the jsonl path, whose lines are items only. Stdout stays parseable —
+/// DESIGN §7.3: stderr is narrative, stdout is JSON.
+fn warn_on_stderr(warning: Option<&str>) {
+    if let Some(warning) = warning {
+        eprintln!("warning: {warning}");
+    }
 }
 
 /// The `_meta` object: counts, plus the discovery warning when there is one.
@@ -440,7 +453,7 @@ fn available_json(plugin: &RegistryPlugin) -> Value {
     let dispatchable: Vec<&str> = plugin
         .bin_names
         .iter()
-        .filter_map(|bin| bin.strip_prefix("clove-").filter(|rest| !rest.is_empty()))
+        .filter_map(|bin| provenance::bare_subcommand(bin))
         .collect();
 
     json!({

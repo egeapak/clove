@@ -6,10 +6,11 @@
 //! concurrent run can never leave a half-written cache — the read path tolerates
 //! corruption anyway, but preventing beats recovering.
 //!
-//! Scope note: this cache serves `list --all` and `search` only. When install
-//! lands it must fetch its verification evidence **live** — a cache is a file
-//! anyone who can set `$CLOVE_HOME` can write, and it must never be able to
-//! decide what counts as a verified plugin.
+//! Scope note: this cache serves `list --all` and `search` only. `install`
+//! fetches its verification evidence **live** and never reads this file — a
+//! cache is a file anyone who can set `$CLOVE_HOME` can write, and it must not
+//! be able to decide what counts as a plugin. That boundary is only meaningful
+//! alongside the one on `$CLOVE_REGISTRY_URL`; see `crates_io.rs`.
 
 use camino::{Utf8Path, Utf8PathBuf};
 use chrono::{DateTime, Duration, Utc};
