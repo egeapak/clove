@@ -42,9 +42,23 @@ const MAX_TEMP_ATTEMPTS: u32 = 8;
 /// invocation for the next 24 hours.
 const MAX_CACHE_BYTES: u64 = 16 * 1024 * 1024;
 
+/// The registry root this process is configured against.
+fn current_root() -> String {
+    std::env::var(super::crates_io::API_ROOT_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| super::crates_io::DEFAULT_API_ROOT.to_owned())
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct CacheFile {
     schema: u32,
+    /// Which registry produced this. A cache file says nothing about *where*
+    /// its answers came from otherwise, so pointing `$CLOVE_REGISTRY_URL` at a
+    /// different registry kept serving the previous one's plugins until the TTL
+    /// expired.
+    #[serde(default)]
+    registry_root: String,
     fetched_at: DateTime<Utc>,
     /// `None` records that the registry itself is absent (`clove-plugin`
     /// unpublished) — distinct from a published registry with no dependents.
@@ -130,6 +144,12 @@ pub fn read(
     }
     let raw = std::fs::read_to_string(&path).ok()?;
     let parsed: CacheFile = serde_json::from_str(&raw).ok()?;
+    if parsed.registry_root != current_root() {
+        // A cache written against a different registry answers for a registry
+        // the user is no longer pointing at — `list --all` served the previous
+        // one's plugins for 24h, and only `--refresh` escaped.
+        return None;
+    }
     if parsed.schema != CACHE_SCHEMA {
         return None;
     }
@@ -152,6 +172,7 @@ pub fn read(
 pub fn write(home: &Utf8Path, now: DateTime<Utc>, plugins: Option<&[RegistryPlugin]>) {
     let file = CacheFile {
         schema: CACHE_SCHEMA,
+        registry_root: current_root(),
         fetched_at: now,
         plugins: plugins.map(|ps| ps.iter().map(CachedPlugin::from).collect()),
     };
@@ -273,6 +294,31 @@ mod tests {
         let now = Utc::now();
         write(&home, now + Duration::hours(48), Some(&sample()));
         assert!(read(&home, now, TTL).is_none());
+    }
+
+    #[test]
+    fn a_cache_from_another_registry_is_a_miss() {
+        // `$CLOVE_REGISTRY_URL` is a documented seam, and the cache file is a
+        // single path under `$CLOVE_HOME` — so without this the answers from
+        // one registry were served for the next 24h after pointing at another.
+        let home = tempfile::tempdir().unwrap();
+        let home = Utf8Path::from_path(home.path()).unwrap();
+        let now = Utc::now();
+
+        std::fs::write(
+            path_in(home),
+            format!(
+                r#"{{"schema":{CACHE_SCHEMA},"registry_root":"https://other.example/api/v1",
+                    "fetched_at":"{}","plugins":[]}}"#,
+                now.to_rfc3339()
+            ),
+        )
+        .unwrap();
+
+        assert!(
+            read(home, now, Duration::hours(24)).is_none(),
+            "a cache written against a different registry must not answer for this one"
+        );
     }
 
     #[test]

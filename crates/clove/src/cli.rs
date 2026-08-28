@@ -110,8 +110,8 @@ Built-in providers: json, jsonl — clove's native restore, the inverse of \
 restores items preserving their ids (an export → import round-trip is a \
 backup/restore); existing ids are skipped unless --overwrite. Comments are not \
 part of a clove export, so they are not restored. Any other provider is an \
-external plugin: tk (a .tickets/ dir) needs clove-import-tk (cargo install \
-clove-import-tk); beads (an issues.jsonl) needs clove-import-beads. A bidirectional \
+external plugin: tk (a .tickets/ dir) needs clove-import-tk (`clove plugin install \
+import-tk`); beads (an issues.jsonl) needs clove-import-beads. A bidirectional \
 plugin can also serve import: `import github` is served by clove-sync-github \
 (pull-only view of the two-way sync).\n\
 Note: clove global flags (--format, --color, --quiet, …) must come BEFORE the \
@@ -130,7 +130,7 @@ e.g. `clove export --format json json --out items.json`.")]
     Export(ExportArgs),
     /// Two-way sync items with a tracker (`github`).
     #[command(after_help = "\
-github requires the clove-sync-github plugin (cargo install clove-sync-github). \
+github requires the clove-sync-github plugin (`clove plugin install sync-github`). \
 There are no built-in sync providers — every provider is an external \
 clove-sync-<provider> plugin. The same clove-sync-github binary also serves the \
 one-way `clove import github` (pull) and `clove export github` (push).\n\
@@ -216,7 +216,11 @@ pub struct PluginInstallArgs {
     /// Uses plain `git`, so any forge works. The repository is cloned shallowly
     /// and its packages inspected; a package qualifies as a plugin only if it
     /// depends on `clove-plugin`, builds a `clove-*` binary, and is publishable.
-    #[arg(long, value_name = "URL")]
+    ///
+    /// Conflicts with a name: `install gitlab --git <url>` silently ignored the
+    /// name and installed whatever the repository held, which could be a
+    /// different plugin entirely.
+    #[arg(long, value_name = "URL", conflicts_with = "name")]
     pub git: Option<String>,
 
     /// With `--git`: install this tag (pins the code being installed).
@@ -251,6 +255,9 @@ pub struct PluginInstallArgs {
     pub strict: bool,
 
     /// Install even when every published version is yanked.
+    ///
+    /// Lifts clove's refusal only — cargo excludes yanked versions from
+    /// resolution and offers no way back in, so the install may still fail.
     #[arg(long)]
     pub allow_yanked: bool,
 }
@@ -281,10 +288,14 @@ pub struct PluginUpdateArgs {
     #[arg(long)]
     pub strict: bool,
 
-    /// Update to a version even when it is yanked.
+    /// Lift clove's refusal to move to a yanked version.
     ///
     /// A yank is the usual response to a compromised or broken release, so an
     /// update never moves to one without this.
+    ///
+    /// Note this lifts *clove's* check only. cargo excludes yanked versions
+    /// from resolution and has no flag to re-include them, so the install may
+    /// still fail — the flag buys you cargo's error instead of clove's.
     #[arg(long)]
     pub allow_yanked: bool,
 }

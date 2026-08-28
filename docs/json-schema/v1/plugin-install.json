@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://clove.dev/schema/v1/plugin-install.json",
   "title": "clove plugin install/uninstall/update envelope",
-  "description": "The success envelope of the three mutating `clove plugin` commands. Each has its own `data` shape, distinguished by which of `installed` / `uninstalled` / `updated` is present. `ok: true` does NOT mean something changed: a declined confirmation, an already-installed package, and an up-to-date check all succeed with a payload saying nothing happened — callers must read the payload, not the exit code, to learn whether the machine changed. A failure uses `error.json` instead.",
+  "description": "The success envelope of the three mutating `clove plugin` commands. Each has its own `data` shape, distinguished by which of `installed` / `uninstalled` / `updated` is present. `ok: true` does NOT mean something changed: an already-installed package and an up-to-date check both succeed with a payload saying nothing happened — callers must read the payload, not the exit code, to learn whether the machine changed. A failure uses `error.json` instead.",
   "type": "object",
   "required": ["v", "ok", "data"],
   "properties": {
@@ -53,12 +53,11 @@
     },
     "notInstalled": {
       "title": "install made no change",
-      "description": "The command succeeded without installing anything: the user answered no (`declined`), or the plugin was already present and `--force` was not given (`already_installed`).",
+      "description": "The command succeeded without installing anything: the plugin was already present and `--force` was not given. Declining the confirmation is not a JSON outcome — the prompt is only ever shown in human format, so a declined install prints to the terminal and emits no envelope.",
       "type": "object",
       "required": ["installed"],
       "properties": {
         "installed": { "const": false },
-        "declined": { "const": true },
         "already_installed": { "const": true },
         "package": { "type": "string" },
         "version": { "type": ["string", "null"] }
@@ -96,12 +95,20 @@
             "additionalProperties": false
           }
         },
-        "checked": { "type": "integer", "minimum": 0 },
+        "checked": {
+          "description": "How many installed plugins were actually re-resolved against the registry. Excludes the skipped ones — counting a git-installed plugin here and then reporting \"everything is up to date\" claimed a check that never happened.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "skipped": {
+          "description": "Installed plugins `update` did not check because they did not come from the registry (a git or path install). Update one by reinstalling it from its source.",
+          "type": "integer",
+          "minimum": 0
+        },
         "scope": {
           "description": "`all` when every clove-installed plugin was considered (no name, or `--all`), `one` when a single plugin was named. This is what disambiguates `checked: 0`.",
           "enum": ["all", "one"]
-        },
-        "declined": { "const": true }
+        }
       },
       "additionalProperties": false
     },

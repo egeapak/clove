@@ -195,8 +195,13 @@ fn dispatch_multiplexer(
         ),
         None => Err(CloveError::InvalidField {
             field: "provider".to_owned(),
+            // Name the command that installs it. `cargo install` was the only
+            // instruction the product gave, and it lands the binary in
+            // `~/.cargo/bin` — outside the clove-managed root, which is exactly
+            // the state `uninstall` then declines to manage.
             reason: format!(
-                "unknown {multiplexer} provider `{provider}`; install clove-{multiplexer}-{provider}"
+                "unknown {multiplexer} provider `{provider}`; install it with \
+                 `clove plugin install {multiplexer}-{provider}`"
             ),
         }),
     }

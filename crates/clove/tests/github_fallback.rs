@@ -75,7 +75,9 @@ fn sync_unknown_provider_is_a_clean_validation_error() {
     );
     let message = v["error"]["message"].as_str().unwrap_or_default();
     assert!(
-        message.contains("install clove-sync-gitlab"),
-        "error should point at the missing plugin: {v}"
+        message.contains("clove plugin install sync-gitlab"),
+        "the error must name the command that installs it — `cargo install` puts the \
+         binary in ~/.cargo/bin, which `clove plugin uninstall` then declines to \
+         manage: {v}"
     );
 }

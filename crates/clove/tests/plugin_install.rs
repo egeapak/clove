@@ -116,18 +116,50 @@ impl MockCratesIo {
 }
 
 fn handle(mut stream: TcpStream, state: &Arc<Mutex<Registry>>) {
+    // Read until the end of the headers rather than taking whatever one `read`
+    // returned: a request split across TCP segments would otherwise parse as an
+    // empty path and 404. Loopback almost always delivers one segment, so this
+    // was a rare flake rather than a visible bug.
+    let mut request = String::new();
     let mut buf = [0u8; 8192];
-    let n = match stream.read(&mut buf) {
-        Ok(n) if n > 0 => n,
-        _ => return,
-    };
-    let request = String::from_utf8_lossy(&buf[..n]).into_owned();
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                request.push_str(&String::from_utf8_lossy(&buf[..n]));
+                if request.contains("\r\n\r\n") {
+                    break;
+                }
+            }
+            Err(_) => return,
+        }
+    }
     let path = request
         .lines()
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
         .unwrap_or("")
         .to_owned();
+
+    // crates.io answers 403 to a request with no User-Agent — for *every* crate,
+    // which reads as "every name is taken". The client sets one; nothing proved
+    // it reached the wire. Enforcing it here turns all 29 tests into evidence
+    // that it does, and pins the single most surprising thing about this API.
+    let has_user_agent = request
+        .lines()
+        .any(|line| line.to_ascii_lowercase().starts_with("user-agent:") && line.len() > 12);
+    if !has_user_agent {
+        let payload =
+            json!({"errors":[{"detail":"missing or invalid User-Agent header"}]}).to_string();
+        let _ = stream.write_all(
+            format!(
+                "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                payload.len()
+            )
+            .as_bytes(),
+        );
+        return;
+    }
 
     let s = state.lock().unwrap();
     let (status, body) = if path.contains("/reverse_dependencies") {
@@ -145,13 +177,23 @@ fn handle(mut stream: TcpStream, state: &Arc<Mutex<Registry>>) {
                 .iter()
                 .enumerate()
                 .map(|(i, name)| {
-                    let bins = s
-                        .crates
-                        .get(name)
-                        .map(|c| c["versions"][0]["bin_names"].clone());
+                    // Read `num`/`yanked` from what was actually published.
+                    // Hardcoding `1.0.0`/`false` meant discovery always reported
+                    // version 1.0.0 and never reported a yanked crate as yanked,
+                    // so the two read paths silently disagreed.
+                    let published = s.crates.get(name).map(|c| &c["versions"][0]);
                     json!({
-                        "id": i, "crate": name, "num": "1.0.0", "yanked": false,
-                        "bin_names": bins.unwrap_or(json!([name])),
+                        "id": i,
+                        "crate": name,
+                        "num": published
+                            .and_then(|v| v["num"].as_str())
+                            .unwrap_or("1.0.0"),
+                        "yanked": published
+                            .and_then(|v| v["yanked"].as_bool())
+                            .unwrap_or(false),
+                        "bin_names": published
+                            .map(|v| v["bin_names"].clone())
+                            .unwrap_or(json!([name])),
                     })
                 })
                 .collect();
@@ -173,8 +215,9 @@ fn handle(mut stream: TcpStream, state: &Arc<Mutex<Registry>>) {
 
     let payload = body.to_string();
     let response = format!(
-        "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
-        payload.len()
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+        payload.len(),
+        reason = if status == 200 { "OK" } else { "Not Found" }
     );
     let _ = stream.write_all(response.as_bytes());
 }
@@ -323,10 +366,39 @@ fn env_with(plugin_behavior: &str) -> Env {
     }
 }
 
+/// A copy of the `clove` binary in a directory this suite controls.
+///
+/// `plugin::search_dirs()` puts the running binary's own directory **first**, so
+/// `assert_cmd`'s `target/debug/clove` drags in every plugin the workspace has
+/// built — `clove-sync-github`, `clove-import-tk`, `clove-import-beads`,
+/// `clove-echo`. That makes the installed set differ between a local
+/// `-p clove-cli --test plugin_install` run and CI's full `--workspace` build,
+/// and no environment variable can suppress it (`$CLOVE_PLUGIN_PATH` ranks
+/// *below* the exe dir). Running a copy from a temp dir makes that first search
+/// entry a directory holding nothing but `clove`.
+///
+/// One copy per test binary, not per test.
+fn isolated_clove() -> &'static Path {
+    static CLOVE: std::sync::OnceLock<(TempDir, std::path::PathBuf)> = std::sync::OnceLock::new();
+    &CLOVE
+        .get_or_init(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let dst = dir
+                .path()
+                .join(format!("clove{}", std::env::consts::EXE_SUFFIX));
+            std::fs::copy(assert_cmd::cargo::cargo_bin("clove"), &dst).unwrap();
+            (dir, dst)
+        })
+        .1
+}
+
 impl Env {
     fn clove(&self) -> Command {
-        let mut cmd = Command::cargo_bin("clove").unwrap();
+        let mut cmd = Command::new(isolated_clove());
         cmd.env_remove("CLOVE_FORMAT");
+        // Inherited, and it outranks `<clove-home>/bin`, so a developer with
+        // real plugins installed would see them in every assertion.
+        cmd.env_remove("CLOVE_PLUGIN_PATH");
         cmd.env("CLOVE_HOME", &self.home);
         cmd.env("CLOVE_REGISTRY_URL", self.registry.url());
         // The fake cargo must win over the real one.
@@ -353,6 +425,28 @@ impl Env {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[test]
+fn the_suite_sees_no_plugin_it_did_not_install() {
+    // The guard for `isolated_clove()`. Without it the suite's view of "what is
+    // installed" depended on which workspace plugins happened to be built —
+    // differing between a local `-p clove-cli --test plugin_install` and CI's
+    // `--workspace` — so every count assertion was environment-dependent, and a
+    // test whose plugin name collided with a workspace one would resolve the
+    // wrong binary, passing locally and failing in CI.
+    let env = env_with(&compatible_plugin());
+    let v = json_of(
+        &env.clove()
+            .args(["--format", "json", "plugin", "list"])
+            .assert()
+            .success(),
+    );
+    assert_eq!(
+        v["data"].as_array().map(Vec::len),
+        Some(0),
+        "the plugin search path must be hermetic: {v}"
+    );
+}
 
 #[test]
 fn install_pins_the_version_and_the_single_binary() {

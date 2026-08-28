@@ -127,7 +127,7 @@ fn unknown_import_provider_is_a_scoped_validation_error() {
     assert_eq!(v["error"]["exit"], 4);
     let msg = v["error"]["message"].as_str().unwrap();
     assert!(
-        msg.contains("unknown import provider") && msg.contains("install clove-import-nope"),
+        msg.contains("unknown import provider") && msg.contains("clove plugin install import-nope"),
         "message: {msg}"
     );
 }
@@ -146,7 +146,7 @@ fn unknown_export_provider_is_a_scoped_validation_error() {
     assert_eq!(v["error"]["code"], "VALIDATION_ERROR");
     let msg = v["error"]["message"].as_str().unwrap();
     assert!(
-        msg.contains("unknown export provider") && msg.contains("install clove-export-nope"),
+        msg.contains("unknown export provider") && msg.contains("clove plugin install export-nope"),
         "message: {msg}"
     );
 }

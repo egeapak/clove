@@ -109,21 +109,55 @@ pub enum FetchError {
     Decode(String),
 }
 
+/// The registry host these messages should name.
+///
+/// Hardcoding "crates.io" made every message wrong whenever
+/// `$CLOVE_REGISTRY_URL` is set — telling the user crates.io was unreachable
+/// when the request never went there. The variable is read here rather than
+/// threaded through `FetchError` because these are display strings, and the
+/// alternative is a host field on an error type that exists to classify
+/// transport failures.
+fn registry_label() -> String {
+    match std::env::var(crates_io::API_ROOT_ENV) {
+        Ok(root) if !root.trim().is_empty() => {
+            let root = root.trim();
+            // Show the host, not the full API path.
+            let host = root
+                .split("://")
+                .nth(1)
+                .unwrap_or(root)
+                .split('/')
+                .next()
+                .unwrap_or(root);
+            display_safe(host)
+        }
+        _ => "crates.io".to_owned(),
+    }
+}
+
 impl std::fmt::Display for FetchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let host = registry_label();
         match self {
             FetchError::Status { code, .. } if *code == 429 => {
-                write!(f, "crates.io rate limit reached (HTTP 429)")
+                write!(f, "{host} rate limit reached (HTTP 429)")
             }
             FetchError::Status { code, .. } if *code == 403 => write!(
                 f,
-                "crates.io refused the request (HTTP 403) — a missing User-Agent \
+                "{host} refused the request (HTTP 403) — a missing User-Agent \
                  is the usual cause"
             ),
-            FetchError::Status { code, .. } => write!(f, "crates.io returned HTTP {code}"),
-            FetchError::Transport(message) => write!(f, "could not reach crates.io: {message}"),
+            FetchError::Status { code, .. } => write!(f, "{host} returned HTTP {code}"),
+            // `ureq`'s Display prefixes its own `io:` tag, which double-colons
+            // into this sentence ("could not reach crates.io: io: Connection
+            // refused").
+            FetchError::Transport(message) => write!(
+                f,
+                "could not reach {host}: {}",
+                message.strip_prefix("io: ").unwrap_or(message)
+            ),
             FetchError::Decode(message) => {
-                write!(f, "could not read the crates.io response: {message}")
+                write!(f, "could not read the {host} response: {message}")
             }
         }
     }
@@ -348,18 +382,67 @@ pub fn candidate_crate_names(name: &str) -> Vec<String> {
     if name.starts_with("clove-") {
         return vec![name.to_owned()];
     }
+    // A name that already names its multiplexer is exact too.
+    //
+    // `sync-github` is the spelling the docs, the help text and the
+    // missing-plugin hints all teach — it is what `plugin list` prints in the
+    // NAME column. Expanding it anyway produced `clove-sync-sync-github`,
+    // `clove-import-sync-github` and `clove-export-sync-github`: three
+    // impossible probes, three wasted requests, and a "looked for …" error
+    // listing names no one could ever publish.
+    if MULTIPLEXERS
+        .iter()
+        .any(|mux| name.starts_with(&format!("{mux}-")))
+    {
+        return vec![format!("clove-{name}")];
+    }
     // Multiplexer providers first (`clove sync gitlab` is the common shape), then
     // the plain top-level subcommand.
-    ["sync", "import", "export"]
+    MULTIPLEXERS
         .iter()
         .map(|mux| format!("clove-{mux}-{name}"))
         .chain(std::iter::once(format!("clove-{name}")))
         .collect()
 }
 
+/// The multiplexer subcommands a provider name can hang off.
+const MULTIPLEXERS: [&str; 3] = ["sync", "import", "export"];
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_name_that_already_names_its_multiplexer_is_not_expanded_again() {
+        // `sync-github` is what `plugin list` prints and what every hint now
+        // teaches, so it must not become `clove-sync-sync-github`.
+        assert_eq!(
+            candidate_crate_names("sync-github"),
+            vec!["clove-sync-github".to_owned()]
+        );
+        assert_eq!(
+            candidate_crate_names("import-tk"),
+            vec!["clove-import-tk".to_owned()]
+        );
+        // An exact crate name stays exact.
+        assert_eq!(
+            candidate_crate_names("clove-sync-github"),
+            vec!["clove-sync-github".to_owned()]
+        );
+        // A bare provider still gets the full ladder.
+        assert_eq!(
+            candidate_crate_names("gitlab"),
+            vec![
+                "clove-sync-gitlab".to_owned(),
+                "clove-import-gitlab".to_owned(),
+                "clove-export-gitlab".to_owned(),
+                "clove-gitlab".to_owned(),
+            ]
+        );
+        // A name that merely *starts with* a mux word is not a mux-qualified
+        // name — only the `<mux>-` prefix counts.
+        assert_eq!(candidate_crate_names("syncthing").len(), 4);
+    }
 
     #[test]
     fn valid_crate_names_are_accepted() {

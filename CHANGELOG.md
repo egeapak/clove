@@ -561,6 +561,44 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`clove plugin update` no longer reports a green light for plugins it never
+  checked.** A git-installed plugin is not re-resolved through crates.io (by
+  design — that would swap the code the user chose for a same-named crate), but
+  it was rendered as "no newer version known" and then summarised as "everything
+  is up to date". The payload now separates `checked` from `skipped`, the line
+  says "not checked; reinstall to update it", and the summary counts only what
+  was checked.
+- **`clove plugin install --git` no longer claims to have installed something
+  when it did not.** Re-running it hit cargo's own "already installed" refusal
+  and clove still reported `installed: true` with a commit and a path — breaking
+  the premise the published schema rests on. It now has the same
+  already-installed guard as the crates.io path, and says that `--force` is how
+  a git-installed plugin is updated.
+- **`clove plugin search` no longer states a negative it could not check.** With
+  the registry unreachable it printed the warning and then "no published plugins
+  matched" — a claim about crates.io made while unable to reach it.
+- **A name that already names its multiplexer is no longer expanded again.**
+  `plugin install sync-github` — the spelling `plugin list` prints and every
+  hint now teaches — probed `clove-sync-sync-github`,
+  `clove-import-sync-github` and `clove-export-sync-github`: three impossible
+  candidates, three wasted requests, and an error listing names nobody could
+  publish.
+- **The registry cache is keyed by the registry it came from.** Pointing
+  `$CLOVE_REGISTRY_URL` at a different registry served the previous one's
+  answers for 24 hours; only `--refresh` escaped.
+- **`clove plugin list --all` prints its sections on a successful empty
+  answer.** It returned early unless something was found or something went
+  wrong, so a working registry with no plugins yet printed nothing at all —
+  indistinguishable from a broken command, and reachable for real between
+  publishing `clove-plugin` and its first dependent.
+- **Registry errors name the registry that was actually contacted**, instead of
+  saying "crates.io" for whatever `$CLOVE_REGISTRY_URL` points at, and no longer
+  double-colon `ureq`'s own `io:` prefix into the sentence.
+- **`clove plugin list` compat notes no longer describe enforcement that does
+  not exist.** Dispatch is a probe-free `stat` walk by design, so it neither
+  warns nor refuses; the notes now say what the plugin *declares*
+  (`[built for an older clove]`, `[declares it needs a newer clove]`) rather
+  than promising a warning nothing prints.
 - **`clove plugin list --format jsonl` no longer appends a non-item line.** It
   had grown a trailing `{v, ok, _meta}` line to carry the discovery warning,
   making it the only jsonl surface in the repo whose last line has no `data` —

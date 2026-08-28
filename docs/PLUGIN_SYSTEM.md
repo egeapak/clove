@@ -311,7 +311,7 @@ place and so nobody mistakes their absence for an oversight:
 |-----|---------|---------|
 | `CLOVE_HOME` | `clove_home.rs` | The clove-managed root (§5): `bin/` for installed plugins, plus the registry cache. Falls back to `$XDG_DATA_HOME/clove`, then `~/.local/share/clove` (`%APPDATA%\clove` on Windows). |
 | `CLOVE_PLUGIN_PATH` | `plugin.rs` | Extra plugin search directories (§5). |
-| `CLOVE_REGISTRY_URL` | `registry/crates_io.rs` | Overrides the crates.io API root, for a mirror or for tests. The counterpart of `CLOVE_GITHUB_API_URL` in the sync tests. |
+| `CLOVE_REGISTRY_URL` | `registry/crates_io.rs` | Overrides the crates.io API root **for discovery and name resolution only** — `cargo install` still fetches from the real crates.io, so this does not make clove use a mirror; it exists for tests. The counterpart of `CLOVE_GITHUB_API_URL` in the sync tests. |
 
 `CLOVE_HOME` is **not** exported to plugins today: no plugin needs the install
 root, and the §6.2 contract is deliberately minimal — every exported var is one

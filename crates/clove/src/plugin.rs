@@ -60,11 +60,13 @@ pub struct PluginInfo {
 /// The candidate binary name for a dispatch path, e.g. `["sync", "github"]` →
 /// `clove-sync-github` (plus the platform executable suffix, `.exe` on Windows).
 fn binary_name(segments: &[&str]) -> String {
-    format!(
-        "clove-{}{}",
-        segments.join("-"),
-        std::env::consts::EXE_SUFFIX
-    )
+    binary_name_with(segments, std::env::consts::EXE_SUFFIX)
+}
+
+/// [`binary_name`] with the executable suffix injected — see
+/// [`crate::registry::install::installed_binary_path_with`] for why.
+fn binary_name_with(segments: &[&str], exe_suffix: &str) -> String {
+    format!("clove-{}{exe_suffix}", segments.join("-"))
 }
 
 /// The ordered plugin search path (§5): the directory of the running `clove`
@@ -648,6 +650,44 @@ pub fn run_plugin(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_suffix_aware_helpers_agree_under_an_injected_suffix() {
+        use crate::registry::{install, provenance};
+
+        // Two Windows-only bugs shipped on this branch — a path built without
+        // `EXE_SUFFIX`, and a suffixed name reaching `cargo --bin` — and CI runs
+        // the suite on Windows. It could not catch them: the install suite is
+        // `#![cfg(unix)]`, and the existing suffix assertions are written as
+        // `format!("…{}", EXE_SUFFIX)`, which on Unix expands to the empty
+        // string and asserts nothing about suffix handling at all.
+        //
+        // So the round trip is pinned under both suffixes, on every platform.
+        for suffix in ["", ".exe"] {
+            let file = binary_name_with(&["sync", "github"], suffix);
+            assert_eq!(file, format!("clove-sync-github{suffix}"));
+
+            let root = camino::Utf8Path::new("/r");
+            let path = install::installed_binary_path_with(root, "clove-sync-github", suffix);
+            assert_eq!(
+                path,
+                root.join("bin").join(&file),
+                "the probed path must be the file cargo actually wrote, or gate 3 \
+                 stats a file that is not there, finds nothing, and passes vacuously"
+            );
+
+            assert_eq!(
+                provenance::bare_subcommand_with(path.file_name().unwrap(), suffix),
+                Some("sync-github")
+            );
+            // cargo's bookkeeping is the only place the suffixed name appears,
+            // so an unsuffixed entry must still resolve.
+            assert_eq!(
+                provenance::bare_subcommand_with("clove-sync-github", suffix),
+                Some("sync-github")
+            );
+        }
+    }
 
     #[test]
     fn binary_name_joins_segments_and_prefix() {

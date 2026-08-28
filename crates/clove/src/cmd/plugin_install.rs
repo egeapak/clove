@@ -111,6 +111,35 @@ fn install_from_git(
     // name, not a commitment.
     let pinned = GitRef::Rev(git_source::resolve_head(&clone)?);
 
+    // The same already-installed guard the crates.io path has. Without it a
+    // repeat `install --git` reached cargo, which declined ("already installed,
+    // use --force"), and clove reported `installed: true` with a commit and a
+    // path for a run that changed nothing — breaking the one premise the
+    // published schema rests on, that the payload says whether anything
+    // happened. It matters most here: reinstalling *is* the update path for a
+    // git plugin.
+    if let Some(subcommand) = provenance::bare_subcommand(&chosen.bin) {
+        if let Some(existing) = provenance::find_by_subcommand(&home, subcommand) {
+            if !args.force {
+                emit(
+                    format,
+                    json!({
+                        "installed": false,
+                        "already_installed": true,
+                        "package": existing.package,
+                        "version": existing.version,
+                    }),
+                    &format!(
+                        "{} {} is already installed (--force to reinstall, which is also \
+                         how you update a git-installed plugin)",
+                        existing.package, existing.version
+                    ),
+                );
+                return Ok(());
+            }
+        }
+    }
+
     let installed_path = install::installed_binary_path(&home, &chosen.bin);
     let shadowed = shadowed_binary(&chosen.bin, &installed_path);
     if let Some(existing) = &shadowed {
@@ -145,13 +174,22 @@ fn install_from_git(
         Consent::Ask => {
             // Not printed here: the same warnings are printed after the install
             // below, and doing both showed the unpinned-branch warning twice.
-            let prompt = install::git_prompt_text(url, &chosen.package, &chosen.bin);
+            let GitRef::Rev(sha) = &pinned else {
+                unreachable!("resolve_head always yields a Rev")
+            };
+            let prompt = install::git_prompt_text(
+                url,
+                &chosen.package,
+                &chosen.bin,
+                sha,
+                shadowed.as_deref(),
+            );
             if !install::ask_confirmation(&prompt) {
-                emit(
-                    format,
-                    json!({ "installed": false, "declined": true }),
-                    "not installed",
-                );
+                // `consent_policy` returns `Ask` only when the format is human,
+                // so this is never a machine-readable path. Emitting a JSON
+                // `declined` payload here was unreachable code that the
+                // published schema then had to describe.
+                println!("not installed");
                 return Ok(());
             }
         }
@@ -172,6 +210,7 @@ fn install_from_git(
         args.force,
     );
     run_cargo(&argv, "install")?;
+    correct_cargo_path_advice(format, &home);
 
     let probe = crate::plugin::probe_info(&installed_path);
     if let Some(reason) = incompatible_reason(&chosen.package, probe.as_ref()) {
@@ -303,11 +342,8 @@ fn install_from_registry(
         Consent::Ask => {
             let prompt = install::prompt_text(&candidate, &gates, shadowed.as_deref());
             if !install::ask_confirmation(&prompt) {
-                emit(
-                    format,
-                    json!({ "installed": false, "declined": true }),
-                    "not installed",
-                );
+                // See `install_from_git`: `Ask` implies human format.
+                println!("not installed");
                 return Ok(());
             }
         }
@@ -328,6 +364,7 @@ fn install_from_registry(
         args.force,
     );
     run_cargo(&argv, "install")?;
+    correct_cargo_path_advice(format, &home);
 
     // Gate 3: probe the *built artifact*. This runs after cargo has already
     // executed the crate's build scripts, so it is not a safety check — it is a
@@ -606,7 +643,7 @@ pub fn run_update(format: OutputFormat, args: &PluginUpdateArgs) -> Result<(), C
     if targets.is_empty() {
         emit(
             format,
-            json!({ "updated": [], "checked": 0, "scope": scope }),
+            json!({ "updated": [], "checked": 0, "skipped": 0, "scope": scope }),
             "no clove-installed plugins to update",
         );
         return Ok(());
@@ -696,11 +733,35 @@ pub fn run_update(format: OutputFormat, args: &PluginUpdateArgs) -> Result<(), C
     for line in &blocked {
         eprintln!("{line}");
     }
+    // `checked` must count what was actually checked. Counting a git-installed
+    // plugin and then reporting "everything is up to date" was the same lie in
+    // two places.
+    let checked = verdicts
+        .iter()
+        .filter(|v| {
+            !matches!(
+                v,
+                install::UpdateVerdict::Hold(install::Hold::NotChecked(_))
+            )
+        })
+        .count();
+    let skipped = plans.len() - checked;
     if upgradable.is_empty() {
+        let summary = match (checked, skipped) {
+            (0, 0) => "nothing to update".to_owned(),
+            (0, n) => format!("nothing checked ({n} not installed from crates.io)"),
+            (_, 0) => "everything is up to date".to_owned(),
+            (_, n) => format!("everything checked is up to date ({n} not checked)"),
+        };
         emit_with_warnings(
             format,
-            json!({ "updated": [], "checked": plans.len(), "scope": scope }),
-            "everything is up to date",
+            json!({
+                "updated": [],
+                "checked": checked,
+                "skipped": skipped,
+                "scope": scope,
+            }),
+            &summary,
             warnings,
         );
         return Ok(());
@@ -718,11 +779,8 @@ pub fn run_update(format: OutputFormat, args: &PluginUpdateArgs) -> Result<(), C
         Consent::Granted => {}
         Consent::Ask => {
             if !install::ask_confirmation("  Update these plugins? [y/N] ") {
-                emit(
-                    format,
-                    json!({ "updated": [], "declined": true, "scope": scope }),
-                    "not updated",
-                );
+                // See `install_from_git`: `Ask` implies human format.
+                println!("not updated");
                 return Ok(());
             }
         }
@@ -769,7 +827,12 @@ pub fn run_update(format: OutputFormat, args: &PluginUpdateArgs) -> Result<(), C
     let count = updated.len();
     emit_with_warnings(
         format,
-        json!({ "updated": updated, "checked": plans.len(), "scope": scope }),
+        json!({
+            "updated": updated,
+            "checked": checked,
+            "skipped": skipped,
+            "scope": scope,
+        }),
         &format!("updated {count} plugin(s)"),
         warnings,
     );
@@ -882,6 +945,25 @@ fn run_cargo(argv: &[String], what: &str) -> Result<(), CloveError> {
     }
 }
 
+/// Correct cargo's PATH advice, which is wrong for a clove plugin.
+///
+/// `cargo install --root` ends with "be sure to add `<root>/bin` to your PATH".
+/// For clove that is exactly backwards: `<clove-home>/bin` is on clove's *own*
+/// search path (PLUGIN_SYSTEM §5), and a user who follows cargo's advice puts a
+/// directory of internet-fetched binaries on their shell `PATH` — the opposite
+/// of the containment the install root exists for. cargo's streams are
+/// inherited (so the build stays visible), so the correction follows it rather
+/// than replacing it.
+fn correct_cargo_path_advice(format: OutputFormat, home: &Utf8Path) {
+    if format == OutputFormat::Human {
+        eprintln!(
+            "note: ignore cargo's PATH suggestion above — clove resolves plugins from \
+             {} itself, so it does not need to be on $PATH.",
+            install::bin_dir(home)
+        );
+    }
+}
+
 fn is_tty_stdin() -> bool {
     use std::io::IsTerminal;
     std::io::stdin().is_terminal()
@@ -899,16 +981,15 @@ fn emit(format: OutputFormat, data: Value, human: &str) {
 fn emit_with_warnings(format: OutputFormat, data: Value, human: &str, warnings: Vec<String>) {
     match format {
         OutputFormat::Human => println!("{human}"),
-        OutputFormat::Json => print_json_success(data, json!({ "warnings": warnings })),
-        // jsonl carries no `_meta` (DESIGN §7.3) — `cmd/plugin.rs` routes its
-        // list output the same way. Collapsing `Json | Jsonl` into one arm here
-        // re-introduced, two files away, the exact trailing-metadata shape this
-        // branch removed from `plugin list`.
-        OutputFormat::Jsonl => {
-            for warning in &warnings {
-                eprintln!("warning: {warning}");
-            }
-            crate::output::print_jsonl_items(std::slice::from_ref(&data))
+        // These are single-result commands: one envelope, `_meta` included, in
+        // both machine formats — the same shape `new`, `show`, `doctor`,
+        // `version`, `reindex` and `stats` emit. The jsonl rule that bit
+        // `plugin list` is about *list* commands, which emit one line per item
+        // and so cannot carry `_meta` without appending a line that has no
+        // `data`. There is only ever one line here, so there is no trailing
+        // line to trip over. See DESIGN §7.3.
+        OutputFormat::Json | OutputFormat::Jsonl => {
+            print_json_success(data, json!({ "warnings": warnings }))
         }
     }
 }

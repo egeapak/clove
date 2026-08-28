@@ -50,6 +50,8 @@ pub enum DependsOnPlugin {
 /// The outcome of the pre-install checks, as reported to the user.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Gates {
+    /// The crate these gates were evaluated for, so the messages can name it.
+    pub crate_name: Option<String>,
     pub depends_on_plugin: DependsOnPlugin,
     /// The binary that will be installed — the crate's own, validated name.
     pub dispatchable_bin: Option<String>,
@@ -69,16 +71,24 @@ impl Gates {
     /// unverifiable dependency is reported and left to the prompt, unless the
     /// caller asked for `--strict`.
     pub fn blocking_reason(&self, strict: bool) -> Option<String> {
+        // Name the crate. A bare name resolves through a ladder, so "this crate"
+        // left the user unable to tell *which* candidate was rejected — while
+        // the neighbouring yanked message names it.
+        let crate_name = self
+            .crate_name
+            .as_deref()
+            .map(|n| format!("`{}`", super::display_safe(n)))
+            .unwrap_or_else(|| "this crate".to_owned());
         if self.depends_on_plugin == DependsOnPlugin::NotADependent {
             return Some(format!(
-                "this crate does not depend on `{REGISTRY_ROOT_CRATE}`, so it is not a \
+                "{crate_name} does not depend on `{REGISTRY_ROOT_CRATE}`, so it is not a \
                  clove plugin"
             ));
         }
         if strict && self.depends_on_plugin == DependsOnPlugin::Unverifiable {
             return Some(format!(
-                "could not verify that this crate depends on `{REGISTRY_ROOT_CRATE}` \
-                 (registry unavailable), and --strict was given"
+                "could not verify that {crate_name} depends on `{REGISTRY_ROOT_CRATE}` \
+                 (the registry could not be consulted), and --strict was given"
             ));
         }
         if self.dispatchable_bin.is_none() {
@@ -116,6 +126,7 @@ pub fn evaluate(candidate: &RegistryPlugin, dependents: Option<&[String]>) -> Ga
     };
 
     Gates {
+        crate_name: Some(candidate.crate_name.clone()),
         depends_on_plugin,
         dispatchable_bin: dispatchable,
         bin_problem,
@@ -213,16 +224,30 @@ pub fn consent_policy(yes: bool, human: bool, stdin_tty: bool, stderr_tty: bool)
 /// the same [`super::display_safe`] treatment as registry strings: a package
 /// name carrying a newline would otherwise forge a prompt line, and CR/CSI could
 /// overwrite the sentence that says third-party code is about to run.
-pub fn git_prompt_text(url: &str, package: &str, bin: &str) -> String {
+pub fn git_prompt_text(
+    url: &str,
+    package: &str,
+    bin: &str,
+    commit: &str,
+    shadows: Option<&Utf8Path>,
+) -> String {
     let safe = super::display_safe;
     let mut out = String::new();
     out.push_str(&format!("  {}\n", safe(package)));
-    out.push_str(&format!("  source:    {}\n", safe(url)));
-    out.push_str(&format!("  installs:  {}\n", safe(bin)));
     out.push_str(&format!(
         "  checks:    depends on {REGISTRY_ROOT_CRATE}; matches the clove plugin \
          convention — not audited\n"
     ));
+    out.push_str(&format!("  installs:  {}\n", safe(bin)));
+    if let Some(existing) = shadows {
+        out.push_str(&format!("  REPLACES:  {}\n", safe(existing.as_str())));
+    }
+    out.push_str(&format!("  source:    {}\n", safe(url)));
+    // "The tree clove inspected is the tree cargo builds" is the whole point of
+    // pinning, and it is the mitigation for the moving-branch warning printed
+    // just above this. A prompt that will not say *which* tree cannot support
+    // either claim.
+    out.push_str(&format!("  commit:    {}\n", safe(commit)));
     out.push('\n');
     out.push_str("  Installing builds and runs third-party code as you. Continue? [y/N] ");
     out
@@ -427,12 +452,23 @@ pub enum Hold {
     PrereleaseOnly(String),
     /// `installed.version` is not a semver version, so nothing is comparable.
     LocalUnparseable,
-    /// Nothing to compare against: not registry-sourced, or nothing published.
+    /// Nothing published under this name to compare against.
     NoCandidate,
+    /// Not installed from the registry, so `update` never looked. The string is
+    /// the source label, which names how to update it instead.
+    NotChecked(String),
 }
 
 /// Decide whether `candidate` is an update for `installed`.
 pub fn update_verdict(installed: &Installed, candidate: Option<&RegistryPlugin>) -> UpdateVerdict {
+    // "We did not look" is not "there is nothing newer". A git-installed plugin
+    // reported "no newer version known", and the summary then said "everything
+    // is up to date" — a green light, forever, over a plugin that was never
+    // checked. It is also the case where the user most needs to be told what to
+    // do instead, since `update` cannot do it for them.
+    if !updatable_from_registry(installed) {
+        return UpdateVerdict::Hold(Hold::NotChecked(installed.source.label()));
+    }
     let Some(candidate) = candidate else {
         return UpdateVerdict::Hold(Hold::NoCandidate);
     };
@@ -485,9 +521,12 @@ pub fn update_line(installed: &Installed, verdict: &UpdateVerdict) -> String {
             "  {package} {version} (kept — the installed version is not a semver version, \
              so nothing can be compared)"
         ),
-        UpdateVerdict::Hold(Hold::NoCandidate) => format!(
-            "  {package} {version} ({} — no newer version known)",
-            super::display_safe(&installed.source.label())
+        UpdateVerdict::Hold(Hold::NoCandidate) => {
+            format!("  {package} {version} (nothing published under this name)")
+        }
+        UpdateVerdict::Hold(Hold::NotChecked(label)) => format!(
+            "  {package} {version} ({} — not checked; reinstall to update it)",
+            super::display_safe(label)
         ),
     }
 }
@@ -510,7 +549,17 @@ pub fn bin_dir(root: &Utf8Path) -> Utf8PathBuf {
 /// vacuously, and the rollback never fire, on the one platform where the whole
 /// `bare_subcommand` suffix dance exists.
 pub fn installed_binary_path(root: &Utf8Path, bin: &str) -> Utf8PathBuf {
-    bin_dir(root).join(format!("{bin}{}", std::env::consts::EXE_SUFFIX))
+    installed_binary_path_with(root, bin, std::env::consts::EXE_SUFFIX)
+}
+
+/// [`installed_binary_path`] with the executable suffix injected.
+///
+/// The suffix is a compile-time constant, so the other platform's behaviour is
+/// unreachable from a test on this one — which is exactly how the missing
+/// suffix shipped and sat unnoticed through a Windows CI leg. Taking it as a
+/// parameter makes both cases testable everywhere.
+pub fn installed_binary_path_with(root: &Utf8Path, bin: &str, exe_suffix: &str) -> Utf8PathBuf {
+    bin_dir(root).join(format!("{bin}{exe_suffix}"))
 }
 
 /// Map a cargo invocation failure onto a clove error.
@@ -676,6 +725,8 @@ mod tests {
             "https://github.com/someone/clove-sync-gitlab",
             "clove-sync-gitlab",
             "clove-sync-gitlab",
+            "0123456789abcdef0123456789abcdef01234567",
+            None,
         );
 
         // Regression: the git prompt used to be one long `format!` whose folded
@@ -692,6 +743,10 @@ mod tests {
         assert!(
             text.contains("  source:    https://github.com/someone/"),
             "{text}"
+        );
+        assert!(
+            text.contains("  commit:    0123456789abcdef"),
+            "the prompt must name the tree cargo will build: {text}"
         );
         assert!(text.contains("  installs:  clove-sync-gitlab"), "{text}");
         assert!(text.contains("not audited"), "{text}");
@@ -710,6 +765,8 @@ mod tests {
             "https://example.com/r",
             "evil\n  checks:    audited by clove",
             "b\r\u{1b}[2K",
+            "0123456789abcdef0123456789abcdef01234567",
+            None,
         );
         assert_eq!(
             text.lines()
@@ -746,6 +803,46 @@ mod tests {
         assert_eq!(consent_policy(true, false, false, false), Consent::Granted);
         // A human at a terminal is asked.
         assert_eq!(consent_policy(false, true, true, true), Consent::Ask);
+    }
+
+    #[test]
+    fn the_consent_matrix_is_total() {
+        // This function decides whether unvetted third-party code gets built and
+        // run. Sampling five of its sixteen inputs is not enough for that — the
+        // rule is stated once here and checked against every combination, so a
+        // future edit cannot widen it in a corner nobody sampled.
+        for yes in [false, true] {
+            for human in [false, true] {
+                for stdin_tty in [false, true] {
+                    for stderr_tty in [false, true] {
+                        let got = consent_policy(yes, human, stdin_tty, stderr_tty);
+                        let want = if yes {
+                            // An explicit decision, whatever the environment.
+                            Consent::Granted
+                        } else if human && stdin_tty && stderr_tty {
+                            // Someone is there to answer, on a stream that can
+                            // carry the question.
+                            Consent::Ask
+                        } else {
+                            // Silence is not consent.
+                            Consent::Refuse
+                        };
+                        assert_eq!(
+                            got, want,
+                            "consent_policy(yes={yes}, human={human}, \
+                             stdin_tty={stdin_tty}, stderr_tty={stderr_tty})"
+                        );
+
+                        // Relied on by the three call sites, which print a plain
+                        // line rather than an envelope when the user declines:
+                        // asking is only ever reachable in human format.
+                        if got == Consent::Ask {
+                            assert!(human, "a prompt would corrupt a machine-readable envelope");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

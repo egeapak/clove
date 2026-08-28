@@ -932,13 +932,21 @@ regardless of warnings.
 **`jsonl` format:** one envelope per line, `"data"` is a single item (not array). Enables
 `clove ls --format jsonl | while read line; do ...; done`.
 
-Every line is an item envelope — jsonl carries **no `_meta`**, and no command
-appends a trailing metadata line. A line without `data` would make
-`jq -r .data.<field>` emit a spurious `null` at the end of the stream, which is
-exactly the per-line consumption this format exists for. A command with warnings
-to report (a failed plugin-registry lookup, say) prints them to **stderr** in
-this format, as human mode does; use `--format json` when the warnings must be
-machine-readable.
+The rule that matters is per-line: **every line carries `data`**, and no command
+appends a trailing metadata-only line. A line without `data` makes
+`jq -r .data.<field>` emit a spurious `null` at the end of the stream, which
+defeats the per-line consumption this format exists for.
+
+That splits the two kinds of command:
+
+- A **list** command (`ls`, `ready`, `blocked`, `query`, `search`,
+  `plugin list`/`search`) emits one line per item and therefore has nowhere to
+  put `_meta`. Warnings go to **stderr** in this format, as they do in human
+  mode; use `--format json` when they must be machine-readable.
+- A **single-result** command (`new`, `show`, `version`, `reindex`, `doctor`,
+  `stats`, `plugin install`/`uninstall`/`update`) emits exactly one line, which
+  is the whole envelope — `_meta` included. There is no trailing line, because
+  there is only ever the one.
 
 ### 7.4 Item JSON Schema (v1)
 

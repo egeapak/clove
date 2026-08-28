@@ -84,11 +84,20 @@ impl Installed {
 /// The subcommand a binary filename dispatches as: `clove-sync-github.exe` →
 /// `sync-github`. `None` when the file is not a clove plugin binary at all.
 pub fn bare_subcommand(bin: &str) -> Option<&str> {
-    let suffix = std::env::consts::EXE_SUFFIX;
-    let stem = if suffix.is_empty() {
+    bare_subcommand_with(bin, std::env::consts::EXE_SUFFIX)
+}
+
+/// [`bare_subcommand`] with the executable suffix injected — see
+/// [`super::install::installed_binary_path_with`] for why.
+///
+/// The suffix is tolerated rather than required: cargo's bookkeeping is the only
+/// place the suffixed name appears, and a hand-written or older entry may carry
+/// the bare name.
+pub fn bare_subcommand_with<'a>(bin: &'a str, exe_suffix: &str) -> Option<&'a str> {
+    let stem = if exe_suffix.is_empty() {
         bin
     } else {
-        bin.strip_suffix(suffix).unwrap_or(bin)
+        bin.strip_suffix(exe_suffix).unwrap_or(bin)
     };
     stem.strip_prefix("clove-").filter(|rest| !rest.is_empty())
 }

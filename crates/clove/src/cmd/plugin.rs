@@ -54,17 +54,27 @@ impl Discovery {
     }
 
     /// The user-facing warning, if this attempt did not yield a usable registry.
-    fn warning(&self) -> Option<String> {
+    fn warning(&self, fresh: bool) -> Option<String> {
         match self {
             Discovery::Available(Some(_)) => None,
             // This may be served from a cache up to 24h old, so it is phrased as
             // what was observed rather than as a fact about right now, and it
             // names the flag that re-checks.
-            Discovery::Available(None) => Some(format!(
-                "no plugin registry found: `{REGISTRY_ROOT_CRATE}` was not published to \
-                 crates.io as of the last check, so no plugins can be discovered \
-                 (re-check with --refresh)"
-            )),
+            // The "as of the last check … --refresh" tail is only true of a
+            // cached answer. Printing it after `--refresh` told the user to do
+            // the thing they had just done.
+            Discovery::Available(None) => Some(if fresh {
+                format!(
+                    "no plugin registry found: `{REGISTRY_ROOT_CRATE}` is not published to \
+                     crates.io, so no plugins can be discovered"
+                )
+            } else {
+                format!(
+                    "no plugin registry found: `{REGISTRY_ROOT_CRATE}` was not published to \
+                     crates.io as of the last check, so no plugins can be discovered \
+                     (re-check with --refresh)"
+                )
+            }),
             Discovery::Failed(message) => Some(message.clone()),
         }
     }
@@ -76,12 +86,18 @@ pub fn run_list(format: OutputFormat, args: &PluginListArgs) -> Result<(), Clove
 
     // `--refresh` only means anything against the registry, so it implies `--all`.
     if !args.all && !args.refresh {
-        return render(format, &installed, &[], None);
+        return render(format, &installed, &[], None, false);
     }
 
     let discovery = discover(args.refresh);
     let available = not_installed(discovery.plugins(), &installed);
-    render(format, &installed, &available, discovery.warning())
+    render(
+        format,
+        &installed,
+        &available,
+        discovery.warning(args.refresh),
+        true,
+    )
 }
 
 /// Filter the discovered set by `query` and render it.
@@ -116,7 +132,7 @@ pub fn run_search(format: OutputFormat, args: &PluginSearchArgs) -> Result<(), C
     // hour ago, with no indication the answer came from a snapshot. Perversely,
     // the same query would work if the network were down. The probe is exact-name
     // and cheap (at most four requests), so it costs little to always try.
-    let mut warning = discovery.warning();
+    let mut warning = discovery.warning(args.refresh);
     // Whether a successful probe *answers* the warning depends on which warning
     // it is. An absent registry has nothing to report, so a hit resolves it. A
     // discovery *failure* is different: the probe checked a handful of
@@ -299,12 +315,15 @@ fn render(
     installed: &[EnrichedPlugin],
     available: &[RegistryPlugin],
     warning: Option<String>,
+    consulted_registry: bool,
 ) -> Result<(), CloveError> {
     let mut items: Vec<Value> = installed.iter().map(installed_json).collect();
     items.extend(available.iter().map(available_json));
 
     match format {
-        OutputFormat::Human => render_human(installed, available, warning.as_deref()),
+        OutputFormat::Human => {
+            render_human(installed, available, warning.as_deref(), consulted_registry)
+        }
         OutputFormat::Json => {
             print_json_list(items, meta(installed.len(), available.len(), warning))
         }
@@ -355,7 +374,15 @@ fn render_search(
                 eprintln!("warning: {warning}");
             }
             if matches.is_empty() {
-                println!("no published plugins matched");
+                // "Nothing matched" is a claim about the registry. When the
+                // warning above says we could not reach it, that claim was not
+                // checked — the `Ok(None)`/`Err` distinction the whole read path
+                // preserves was being collapsed one line later, in prose.
+                if warning.is_some() {
+                    println!("could not check crates.io — no results");
+                } else {
+                    println!("no published plugins matched");
+                }
             } else {
                 render_available_table(matches, installed);
             }
@@ -490,7 +517,12 @@ fn available_json(plugin: &RegistryPlugin) -> Value {
 /// A plugin that failed the probe (`no_info`) shows `—` for version and
 /// `(no metadata)` for about; an out-of-range plugin (`outdated` /
 /// `needs_newer_clove`) gets a trailing compat note on its row.
-fn render_human(installed: &[EnrichedPlugin], available: &[RegistryPlugin], warning: Option<&str>) {
+fn render_human(
+    installed: &[EnrichedPlugin],
+    available: &[RegistryPlugin],
+    warning: Option<&str>,
+    consulted_registry: bool,
+) {
     if let Some(warning) = warning {
         eprintln!("warning: {warning}");
     }
@@ -498,7 +530,13 @@ fn render_human(installed: &[EnrichedPlugin], available: &[RegistryPlugin], warn
     // Only the bare `plugin list` stays silent on an empty machine. Once the
     // registry is in play there are sections to label, so printing nothing at
     // all would read as a broken command.
-    let show_sections = !available.is_empty() || warning.is_some();
+    //
+    // Derived from `--all`/`--refresh` having been asked for, not from whether
+    // the answer happened to be non-empty: a *successful* discovery that found
+    // nothing is exactly when a bare empty screen is least defensible, and it is
+    // reachable for real in the window between `clove-plugin` being published
+    // and its first dependent.
+    let show_sections = consulted_registry;
 
     if installed.is_empty() && !show_sections {
         return;
@@ -538,11 +576,16 @@ fn render_installed_table(plugins: &[EnrichedPlugin], indent: bool) {
             };
             let mut about = about;
             match p.status {
+                // These state what the *plugin declares*, not what dispatch
+                // does. Dispatch is a probe-free `stat` walk by design, so it
+                // neither warns nor refuses; the old strings ("runs with a
+                // warning", "[needs a newer clove]") described enforcement that
+                // does not exist anywhere in the codebase.
                 PluginStatus::Outdated => {
-                    about.push_str("  [outdated: predates this clove; runs with a warning]");
+                    about.push_str("  [built for an older clove]");
                 }
                 PluginStatus::NeedsNewerClove => {
-                    about.push_str("  [needs a newer clove]");
+                    about.push_str("  [declares it needs a newer clove]");
                 }
                 PluginStatus::Ok | PluginStatus::NoInfo => {}
             }
@@ -724,7 +767,7 @@ mod tests {
         // "nothing to discover yet", never as a failure.
         let discovery = Discovery::Available(None);
         assert!(discovery.plugins().is_empty());
-        let warning = discovery.warning().expect("absent registry warns");
+        let warning = discovery.warning(false).expect("absent registry warns");
         assert!(warning.contains("not published"));
     }
 
@@ -732,14 +775,14 @@ mod tests {
     fn a_published_but_empty_registry_does_not_warn() {
         // Published with no dependents yet is a *complete, correct* answer.
         let discovery = Discovery::Available(Some(vec![]));
-        assert_eq!(discovery.warning(), None);
+        assert_eq!(discovery.warning(false), None);
     }
 
     #[test]
     fn a_failed_discovery_reports_its_cause() {
         let discovery = Discovery::Failed("could not reach crates.io: dns".to_owned());
         assert!(discovery.plugins().is_empty());
-        assert!(discovery.warning().unwrap().contains("dns"));
+        assert!(discovery.warning(false).unwrap().contains("dns"));
     }
 
     #[test]

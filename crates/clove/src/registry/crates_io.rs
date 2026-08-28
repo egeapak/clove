@@ -12,9 +12,14 @@ use super::{Fetch, FetchError, RegistryPlugin};
 /// The crates.io API root.
 pub const DEFAULT_API_ROOT: &str = "https://crates.io/api/v1";
 
-/// Overrides the API root — for tests (pointing at a local mock or a dead
-/// address) and for a registry mirror. Mirrors the existing
-/// `CLOVE_GITHUB_API_URL` seam used by the GitHub sync tests.
+/// Overrides the API root — for tests, pointing at a local mock or a dead
+/// address. Mirrors the existing `CLOVE_GITHUB_API_URL` seam used by the GitHub
+/// sync tests.
+///
+/// **Not a mirror setting.** It steers discovery and name resolution only;
+/// `cargo install` always fetches from the real crates.io. Pointing this at a
+/// mirror is worse than not supporting one: the confirmation prompt would
+/// describe the mirror's metadata while the artifact came from somewhere else.
 ///
 /// # Why this is trusted when the discovery cache is not
 ///
