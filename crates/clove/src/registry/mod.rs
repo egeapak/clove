@@ -42,8 +42,17 @@ use std::time::Duration;
 pub struct RegistryPlugin {
     /// The crate name, e.g. `clove-sync-gitlab`.
     pub crate_name: String,
-    /// The highest **non-yanked** published version, if any.
+    /// The highest **non-yanked, non-pre-release** published version, if any.
+    ///
+    /// Pre-releases are kept out deliberately: this is the version
+    /// `cargo install <crate>` would resolve to, and it is what `update` moves
+    /// to. Folding `2.0.0-alpha.1` in here made it outrank a stable `1.2.0`
+    /// (semver compares the core first), so a plugin published with an alpha
+    /// alongside its stable release offered the alpha as an upgrade.
     pub latest: Option<semver::Version>,
+    /// The highest non-yanked **pre-release**, tracked separately so a crate
+    /// that has only ever published pre-releases is still representable.
+    pub latest_prerelease: Option<semver::Version>,
     /// The highest version overall when every version is yanked — so a crate
     /// whose releases were all pulled is still representable (and reportable)
     /// rather than collapsing to a blank version.
@@ -63,14 +72,16 @@ pub struct RegistryPlugin {
 impl RegistryPlugin {
     /// True when the crate has published versions but every one is yanked.
     pub fn fully_yanked(&self) -> bool {
-        self.latest.is_none() && self.latest_yanked.is_some()
+        self.latest.is_none() && self.latest_prerelease.is_none() && self.latest_yanked.is_some()
     }
 
-    /// The version to display, preferring the installable one and falling back
-    /// to a yanked release so a fully-yanked crate still shows something real.
+    /// The version to display, preferring the stable release, then a
+    /// pre-release, then a yanked one — so a crate with nothing installable
+    /// still shows something real rather than a blank.
     pub fn display_version(&self) -> Option<String> {
         self.latest
             .as_ref()
+            .or(self.latest_prerelease.as_ref())
             .or(self.latest_yanked.as_ref())
             .map(|v| v.to_string())
     }
@@ -211,7 +222,9 @@ pub fn validate_bin_name(name: &str) -> Result<(), clove_types::CloveError> {
         .find(|c| !(c.is_ascii_alphanumeric() || *c == '-' || *c == '_'))
     {
         return Err(invalid(format!(
-            "binary name {name:?} contains {bad:?}; only letters, digits, `-` and `_`              are allowed (cargo treats `--bin` as a glob, so a name containing              `*`, `?` or `[` would install binaries the user never approved)"
+            "binary name {name:?} contains {bad:?}; only letters, digits, `-` and `_` \
+             are allowed (cargo treats `--bin` as a glob, so a name containing `*`, \
+             `?` or `[` would install binaries the user never approved)"
         )));
     }
     Ok(())
@@ -229,11 +242,37 @@ pub fn validate_bin_name(name: &str) -> Result<(), clove_types::CloveError> {
 /// So: control characters (C0, DEL and C1) are dropped rather than escaped —
 /// nothing legitimate needs them — and the result is clamped, because a very long
 /// value scrolls the real facts off screen just as effectively.
+///
+/// `char::is_control()` covers only `General_Category=Cc`, which is not enough.
+/// The **bidi controls** (U+202A..U+202E, U+2066..U+2069) and the invisible
+/// separators (U+200B..U+200F, U+FEFF) are `Cf` and would pass straight through —
+/// and `owner:` and `repo:` are precisely the two prompt fields a publisher
+/// writes freely *and* the two a human reads to decide whether they trust the
+/// crate. A `repository` containing U+202E renders the rest of the line reversed,
+/// so the prompt can be made to display a repo the user recognizes while the
+/// install proceeds against another. They are dropped for the same reason CR is.
+/// `Cf` characters that reorder or hide text on a terminal line.
+///
+/// Listed explicitly rather than pulled from a Unicode-tables crate: this is the
+/// complete set that matters for a single-line prompt, and a dependency for it
+/// would be the only Unicode-property dependency in the workspace.
+fn is_bidi_or_invisible(c: &char) -> bool {
+    matches!(c,
+        '\u{200b}'..='\u{200f}'   // ZWSP, ZWNJ, ZWJ, LRM, RLM
+        | '\u{202a}'..='\u{202e}' // LRE, RLE, PDF, LRO, RLO
+        | '\u{2060}'..='\u{2064}' // word joiner, invisible operators
+        | '\u{2066}'..='\u{2069}' // LRI, RLI, FSI, PDI
+        | '\u{feff}'              // BOM / ZWNBSP
+    )
+}
+
 pub fn display_safe(value: &str) -> String {
     const MAX: usize = 200;
     let mut out: String = value
         .chars()
-        .filter(|c| !c.is_control() && !('\u{80}'..='\u{9f}').contains(c))
+        .filter(|c| {
+            !c.is_control() && !('\u{80}'..='\u{9f}').contains(c) && !is_bidi_or_invisible(c)
+        })
         .collect();
     if out.chars().count() > MAX {
         out = out.chars().take(MAX).collect::<String>() + "…";
@@ -427,6 +466,7 @@ mod tests {
         // is non-yanked by construction the flag is dead, and a crate whose every
         // release was pulled has no value to put there.
         let plugin = RegistryPlugin {
+            latest_prerelease: None,
             crate_name: "clove-sync-gone".to_owned(),
             latest: None,
             latest_yanked: Some(semver::Version::new(0, 3, 0)),

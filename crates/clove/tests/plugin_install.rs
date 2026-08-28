@@ -232,6 +232,19 @@ if [ "$1" = "install" ]; then
 PLUGIN
   chmod +x "$root/bin/$bin"
 fi
+# `uninstall` must actually delete, or the shim is more forgiving than cargo and
+# the post-uninstall "is it really gone?" check has nothing to verify.
+if [ "$1" = "uninstall" ]; then
+  root=""; pkg=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --root) root="$2"; shift 2 ;;
+      --) shift; pkg="$1"; shift ;;
+      *) shift ;;
+    esac
+  done
+  [ -n "$root" ] && [ -n "$pkg" ] && rm -f "$root/bin/$pkg"
+fi
 exit 0
 "#,
         log = log.display(),
@@ -267,6 +280,17 @@ fi
 exit 0"#,
         next = api + 1
     )
+}
+
+/// Did the fake cargo run this exact subcommand?
+///
+/// `cargo_log(..).contains("install")` is satisfied by an `uninstall` line, so
+/// every "it did not install" assertion written that way was vacuous. The shim
+/// logs one `argv.join(" ")` per line, so the subcommand is the first token.
+fn cargo_ran(dir: &Path, subcommand: &str) -> bool {
+    cargo_log(dir)
+        .lines()
+        .any(|line| line.split_whitespace().next() == Some(subcommand))
 }
 
 fn cargo_log(dir: &Path) -> String {
@@ -948,7 +972,7 @@ fn a_crate_that_builds_no_binary_of_its_own_name_is_refused() {
         err.contains("does not build a binary of its own name"),
         "{err}"
     );
-    assert!(!cargo_log(&env.bin).contains("install"));
+    assert!(!cargo_ran(&env.bin, "install"));
 }
 
 #[test]

@@ -136,10 +136,47 @@ fn git(args: &[&str], cwd: Option<&Utf8Path>) -> Result<std::process::Output, Cl
         }
     })?;
 
+    // The pipes must be drained *while* git runs, not after it exits.
+    //
+    // Polling `try_wait` and only then calling `wait_with_output` deadlocks the
+    // moment a child fills the 64 KiB pipe buffer: git blocks in `write`, so it
+    // never exits, so `try_wait` never reports it, and the loop burns the whole
+    // 120s timeout before killing a process that was working fine. `ls-remote`
+    // writes one line per ref, so any repository with a few thousand refs — a
+    // fork of a large upstream, a monorepo with per-release tags — hit it and
+    // reported "could not reach" for a perfectly reachable repo.
+    //
+    // A reader thread per pipe is the standard answer, and it is what
+    // `Command::output()` does internally (which is why `find_plugins` never had
+    // this bug). The threads end when git closes its ends, so they cannot
+    // outlive the kill below.
+    let reader = |pipe: Option<std::process::ChildStdout>| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut pipe) = pipe {
+                use std::io::Read;
+                let _ = pipe.read_to_end(&mut buf);
+            }
+            buf
+        })
+    };
+    let stdout = reader(child.stdout.take());
+    let stderr = {
+        let pipe = child.stderr.take();
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut pipe) = pipe {
+                use std::io::Read;
+                let _ = pipe.read_to_end(&mut buf);
+            }
+            buf
+        })
+    };
+
     let start = std::time::Instant::now();
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => break status,
             Ok(None) => {
                 if start.elapsed() >= GIT_TIMEOUT {
                     let _ = child.kill();
@@ -160,9 +197,12 @@ fn git(args: &[&str], cwd: Option<&Utf8Path>) -> Result<std::process::Output, Cl
                 })
             }
         }
-    }
-    child.wait_with_output().map_err(|e| CloveError::Registry {
-        message: format!("git failed: {e}"),
+    };
+
+    Ok(std::process::Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
     })
 }
 
@@ -228,13 +268,15 @@ pub fn shallow_clone(
     // `--no-checkout` above keeps the clone cheap; materialize the tree now.
     let checkout = match reference {
         Some(GitRef::Rev(rev)) => {
-            let fetch = git(&["fetch", "--depth", "1", "origin", rev], Some(dest))?;
+            let fetch = git(&["fetch", "--depth", "1", "origin", "--", rev], Some(dest))?;
             if !fetch.status.success() {
                 return Err(CloveError::Registry {
                     message: format!("could not fetch rev `{rev}` from `{url}`"),
                 });
             }
-            git(&["checkout", "--quiet", rev], Some(dest))?
+            // `--` disambiguates a rev from a pathspec; `probe_remote` and
+            // `shallow_clone` already do this for the URL.
+            git(&["checkout", "--quiet", rev, "--"], Some(dest))?
         }
         _ => git(&["checkout", "--quiet", "HEAD"], Some(dest))?,
     };
@@ -495,6 +537,11 @@ pub fn cargo_install_argv(
     if force {
         argv.push("--force".to_owned());
     }
+    // The same `--` the crates.io path uses: `package` comes out of a foreign
+    // `Cargo.toml`, so it must not be parsable as an option. It is currently
+    // forced to `clove-*` by `plugins_from_metadata`, but that is a rule two
+    // functions away — this is the layer that does not depend on remembering it.
+    argv.push("--".to_owned());
     argv.push(package.to_owned());
     argv
 }

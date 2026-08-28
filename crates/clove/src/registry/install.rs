@@ -240,7 +240,11 @@ pub fn refusal_message() -> String {
 /// Deliberately free of any "verified" claim. The design's mock-up showed
 /// `✓ verified clove plugin`, which reads as "clove vetted this" — see the module
 /// docs for why nothing here can support that.
-pub fn prompt_text(candidate: &RegistryPlugin, gates: &Gates) -> String {
+pub fn prompt_text(
+    candidate: &RegistryPlugin,
+    gates: &Gates,
+    shadows: Option<&Utf8Path>,
+) -> String {
     // Every value below comes from the registry response, and this prompt *is*
     // the security decision. Left raw, a `repository` containing a newline forges
     // extra prompt lines ("checks: audited by clove"), and CR/CSI sequences
@@ -265,6 +269,11 @@ pub fn prompt_text(candidate: &RegistryPlugin, gates: &Gates) -> String {
 
     if let Some(bin) = &gates.dispatchable_bin {
         out.push_str(&format!("  installs:  {}\n", safe(bin)));
+    }
+    // The single most consequential fact when it applies: this install silently
+    // takes over a subcommand that currently runs a different binary.
+    if let Some(existing) = shadows {
+        out.push_str(&format!("  REPLACES:  {}\n", safe(existing.as_str())));
     }
     if let Some(owner) = &candidate.published_by {
         out.push_str(&format!("  owner:     {}\n", safe(owner)));
@@ -387,18 +396,98 @@ pub fn foreign_install_message(name: &str, path: &Utf8Path, root: &Utf8Path) -> 
     )
 }
 
+/// What `update` should do about one installed package.
+///
+/// This exists because the question is **"is the candidate greater?"**, and the
+/// code used to ask "is the string different?". Two real cases that gets wrong:
+///
+/// - A pre-release. `RegistryPlugin::latest` now excludes them, but a crate
+///   whose only releases are pre-releases still resolves to one, and moving to
+///   it is not something an unattended `update` should decide.
+/// - A *downgrade*. `$CLOVE_REGISTRY_URL` is a documented mirror seam, and a
+///   lagging mirror hands back an older `latest`. The string differs, so the old
+///   code rendered `1.2.0 → 1.1.0` with an arrow implying forward motion and ran
+///   `cargo install --version =1.1.0 --force`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateVerdict {
+    /// Move to this version.
+    Newer(String),
+    /// Do nothing, for this reason.
+    Hold(Hold),
+}
+
+/// Why an installed package is not being updated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Hold {
+    /// The newest published version is the installed one.
+    UpToDate,
+    /// The registry's newest is older than what is installed.
+    RegistryBehind(String),
+    /// Only a pre-release is available, and `update` does not move to those.
+    PrereleaseOnly(String),
+    /// `installed.version` is not a semver version, so nothing is comparable.
+    LocalUnparseable,
+    /// Nothing to compare against: not registry-sourced, or nothing published.
+    NoCandidate,
+}
+
+/// Decide whether `candidate` is an update for `installed`.
+pub fn update_verdict(installed: &Installed, candidate: Option<&RegistryPlugin>) -> UpdateVerdict {
+    let Some(candidate) = candidate else {
+        return UpdateVerdict::Hold(Hold::NoCandidate);
+    };
+    // `installed.version` is a raw string out of `.crates2.json`. If it will not
+    // parse, say so rather than falling back to a string compare — a bogus local
+    // version is a reason to report, not to guess a direction.
+    let Ok(current) = semver::Version::parse(&installed.version) else {
+        return UpdateVerdict::Hold(Hold::LocalUnparseable);
+    };
+
+    match &candidate.latest {
+        Some(latest) if *latest > current => UpdateVerdict::Newer(latest.to_string()),
+        Some(latest) if *latest == current => UpdateVerdict::Hold(Hold::UpToDate),
+        Some(latest) => UpdateVerdict::Hold(Hold::RegistryBehind(latest.to_string())),
+        // No stable release. A pre-release is reported but never moved to.
+        None => match &candidate.latest_prerelease {
+            Some(pre) if *pre > current => {
+                UpdateVerdict::Hold(Hold::PrereleaseOnly(pre.to_string()))
+            }
+            _ => UpdateVerdict::Hold(Hold::NoCandidate),
+        },
+    }
+}
+
 /// Summarize what `update` would change for one installed package.
-pub fn update_line(installed: &Installed, latest: Option<&str>) -> String {
-    match latest {
-        Some(v) if v != installed.version => {
-            format!("  {} {} → {v}", installed.package, installed.version)
+///
+/// Every value is `display_safe`'d, for the same reason `prompt_text` is: these
+/// lines *are* the evidence for the `Update these plugins? [y/N]` question, and
+/// they come out of `.crates2.json` — a file this module's own threat model
+/// treats as attacker-writable. `parse_pkgid` validates the crate *name* but
+/// carries the version and the source string through verbatim, so a version of
+/// `1.0.0\u{1b}[2K\r  clove-sync-github 0.1.0 (up to date)` forges the plan the
+/// user is approving. That is the injection this branch already closed for the
+/// install prompt.
+pub fn update_line(installed: &Installed, verdict: &UpdateVerdict) -> String {
+    let package = super::display_safe(&installed.package);
+    let version = super::display_safe(&installed.version);
+    let (package, version) = (&package, &version);
+    match verdict {
+        UpdateVerdict::Newer(v) => format!("  {package} {version} → {v}"),
+        UpdateVerdict::Hold(Hold::UpToDate) => format!("  {package} {version} (up to date)"),
+        UpdateVerdict::Hold(Hold::RegistryBehind(v)) => {
+            format!("  {package} {version} (kept — the registry's newest is {v}, which is older)")
         }
-        Some(_) => format!("  {} {} (up to date)", installed.package, installed.version),
-        None => format!(
-            "  {} {} ({} — no newer version known)",
-            installed.package,
-            installed.version,
-            installed.source.label()
+        UpdateVerdict::Hold(Hold::PrereleaseOnly(v)) => format!(
+            "  {package} {version} (kept — {v} is a pre-release; install it explicitly to \
+             move to it)"
+        ),
+        UpdateVerdict::Hold(Hold::LocalUnparseable) => format!(
+            "  {package} {version} (kept — the installed version is not a semver version, \
+             so nothing can be compared)"
+        ),
+        UpdateVerdict::Hold(Hold::NoCandidate) => format!(
+            "  {package} {version} ({} — no newer version known)",
+            super::display_safe(&installed.source.label())
         ),
     }
 }
@@ -451,6 +540,7 @@ mod tests {
         RegistryPlugin {
             crate_name: name.to_owned(),
             latest: Some(semver::Version::new(0, 2, 0)),
+            latest_prerelease: None,
             latest_yanked: None,
             description: Some("a plugin".to_owned()),
             repository: Some("https://example.com/p".to_owned()),
@@ -479,7 +569,7 @@ mod tests {
         assert!(gates.blocking_reason(true).is_some());
 
         // And the prompt says so out loud rather than implying a clean check.
-        let text = prompt_text(&c, &gates);
+        let text = prompt_text(&c, &gates, None);
         assert!(text.contains("could NOT verify"), "{text}");
     }
 
@@ -542,7 +632,7 @@ mod tests {
         c.repository = Some("https://x\n  checks:    audited by clove\r hidden".to_owned());
         c.published_by = Some("someone\u{1b}[2K".to_owned());
         let gates = evaluate(&c, Some(&["clove-sync-gitlab".to_owned()]));
-        let text = prompt_text(&c, &gates);
+        let text = prompt_text(&c, &gates, None);
 
         // The prompt has exactly the lines it builds — no injected ones.
         let repo_lines = text
@@ -563,7 +653,7 @@ mod tests {
         // forgeable by the publisher, so that string must not ship.
         let c = candidate("clove-sync-gitlab", &["clove-sync-gitlab"]);
         let gates = evaluate(&c, Some(&["clove-sync-gitlab".to_owned()]));
-        let text = prompt_text(&c, &gates);
+        let text = prompt_text(&c, &gates, None);
 
         assert!(!text.contains('✓'), "{text}");
         assert!(
@@ -720,7 +810,7 @@ mod tests {
         };
         assert!(!updatable_from_registry(&git));
         // …and says why, rather than silently converting it to a registry install.
-        assert!(update_line(&git, None).contains("git https://e.com/x"));
+        assert!(update_line(&git, &update_verdict(&git, None)).contains("git https://e.com/x"));
 
         let reg = Installed {
             package: "clove-sync-gitlab".to_owned(),
@@ -729,12 +819,108 @@ mod tests {
             bins: vec!["clove-sync-gitlab".to_owned()],
         };
         assert!(updatable_from_registry(&reg));
+        let newer = candidate("clove-sync-gitlab", &["clove-sync-gitlab"]);
         assert_eq!(
-            update_line(&reg, Some("0.2.0")),
+            update_line(&reg, &update_verdict(&reg, Some(&newer))),
             "  clove-sync-gitlab 0.1.0 → 0.2.0",
             "update must show what it would change before doing it"
         );
-        assert!(update_line(&reg, Some("0.1.0")).contains("up to date"));
+    }
+
+    /// A candidate at an explicit version, for the ordering tests.
+    fn candidate_at(name: &str, version: &str) -> RegistryPlugin {
+        let mut c = candidate(name, &[name]);
+        let parsed = semver::Version::parse(version).unwrap();
+        if parsed.pre.is_empty() {
+            c.latest = Some(parsed);
+            c.latest_prerelease = None;
+        } else {
+            c.latest = None;
+            c.latest_prerelease = Some(parsed);
+        }
+        c
+    }
+
+    fn installed_at(version: &str) -> Installed {
+        Installed {
+            package: "clove-sync-gitlab".to_owned(),
+            version: version.to_owned(),
+            source: Source::Registry,
+            bins: vec!["clove-sync-gitlab".to_owned()],
+        }
+    }
+
+    #[test]
+    fn an_update_moves_only_to_a_strictly_greater_stable_version() {
+        let installed = installed_at("1.2.0");
+
+        // The case a string compare gets right by luck.
+        assert_eq!(
+            update_verdict(
+                &installed,
+                Some(&candidate_at("clove-sync-gitlab", "1.3.0"))
+            ),
+            UpdateVerdict::Newer("1.3.0".to_owned())
+        );
+        assert_eq!(
+            update_verdict(
+                &installed,
+                Some(&candidate_at("clove-sync-gitlab", "1.2.0"))
+            ),
+            UpdateVerdict::Hold(Hold::UpToDate)
+        );
+
+        // A lagging mirror hands back an *older* `latest`. The strings differ, so
+        // `!=` rendered `1.2.0 → 1.1.0` and ran `--version =1.1.0 --force`.
+        assert_eq!(
+            update_verdict(
+                &installed,
+                Some(&candidate_at("clove-sync-gitlab", "1.1.0"))
+            ),
+            UpdateVerdict::Hold(Hold::RegistryBehind("1.1.0".to_owned()))
+        );
+
+        // Semver ordering, not lexical: "0.10.0" < "0.9.0" as strings.
+        let ten = installed_at("0.10.0");
+        assert_eq!(
+            update_verdict(&ten, Some(&candidate_at("clove-sync-gitlab", "0.9.0"))),
+            UpdateVerdict::Hold(Hold::RegistryBehind("0.9.0".to_owned()))
+        );
+
+        // A pre-release outranks a stable release by semver precedence, so
+        // folding it into `latest` offered an alpha as an upgrade. It is
+        // reported and held.
+        assert_eq!(
+            update_verdict(
+                &installed,
+                Some(&candidate_at("clove-sync-gitlab", "2.0.0-alpha.1"))
+            ),
+            UpdateVerdict::Hold(Hold::PrereleaseOnly("2.0.0-alpha.1".to_owned()))
+        );
+
+        // A local version cargo did not write is reported, never guessed at.
+        let odd = installed_at("not-a-version");
+        assert_eq!(
+            update_verdict(&odd, Some(&candidate_at("clove-sync-gitlab", "1.3.0"))),
+            UpdateVerdict::Hold(Hold::LocalUnparseable)
+        );
+    }
+
+    #[test]
+    fn the_update_plan_cannot_forge_its_own_lines() {
+        // `.crates2.json` is attacker-writable per this module's threat model,
+        // and `parse_pkgid` validates only the name — so the version reaches
+        // here raw, and these lines are the evidence for the [y/N] question.
+        let forged = Installed {
+            package: "clove-sync-gitlab".to_owned(),
+            version: "1.0.0\u{1b}[2K\r  clove-sync-github 9.9.9 (up to date)".to_owned(),
+            source: Source::Registry,
+            bins: vec!["clove-sync-gitlab".to_owned()],
+        };
+        let line = update_line(&forged, &UpdateVerdict::Hold(Hold::UpToDate));
+        assert!(!line.contains('\r'), "{line:?}");
+        assert!(!line.contains('\u{1b}'), "{line:?}");
+        assert_eq!(line.lines().count(), 1, "one package, one line: {line:?}");
     }
 
     #[test]

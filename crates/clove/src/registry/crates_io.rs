@@ -91,8 +91,11 @@ struct CrateObject {
 /// is returned by `GET /crates/{name}` as well as by `reverse_dependencies`.
 #[derive(Debug, Deserialize)]
 struct VersionObject {
+    /// `Option` rather than `u64`: a row missing `id` would default to `0` and
+    /// join against a dependency row missing `version_id`, which also defaults
+    /// to `0` — pairing two unrelated records. Absent means "skip this row".
     #[serde(default)]
-    id: u64,
+    id: Option<u64>,
     /// The **dependent** crate's name. In a `reverse_dependencies` response this
     /// is the crate we are looking for; see [`reverse_dependents`].
     #[serde(default)]
@@ -139,8 +142,9 @@ struct ReverseDepsResponse {
 /// repeated, which looks plausible enough to ship.
 #[derive(Debug, Deserialize)]
 struct DependencyObject {
+    /// See [`VersionObject::id`] for why this is an `Option`.
     #[serde(default)]
-    version_id: u64,
+    version_id: Option<u64>,
     #[serde(default)]
     kind: String,
     /// The **dependent crate's** total downloads. Note the version objects in the
@@ -197,6 +201,25 @@ impl<'a> CratesIo<'a> {
         };
         let parsed: CrateResponse =
             serde_json::from_str(&body).map_err(|e| FetchError::Decode(e.to_string()))?;
+
+        // The response must be *about the crate we asked for*.
+        //
+        // `plugin_from_crate` takes `crate_name` from the body, and that name
+        // then chooses what `cargo install` builds and what the confirmation
+        // prompt displays. Without this check a registry answering
+        // `GET /crates/clove-sync-gitlab` with a body naming `clove-sync-github`
+        // redirects the install to a different crate — and gate 1 passes,
+        // because the substituted name really is a `clove-plugin` dependent.
+        // `validate_crate_name` cannot catch it: the substituted name is
+        // perfectly well-formed. crates.io treats `-` and `_` as equivalent in
+        // lookups, so they are normalized before comparing.
+        let equivalent = |a: &str| a.replace('_', "-").to_ascii_lowercase();
+        if equivalent(&parsed.krate.name) != equivalent(name) {
+            return Err(FetchError::Decode(format!(
+                "asked for `{name}` but the registry answered about `{}`",
+                super::display_safe(&parsed.krate.name)
+            )));
+        }
         Ok(Some(plugin_from_crate(parsed)))
     }
 
@@ -282,14 +305,20 @@ impl<'a> CratesIo<'a> {
 /// 3. **the dedup** — rows are *versions*, so one crate can appear several
 ///    times. Versions are compared as semver, not as strings.
 fn merge_page(by_crate: &mut HashMap<String, RegistryPlugin>, page: ReverseDepsResponse) {
-    let versions_by_id: HashMap<u64, &VersionObject> =
-        page.versions.iter().map(|v| (v.id, v)).collect();
+    let versions_by_id: HashMap<u64, &VersionObject> = page
+        .versions
+        .iter()
+        .filter_map(|v| v.id.map(|id| (id, v)))
+        .collect();
 
     for dep in &page.dependencies {
         if dep.kind != "normal" {
             continue;
         }
-        let Some(version) = versions_by_id.get(&dep.version_id) else {
+        let Some(version_id) = dep.version_id else {
+            continue;
+        };
+        let Some(version) = versions_by_id.get(&version_id) else {
             continue;
         };
         if version.krate.is_empty() {
@@ -302,6 +331,7 @@ fn merge_page(by_crate: &mut HashMap<String, RegistryPlugin>, page: ReverseDepsR
             .or_insert_with(|| RegistryPlugin {
                 crate_name: version.krate.clone(),
                 latest: None,
+                latest_prerelease: None,
                 latest_yanked: None,
                 description: None,
                 repository: None,
@@ -317,18 +347,36 @@ fn merge_page(by_crate: &mut HashMap<String, RegistryPlugin>, page: ReverseDepsR
         // Metadata is taken from whichever version is currently the best
         // candidate, so the displayed description/bins match the version a user
         // would actually get.
-        let is_new_best = match (&parsed, version.yanked) {
-            (Some(v), false) => entry.latest.as_ref().is_none_or(|cur| v > cur),
-            (Some(v), true) => {
-                entry.latest.is_none() && entry.latest_yanked.as_ref().is_none_or(|cur| v > cur)
+        // Three buckets, in descending preference: stable, pre-release, yanked.
+        // A pre-release must not land in `latest` — `2.0.0-alpha.1` outranks
+        // `1.2.0` by semver precedence, so folding them together made an alpha
+        // the version `install` pinned and `update` moved to.
+        let prerelease = parsed.as_ref().is_some_and(|v| !v.pre.is_empty());
+        let is_new_best = match (&parsed, version.yanked, prerelease) {
+            (Some(v), false, false) => entry.latest.as_ref().is_none_or(|cur| v > cur),
+            (Some(v), false, true) => {
+                entry.latest.is_none() && entry.latest_prerelease.as_ref().is_none_or(|cur| v > cur)
             }
-            (None, _) => entry.latest.is_none() && entry.latest_yanked.is_none(),
+            (Some(v), true, _) => {
+                entry.latest.is_none()
+                    && entry.latest_prerelease.is_none()
+                    && entry.latest_yanked.as_ref().is_none_or(|cur| v > cur)
+            }
+            (None, _, _) => {
+                entry.latest.is_none()
+                    && entry.latest_prerelease.is_none()
+                    && entry.latest_yanked.is_none()
+            }
         };
 
         if let Some(v) = parsed {
             if version.yanked {
                 if entry.latest_yanked.as_ref().is_none_or(|cur| &v > cur) {
                     entry.latest_yanked = Some(v);
+                }
+            } else if prerelease {
+                if entry.latest_prerelease.as_ref().is_none_or(|cur| &v > cur) {
+                    entry.latest_prerelease = Some(v);
                 }
             } else if entry.latest.as_ref().is_none_or(|cur| &v > cur) {
                 entry.latest = Some(v);
@@ -347,25 +395,31 @@ fn merge_page(by_crate: &mut HashMap<String, RegistryPlugin>, page: ReverseDepsR
 /// Build a [`RegistryPlugin`] from a `GET /crates/{name}` response.
 fn plugin_from_crate(response: CrateResponse) -> RegistryPlugin {
     let mut latest: Option<semver::Version> = None;
+    let mut latest_prerelease: Option<semver::Version> = None;
     let mut latest_yanked: Option<semver::Version> = None;
     let mut best: Option<&VersionObject> = None;
+    let mut best_prerelease: Option<&VersionObject> = None;
     let mut best_yanked: Option<&VersionObject> = None;
 
     for version in &response.versions {
         let Ok(parsed) = semver::Version::parse(&version.num) else {
             continue;
         };
+        // See `merge_page`: pre-releases are a third bucket, never folded into
+        // `latest`, because semver ranks `2.0.0-alpha.1` above a stable `1.2.0`.
         if version.yanked {
             if latest_yanked.as_ref().is_none_or(|cur| &parsed > cur) {
                 latest_yanked = Some(parsed);
                 best_yanked = Some(version);
             }
-        } else {
-            let better = latest.as_ref().is_none_or(|cur| &parsed > cur);
-            if better {
-                latest = Some(parsed);
-                best = Some(version);
+        } else if !parsed.pre.is_empty() {
+            if latest_prerelease.as_ref().is_none_or(|cur| &parsed > cur) {
+                latest_prerelease = Some(parsed);
+                best_prerelease = Some(version);
             }
+        } else if latest.as_ref().is_none_or(|cur| &parsed > cur) {
+            latest = Some(parsed);
+            best = Some(version);
         }
     }
     // With no non-yanked release, describe the crate from its highest-semver
@@ -373,11 +427,15 @@ fn plugin_from_crate(response: CrateResponse) -> RegistryPlugin {
     // `latest_yanked` rather than taken from `versions.first()`, which is
     // *publication* order. A crate that shipped 0.9.0 and then backported 0.8.1
     // (both yanked) would otherwise report version 0.9.0 with 0.8.1's metadata.
-    let best = best.or(best_yanked).or_else(|| response.versions.first());
+    let best = best
+        .or(best_prerelease)
+        .or(best_yanked)
+        .or_else(|| response.versions.first());
 
     RegistryPlugin {
         crate_name: response.krate.name,
         latest,
+        latest_prerelease,
         latest_yanked,
         description: best
             .and_then(|v| v.description.clone())

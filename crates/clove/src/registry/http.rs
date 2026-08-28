@@ -48,7 +48,7 @@ impl UreqFetch {
             // back to the user (the response body reaches only serde_json, and
             // `FetchError`'s Display prints the status alone), so this is blind at
             // worst — but there is no reason to allow ten hops.
-            .max_redirects(2)
+            .max_redirects(0)
             // Keep non-2xx responses as *values* rather than errors: a 404 is
             // meaningful data ("this crate does not exist") and ureq otherwise
             // discards the body along with the status.

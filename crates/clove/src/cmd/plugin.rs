@@ -626,6 +626,7 @@ mod tests {
         RegistryPlugin {
             crate_name: name.to_owned(),
             latest: Some(semver::Version::new(0, 2, 0)),
+            latest_prerelease: None,
             latest_yanked: None,
             description: Some("a plugin".to_owned()),
             repository: None,

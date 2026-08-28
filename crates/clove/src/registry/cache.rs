@@ -20,7 +20,12 @@ use super::RegistryPlugin;
 
 /// The cache-file format version, so a future shape change can be migrated (or
 /// simply ignored) rather than mis-parsed.
-const CACHE_SCHEMA: u32 = 1;
+// Bumped to 2 when `latest` stopped including pre-releases: a v1 file's `latest`
+// may hold a `2.0.0-alpha.1` under the old meaning, and a schema mismatch is
+// already a cache miss, so one refetch retires every stale file. Adding the
+// field alone would not have done it — the *meaning* of an existing field
+// changed, which is exactly what the version number is for.
+const CACHE_SCHEMA: u32 = 2;
 
 /// How long a cached discovery result stays fresh.
 pub const TTL: Duration = Duration::hours(24);
@@ -52,6 +57,8 @@ struct CachedPlugin {
     #[serde(default)]
     latest: Option<String>,
     #[serde(default)]
+    latest_prerelease: Option<String>,
+    #[serde(default)]
     latest_yanked: Option<String>,
     #[serde(default)]
     description: Option<String>,
@@ -70,6 +77,7 @@ impl From<&RegistryPlugin> for CachedPlugin {
         CachedPlugin {
             crate_name: p.crate_name.clone(),
             latest: p.latest.as_ref().map(|v| v.to_string()),
+            latest_prerelease: p.latest_prerelease.as_ref().map(|v| v.to_string()),
             latest_yanked: p.latest_yanked.as_ref().map(|v| v.to_string()),
             description: p.description.clone(),
             repository: p.repository.clone(),
@@ -85,6 +93,9 @@ impl From<CachedPlugin> for RegistryPlugin {
         RegistryPlugin {
             crate_name: c.crate_name,
             latest: c.latest.and_then(|v| semver::Version::parse(&v).ok()),
+            latest_prerelease: c
+                .latest_prerelease
+                .and_then(|v| semver::Version::parse(&v).ok()),
             latest_yanked: c
                 .latest_yanked
                 .and_then(|v| semver::Version::parse(&v).ok()),
@@ -197,6 +208,7 @@ mod tests {
         vec![RegistryPlugin {
             crate_name: "clove-sync-gitlab".to_owned(),
             latest: Some(semver::Version::new(0, 10, 0)),
+            latest_prerelease: None,
             latest_yanked: Some(semver::Version::new(0, 11, 0)),
             description: Some("Two-way GitLab sync".to_owned()),
             repository: None,

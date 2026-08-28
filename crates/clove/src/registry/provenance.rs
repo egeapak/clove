@@ -113,7 +113,16 @@ const CRATES2: &str = ".crates2.json";
 /// An absent or unreadable file means "nothing installed by clove" — that is the
 /// state before the first install, not an error.
 pub fn installed_under(home: &Utf8Path) -> Vec<Installed> {
-    let Ok(raw) = std::fs::read_to_string(home.join(CRATES2)) else {
+    let path = home.join(CRATES2);
+    // The same ceiling `cache::read` applies, for the same stated reason: this
+    // module already treats `$CLOVE_HOME` as attacker-writable, so an unbounded
+    // read of a file living there is a self-inflicted OOM waiting to happen. The
+    // asymmetry with the cache was unintended.
+    const MAX_CRATES2_BYTES: u64 = 16 * 1024 * 1024;
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_CRATES2_BYTES) {
+        return Vec::new();
+    }
+    let Ok(raw) = std::fs::read_to_string(&path) else {
         return Vec::new();
     };
     let Ok(parsed) = serde_json::from_str::<CratesFile>(&raw) else {

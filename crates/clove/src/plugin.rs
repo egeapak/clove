@@ -396,7 +396,19 @@ pub fn probe_info(path: &Utf8Path) -> Option<ProbedInfo> {
     }
 
     let mut stdout = String::new();
-    child.stdout.take()?.read_to_string(&mut stdout).ok()?;
+    // Bounded. The probe timeout covers only `try_wait`, so once the direct
+    // child exits this read had no cap and no deadline: a plugin that forks a
+    // grandchild inheriting the stdout pipe and then exits leaves the write end
+    // open forever, and this blocked with no timeout left to save it. `take` is
+    // enough to bound the damage — a metadata reply is a few hundred bytes, and
+    // this now runs against freshly-downloaded third-party code (gate 3).
+    const MAX_PROBE_OUTPUT: u64 = 64 * 1024;
+    child
+        .stdout
+        .take()?
+        .take(MAX_PROBE_OUTPUT)
+        .read_to_string(&mut stdout)
+        .ok()?;
 
     parse_probe_json(&stdout)
 }
