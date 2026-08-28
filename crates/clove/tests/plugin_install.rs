@@ -9,8 +9,6 @@
 //!   binary it was asked to install. The real thing would take minutes and reach
 //!   the network; what these tests need to assert is the orchestration — which
 //!   argv is built, what happens after, and what is rolled back.
-#![cfg(unix)]
-
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
@@ -227,102 +225,63 @@ fn handle(mut stream: TcpStream, state: &Arc<Mutex<Registry>>) {
 // ---------------------------------------------------------------------------
 
 /// The real `cargo`, resolved before the shim shadows it.
+/// The real cargo, resolved absolutely before the shim shadows it on `PATH`.
 fn which_cargo() -> std::path::PathBuf {
-    if let Ok(explicit) = std::env::var("CARGO") {
-        return std::path::PathBuf::from(explicit);
+    // cargo always sets `$CARGO` for a test binary it launched.
+    if let Some(path) = std::env::var_os("CARGO") {
+        return path.into();
     }
-    for dir in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
-        let candidate = dir.join("cargo");
-        if candidate.is_file() {
-            return candidate;
-        }
-    }
-    std::path::PathBuf::from("cargo")
+    std::path::PathBuf::from(format!("cargo{}", std::env::consts::EXE_SUFFIX))
 }
 
-/// A directory holding a `cargo` shim, to be prepended to `PATH`.
+/// Build the compiled `fake-cargo` fixture once per test binary.
+fn fake_cargo_bin() -> &'static Path {
+    static BUILT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    BUILT.get_or_init(|| {
+        escargot::CargoBuild::new()
+            .package("clove-plugin-echo")
+            .bin("fake-cargo")
+            .run()
+            .expect("build the fake-cargo fixture")
+            .path()
+            .to_path_buf()
+    })
+}
+
+/// Install the fake cargo into `dir` under the name `cargo`.
 ///
-/// The shim appends its argv to `<dir>/argv.log` and, for `install`, creates the
-/// binary named by `--bin` under `--root`/bin. `plugin_behavior` lets a test make
-/// that binary answer `--clove-plugin-info` in a particular way — which is how
-/// the post-install gate and its rollback are exercised.
-fn fake_cargo(dir: &Path, plugin_behavior: &str) {
-    let log = dir.join("argv.log");
-    // Only `install`/`uninstall` are faked. Everything else — notably
-    // `cargo metadata`, which the git path uses to work out which package in a
-    // repository is a plugin — is passed through to the real cargo, or the shim
-    // would be answering questions it knows nothing about.
-    let real_cargo = which_cargo();
-    let script = format!(
-        r#"#!/bin/sh
-case "$1" in
-  install|uninstall) ;;
-  *) exec "{real_cargo}" "$@" ;;
-esac
-printf '%s\n' "$*" >> "{log}"
-if [ "$1" = "install" ]; then
-  root=""; bin=""
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      --root) root="$2"; shift 2 ;;
-      --bin) bin="$2"; shift 2 ;;
-      *) shift ;;
-    esac
-  done
-  mkdir -p "$root/bin"
-  cat > "$root/bin/$bin" <<'PLUGIN'
-{plugin_behavior}
-PLUGIN
-  chmod +x "$root/bin/$bin"
-fi
-# `uninstall` must actually delete, or the shim is more forgiving than cargo and
-# the post-uninstall "is it really gone?" check has nothing to verify.
-if [ "$1" = "uninstall" ]; then
-  root=""; pkg=""
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      --root) root="$2"; shift 2 ;;
-      --) shift; pkg="$1"; shift ;;
-      *) shift ;;
-    esac
-  done
-  [ -n "$root" ] && [ -n "$pkg" ] && rm -f "$root/bin/$pkg"
-fi
-exit 0
-"#,
-        log = log.display(),
-        real_cargo = real_cargo.display(),
-    );
-    let path = dir.join("cargo");
-    std::fs::write(&path, script).unwrap();
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
+/// It is the same binary that will later be "installed" as the plugin, so its
+/// `--clove-plugin-info` answer is chosen by `$FAKE_PLUGIN_MODE` at probe time
+/// rather than baked into a script here.
+fn fake_cargo(dir: &Path) {
+    let dest = dir.join(format!("cargo{}", std::env::consts::EXE_SUFFIX));
+    std::fs::copy(fake_cargo_bin(), &dest).expect("copy the fake cargo onto the test PATH");
+    #[cfg(unix)]
+    {
+        let mut perms = std::fs::metadata(&dest).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&dest, perms).unwrap();
+    }
 }
 
-/// A plugin that answers the compat probe as built against this clove.
-fn compatible_plugin() -> String {
-    let api = clove_plugin::CLOVE_PLUGIN_API;
-    format!(
-        r#"#!/bin/sh
-if [ "$1" = "--clove-plugin-info" ]; then
-  echo '{{"name":"p","version":"1.0.0","about":"ok","provides":["sync:gitlab"],"clove_plugin_api":{api},"min_clove_plugin_api":{api},"max_clove_plugin_api":{api},"max_schema":1}}'
-fi
-exit 0"#
-    )
+/// Put `dir` first on `PATH` for `cmd`, portably.
+fn prepend_path(cmd: &mut Command, dir: &Path) {
+    let mut dirs = vec![dir.to_path_buf()];
+    dirs.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    cmd.env("PATH", std::env::join_paths(dirs).unwrap());
 }
 
-/// A plugin that demands a newer clove than this one — gate 3 must refuse it.
-fn needs_newer_clove_plugin() -> String {
-    let api = clove_plugin::CLOVE_PLUGIN_API;
-    format!(
-        r#"#!/bin/sh
-if [ "$1" = "--clove-plugin-info" ]; then
-  echo '{{"name":"p","version":"9.0.0","about":"future","provides":["sync:gitlab"],"clove_plugin_api":{next},"min_clove_plugin_api":{next},"max_clove_plugin_api":{next},"max_schema":1}}'
-fi
-exit 0"#,
-        next = api + 1
-    )
+/// A `file://` URL git accepts on this platform.
+fn file_url(path: &Path) -> String {
+    let s = path.to_string_lossy().replace('\\', "/");
+    if s.starts_with('/') {
+        format!("file://{s}")
+    } else {
+        // Windows: `C:/x` needs the third slash.
+        format!("file:///{s}")
+    }
 }
 
 /// Did the fake cargo run this exact subcommand?
@@ -348,22 +307,37 @@ struct Env {
     _tmp: TempDir,
     home: std::path::PathBuf,
     bin: std::path::PathBuf,
+    /// Which `--clove-plugin-info` answer the installed plugin gives.
+    mode: String,
     registry: MockCratesIo,
 }
 
-fn env_with(plugin_behavior: &str) -> Env {
+/// A test environment whose "installed plugin" answers the compat probe in
+/// `mode` — one of `"compatible"`, `"needs_newer"`, `"outdated"`, `"no_info"`.
+fn env_with(mode: &str) -> Env {
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join("clove-home");
     let bin = tmp.path().join("fakebin");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&bin).unwrap();
-    fake_cargo(&bin, plugin_behavior);
+    fake_cargo(&bin);
     Env {
         _tmp: tmp,
         home,
         bin,
+        mode: mode.to_owned(),
         registry: MockCratesIo::start(),
     }
+}
+
+/// The plugin behaviour names, so call sites read as intent rather than strings.
+fn compatible_plugin() -> String {
+    "compatible".to_owned()
+}
+
+/// A plugin that demands a newer clove than this one — gate 3 must refuse it.
+fn needs_newer_clove_plugin() -> String {
+    "needs_newer".to_owned()
 }
 
 /// A copy of the `clove` binary in a directory this suite controls.
@@ -396,23 +370,32 @@ impl Env {
     fn clove(&self) -> Command {
         let mut cmd = Command::new(isolated_clove());
         cmd.env_remove("CLOVE_FORMAT");
+        // Reaches the probed plugin by plain inheritance: harness -> clove ->
+        // the freshly "installed" binary.
+        cmd.env("FAKE_PLUGIN_MODE", &self.mode);
+        cmd.env("FAKE_CARGO_LOG", self.bin.join("argv.log"));
+        cmd.env("FAKE_CARGO_REAL", which_cargo());
         // Inherited, and it outranks `<clove-home>/bin`, so a developer with
         // real plugins installed would see them in every assertion.
         cmd.env_remove("CLOVE_PLUGIN_PATH");
         cmd.env("CLOVE_HOME", &self.home);
         cmd.env("CLOVE_REGISTRY_URL", self.registry.url());
         // The fake cargo must win over the real one.
-        let path = format!(
-            "{}:{}",
-            self.bin.display(),
-            std::env::var("PATH").unwrap_or_default()
-        );
-        cmd.env("PATH", path);
+        prepend_path(&mut cmd, &self.bin);
         cmd
     }
 
     /// Simulate cargo's bookkeeping for an already-installed package.
+    /// Simulate cargo's bookkeeping for an already-installed package.
+    ///
+    /// Real cargo records the file name, which carries `.exe` on Windows — so
+    /// seeding the bare name would exercise `bare_subcommand`'s tolerant branch
+    /// instead of the real one.
     fn seed_installed(&self, pkgid: &str, bins: &[&str]) {
+        let bins: Vec<String> = bins
+            .iter()
+            .map(|b| format!("{b}{}", std::env::consts::EXE_SUFFIX))
+            .collect();
         let body = json!({ "installs": { pkgid: { "bins": bins } } });
         std::fs::write(
             self.home.join(".crates2.json"),
@@ -446,6 +429,86 @@ fn the_suite_sees_no_plugin_it_did_not_install() {
         Some(0),
         "the plugin search path must be hermetic: {v}"
     );
+}
+
+#[test]
+fn a_failed_rollback_says_the_binary_is_still_on_the_search_path() {
+    // The `Err` branch of `roll_back`, unreachable until the compiled shim could
+    // be told to fail. It is the branch that matters: the rejected binary is
+    // still in `<clove-home>/bin`, which outranks `$PATH`.
+    let env = env_with(&needs_newer_clove_plugin());
+    env.registry
+        .publish_plugin("clove-sync-gitlab", "0.2.0", "clove-sync-gitlab");
+
+    let assert = env
+        .clove()
+        .env("FAKE_CARGO_FAIL_ON", "uninstall")
+        .args(["plugin", "install", "gitlab", "--yes"])
+        .assert()
+        .failure();
+    let err = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+
+    assert!(err.contains("FAILED"), "{err}");
+    assert!(
+        err.contains("Remove it manually"),
+        "must say what to do: {err}"
+    );
+    assert!(
+        !err.contains("has been rolled back"),
+        "must not assert an action that did not happen: {err}"
+    );
+    // …and the file really is still there, which is why it is worded that way.
+    assert!(
+        env.home
+            .join("bin")
+            .join(format!("clove-sync-gitlab{}", std::env::consts::EXE_SUFFIX))
+            .exists(),
+        "the message is only honest if the binary is in fact still present"
+    );
+}
+
+#[test]
+fn a_failed_cargo_install_leaves_nothing_behind_and_says_so() {
+    let env = env_with(&compatible_plugin());
+    env.registry
+        .publish_plugin("clove-sync-gitlab", "0.2.0", "clove-sync-gitlab");
+
+    let assert = env
+        .clove()
+        .env("FAKE_CARGO_FAIL_ON", "install")
+        .args(["plugin", "install", "gitlab", "--yes"])
+        .assert()
+        .failure();
+    let err = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(err.contains("`cargo install` failed"), "{err}");
+    assert!(
+        !env.home.join("bin").exists()
+            || std::fs::read_dir(env.home.join("bin"))
+                .map(|mut d| d.next().is_none())
+                .unwrap_or(true),
+        "a failed install must not leave a binary on the search path"
+    );
+}
+
+#[test]
+fn a_missing_cargo_names_the_toolchain_not_the_os_error() {
+    // Installing builds from source, so "cargo is not installed" is a likely
+    // first-run failure and deserves the actionable message.
+    let env = env_with(&compatible_plugin());
+    env.registry
+        .publish_plugin("clove-sync-gitlab", "0.2.0", "clove-sync-gitlab");
+
+    let empty = env._tmp.path().join("emptybin");
+    std::fs::create_dir_all(&empty).unwrap();
+
+    let assert = env
+        .clove()
+        .env("PATH", &empty)
+        .args(["plugin", "install", "gitlab", "--yes"])
+        .assert()
+        .failure();
+    let err = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(err.contains("rustup.rs"), "must name the remedy: {err}");
 }
 
 #[test]
@@ -746,7 +809,16 @@ fn a_traversal_or_flag_shaped_name_never_reaches_cargo_or_a_url() {
 // all exercised for real — only the final `cargo install` is faked.
 // ---------------------------------------------------------------------------
 
+/// Run a helper subprocess, isolated from the developer's git configuration.
+///
+/// Without this a global `commit.gpgsign`, `core.hooksPath`, `init.templateDir`,
+/// a `url.<base>.insteadOf` rewrite, or `safe.directory` ownership rules can each
+/// fail or silently redirect these repositories on a real workstation.
 fn run(cmd: &mut Command) {
+    cmd.env("GIT_CONFIG_GLOBAL", "/nonexistent/clove-test-gitconfig")
+        .env("GIT_CONFIG_SYSTEM", "/nonexistent/clove-test-gitconfig")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_TERMINAL_PROMPT", "0");
     let out = cmd.output().expect("spawn");
     assert!(
         out.status.success(),
@@ -796,7 +868,7 @@ fn make_repo(dir: &Path, members: &[(&str, &str, &str)]) {
         .current_dir(dir));
     run(Command::new("git").args(["add", "-A"]).current_dir(dir));
     run(Command::new("git")
-        .args(["commit", "-q", "-m", "init"])
+        .args(["-c", "commit.gpgsign=false", "commit", "-q", "-m", "init"])
         .current_dir(dir));
 }
 
@@ -814,7 +886,7 @@ fn install_from_a_git_repo_with_one_plugin() {
             "plugin",
             "install",
             "--git",
-            &format!("file://{}", repo.display()),
+            &file_url(&repo),
             "--yes",
         ])
         .assert()
@@ -856,13 +928,7 @@ fn a_workspace_shaped_like_clove_offers_only_the_real_plugins() {
 
     let assert = env
         .clove()
-        .args([
-            "plugin",
-            "install",
-            "--git",
-            &format!("file://{}", repo.display()),
-            "--yes",
-        ])
+        .args(["plugin", "install", "--git", &file_url(&repo), "--yes"])
         .assert()
         .failure();
     let err = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
@@ -899,7 +965,7 @@ fn package_selects_one_plugin_from_a_multi_plugin_repo() {
             "plugin",
             "install",
             "--git",
-            &format!("file://{}", repo.display()),
+            &file_url(&repo),
             "--package",
             "clove-import-tk",
             "--yes",
@@ -936,13 +1002,7 @@ fn a_repo_with_no_clove_plugin_is_refused() {
         .current_dir(&repo));
 
     env.clove()
-        .args([
-            "plugin",
-            "install",
-            "--git",
-            &format!("file://{}", repo.display()),
-            "--yes",
-        ])
+        .args(["plugin", "install", "--git", &file_url(&repo), "--yes"])
         .assert()
         .failure();
     assert!(!cargo_log(&env.bin).contains("install"));
@@ -965,7 +1025,7 @@ fn a_tag_pins_the_install_and_suppresses_the_moving_branch_warning() {
             "plugin",
             "install",
             "--git",
-            &format!("file://{}", repo.display()),
+            &file_url(&repo),
             "--tag",
             "v1.0.0",
             "--yes",
@@ -1177,7 +1237,7 @@ fn a_git_install_is_pinned_to_the_commit_that_was_inspected() {
             "plugin",
             "install",
             "--git",
-            &format!("file://{}", repo.display()),
+            &file_url(&repo),
             "--tag",
             "v1.0.0",
             "--yes",
@@ -1320,7 +1380,7 @@ fn install_from_git_matches_the_published_schema() {
                 "plugin",
                 "install",
                 "--git",
-                &format!("file://{}", repo.display()),
+                &file_url(&repo),
                 "--yes",
             ])
             .assert()

@@ -561,6 +561,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The plugin install suite runs on Windows.** It carried `#![cfg(unix)]`
+  because its `cargo` shim and its fake plugin were `#!/bin/sh` scripts, so CI's
+  `windows-latest` leg silently skipped all 33 tests — which is how two
+  Windows-only bugs shipped (a path built without `EXE_SUFFIX`, and a suffixed
+  binary name reaching `cargo --bin`). Both are now one compiled fixture binary
+  wearing two hats, since a `.cmd` shim would not do: `std::process::Command`
+  appends `.exe` to an extension-less name rather than walking `PATHEXT`, and the
+  "installed plugin" is spawned directly by clove and has to be a real
+  executable.
+- **A rejected install no longer claims to have been rolled back before the
+  rollback runs.** The compatibility message ended with "the install has been
+  rolled back", and the rollback then appended its own verdict — so a failed
+  rollback read "…has been rolled back. Rolling the install back FAILED — the
+  binary is still present."
 - **`clove plugin update` no longer reports a green light for plugins it never
   checked.** A git-installed plugin is not re-resolved through crates.io (by
   design — that would swap the code the user chose for a same-named crate), but

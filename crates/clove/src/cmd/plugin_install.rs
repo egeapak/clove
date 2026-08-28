@@ -474,8 +474,12 @@ fn incompatible_reason(package: &str, probe: Option<&crate::plugin::ProbedInfo>)
     let info = probe?;
     (info.min_clove_plugin_api > clove_plugin::CLOVE_PLUGIN_API).then(|| {
         format!(
+            // No claim about the rollback here: `roll_back` is what performs it
+            // and is the only thing that knows whether it worked. Asserting it
+            // in the reason produced "…the install has been rolled back.
+            // Rolling the install back FAILED — the binary is still present."
             "`{package}` needs a newer clove (it requires plugin API {}, this clove \
-             provides {}); the install has been rolled back",
+             provides {})",
             info.min_clove_plugin_api,
             clove_plugin::CLOVE_PLUGIN_API
         )
