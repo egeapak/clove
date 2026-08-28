@@ -561,6 +561,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Plugin discovery works behind a TLS-intercepting proxy.** The client
+  verified against its bundled roots only, so in an environment with a corporate
+  egress proxy — where `cargo`, `git` and `curl` all work because they honour
+  `$SSL_CERT_FILE` / `$CARGO_HTTP_CAINFO` — `plugin list --all` returned an
+  opaque failure that degraded to a warning, and `plugin install` failed
+  outright. It now reads the same variables (plus `$CLOVE_CAINFO`). The extra
+  roots are **added** to the bundled set, never substituted for it: a bundle
+  that is missing or unparseable leaves the trust set exactly as it was, so a
+  misconfiguration cannot silently turn into "nothing verifies".
+- **Discovery has an overall deadline.** The 8s timeout was per request, and
+  retries (up to 3 attempts, up to 5s of backoff) multiplied by pagination (up
+  to 50 pages) put the worst case at ~28 minutes for a command whose stated
+  design goal is not appearing to hang. A 30s ceiling now bounds the walk, and
+  hitting it — or the page cap — is reported rather than returned as a
+  complete-looking list that then gets cached for a day.
 - **The plugin install suite runs on Windows.** It carried `#![cfg(unix)]`
   because its `cargo` shim and its fake plugin were `#!/bin/sh` scripts, so CI's
   `windows-latest` leg silently skipped all 33 tests — which is how two

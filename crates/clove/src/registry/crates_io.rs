@@ -54,6 +54,12 @@ const PER_PAGE: usize = 100;
 /// cannot spin the client forever.
 const MAX_PAGES: usize = 50;
 
+/// A ceiling on the whole paginated discovery walk.
+///
+/// Distinct from the per-request timeout: retries and pagination multiply, and
+/// nothing else bounds their product.
+const DISCOVERY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Deserialize a field that crates.io may send as an explicit `null` rather than
 /// omitting it, yielding the default instead of failing.
 ///
@@ -240,8 +246,21 @@ impl<'a> CratesIo<'a> {
     pub fn reverse_dependents(&self, of: &str) -> Result<Option<Vec<RegistryPlugin>>, FetchError> {
         let mut by_crate: HashMap<String, RegistryPlugin> = HashMap::new();
         let mut page = 1usize;
+        // An overall deadline across the walk.
+        //
+        // The 8s timeout in `http.rs` is *per call*, and `Fetch::get` retries up
+        // to twice with up to 5s of backoff — so one URL can cost 34s, and 50
+        // pages of that is 28 minutes for a command whose whole design rationale
+        // (see `http.rs`) is not appearing to hang. A registry answering 503 +
+        // `Retry-After` quickly still reaches ~8 minutes.
+        let deadline = std::time::Instant::now() + DISCOVERY_DEADLINE;
+        let mut truncated = false;
 
         loop {
+            if std::time::Instant::now() >= deadline {
+                truncated = true;
+                break;
+            }
             let url = format!(
                 "{}/crates/{of}/reverse_dependencies?per_page={PER_PAGE}&page={page}",
                 self.api_root
@@ -273,10 +292,26 @@ impl<'a> CratesIo<'a> {
             // is a supported mirror seam, and a mirror is exactly what omits or
             // approximates `total`. A short page is the reliable signal; the cost
             // of ignoring `total` is at most one extra request.
-            if page_rows < PER_PAGE || page >= MAX_PAGES {
+            if page_rows < PER_PAGE {
+                break;
+            }
+            if page >= MAX_PAGES {
+                truncated = true;
                 break;
             }
             page += 1;
+        }
+
+        // Hitting a cap is not the same as reaching the end, and the result is
+        // cached for 24 hours — so a truncated list would look complete, and
+        // stay that way. `Decode` is the wrong shape for it (the response was
+        // fine), so it is reported as an error the caller degrades on, exactly
+        // as it already does for an unreachable registry.
+        if truncated {
+            return Err(FetchError::Decode(format!(
+                "the registry listing for `{of}` was cut short after {page} pages; \
+                 the result would be incomplete, so it is not being cached"
+            )));
         }
 
         let mut plugins: Vec<RegistryPlugin> = by_crate

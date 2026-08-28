@@ -54,6 +54,7 @@ camino.workspace = true
 chrono.workspace = true
 tempfile.workspace = true       # T-M04: atomic `export --out FILE` writes
 ureq.workspace = true            # crates.io registry client (registry/, `plugin list --all`)
+webpki-root-certs.workspace = true  # bundled roots, extended by $SSL_CERT_FILE/$CARGO_HTTP_CAINFO
 semver.workspace = true          # crates.io version ordering
 
 # `clove daemon stop` on Windows signals the daemon's named event (DESIGN §8.9).

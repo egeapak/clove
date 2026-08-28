@@ -593,6 +593,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "ureq",
+ "webpki-root-certs",
  "windows-sys 0.59.0",
 ]
 

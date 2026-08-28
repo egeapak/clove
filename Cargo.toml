@@ -90,6 +90,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # (correct for a CLI, and it must never be called from cloved/clove-web, which are
 # tokio). `rustls` here resolves to the workspace ring pin above, never aws-lc.
 ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
+webpki-root-certs = "1"         # the bundled trust roots, so an env-named CA bundle can ADD to them rather than replace them
 semver = "1"                    # crates.io version ordering ("0.10.0" > "0.9.0"; a string compare gets this backwards)
 toml = { version = "0.8", default-features = false, features = ["parse"] }  # config.toml parsing only (no serialize/display)
 jsonschema = "0.46"             # JSON Schema validation in tests (T-CLI14)

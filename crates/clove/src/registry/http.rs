@@ -37,9 +37,59 @@ impl Default for UreqFetch {
     }
 }
 
+/// Environment variables naming an additional CA bundle, in the order the rest
+/// of the Rust/`curl` ecosystem checks them.
+///
+/// `cargo` honours `CARGO_HTTP_CAINFO`; `curl`, `git` and OpenSSL honour
+/// `SSL_CERT_FILE`. In a TLS-intercepting environment — a corporate egress
+/// proxy, or the agent proxy this repository is developed behind — those are set
+/// and everything else works, while `clove plugin list --all` returns an opaque
+/// failure that degrades to a warning and `plugin install` fails outright. That
+/// makes the feature look broken in exactly the environments least able to
+/// diagnose it.
+const CA_BUNDLE_VARS: [&str; 3] = ["CLOVE_CAINFO", "CARGO_HTTP_CAINFO", "SSL_CERT_FILE"];
+
+/// The roots to verify against: the bundled set, plus any bundle the environment
+/// names.
+///
+/// Additive, never a replacement: a bundle that fails to parse, or a variable
+/// pointing at nothing, must not quietly *narrow* the trust set — that would
+/// turn a misconfiguration into "nothing verifies" rather than a clear failure.
+fn root_certificates() -> ureq::tls::RootCerts {
+    let bundle = CA_BUNDLE_VARS
+        .iter()
+        .find_map(std::env::var_os)
+        .map(std::path::PathBuf::from);
+    root_certificates_from(bundle.as_deref())
+}
+
+/// [`root_certificates`] with the bundle path supplied, so the additive property
+/// is testable without mutating this process's environment.
+fn root_certificates_from(bundle: Option<&std::path::Path>) -> ureq::tls::RootCerts {
+    let mut roots: Vec<ureq::tls::Certificate<'static>> = webpki_root_certs::TLS_SERVER_ROOT_CERTS
+        .iter()
+        .map(|der| ureq::tls::Certificate::from_der(der.as_ref()).to_owned())
+        .collect();
+
+    if let Some(pem) = bundle.and_then(|path| std::fs::read(path).ok()) {
+        for item in ureq::tls::parse_pem(&pem).flatten() {
+            if let ureq::tls::PemItem::Certificate(cert) = item {
+                roots.push(cert);
+            }
+        }
+    }
+
+    ureq::tls::RootCerts::Specific(std::sync::Arc::new(roots))
+}
+
 impl UreqFetch {
     pub fn new() -> Self {
         let config = ureq::Agent::config_builder()
+            .tls_config(
+                ureq::tls::TlsConfig::builder()
+                    .root_certs(root_certificates())
+                    .build(),
+            )
             .timeout_global(Some(TIMEOUT))
             // crates.io needs no redirects at all. A permissive limit only widens
             // what a hostile or misconfigured registry root can reach: ureq applies
@@ -184,6 +234,61 @@ fn tls_hint(message: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn an_environment_ca_bundle_adds_to_the_bundled_roots_and_never_narrows_them() {
+        // The property that matters. A bundle that fails to parse, or a variable
+        // pointing at nothing, must not quietly *narrow* the trust set — that
+        // turns a misconfiguration into "nothing verifies at all", which is both
+        // a worse failure and a much harder one to diagnose than a plain
+        // certificate error.
+        let count = |roots: &ureq::tls::RootCerts| match roots {
+            ureq::tls::RootCerts::Specific(certs) => certs.len(),
+            _ => panic!("expected an explicit root set"),
+        };
+
+        let baseline = count(&root_certificates_from(None));
+        assert!(baseline > 0, "the bundled roots must be present");
+
+        let dir = tempfile::tempdir().unwrap();
+
+        // A variable naming a file that does not exist is ignored, not fatal.
+        let missing = dir.path().join("nope.pem");
+        assert_eq!(count(&root_certificates_from(Some(&missing))), baseline);
+
+        // A file that is not PEM at all contributes nothing, and takes nothing.
+        let garbage = dir.path().join("garbage.pem");
+        std::fs::write(&garbage, b"this is not a certificate").unwrap();
+        assert_eq!(
+            count(&root_certificates_from(Some(&garbage))),
+            baseline,
+            "an unparseable bundle must not reduce the trust set"
+        );
+
+        // A real bundle is *added* to the built-in roots, not swapped for them —
+        // so a corporate CA does not cost you the public ones.
+        let extra = dir.path().join("extra.pem");
+        std::fs::write(&extra, SELF_SIGNED_PEM).unwrap();
+        assert_eq!(
+            count(&root_certificates_from(Some(&extra))),
+            baseline + 1,
+            "an environment CA must extend the trust set"
+        );
+    }
+
+    /// A throwaway self-signed certificate, only ever parsed — never trusted by
+    /// anything but this test's arithmetic.
+    const SELF_SIGNED_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
+MIIBhDCCASugAwIBAgIUbN3reOdgv7zCeE6MSKbUbu/ux0IwCgYIKoZIzj0EAwIw\n\
+GDEWMBQGA1UEAwwNY2xvdmUtdGVzdC1jYTAeFw0yNjA4MjgxMDM0MTFaFw0zNjA4\n\
+MjUxMDM0MTFaMBgxFjAUBgNVBAMMDWNsb3ZlLXRlc3QtY2EwWTATBgcqhkjOPQIB\n\
+BggqhkjOPQMBBwNCAAQ019MLglYI2yKiibKXEg8N7xCpOAQN0kxIcdu9+EOvcyzi\n\
+YnS5vtMW4IEnvDJHoYTLuI9tNlbZJ1H3vybg04+lo1MwUTAdBgNVHQ4EFgQUiyh/\n\
+t+D4Lb7f3rGDhzEmbLHnShEwHwYDVR0jBBgwFoAUiyh/t+D4Lb7f3rGDhzEmbLHn\n\
+ShEwDwYDVR0TAQH/BAUwAwEB/zAKBggqhkjOPQQDAgNHADBEAiA2C9G6KQ9ExCVz\n\
+C4UV47ZnXdr8UQNzJLnRZWNCU44+iQIgJGPGcxqHPKOvdDP/uZg/N0UUTO1rS0LC\n\
+X5fIM+2FHJc=\n\
+-----END CERTIFICATE-----\n";
     use super::*;
 
     #[test]
