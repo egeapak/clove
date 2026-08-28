@@ -113,6 +113,14 @@ impl MockCratesIo {
     }
 }
 
+/// The value of `?<name>=` in a request path.
+fn query_param(path: &str, name: &str) -> Option<String> {
+    path.split(['?', '&'])
+        .skip(1)
+        .find_map(|pair| pair.strip_prefix(&format!("{name}=")))
+        .map(str::to_owned)
+}
+
 fn handle(mut stream: TcpStream, state: &Arc<Mutex<Registry>>) {
     // Read until the end of the headers rather than taking whatever one `read`
     // returned: a request split across TCP segments would otherwise parse as an
@@ -164,16 +172,35 @@ fn handle(mut stream: TcpStream, state: &Arc<Mutex<Registry>>) {
         if !s.registry_published {
             (404, json!({"errors":[{"detail":"crate does not exist"}]}))
         } else {
-            let deps: Vec<Value> = s
+            // Real crates.io caps `per_page` at 100 and returns short pages;
+            // serving everything on every request meant the pagination loop was
+            // only ever exercised against the unit-level `FakeFetch`, and a
+            // registry with 100+ dependents would have looped to `MAX_PAGES`
+            // against identical pages without any test noticing.
+            let per_page: usize = query_param(&path, "per_page")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(100)
+                .min(100);
+            let page: usize = query_param(&path, "page")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1)
+                .max(1);
+            let start = (page - 1) * per_page;
+            let slice: Vec<(usize, &String)> = s
                 .dependents
                 .iter()
                 .enumerate()
+                .skip(start)
+                .take(per_page)
+                .collect();
+
+            let deps: Vec<Value> = slice
+                .iter()
                 .map(|(i, _)| json!({"version_id": i, "crate_id": "clove-plugin", "kind": "normal", "downloads": 10}))
                 .collect();
-            let versions: Vec<Value> = s
-                .dependents
+            let versions: Vec<Value> = slice
                 .iter()
-                .enumerate()
+                .map(|(i, name)| (*i, *name))
                 .map(|(i, name)| {
                     // Read `num`/`yanked` from what was actually published.
                     // Hardcoding `1.0.0`/`false` meant discovery always reported
@@ -1050,6 +1077,302 @@ fn a_tag_pins_the_install_and_suppresses_the_moving_branch_warning() {
         !log.contains("--tag"),
         "the mutable tag must not be what cargo resolves: {log}"
     );
+}
+
+/// The current HEAD sha of `repo`.
+fn head_sha(repo: &Path) -> String {
+    let out = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo)
+        .output()
+        .expect("git rev-parse");
+    String::from_utf8(out.stdout).unwrap().trim().to_owned()
+}
+
+/// Add an empty commit, so a repository has a history to pick a point in.
+fn empty_commit(repo: &Path, message: &str) {
+    run(Command::new("git")
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            message,
+        ])
+        .current_dir(repo));
+}
+
+#[test]
+fn discovery_walks_every_page_of_a_large_registry() {
+    // The paginating loop had never run over HTTP — only against the unit-level
+    // `FakeFetch`. With the mock serving everything on one page, a registry
+    // larger than `per_page` would have been silently truncated (or looped to
+    // the page cap against identical pages) with no test noticing.
+    let env = env_with(&compatible_plugin());
+    for i in 0..150 {
+        env.registry.publish_plugin(
+            &format!("clove-sync-p{i:03}"),
+            "1.0.0",
+            &format!("clove-sync-p{i:03}"),
+        );
+    }
+
+    let out = json_of(
+        &env.clove()
+            .args(["--format", "json", "plugin", "list", "--all", "--refresh"])
+            .assert()
+            .success(),
+    );
+    assert_matches(&plugin_schema("plugin-list.json"), &out);
+    assert_eq!(
+        out["_meta"]["available_count"], 150,
+        "every page must be walked, and rows deduped across them: {}",
+        out["_meta"]
+    );
+}
+
+#[test]
+fn uninstalling_a_plugin_clove_did_not_install_names_the_situation() {
+    // `foreign_install_message`: a `cargo install`ed plugin resolves fine but
+    // lives outside the clove-managed root, so `uninstall` must say that rather
+    // than "no such plugin" — and must not try to remove it.
+    let env = env_with(&compatible_plugin());
+    let elsewhere = env._tmp.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let foreign = elsewhere.join(format!("clove-sync-gitlab{}", std::env::consts::EXE_SUFFIX));
+    std::fs::copy(fake_cargo_bin(), &foreign).unwrap();
+    #[cfg(unix)]
+    {
+        let mut perms = std::fs::metadata(&foreign).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&foreign, perms).unwrap();
+    }
+
+    let assert = env
+        .clove()
+        .env("CLOVE_PLUGIN_PATH", &elsewhere)
+        .args(["plugin", "uninstall", "sync-gitlab"])
+        .assert()
+        .failure();
+    let err = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+
+    assert!(
+        err.contains("outside the clove-managed root"),
+        "must distinguish 'clove did not install this' from 'no such plugin': {err}"
+    );
+    assert!(
+        err.contains("cargo uninstall"),
+        "must say how to remove it: {err}"
+    );
+    assert!(
+        !cargo_ran(&env.bin, "uninstall"),
+        "clove must not try to remove what it did not install"
+    );
+    assert!(foreign.exists(), "and must not have removed it");
+}
+
+#[test]
+fn the_human_output_says_what_happened_on_each_command() {
+    // Every other success assertion in this file is `--format json`, so the
+    // human arms were unverified — and human is the default.
+    let env = env_with(&compatible_plugin());
+    env.registry
+        .publish_plugin("clove-sync-gitlab", "0.2.0", "clove-sync-gitlab");
+
+    let out = env
+        .clove()
+        .args(["plugin", "install", "gitlab", "--yes"])
+        .assert()
+        .success();
+    let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(
+        text.contains("installed clove-sync-gitlab 0.2.0"),
+        "install: {text}"
+    );
+
+    env.seed_installed(
+        "clove-sync-gitlab 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+        &["clove-sync-gitlab"],
+    );
+
+    let out = env
+        .clove()
+        .args(["plugin", "update", "--yes"])
+        .assert()
+        .success();
+    let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(text.contains("up to date"), "update: {text}");
+
+    let out = env
+        .clove()
+        .args(["plugin", "uninstall", "gitlab"])
+        .assert()
+        .success();
+    let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(
+        text.contains("uninstalled clove-sync-gitlab 0.2.0"),
+        "uninstall: {text}"
+    );
+}
+
+#[test]
+fn a_rev_installs_that_exact_commit_and_not_the_tip() {
+    // `--rev` is the only path through `git fetch --depth 1 origin -- <sha>` plus
+    // `git checkout <rev> --`, and it was entirely unexecuted.
+    let env = env_with(&compatible_plugin());
+    let repo = env._tmp.path().join("srcrepo");
+    make_repo(&repo, &[("clove-sync-gitlab", "clove-sync-gitlab", "")]);
+    let first = head_sha(&repo);
+    empty_commit(&repo, "later work");
+    let tip = head_sha(&repo);
+    assert_ne!(first, tip, "the fixture needs two commits to distinguish");
+
+    let out = json_of(
+        &env.clove()
+            .args([
+                "--format",
+                "json",
+                "plugin",
+                "install",
+                "--git",
+                &file_url(&repo),
+                "--rev",
+                &first,
+                "--yes",
+            ])
+            .assert()
+            .success(),
+    );
+
+    assert_eq!(
+        out["data"]["commit"], first,
+        "the named revision must be what was installed, not the tip: {out}"
+    );
+    let log = cargo_log(&env.bin);
+    assert!(log.contains(&format!("--rev {first}")), "{log}");
+    assert!(
+        !log.contains(&tip),
+        "the tip must not reach cargo when a rev was named: {log}"
+    );
+}
+
+#[test]
+fn a_branch_is_resolved_to_a_commit_before_cargo_sees_it() {
+    // A branch is a mutable name: cargo does its own clone, so passing the
+    // branch through would let the host serve a different tree than the one
+    // clove inspected. Pinned for `--tag`; this pins the same for `--branch`.
+    let env = env_with(&compatible_plugin());
+    let repo = env._tmp.path().join("srcrepo");
+    make_repo(&repo, &[("clove-sync-gitlab", "clove-sync-gitlab", "")]);
+    run(Command::new("git")
+        .args(["branch", "release"])
+        .current_dir(&repo));
+    let sha = head_sha(&repo);
+
+    let out = json_of(
+        &env.clove()
+            .args([
+                "--format",
+                "json",
+                "plugin",
+                "install",
+                "--git",
+                &file_url(&repo),
+                "--branch",
+                "release",
+                "--yes",
+            ])
+            .assert()
+            .success(),
+    );
+
+    assert_eq!(out["data"]["commit"], sha, "{out}");
+    let log = cargo_log(&env.bin);
+    assert!(log.contains(&format!("--rev {sha}")), "{log}");
+    assert!(
+        !log.contains("--branch"),
+        "the mutable branch name must not be what cargo resolves: {log}"
+    );
+}
+
+#[test]
+fn a_repository_with_no_manifest_at_its_root_says_so() {
+    let env = env_with(&compatible_plugin());
+    let repo = env._tmp.path().join("bare");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::write(repo.join("README.md"), "no rust here\n").unwrap();
+    run(Command::new("git").arg("init").arg("-q").current_dir(&repo));
+    run(Command::new("git")
+        .args(["config", "user.email", "t@example.com"])
+        .current_dir(&repo));
+    run(Command::new("git")
+        .args(["config", "user.name", "t"])
+        .current_dir(&repo));
+    run(Command::new("git").args(["add", "-A"]).current_dir(&repo));
+    empty_commit(&repo, "init");
+
+    let assert = env
+        .clove()
+        .args(["plugin", "install", "--git", &file_url(&repo), "--yes"])
+        .assert()
+        .failure();
+    let err = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        err.contains("Cargo.toml"),
+        "must name what is missing: {err}"
+    );
+    assert!(!cargo_ran(&env.bin, "install"), "nothing to build");
+}
+
+#[test]
+fn a_package_that_is_not_in_the_repository_lists_the_ones_that_are() {
+    let env = env_with(&compatible_plugin());
+    let repo = env._tmp.path().join("srcrepo");
+    make_repo(
+        &repo,
+        &[
+            ("clove-sync-gitlab", "clove-sync-gitlab", ""),
+            ("clove-import-jira", "clove-import-jira", ""),
+        ],
+    );
+
+    let assert = env
+        .clove()
+        .args([
+            "plugin",
+            "install",
+            "--git",
+            &file_url(&repo),
+            "--package",
+            "clove-sync-nope",
+            "--yes",
+        ])
+        .assert()
+        .failure();
+    let err = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        err.contains("clove-sync-gitlab") && err.contains("clove-import-jira"),
+        "naming what was not found is only useful with what was: {err}"
+    );
+    assert!(!cargo_ran(&env.bin, "install"));
+}
+
+#[test]
+fn a_package_whose_binary_has_another_name_is_refused() {
+    // `plugins_from_metadata` requires target.name == package.name, because that
+    // equality is the convention dispatch is built on. Unit-tested; this pins it
+    // through the real `cargo metadata` on a real repository.
+    let env = env_with(&compatible_plugin());
+    let repo = env._tmp.path().join("srcrepo");
+    make_repo(&repo, &[("clove-sync-gitlab", "gitlab-helper", "")]);
+
+    env.clove()
+        .args(["plugin", "install", "--git", &file_url(&repo), "--yes"])
+        .assert()
+        .failure();
+    assert!(!cargo_ran(&env.bin, "install"), "nothing may be built");
 }
 
 #[test]

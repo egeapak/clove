@@ -84,16 +84,36 @@ before continuing, exactly as was done for `clove` → `clove-cli`.
 
 ### 2a. Name reservation is a *gate*, not a nicety
 
-`clove plugin install <name>` resolves `<name>` to the crates.io crate
-`clove-<name>` (`docs/PLUGIN_REGISTRY.md` §2) — so the moment `clove-cli` is
-live, `clove plugin install sync-github` is a documented command pointing at a
-crates.io name. If that name is not ours, the command installs **someone else's
-binary** onto the user's `PATH` under a first-party-looking name.
+`clove plugin install <name>` resolves `<name>` against crates.io — so the moment
+`clove-cli` is live, `clove plugin install sync-github` is a documented command
+pointing at a crates.io name. If that name is not ours, the command installs
+**someone else's binary** onto the user's `PATH` under a first-party-looking
+name.
 
 Therefore: **`clove-sync-github`, `clove-import-tk`, and `clove-import-beads`
 must be published (not merely verified free) before `clove-cli`.** Step 3 orders
 them that way. Do not reorder them after `clove-cli` "because they are leaves" —
 the dependency graph permits it, the threat model does not.
+
+**The resolver probes more than one name per provider.** `candidate_crate_names`
+(`crates/clove/src/registry/mod.rs`) expands a *bare provider* into four
+candidates, and only collapses to one when the name already carries its
+multiplexer:
+
+| what the user types | probed |
+|---|---|
+| `sync-github` (what `plugin list` prints, and what every hint teaches) | `clove-sync-github` |
+| `clove-sync-github` (an exact crate name) | `clove-sync-github` |
+| `github` (a bare provider) | `clove-sync-github`, `clove-import-github`, `clove-export-github`, `clove-github` |
+
+The taught spellings resolve to exactly one name, which is what the reservation
+list above covers. The bare-provider form is the loose end: a squatter on
+`clove-import-github` makes `clove plugin install github` **ambiguous** and
+therefore refused. That is a denial, not a compromise — `resolve_candidate`
+refuses rather than guessing, and the exact spelling still works — so it does
+not block a release. If you want the bare form to stay unambiguous, reserve the
+other three rungs for each first-party provider as stub crates too; that is a
+cost/annoyance trade, not a security one.
 
 The same reasoning applies to any *future* first-party plugin: reserve the name
 with a real publish (a stub `0.0.0` release is enough to hold it) in the same

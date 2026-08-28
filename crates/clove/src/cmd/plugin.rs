@@ -666,6 +666,7 @@ fn render_available_table(plugins: &[RegistryPlugin], installed: &[EnrichedPlugi
     struct Row {
         krate: String,
         version: String,
+        run_as: String,
         about: String,
     }
 
@@ -682,6 +683,10 @@ fn render_available_table(plugins: &[RegistryPlugin], installed: &[EnrichedPlugi
             Row {
                 krate: p.crate_name.clone(),
                 version: p.display_version().unwrap_or_else(|| "—".to_owned()),
+                // "What do I type?" is the most useful fact on a discovery
+                // surface, and it was in the JSON `commands` array but absent
+                // from the human view — while the Installed table had it.
+                run_as: run_as_of(p),
                 about,
             }
         })
@@ -689,23 +694,42 @@ fn render_available_table(plugins: &[RegistryPlugin], installed: &[EnrichedPlugi
 
     let crate_w = header_width("CRATE", rows.iter().map(|r| r.krate.as_str()));
     let version_w = header_width("VERSION", rows.iter().map(|r| r.version.as_str()));
+    let run_as_w = header_width("RUN AS", rows.iter().map(|r| r.run_as.as_str()));
 
-    println!("  {:<crate_w$}  {:<version_w$}  ABOUT", "CRATE", "VERSION");
+    println!(
+        "  {:<crate_w$}  {:<version_w$}  {:<run_as_w$}  ABOUT",
+        "CRATE", "VERSION", "RUN AS"
+    );
     for row in &rows {
         println!(
-            "  {:<crate_w$}  {:<version_w$}  {}",
-            row.krate, row.version, row.about
+            "  {:<crate_w$}  {:<version_w$}  {:<run_as_w$}  {}",
+            row.krate, row.version, row.run_as, row.about
         );
     }
 }
 
+/// The first `clove …` invocation a discovered plugin would answer to.
+fn run_as_of(plugin: &RegistryPlugin) -> String {
+    plugin
+        .bin_names
+        .iter()
+        .filter_map(|bin| provenance::bare_subcommand(bin))
+        .flat_map(|bare| plugin::run_as(&[], bare))
+        .next()
+        .unwrap_or_else(|| "—".to_owned())
+}
+
 /// The column width: the wider of the header and the widest cell.
 fn header_width<'a>(header: &str, cells: impl Iterator<Item = &'a str>) -> usize {
+    // `chars`, not `len`: a description with any non-ASCII in it made `str::len`
+    // (bytes) overstate the column and misalign every row after it. Still not
+    // grapheme- or width-aware, which would need a dependency; this is the cheap
+    // fix for the common case.
     cells
-        .map(str::len)
-        .chain(std::iter::once(header.len()))
+        .map(|cell| cell.chars().count())
+        .chain(std::iter::once(header.chars().count()))
         .max()
-        .unwrap_or(header.len())
+        .unwrap_or_else(|| header.chars().count())
 }
 
 #[cfg(test)]

@@ -561,6 +561,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The install confirmation says what it is and where the binary lands.** It
+  opened on a bare crate name with nothing stating the action until the last
+  line, and never showed the install path — the property the README leads with
+  ("not `~/.cargo/bin`"). The two prompts also ordered their fields differently.
+- **`clove plugin list --all` shows `RUN AS` for discovered plugins.** "What do
+  I type?" is the most useful fact on a discovery surface; it was in the JSON
+  `commands` array and absent from the human table, which the Installed table
+  had all along. Column widths are also measured in characters rather than
+  bytes, so a non-ASCII description no longer misaligns every row after it.
 - **`clove plugin list --all` says when an installed plugin has an update.**
   It filtered installed plugins out of the discovered set entirely, so a newer
   release was invisible — on the one surface where a user would learn that

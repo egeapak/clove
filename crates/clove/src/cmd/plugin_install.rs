@@ -20,7 +20,7 @@ use crate::registry::crates_io::CratesIo;
 use crate::registry::http::UreqFetch;
 use crate::registry::install::{
     self, cargo_failure, cargo_install_argv, cargo_missing, cargo_uninstall_argv, consent_policy,
-    rollback_argv, Consent, Gates, REGISTRY_ROOT_CRATE,
+    Consent, Gates, REGISTRY_ROOT_CRATE,
 };
 use crate::registry::provenance::{self, Installed};
 use crate::registry::RegistryPlugin;
@@ -182,6 +182,7 @@ fn install_from_git(
                 &chosen.package,
                 &chosen.bin,
                 sha,
+                Some(installed_path.as_path()),
                 shadowed.as_deref(),
             );
             if !install::ask_confirmation(&prompt) {
@@ -340,7 +341,12 @@ fn install_from_registry(
     ) {
         Consent::Granted => {}
         Consent::Ask => {
-            let prompt = install::prompt_text(&candidate, &gates, shadowed.as_deref());
+            let prompt = install::prompt_text(
+                &candidate,
+                &gates,
+                Some(installed_path.as_path()),
+                shadowed.as_deref(),
+            );
             if !install::ask_confirmation(&prompt) {
                 // See `install_from_git`: `Ask` implies human format.
                 println!("not installed");
@@ -442,7 +448,7 @@ fn install_from_registry(
 /// the message must not assert an action that did not happen, and must say what
 /// to delete.
 fn roll_back(package: &str, home: &Utf8Path, installed_path: &Utf8Path, reason: String) -> String {
-    let uninstalled = run_cargo(&rollback_argv(package, home), "uninstall").is_ok();
+    let uninstalled = run_cargo(&cargo_uninstall_argv(package, home), "uninstall").is_ok();
     // cargo's exit code is not proof the file is gone. `cargo uninstall` exits 0
     // while leaving a binary another `.crates2.json` entry also claims — verified
     // against cargo 1.94 with two packages sharing a bin name under one --root.

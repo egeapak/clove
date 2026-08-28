@@ -123,7 +123,7 @@ impl From<CachedPlugin> for RegistryPlugin {
 }
 
 /// The cache file path inside `home`.
-pub fn path_in(home: &Utf8Path) -> Utf8PathBuf {
+fn path_in(home: &Utf8Path) -> Utf8PathBuf {
     home.join(FILE_NAME)
 }
 

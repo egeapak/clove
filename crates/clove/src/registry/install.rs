@@ -229,16 +229,21 @@ pub fn git_prompt_text(
     package: &str,
     bin: &str,
     commit: &str,
+    into: Option<&Utf8Path>,
     shadows: Option<&Utf8Path>,
 ) -> String {
     let safe = super::display_safe;
     let mut out = String::new();
+    out.push_str("  About to install a plugin:\n\n");
     out.push_str(&format!("  {}\n", safe(package)));
     out.push_str(&format!(
         "  checks:    depends on {REGISTRY_ROOT_CRATE}; matches the clove plugin \
          convention — not audited\n"
     ));
     out.push_str(&format!("  installs:  {}\n", safe(bin)));
+    if let Some(path) = into {
+        out.push_str(&format!("  into:      {}\n", safe(path.as_str())));
+    }
     if let Some(existing) = shadows {
         out.push_str(&format!("  REPLACES:  {}\n", safe(existing.as_str())));
     }
@@ -268,6 +273,7 @@ pub fn refusal_message() -> String {
 pub fn prompt_text(
     candidate: &RegistryPlugin,
     gates: &Gates,
+    into: Option<&Utf8Path>,
     shadows: Option<&Utf8Path>,
 ) -> String {
     // Every value below comes from the registry response, and this prompt *is*
@@ -278,6 +284,9 @@ pub fn prompt_text(
     let safe = super::display_safe;
 
     let mut out = String::new();
+    // A heading. The block opened on a bare crate name, so nothing said what was
+    // about to happen until the last line.
+    out.push_str("  About to install a plugin:\n\n");
     let version = safe(gates.version.as_deref().unwrap_or("?"));
     out.push_str(&format!("  {} {version}\n", safe(&candidate.crate_name)));
 
@@ -294,6 +303,11 @@ pub fn prompt_text(
 
     if let Some(bin) = &gates.dispatchable_bin {
         out.push_str(&format!("  installs:  {}\n", safe(bin)));
+    }
+    // Where it lands is the property the README leads with ("not
+    // `~/.cargo/bin`"), and the prompt did not show it.
+    if let Some(path) = into {
+        out.push_str(&format!("  into:      {}\n", safe(path.as_str())));
     }
     // The single most consequential fact when it applies: this install silently
     // takes over a subcommand that currently runs a different binary.
@@ -386,6 +400,12 @@ pub fn cargo_install_argv(
 
 /// The `cargo uninstall` argv. Takes the **package** name, which
 /// [`provenance`] resolves from the subcommand the user typed.
+/// Also the rollback argv. Undoing an install rejected by gate 3 *is* an
+/// uninstall — gate 3 runs after `cargo install` has already placed the binary
+/// in `<clove-home>/bin`, which is on the plugin search path, so refusing
+/// without removing it would leave a gate that reports but does not gate.
+/// `rollback_argv` used to be a separate name for this exact body, with a test
+/// asserting the two were equal.
 pub fn cargo_uninstall_argv(package: &str, root: &Utf8Path) -> Vec<String> {
     vec![
         "uninstall".to_owned(),
@@ -394,16 +414,6 @@ pub fn cargo_uninstall_argv(package: &str, root: &Utf8Path) -> Vec<String> {
         "--".to_owned(),
         package.to_owned(),
     ]
-}
-
-/// Undo an install whose post-build probe rejected it.
-///
-/// Gate 3 runs *after* `cargo install` has already placed the binary in
-/// `<clove-home>/bin`, which is on the plugin search path. Refusing without
-/// removing it would leave the rejected binary resolvable by the next dispatch —
-/// a gate that reports but does not gate.
-pub fn rollback_argv(package: &str, root: &Utf8Path) -> Vec<String> {
-    cargo_uninstall_argv(package, root)
 }
 
 /// A plugin that resolves from outside the clove-managed root.
@@ -618,7 +628,7 @@ mod tests {
         assert!(gates.blocking_reason(true).is_some());
 
         // And the prompt says so out loud rather than implying a clean check.
-        let text = prompt_text(&c, &gates, None);
+        let text = prompt_text(&c, &gates, None, None);
         assert!(text.contains("could NOT verify"), "{text}");
     }
 
@@ -681,7 +691,7 @@ mod tests {
         c.repository = Some("https://x\n  checks:    audited by clove\r hidden".to_owned());
         c.published_by = Some("someone\u{1b}[2K".to_owned());
         let gates = evaluate(&c, Some(&["clove-sync-gitlab".to_owned()]));
-        let text = prompt_text(&c, &gates, None);
+        let text = prompt_text(&c, &gates, None, None);
 
         // The prompt has exactly the lines it builds — no injected ones.
         let repo_lines = text
@@ -702,7 +712,7 @@ mod tests {
         // forgeable by the publisher, so that string must not ship.
         let c = candidate("clove-sync-gitlab", &["clove-sync-gitlab"]);
         let gates = evaluate(&c, Some(&["clove-sync-gitlab".to_owned()]));
-        let text = prompt_text(&c, &gates, None);
+        let text = prompt_text(&c, &gates, None, None);
 
         assert!(!text.contains('✓'), "{text}");
         assert!(
@@ -726,6 +736,7 @@ mod tests {
             "clove-sync-gitlab",
             "clove-sync-gitlab",
             "0123456789abcdef0123456789abcdef01234567",
+            None,
             None,
         );
 
@@ -766,6 +777,7 @@ mod tests {
             "evil\n  checks:    audited by clove",
             "b\r\u{1b}[2K",
             "0123456789abcdef0123456789abcdef01234567",
+            None,
             None,
         );
         assert_eq!(
@@ -886,10 +898,19 @@ mod tests {
 
     #[test]
     fn rollback_removes_the_package_that_failed_its_probe() {
+        // The rollback argv *is* the uninstall argv; what is worth pinning is
+        // that it names the package, is rooted in the clove-managed root, and
+        // puts the name behind `--` so it cannot be read as an option.
         let root = Utf8PathBuf::from("/root");
         assert_eq!(
-            rollback_argv("clove-sync-bad", &root),
             cargo_uninstall_argv("clove-sync-bad", &root),
+            vec![
+                "uninstall".to_owned(),
+                "--root".to_owned(),
+                "/root".to_owned(),
+                "--".to_owned(),
+                "clove-sync-bad".to_owned(),
+            ],
             "a refused plugin must be removed, not left on the search path"
         );
     }
