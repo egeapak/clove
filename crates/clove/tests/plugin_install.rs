@@ -1465,6 +1465,40 @@ fn plugin_list_and_search_match_the_published_schema() {
 }
 
 #[test]
+fn list_all_tells_an_installed_plugin_that_an_update_exists() {
+    // `update` is the action; `list --all` is the only place a user would learn
+    // they need it. It used to filter installed plugins out of the discovered
+    // set entirely, so a newer release was invisible until you happened to run
+    // `update` for other reasons.
+    let env = env_with(&compatible_plugin());
+    env.registry
+        .publish_plugin("clove-sync-gitlab", "0.2.0", "clove-sync-gitlab");
+    env.clove()
+        .args(["--format", "json", "plugin", "install", "gitlab", "--yes"])
+        .assert()
+        .success();
+
+    // The installed fixture reports version 1.0.0, so 2.0.0 is genuinely newer.
+    env.registry
+        .publish_plugin("clove-sync-gitlab", "2.0.0", "clove-sync-gitlab");
+
+    let out = json_of(
+        &env.clove()
+            .args(["--format", "json", "plugin", "list", "--all", "--refresh"])
+            .assert()
+            .success(),
+    );
+    assert_matches(&plugin_schema("plugin-list.json"), &out);
+
+    let row = row(&out, "sync-gitlab");
+    assert_eq!(row["installed"], true, "{out}");
+    assert_eq!(
+        row["latest_version"], "2.0.0",
+        "an installed plugin with a newer release must say so: {out}"
+    );
+}
+
+#[test]
 fn a_degraded_discovery_still_matches_the_list_schema() {
     // Discovery is additive: with crates.io unreachable the command still
     // succeeds, and the failure has to travel in `_meta.warnings` — which is

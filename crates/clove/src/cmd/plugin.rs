@@ -86,7 +86,7 @@ pub fn run_list(format: OutputFormat, args: &PluginListArgs) -> Result<(), Clove
 
     // `--refresh` only means anything against the registry, so it implies `--all`.
     if !args.all && !args.refresh {
-        return render(format, &installed, &[], None, false);
+        return render(format, &installed, &[], &[], None, false);
     }
 
     let discovery = discover(args.refresh);
@@ -95,6 +95,7 @@ pub fn run_list(format: OutputFormat, args: &PluginListArgs) -> Result<(), Clove
         format,
         &installed,
         &available,
+        discovery.plugins(),
         discovery.warning(args.refresh),
         true,
     )
@@ -254,6 +255,21 @@ fn fetch_uncached() -> Discovery {
 /// resolvable on the search path — matched suffix-insensitively, because
 /// crates.io records `bin_names` without the platform executable suffix while
 /// the resolver looks for `clove-sync-github.exe` on Windows.
+/// The newest published version of an installed plugin, when discovery saw it
+/// and it differs from what is installed.
+fn latest_for(plugin: &EnrichedPlugin, discovered: &[RegistryPlugin]) -> Option<String> {
+    let probed = plugin.probed.as_ref()?.version.as_str();
+    let candidate = discovered
+        .iter()
+        .find(|c| installed_match(c, std::slice::from_ref(plugin)).is_some())?;
+    let latest = candidate.latest.as_ref()?;
+    // Only a strictly greater *stable* release is an update — the same rule
+    // `update` itself applies, so the two cannot disagree about whether there is
+    // one.
+    let current = semver::Version::parse(probed).ok()?;
+    (*latest > current).then(|| latest.to_string())
+}
+
 fn not_installed(
     discovered: &[RegistryPlugin],
     installed: &[EnrichedPlugin],
@@ -273,12 +289,16 @@ fn not_installed(
 /// differently-named binary could never be run as `clove <something>`. Offering
 /// it under "Available" would promise a command that cannot exist.
 ///
-/// The naming convention lives in [`provenance::bare_subcommand`] rather than in
-/// the crates.io client, so that client stays a general-purpose registry reader —
-/// and rather than inline here, so every "is this binary dispatchable?" answer in
-/// the codebase comes from one function. The inline copies this replaced were not
+/// The naming convention lives in [`provenance::subcommand_of_file`] rather than
+/// in the crates.io client, so that client stays a general-purpose registry
+/// reader — and rather than inline here, so every "is this binary dispatchable?"
+/// answer comes from one body. The inline copies this replaced were not
 /// suffix-aware, so they disagreed with the installed-side check about a
 /// `clove-x.exe`.
+///
+/// One deliberate difference remains: enumerating files on disk requires the
+/// platform suffix, while reading cargo's bookkeeping tolerates its absence.
+/// That is a parameter of the shared function, documented where it lives.
 pub fn is_dispatchable(candidate: &RegistryPlugin) -> bool {
     candidate
         .bin_names
@@ -314,16 +334,27 @@ fn render(
     format: OutputFormat,
     installed: &[EnrichedPlugin],
     available: &[RegistryPlugin],
+    // Everything discovery returned, including plugins already installed —
+    // which `available` excludes, and which is exactly what an "update
+    // available" marker needs.
+    discovered: &[RegistryPlugin],
     warning: Option<String>,
     consulted_registry: bool,
 ) -> Result<(), CloveError> {
-    let mut items: Vec<Value> = installed.iter().map(installed_json).collect();
+    let mut items: Vec<Value> = installed
+        .iter()
+        .map(|p| installed_json_with_latest(p, latest_for(p, discovered).as_deref()))
+        .collect();
     items.extend(available.iter().map(available_json));
 
     match format {
-        OutputFormat::Human => {
-            render_human(installed, available, warning.as_deref(), consulted_registry)
-        }
+        OutputFormat::Human => render_human(
+            installed,
+            available,
+            discovered,
+            warning.as_deref(),
+            consulted_registry,
+        ),
         OutputFormat::Json => {
             print_json_list(items, meta(installed.len(), available.len(), warning))
         }
@@ -440,6 +471,18 @@ fn meta(installed: usize, available: usize, warning: Option<String>) -> Value {
 /// The JSON object for one installed plugin (§3): today's `{ name, path }` plus
 /// `binary`, the probed `version`/`about`/`provides`, the derived `commands`,
 /// `installed: true`, and the compat `status`.
+fn installed_json_with_latest(plugin: &EnrichedPlugin, latest: Option<&str>) -> Value {
+    let mut value = installed_json(plugin);
+    // The plan deferred this "with install", on the grounds that a version the
+    // user cannot act on is noise. Install has shipped, so the premise is gone:
+    // `update` is now the action, and `list --all` is the only place a user
+    // would learn they need it.
+    if let Some(latest) = latest {
+        value["latest_version"] = json!(latest);
+    }
+    value
+}
+
 fn installed_json(plugin: &EnrichedPlugin) -> Value {
     let binary = format!("clove-{}", plugin.info.name);
     let version = plugin.probed.as_ref().map(|p| p.version.as_str());
@@ -520,6 +563,7 @@ fn available_json(plugin: &RegistryPlugin) -> Value {
 fn render_human(
     installed: &[EnrichedPlugin],
     available: &[RegistryPlugin],
+    discovered: &[RegistryPlugin],
     warning: Option<&str>,
     consulted_registry: bool,
 ) {
@@ -549,7 +593,7 @@ fn render_human(
         }
     }
     if !installed.is_empty() {
-        render_installed_table(installed, show_sections);
+        render_installed_table(installed, discovered, show_sections);
     }
 
     if !available.is_empty() {
@@ -559,7 +603,7 @@ fn render_human(
     }
 }
 
-fn render_installed_table(plugins: &[EnrichedPlugin], indent: bool) {
+fn render_installed_table(plugins: &[EnrichedPlugin], discovered: &[RegistryPlugin], indent: bool) {
     struct Row {
         name: String,
         version: String,
@@ -588,6 +632,9 @@ fn render_installed_table(plugins: &[EnrichedPlugin], indent: bool) {
                     about.push_str("  [declares it needs a newer clove]");
                 }
                 PluginStatus::Ok | PluginStatus::NoInfo => {}
+            }
+            if let Some(latest) = latest_for(p, discovered) {
+                about.push_str(&format!("  [update available: {latest}]"));
             }
             Row {
                 name: p.info.name.clone(),

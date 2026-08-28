@@ -251,14 +251,20 @@ pub struct PluginInstallArgs {
     ///
     /// Without this, a registry that cannot be reached downgrades the check to a
     /// warning shown in the prompt; with it, the install refuses instead.
-    #[arg(long)]
+    ///
+    /// crates.io only: `--git` reads the manifest directly, so there is nothing
+    /// to be unable to verify. Rejected alongside `--git` rather than silently
+    /// ignored.
+    #[arg(long, conflicts_with = "git")]
     pub strict: bool,
 
     /// Install even when every published version is yanked.
     ///
     /// Lifts clove's refusal only — cargo excludes yanked versions from
     /// resolution and offers no way back in, so the install may still fail.
-    #[arg(long)]
+    ///
+    /// crates.io only: a git repository has no concept of a yank.
+    #[arg(long, conflicts_with = "git")]
     pub allow_yanked: bool,
 }
 

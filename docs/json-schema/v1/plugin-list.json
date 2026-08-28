@@ -47,7 +47,7 @@
           "type": ["string", "null"]
         },
         "latest_version": {
-          "description": "The newest version published to crates.io. Present only on rows that came from discovery. This — not `status` — is where \"a newer release exists\" lives.",
+          "description": "The newest STABLE version published to crates.io. This — not `status` — is where \"a newer release exists\" lives. On a discovered row it is simply the published version. On an *installed* row it is present only when that version is strictly greater than the installed one, by the same rule `plugin update` applies, so the two can never disagree about whether an update exists.",
           "type": ["string", "null"]
         },
         "about": {

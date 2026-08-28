@@ -561,6 +561,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`clove plugin list --all` says when an installed plugin has an update.**
+  It filtered installed plugins out of the discovered set entirely, so a newer
+  release was invisible — on the one surface where a user would learn that
+  `plugin update` exists. Installed rows now carry `latest_version` when a
+  strictly greater stable release exists, by the same rule `update` applies, and
+  the human table marks them `[update available: X]`.
 - **Plugin discovery works behind a TLS-intercepting proxy.** The client
   verified against its bundled roots only, so in an environment with a corporate
   egress proxy — where `cargo`, `git` and `curl` all work because they honour

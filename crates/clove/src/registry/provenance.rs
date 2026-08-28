@@ -94,10 +94,36 @@ pub fn bare_subcommand(bin: &str) -> Option<&str> {
 /// place the suffixed name appears, and a hand-written or older entry may carry
 /// the bare name.
 pub fn bare_subcommand_with<'a>(bin: &'a str, exe_suffix: &str) -> Option<&'a str> {
+    subcommand_of_file(bin, exe_suffix, false)
+}
+
+/// The shared name rule: strip the platform suffix, strip `clove-`, reject an
+/// empty remainder.
+///
+/// `require_suffix` is the one thing the two callers genuinely disagree about,
+/// and both are right:
+///
+/// - **Enumerating files on disk** ([`crate::plugin::list`]) requires it. On
+///   Windows an extension-less `clove-foo` is not executable, so treating it as
+///   a plugin would list a command that cannot run.
+/// - **Reading cargo's bookkeeping** (here) tolerates its absence: a
+///   hand-written or older `.crates2.json` entry may carry the bare name, and
+///   refusing to match it would leave a real install unmanageable.
+///
+/// Sharing the body keeps the prefix and empty-remainder rules from drifting,
+/// which is what actually went wrong before; the strictness stays a parameter
+/// rather than being papered over.
+pub fn subcommand_of_file<'a>(
+    file_name: &'a str,
+    exe_suffix: &str,
+    require_suffix: bool,
+) -> Option<&'a str> {
     let stem = if exe_suffix.is_empty() {
-        bin
+        file_name
+    } else if require_suffix {
+        file_name.strip_suffix(exe_suffix)?
     } else {
-        bin.strip_suffix(exe_suffix).unwrap_or(bin)
+        file_name.strip_suffix(exe_suffix).unwrap_or(file_name)
     };
     stem.strip_prefix("clove-").filter(|rest| !rest.is_empty())
 }

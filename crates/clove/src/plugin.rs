@@ -209,7 +209,6 @@ pub fn resolve_mux(mux: &str, provider: &str) -> Option<Utf8PathBuf> {
 /// sorted by name. The host's own adjacent binaries (`clove`, `cloved`) never
 /// carry the `clove-` prefix and so are excluded automatically.
 pub fn list() -> Vec<PluginInfo> {
-    let prefix = "clove-";
     let suffix = std::env::consts::EXE_SUFFIX;
 
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -228,20 +227,15 @@ pub fn list() -> Vec<PluginInfo> {
             if file_name == "clove" || file_name == "cloved" {
                 continue;
             }
-            let Some(rest) = file_name.strip_prefix(prefix) else {
+            // The same rule `provenance::bare_subcommand` applies, from the same
+            // function — `require_suffix` is the one deliberate difference, and
+            // it is documented there. These were two inline copies that had
+            // already drifted on the empty-remainder check.
+            let Some(name) =
+                crate::registry::provenance::subcommand_of_file(&file_name, suffix, true)
+            else {
                 continue;
             };
-            let name = if suffix.is_empty() {
-                rest
-            } else {
-                match rest.strip_suffix(suffix) {
-                    Some(name) => name,
-                    None => continue,
-                }
-            };
-            if name.is_empty() {
-                continue;
-            }
             let path = dir.join(&file_name);
             if !is_executable(&path) {
                 continue;
