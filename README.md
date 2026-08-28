@@ -79,9 +79,9 @@ as `cargo nextest` runs `cargo-nextest`: `clove sync github` →
 **`clove-sync-github`**, `clove import tk`/`beads` →
 **`clove-import-tk`**/**`clove-import-beads`**. (`clove export json`/`jsonl` stays
 built-in — that's clove's own serialization, not a foreign integration.) Without
-the plugin, the command prints a clean `unknown <mux> provider; install
-clove-<mux>-<provider>` error (exit 4); installing it lights the command up with
-no core rebuild. The daemon's periodic sync spawns the same `clove sync github`,
+the plugin, the command prints a clean `unknown <mux> provider; install it with
+clove plugin install <mux>-<provider>` error (exit 4); installing it lights the
+command up with no core rebuild. The daemon's periodic sync spawns the same `clove sync github`,
 so it needs the plugin too. See [`docs/PLUGIN_SYSTEM.md`](docs/PLUGIN_SYSTEM.md) for
 the dispatch/discovery/env contract.
 
@@ -103,10 +103,12 @@ clove plugin update                  # re-resolve every clove-installed plugin
 clove plugin uninstall sync-github
 ```
 
-Installing builds and runs third-party code, so `install`/`update` print what
-they resolved — crate, version, binary, owner, downloads — and **ask before
-proceeding**. They never claim a plugin is vetted; clove does not audit
-plugins, and every signal in that prompt is one the publisher controls. A run
+Installing builds and runs third-party code, so both **ask before proceeding**:
+`install` prints what it resolved — crate, version, binary, owner, repository,
+downloads, and for `--git` the exact commit — and `update` prints each
+old → new version before changing anything. Neither ever claims a plugin is
+vetted: clove does not audit plugins, and every signal in those prompts is one
+the publisher controls. A run
 with no terminal to ask on (CI, an agent) **refuses** rather than proceeding
 silently — pass `--yes` to state the decision explicitly. Plugins land in
 clove's own install root, not `~/.cargo/bin`, so `clove plugin uninstall` only

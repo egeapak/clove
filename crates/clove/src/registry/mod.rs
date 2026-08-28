@@ -117,6 +117,21 @@ pub enum FetchError {
 /// threaded through `FetchError` because these are display strings, and the
 /// alternative is a host field on an error type that exists to classify
 /// transport failures.
+/// The first `errors[].detail` in a crates.io error body.
+///
+/// Sanitized: it is a server-controlled string on its way into a terminal line.
+fn detail_of(body: &str) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_str(body).ok()?;
+    let detail = parsed
+        .get("errors")?
+        .as_array()?
+        .first()?
+        .get("detail")?
+        .as_str()?;
+    let safe = display_safe(detail.trim());
+    (!safe.is_empty()).then_some(safe)
+}
+
 fn registry_label() -> String {
     match std::env::var(crates_io::API_ROOT_ENV) {
         Ok(root) if !root.trim().is_empty() => {
@@ -147,7 +162,12 @@ impl std::fmt::Display for FetchError {
                 "{host} refused the request (HTTP 403) — a missing User-Agent \
                  is the usual cause"
             ),
-            FetchError::Status { code, .. } => write!(f, "{host} returned HTTP {code}"),
+            // crates.io puts a human-readable cause in `errors[].detail`; it was
+            // captured and never rendered, so a 400/422 said only "HTTP 400".
+            FetchError::Status { code, body, .. } => match body.as_deref().and_then(detail_of) {
+                Some(detail) => write!(f, "{host} returned HTTP {code}: {detail}"),
+                None => write!(f, "{host} returned HTTP {code}"),
+            },
             // `ureq`'s Display prefixes its own `io:` tag, which double-colons
             // into this sentence ("could not reach crates.io: io: Connection
             // refused").
