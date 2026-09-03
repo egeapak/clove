@@ -16,6 +16,15 @@ publish = false
 name = "clove-echo"
 path = "src/main.rs"
 
+# The test double `crates/clove/tests/plugin_install.rs` puts on PATH as `cargo`,
+# and also the "plugin" that double installs. Compiled rather than a shell
+# script so the install suite runs on Windows too — see the module docs.
+# Deliberately NOT `clove-`-prefixed: that would make it a discoverable plugin in
+# `target/debug`, which every `plugin list` test walks.
+[[bin]]
+name = "fake-cargo"
+path = "src/fake_cargo.rs"
+
 [dependencies]
 clove-plugin.workspace = true
 serde_json.workspace = true

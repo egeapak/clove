@@ -63,3 +63,7 @@ windows-sys = { version = "0.59", features = [
 
 [dev-dependencies]
 tempfile.workspace = true
+# `test-util` unlocks tokio's virtual clock (`#[tokio::test(start_paused)]`),
+# which the watcher's debounce tests use so they assert the coalescing rule
+# instead of racing the OS scheduler. Dev-only — not in the shipped binary.
+tokio = { workspace = true, features = ["test-util"] }

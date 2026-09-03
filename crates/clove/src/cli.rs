@@ -110,8 +110,8 @@ Built-in providers: json, jsonl — clove's native restore, the inverse of \
 restores items preserving their ids (an export → import round-trip is a \
 backup/restore); existing ids are skipped unless --overwrite. Comments are not \
 part of a clove export, so they are not restored. Any other provider is an \
-external plugin: tk (a .tickets/ dir) needs clove-import-tk (cargo install \
-clove-import-tk); beads (an issues.jsonl) needs clove-import-beads. A bidirectional \
+external plugin: tk (a .tickets/ dir) needs clove-import-tk (`clove plugin install \
+import-tk`); beads (an issues.jsonl) needs clove-import-beads. A bidirectional \
 plugin can also serve import: `import github` is served by clove-sync-github \
 (pull-only view of the two-way sync).\n\
 Note: clove global flags (--format, --color, --quiet, …) must come BEFORE the \
@@ -130,7 +130,7 @@ e.g. `clove export --format json json --out items.json`.")]
     Export(ExportArgs),
     /// Two-way sync items with a tracker (`github`).
     #[command(after_help = "\
-github requires the clove-sync-github plugin (cargo install clove-sync-github). \
+github requires the clove-sync-github plugin (`clove plugin install sync-github`). \
 There are no built-in sync providers — every provider is an external \
 clove-sync-<provider> plugin. The same clove-sync-github binary also serves the \
 one-way `clove import github` (pull) and `clove export github` (push).\n\
@@ -157,7 +157,7 @@ provider — everything after it is the provider's own arguments.")]
     Serve(ServeArgs),
     /// Print version and schema information.
     Version,
-    /// Inspect installed subcommand plugins (`clove-*` on the search path).
+    /// Inspect installed subcommand plugins and discover published ones.
     Plugin(PluginArgs),
     /// Run an external subcommand plugin (`clove-<name>` on the search path).
     ///
@@ -168,7 +168,8 @@ provider — everything after it is the provider's own arguments.")]
     External(Vec<String>),
 }
 
-/// `clove plugin <list>` — inspect the installed subcommand plugins.
+/// `clove plugin <list|search>` — inspect installed plugins and discover
+/// published ones.
 #[derive(Debug, Args)]
 pub struct PluginArgs {
     #[command(subcommand)]
@@ -177,8 +178,158 @@ pub struct PluginArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum PluginAction {
-    /// List resolvable `clove-*` plugin binaries with their paths.
-    List,
+    /// List installed plugins; with `--all`, also those published to crates.io.
+    List(PluginListArgs),
+
+    /// Search published plugins by name or description.
+    ///
+    /// Filters the discovered set locally: crates.io's own `?q=` is fuzzy
+    /// full-text and returns nothing useful for a prefix like `clove-sync`.
+    Search(PluginSearchArgs),
+
+    /// Build and install a published plugin.
+    ///
+    /// This compiles and runs third-party code, so it always asks first. A
+    /// non-interactive run refuses rather than proceeding — automation states
+    /// its intent with `--yes`.
+    Install(PluginInstallArgs),
+
+    /// Remove a plugin clove installed. Needs no network.
+    Uninstall(PluginUninstallArgs),
+
+    /// Re-resolve installed plugins to their newest published version.
+    Update(PluginUpdateArgs),
+}
+
+/// `clove plugin install <name> […]`.
+#[derive(Debug, Args)]
+pub struct PluginInstallArgs {
+    /// The plugin to install: a provider (`gitlab`) or an exact crate name.
+    ///
+    /// A bare provider is resolved by constructing the candidate crate names;
+    /// if several exist the command asks for the exact one rather than guessing
+    /// which multiplexer wins. Omit it when installing with `--git`.
+    pub name: Option<String>,
+
+    /// Install from a git repository instead of crates.io.
+    ///
+    /// Uses plain `git`, so any forge works. The repository is cloned shallowly
+    /// and its packages inspected; a package qualifies as a plugin only if it
+    /// depends on `clove-plugin`, builds a `clove-*` binary, and is publishable.
+    ///
+    /// Conflicts with a name: `install gitlab --git <url>` silently ignored the
+    /// name and installed whatever the repository held, which could be a
+    /// different plugin entirely.
+    #[arg(long, value_name = "URL", conflicts_with = "name")]
+    pub git: Option<String>,
+
+    /// With `--git`: install this tag (pins the code being installed).
+    #[arg(long, value_name = "TAG", requires = "git")]
+    pub tag: Option<String>,
+
+    /// With `--git`: install this exact revision.
+    #[arg(long, value_name = "REV", requires = "git", conflicts_with = "tag")]
+    pub rev: Option<String>,
+
+    /// With `--git`: install this branch. It moves, so prefer --tag or --rev.
+    #[arg(long, value_name = "BRANCH", requires = "git", conflicts_with_all = ["tag", "rev"])]
+    pub branch: Option<String>,
+
+    /// With `--git`: which package to install, when the repository has several.
+    #[arg(long, value_name = "NAME", requires = "git")]
+    pub package: Option<String>,
+
+    /// Skip the confirmation. Required for any non-interactive run.
+    #[arg(long)]
+    pub yes: bool,
+
+    /// Reinstall even if the plugin is already present.
+    #[arg(long)]
+    pub force: bool,
+
+    /// Treat an unverifiable `clove-plugin` dependency as fatal.
+    ///
+    /// Without this, a registry that cannot be reached downgrades the check to a
+    /// warning shown in the prompt; with it, the install refuses instead.
+    ///
+    /// crates.io only: `--git` reads the manifest directly, so there is nothing
+    /// to be unable to verify. Rejected alongside `--git` rather than silently
+    /// ignored.
+    #[arg(long, conflicts_with = "git")]
+    pub strict: bool,
+
+    /// Install even when every published version is yanked.
+    ///
+    /// Lifts clove's refusal only — cargo excludes yanked versions from
+    /// resolution and offers no way back in, so the install may still fail.
+    ///
+    /// crates.io only: a git repository has no concept of a yank.
+    #[arg(long, conflicts_with = "git")]
+    pub allow_yanked: bool,
+}
+
+/// `clove plugin uninstall <name>`.
+#[derive(Debug, Args)]
+pub struct PluginUninstallArgs {
+    /// The plugin subcommand to remove, e.g. `sync-github`.
+    pub name: String,
+}
+
+/// `clove plugin update [<name>] [--all]`.
+#[derive(Debug, Args)]
+pub struct PluginUpdateArgs {
+    /// The plugin to update. Omit to check every one.
+    pub name: Option<String>,
+
+    /// Check every clove-installed plugin. This is the default when no name is
+    /// given; the flag exists so the intent can be stated explicitly.
+    #[arg(long, conflicts_with = "name")]
+    pub all: bool,
+
+    /// Skip the confirmation. Required for any non-interactive run.
+    #[arg(long)]
+    pub yes: bool,
+
+    /// Treat an unverifiable `clove-plugin` dependency as fatal, as on install.
+    #[arg(long)]
+    pub strict: bool,
+
+    /// Lift clove's refusal to move to a yanked version.
+    ///
+    /// A yank is the usual response to a compromised or broken release, so an
+    /// update never moves to one without this.
+    ///
+    /// Note this lifts *clove's* check only. cargo excludes yanked versions
+    /// from resolution and has no flag to re-include them, so the install may
+    /// still fail — the flag buys you cargo's error instead of clove's.
+    #[arg(long)]
+    pub allow_yanked: bool,
+}
+
+/// `clove plugin list [--all] [--refresh]`.
+#[derive(Debug, Args)]
+pub struct PluginListArgs {
+    /// Also list plugins published to crates.io but not installed here.
+    ///
+    /// Without this flag the command is a pure filesystem walk and never
+    /// touches the network.
+    #[arg(long)]
+    pub all: bool,
+
+    /// Bypass the cached registry result and re-fetch (implies `--all`).
+    #[arg(long)]
+    pub refresh: bool,
+}
+
+/// `clove plugin search <query> [--refresh]`.
+#[derive(Debug, Args)]
+pub struct PluginSearchArgs {
+    /// Text matched case-insensitively against plugin names and descriptions.
+    pub query: String,
+
+    /// Bypass the cached registry result and re-fetch.
+    #[arg(long)]
+    pub refresh: bool,
 }
 
 /// `clove serve` (DESIGN web UI / M4). Starts an HTTP server that serves the

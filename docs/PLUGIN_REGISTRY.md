@@ -1,12 +1,34 @@
 # Plugin registry, install & discovery
 
-> **Status:** Design — implementation-ready (planned by a design team, decisions
-> adopted). Builds on the cargo-style plugin dispatch in
-> [`PLUGIN_SYSTEM.md`](PLUGIN_SYSTEM.md). Adds: an enriched `clove plugin list`,
-> a curated registry (`clove plugin list --all`), `clove plugin install/uninstall/
-> update`, and **dynamic, plugin-aware `--help`** for the `import`/`export`/`sync`
-> multiplexers. **The core dispatch path stays network- and dependency-free** —
-> everything here lives only on the `plugin install` / `list --all` path.
+> **Status:** Partly implemented, partly superseded. Read this alongside the two
+> documents that revise it:
+>
+> | Section | Status |
+> |---|---|
+> | §2 compat probe, §3 enriched `list`, §6 dynamic `--help` | **Shipped** (`cdea402`) |
+> | §7 search path & install root | **Shipped**, with one correction — the root is *not* `~/.clove`; see below |
+> | §1 registry manifest, §4 `list --all`, §5 `install` | **Superseded** by [`crates.io as the clove plugin registry`](superpowers/specs/2026-07-24-crates-io-plugin-registry-design.md). All of `list --all`, `search`, `install`, `uninstall` and `update` have shipped against crates.io — but **not** as §5 describes them; see the §5 banner |
+> | §8 Phase 3 (prebuilt download, sha256, `plugins.json`, `CLOVE_PLUGINS`) | **Superseded, not scheduled** — `cargo install` replaces it, and `release.yml` already bundles the plugin binaries |
+>
+> Two adopted decisions below did not survive contact with reality:
+>
+> - **"Shell out to `curl`" (decision 1)** is superseded. The registry client is
+>   in-process `ureq`, always on: `reverse_dependencies` has no library binding
+>   anywhere, so the request is hand-rolled regardless, and shelling out adds a
+>   "curl not installed" failure mode for no gain. Measured cost is **~1.54 MB** (+22.6% lean, +18.6% with default
+>   features) — the design's own ~1 MB figure was low; see the implementation
+>   plan §4B.
+> - **The install root is not `~/.clove` (decision 3, §7).** Repository discovery
+>   treats *any* ancestor containing a `.clove/` **directory** as a repository
+>   root, with no marker check, so an install root by that name makes `$HOME`
+>   resolve as a clove repository for every command run beneath it. The root is
+>   `$CLOVE_HOME`, else `$XDG_DATA_HOME/clove`, else `~/.local/share/clove`
+>   (`%APPDATA%\clove` on Windows).
+>
+> Builds on the cargo-style plugin dispatch in
+> [`PLUGIN_SYSTEM.md`](PLUGIN_SYSTEM.md). **The core dispatch path stays network-
+> and dependency-free** — everything here lives only on the `plugin install` /
+> `list --all` path.
 
 ## Goal
 
@@ -43,7 +65,15 @@ clove import --help               # shows built-in providers AND installed impor
    target.
 4. **Phased delivery** (below).
 
-## 1. Registry manifest
+## 1. Registry manifest — SUPERSEDED
+
+> Not built. crates.io is the registry; `registry/plugins.toml` was never
+> created, so there is nothing to migrate. Kept for the rationale on
+> multi-capability binaries vs. multi-binary bundles, which still holds —
+> though the crates.io model makes bundles unrepresentable (one crate, one
+> install), and the umbrella fallback in `PLUGIN_SYSTEM.md` §4.2 made
+> one-binary-many-capabilities the pattern that actually matters.
+
 
 Committed at `registry/plugins.toml`, compiled into `clove` via `include_str!`
 (the offline default), and reachable live at
@@ -168,16 +198,34 @@ multi-capability binary carries a multi-element `provides`/`commands`):
   "installed":true, "status":"ok" }
 ```
 
-## 4. `clove plugin list --all`
+## 4. `clove plugin list --all` — SUPERSEDED
+
+> Shipped, but against **crates.io**, not the manifest described below.
+> The available set is the reverse dependencies of `clove-plugin`, cached
+> for 24h under the clove home; `--refresh` re-fetches. The degradation
+> rule below is accurate and did ship.
+
 
 Merges the enriched installed set with the registry's available plugins
 (bundled manifest; `--refresh` fetches live). One flat `data` array with
 `installed` + `status ∈ {ok,no_info,available}` as the discriminator (keeps JSONL
 clean); human output shows an *Installed* and an *Available* section. A
 registry-fetch failure **degrades** — the Installed section still prints, with the
-error as a warning (`_meta.registry_error`).
+error as a warning (`_meta.warnings`).
 
-## 5. `clove plugin install / uninstall / update`
+## 5. `clove plugin install / uninstall / update` — SUPERSEDED (shipped, differently)
+
+> Install **has shipped**, but resolves against crates.io rather than the
+> curated manifest, and with a materially different security posture than this
+> section describes. The rule below that reads **"non-TTY/JSON proceeds
+> (scriptable)"** is **dead and inverted**: a non-interactive run now *refuses*,
+> because proceeding without a prompt is unattended execution of third-party
+> code. Also changed: `--bin` restricts the install to the crate's own binary,
+> the post-install probe rolls a rejected install back, and the confirmation
+> makes no "verified" claim. The shipped behaviour is described in §5 of the
+> [implementation plan](superpowers/specs/2026-07-25-plugin-registry-implementation-plan.md)
+> and in `clove agent-doc`.
+
 
 - **`install <name>`** resolves `name` **only** through the curated manifest,
   then for each binary runs `cargo install --locked --git <source.git> --tag
@@ -242,7 +290,22 @@ let cli = Cli::try_parse() … // unchanged for every other argv
 the next run with nothing to invalidate. A per-probe timeout bounds a broken
 plugin.
 
-## 7. Search path & install root
+## 7. Search path & install root — SUPERSEDED (shipped, but not as written here)
+
+> The **normative** description is [`PLUGIN_SYSTEM.md`](PLUGIN_SYSTEM.md) §5.
+> This section shipped with two corrections, both of which invert what the
+> original text below says:
+>
+> - **The root is not `~/.clove`.** It is `$CLOVE_HOME`, else
+>   `$XDG_DATA_HOME/clove`, else `~/.local/share/clove` (`%APPDATA%\clove` on
+>   Windows). `~/.clove` would be picked up by repository discovery as a repo
+>   root — see the banner at the top of this document.
+> - **It sits *after* `$CLOVE_PLUGIN_PATH`, not before.** That variable is the
+>   user's explicit opt-in directory, so a binary clove fetched from the internet
+>   must not outrank a deliberate local override. Shipped order:
+>   current-exe dir → `$CLOVE_PLUGIN_PATH` → `<clove-home>/bin` → `$PATH`.
+>
+> `$CLOVE_PLUGIN_HOME`, named below, does not exist in the codebase.
 
 `plugin::search_dirs()` gains `$CLOVE_HOME/bin` (default `~/.clove/bin`,
 overridable via `$CLOVE_HOME`/`$CLOVE_PLUGIN_HOME`), inserted **after** the
@@ -251,7 +314,14 @@ current-exe dir and **before** `$CLOVE_PLUGIN_PATH`/`$PATH`. This is where
 with no user `PATH` edits, and cargo's `--root` metadata enumerates them for
 `uninstall`/`update`.
 
-## 8. Phased delivery
+## 8. Phased delivery — SUPERSEDED
+
+> Phase 1 shipped in `cdea402`. The `$CLOVE_HOME/bin` search-path addition
+> listed under Phase 2 shipped too (§7). The registry manifest is dropped
+> entirely, and Phase 3 (prebuilt download, sha256, `plugins.json`,
+> `CLOVE_PLUGINS`) is superseded by `cargo install`, not scheduled. The
+> live plan is `superpowers/specs/2026-07-25-plugin-registry-implementation-plan.md`.
+
 
 - **Phase 1 (offline, no install):** the `--clove-plugin-info` compat fields (§2),
   the enriched `clove plugin list` (§3), and the dynamic `--help` (§6). No network,
@@ -264,7 +334,15 @@ with no user `PATH` edits, and cargo's `--root` metadata enumerates them for
   and the release-pipeline changes that emit per-plugin artifacts + a generated
   `plugins.json` (bundle untouched), driven by a `CLOVE_PLUGINS` variable.
 
-## 9. Implementation surface (host-only; no new published crate)
+## 9. Implementation surface (host-only; no new published crate) — SUPERSEDED
+
+> The shipped layout is
+> `crates/clove/src/registry/{mod,http,crates_io,cache,install,provenance,git_source}.rs`
+> plus `crates/clove/src/clove_home.rs` and the two command modules
+> `crates/clove/src/cmd/{plugin,plugin_install}.rs` — not the
+> `{manifest,fetch,install}.rs` named below. `registry/plugins.toml` was never
+> created (§1).
+
 
 - `crates/clove-plugin/src/run.rs` — the compat fields on `PluginInfo` + its JSON.
 - `crates/clove/src/plugin.rs` — `probe_info` (spawn `--clove-plugin-info` +

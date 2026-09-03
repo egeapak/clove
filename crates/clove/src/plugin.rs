@@ -60,19 +60,29 @@ pub struct PluginInfo {
 /// The candidate binary name for a dispatch path, e.g. `["sync", "github"]` →
 /// `clove-sync-github` (plus the platform executable suffix, `.exe` on Windows).
 fn binary_name(segments: &[&str]) -> String {
-    format!(
-        "clove-{}{}",
-        segments.join("-"),
-        std::env::consts::EXE_SUFFIX
-    )
+    binary_name_with(segments, std::env::consts::EXE_SUFFIX)
+}
+
+/// [`binary_name`] with the executable suffix injected — see
+/// [`crate::registry::install::installed_binary_path_with`] for why.
+fn binary_name_with(segments: &[&str], exe_suffix: &str) -> String {
+    format!("clove-{}{exe_suffix}", segments.join("-"))
 }
 
 /// The ordered plugin search path (§5): the directory of the running `clove`
-/// binary, then each dir in `$CLOVE_PLUGIN_PATH`, then each dir on `$PATH`.
+/// binary, then each dir in `$CLOVE_PLUGIN_PATH`, then the clove-managed
+/// `<clove-home>/bin`, then each dir on `$PATH`.
 ///
 /// The current-exe directory comes first so a plugin installed next to `clove`
 /// (the common `cargo install` case) is found even when that dir is not on
 /// `$PATH`. Splitting uses the platform path separator (`;` on Windows else `:`).
+///
+/// `<clove-home>/bin` — where `clove plugin install` puts binaries — sits
+/// **after** `$CLOVE_PLUGIN_PATH` and **before** `$PATH`. The order is
+/// deliberate: `$CLOVE_PLUGIN_PATH` is the user's explicit opt-in directory, so
+/// a binary clove fetched from the internet must never outrank a deliberate
+/// local override; but a clove-managed install should still win over an
+/// incidental `$PATH` entry.
 fn search_dirs() -> Vec<Utf8PathBuf> {
     let mut dirs: Vec<Utf8PathBuf> = Vec::new();
 
@@ -84,17 +94,25 @@ fn search_dirs() -> Vec<Utf8PathBuf> {
         }
     }
 
-    for var in ["CLOVE_PLUGIN_PATH", "PATH"] {
-        if let Some(value) = std::env::var_os(var) {
-            for path in std::env::split_paths(&value) {
-                if let Ok(dir) = Utf8PathBuf::from_path_buf(path) {
-                    dirs.push(dir);
-                }
+    push_env_dirs(&mut dirs, "CLOVE_PLUGIN_PATH");
+    // An unresolvable clove home (no `$HOME`) simply contributes no entry.
+    if let Some(bin) = crate::clove_home::bin_dir() {
+        dirs.push(bin);
+    }
+    push_env_dirs(&mut dirs, "PATH");
+
+    dirs
+}
+
+/// Append every directory listed in the path-style environment variable `var`.
+fn push_env_dirs(dirs: &mut Vec<Utf8PathBuf>, var: &str) {
+    if let Some(value) = std::env::var_os(var) {
+        for path in std::env::split_paths(&value) {
+            if let Ok(dir) = Utf8PathBuf::from_path_buf(path) {
+                dirs.push(dir);
             }
         }
     }
-
-    dirs
 }
 
 /// Is `path` an existing regular file that can be executed? On Unix this requires
@@ -191,7 +209,6 @@ pub fn resolve_mux(mux: &str, provider: &str) -> Option<Utf8PathBuf> {
 /// sorted by name. The host's own adjacent binaries (`clove`, `cloved`) never
 /// carry the `clove-` prefix and so are excluded automatically.
 pub fn list() -> Vec<PluginInfo> {
-    let prefix = "clove-";
     let suffix = std::env::consts::EXE_SUFFIX;
 
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -210,20 +227,15 @@ pub fn list() -> Vec<PluginInfo> {
             if file_name == "clove" || file_name == "cloved" {
                 continue;
             }
-            let Some(rest) = file_name.strip_prefix(prefix) else {
+            // The same rule `provenance::bare_subcommand` applies, from the same
+            // function — `require_suffix` is the one deliberate difference, and
+            // it is documented there. These were two inline copies that had
+            // already drifted on the empty-remainder check.
+            let Some(name) =
+                crate::registry::provenance::subcommand_of_file(&file_name, suffix, true)
+            else {
                 continue;
             };
-            let name = if suffix.is_empty() {
-                rest
-            } else {
-                match rest.strip_suffix(suffix) {
-                    Some(name) => name,
-                    None => continue,
-                }
-            };
-            if name.is_empty() {
-                continue;
-            }
             let path = dir.join(&file_name);
             if !is_executable(&path) {
                 continue;
@@ -380,7 +392,19 @@ pub fn probe_info(path: &Utf8Path) -> Option<ProbedInfo> {
     }
 
     let mut stdout = String::new();
-    child.stdout.take()?.read_to_string(&mut stdout).ok()?;
+    // Bounded. The probe timeout covers only `try_wait`, so once the direct
+    // child exits this read had no cap and no deadline: a plugin that forks a
+    // grandchild inheriting the stdout pipe and then exits leaves the write end
+    // open forever, and this blocked with no timeout left to save it. `take` is
+    // enough to bound the damage — a metadata reply is a few hundred bytes, and
+    // this now runs against freshly-downloaded third-party code (gate 3).
+    const MAX_PROBE_OUTPUT: u64 = 64 * 1024;
+    child
+        .stdout
+        .take()?
+        .take(MAX_PROBE_OUTPUT)
+        .read_to_string(&mut stdout)
+        .ok()?;
 
     parse_probe_json(&stdout)
 }
@@ -620,6 +644,44 @@ pub fn run_plugin(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_suffix_aware_helpers_agree_under_an_injected_suffix() {
+        use crate::registry::{install, provenance};
+
+        // Two Windows-only bugs shipped on this branch — a path built without
+        // `EXE_SUFFIX`, and a suffixed name reaching `cargo --bin` — and CI runs
+        // the suite on Windows. It could not catch them: the install suite is
+        // `#![cfg(unix)]`, and the existing suffix assertions are written as
+        // `format!("…{}", EXE_SUFFIX)`, which on Unix expands to the empty
+        // string and asserts nothing about suffix handling at all.
+        //
+        // So the round trip is pinned under both suffixes, on every platform.
+        for suffix in ["", ".exe"] {
+            let file = binary_name_with(&["sync", "github"], suffix);
+            assert_eq!(file, format!("clove-sync-github{suffix}"));
+
+            let root = camino::Utf8Path::new("/r");
+            let path = install::installed_binary_path_with(root, "clove-sync-github", suffix);
+            assert_eq!(
+                path,
+                root.join("bin").join(&file),
+                "the probed path must be the file cargo actually wrote, or gate 3 \
+                 stats a file that is not there, finds nothing, and passes vacuously"
+            );
+
+            assert_eq!(
+                provenance::bare_subcommand_with(path.file_name().unwrap(), suffix),
+                Some("sync-github")
+            );
+            // cargo's bookkeeping is the only place the suffixed name appears,
+            // so an unsuffixed entry must still resolve.
+            assert_eq!(
+                provenance::bare_subcommand_with("clove-sync-github", suffix),
+                Some("sync-github")
+            );
+        }
+    }
 
     #[test]
     fn binary_name_joins_segments_and_prefix() {

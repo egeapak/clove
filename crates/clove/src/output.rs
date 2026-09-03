@@ -106,6 +106,13 @@ pub fn emit_unknown_subcommand(
     } else {
         message.push_str(&format!(" (installed plugins: {})", installed.join(", ")));
     }
+    // Point at the command that installs one. This is where a user lands after
+    // typing a subcommand that does not exist, so it is the natural place to
+    // learn plugins are installable at all.
+    message.push_str(&format!(
+        "; `clove plugin search {subcommand}` looks for one, `clove plugin install \
+         {subcommand}` installs it"
+    ));
 
     match format {
         OutputFormat::Json | OutputFormat::Jsonl => {

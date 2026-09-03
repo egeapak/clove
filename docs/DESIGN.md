@@ -932,6 +932,22 @@ regardless of warnings.
 **`jsonl` format:** one envelope per line, `"data"` is a single item (not array). Enables
 `clove ls --format jsonl | while read line; do ...; done`.
 
+The rule that matters is per-line: **every line carries `data`**, and no command
+appends a trailing metadata-only line. A line without `data` makes
+`jq -r .data.<field>` emit a spurious `null` at the end of the stream, which
+defeats the per-line consumption this format exists for.
+
+That splits the two kinds of command:
+
+- A **list** command (`ls`, `ready`, `blocked`, `query`, `search`,
+  `plugin list`/`search`) emits one line per item and therefore has nowhere to
+  put `_meta`. Warnings go to **stderr** in this format, as they do in human
+  mode; use `--format json` when they must be machine-readable.
+- A **single-result** command (`new`, `show`, `version`, `reindex`, `doctor`,
+  `stats`, `plugin install`/`uninstall`/`update`) emits exactly one line, which
+  is the whole envelope — `_meta` included. There is no trailing line, because
+  there is only ever the one.
+
 ### 7.4 Item JSON Schema (v1)
 
 `clove show <id> --format json` returns:
@@ -1014,6 +1030,14 @@ every producer of the list envelope, so each key is optional: `search` emits no
 all. `crates/clove/tests/schema_validation.rs` validates real command output
 against these and asserts a wrong-typed key is rejected.
 
+`clove plugin` has its own two schemas, because its rows are plugins rather than
+items: `plugin-list.json` (the `list`/`search` envelope, whose `_meta` carries
+`count`/`installed_count`/`available_count` alongside `warnings`) and
+`plugin-install.json` (the `install`/`uninstall`/`update` payloads — a `oneOf`,
+since `ok: true` covers "installed", "declined", "already installed" and
+"nothing to update", and only the payload distinguishes them). Both are
+validated against real command output in `crates/clove/tests/plugin_install.rs`.
+
 **The MCP page is the same response with the envelope flattened.** A tool result
 has no `{v, ok, data, _meta}` wrapper, so what the CLI reports under `_meta`
 travels as plain keys beside `items`:
@@ -1049,7 +1073,7 @@ the model one copy), so both stay.
 | 2 | NotFound | Item does not exist |
 | 3 | CycleDetected | `dep add` when a cycle-path is detected; also used with `--fail-on-cycle` flag on `dep cycle` |
 | 4 | ValidationError | Bad field value, ID collision, invalid priority |
-| 5 | IoError | `.clove/` missing, file unreadable, filesystem error |
+| 5 | IoError | `.clove/` missing, file unreadable, filesystem error; also `REGISTRY_ERROR` — the plugin registry, `cargo` or `git` unreachable, returned by `plugin install`/`uninstall`/`update`. `plugin list`/`search` instead degrade to a warning at exit 0, since discovery is optional |
 | 6 | IndexError | Stale index with `--strict`; index unrecoverable |
 | 7 | DaemonError | Daemon communication failure |
 

@@ -39,6 +39,12 @@ fn install_echo_as(name: &str) -> (TempDir, PathBuf) {
 /// A `clove` invocation rooted at `dir` with a hermetic environment.
 fn clove(dir: &Path) -> Command {
     let mut cmd = Command::cargo_bin("clove").unwrap();
+    // Pin the clove-managed home into `dir`: `<clove-home>/bin` is on the plugin
+    // search path, and `assert_cmd` inherits `$HOME`, so without this a developer
+    // with plugins installed under `~/.local/share/clove/bin` would have them
+    // resolve inside these tests — silently breaking the "no plugin installed"
+    // assertions.
+    cmd.env("CLOVE_HOME", dir.join("clove-home"));
     cmd.current_dir(dir);
     cmd.env_remove("CLOVE_FORMAT");
     cmd.env("CLOVE_AUTHOR", "tester@example.com");
@@ -121,7 +127,7 @@ fn unknown_import_provider_is_a_scoped_validation_error() {
     assert_eq!(v["error"]["exit"], 4);
     let msg = v["error"]["message"].as_str().unwrap();
     assert!(
-        msg.contains("unknown import provider") && msg.contains("install clove-import-nope"),
+        msg.contains("unknown import provider") && msg.contains("clove plugin install import-nope"),
         "message: {msg}"
     );
 }
@@ -140,7 +146,7 @@ fn unknown_export_provider_is_a_scoped_validation_error() {
     assert_eq!(v["error"]["code"], "VALIDATION_ERROR");
     let msg = v["error"]["message"].as_str().unwrap();
     assert!(
-        msg.contains("unknown export provider") && msg.contains("install clove-export-nope"),
+        msg.contains("unknown export provider") && msg.contains("clove plugin install export-nope"),
         "message: {msg}"
     );
 }

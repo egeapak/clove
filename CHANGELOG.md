@@ -166,6 +166,75 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `content[0].text` still carries the same JSON as `structuredContent`, because
   the spec asks a server returning structured content to keep the text copy for
   clients that do not read structured results.
+- **Plugin discovery via crates.io** — clove uses crates.io itself as its plugin
+  registry rather than a curated manifest, so a plugin becomes discoverable by
+  publishing it.
+  - `clove plugin list --all` lists installed plugins alongside published ones,
+    discovered as the reverse dependencies of `clove-plugin` (a crate appears
+    only if it genuinely depends on it) and cached for 24 hours; `--refresh`
+    re-fetches.
+  - `clove plugin search <text>` filters published plugins by name or
+    description. Whenever that filter matches nothing it additionally probes the
+    candidate crate names directly — crates.io has no prefix search, but the
+    naming convention is total, so the names can be constructed instead. That
+    also answers the query when discovery is unavailable or the cache is stale.
+  - Discovery is strictly additive: if it fails for any reason the installed
+    list still prints and the cause is reported in `_meta.warnings`.
+    Plain `clove plugin list` remains a pure filesystem walk, and plugin
+    dispatch never touches the network.
+- **`clove plugin install` / `uninstall` / `update`.** Installing builds and runs
+  third-party code, so the command is built around that rather than around
+  convenience:
+  - **A non-interactive run refuses** unless `--yes` is passed. Silence is not
+    consent, and CI/agent runs are exactly where an unvetted build does the most
+    damage unobserved.
+  - The confirmation states what it is authorizing and makes **no safety claim**.
+    Every check is forgeable by the crate's publisher, so they are described as
+    shape checks ("matches the clove plugin convention — not audited").
+  - `cargo install` is pinned to the approved version and to the **single**
+    binary (`--bin`), so a crate cannot land extra binaries in the search path,
+    where they would receive the full inherited environment on the next dispatch.
+  - The post-install compatibility probe **rolls the install back** when it
+    fails, rather than leaving a rejected binary resolvable.
+  - An ambiguous bare name (both `clove-sync-x` and `clove-import-x` published)
+    refuses and asks for the exact crate instead of guessing which multiplexer
+    wins — a guess would disagree with dispatch.
+  - **`--git <url>`** installs from any forge, using plain `git`. The repository
+    is cloned shallowly (`--filter=blob:none --depth 1`, no submodules) and its
+    packages resolved through `cargo metadata`, so workspace globs, `exclude`
+    and `default-members` are handled by cargo rather than re-implemented. A
+    package qualifies only if it depends on `clove-plugin`, **builds a `clove-*`
+    binary, and is publishable** — filtering on the dependency alone matches five
+    members of clove's own repo, including the host CLI and a `publish = false`
+    test fixture. Git subprocesses are bounded by a timeout and run with
+    `GIT_TERMINAL_PROMPT=0`, so a 401 cannot surface a credential prompt
+    mid-install; the URL is checked against a scheme allow-list first, because a
+    value starting with `-` is read by git as an option and several of those
+    (`--upload-pack`, `--template`, `--config`) execute code.
+  - `uninstall` works offline, resolving the cargo *package* from cargo's own
+    bookkeeping (the package and the binary routinely differ). `update` shows
+    each old → new version first, re-runs every pre-install gate (an update
+    installs *newer* third-party code, so a crate that has since stopped
+    depending on `clove-plugin` is refused, and a yanked release is never
+    offered without `--allow-yanked`), and never re-resolves a git-sourced
+    install through crates.io.
+  - `uninstall` and `update` accept the **same bare name that installed** the
+    plugin: `install gitlab` → `uninstall gitlab`, resolved through the same
+    candidate ladder. An exact subcommand match still wins outright, and a bare
+    name matching two installed plugins is refused rather than guessed at.
+  - Published JSON schemas: `docs/json-schema/v1/plugin-list.json` for
+    `list`/`search` and `plugin-install.json` for the mutating commands, both
+    validated against real command output. `ok: true` does not mean something
+    changed — "declined", "already installed" and "nothing to update" are all
+    successful outcomes, and the schema says which payload means which.
+- `<clove-home>/bin` joins the plugin search path (between `$CLOVE_PLUGIN_PATH`
+  and `$PATH`), resolved from `$CLOVE_HOME`, else `$XDG_DATA_HOME/clove`, else
+  `~/.local/share/clove` (`%APPDATA%\clove` on Windows).
+- New `REGISTRY_ERROR` error classification (exit 5) for registry failures.
+  `plugin install`/`uninstall`/`update` return it when the registry, `cargo` or
+  `git` cannot be reached — a failed install must not look like a successful
+  one. `plugin list`/`search` deliberately do not: discovery is optional, so
+  they degrade to a warning at exit 0.
 
 ### Changed
 
@@ -492,6 +561,95 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The install confirmation says what it is and where the binary lands.** It
+  opened on a bare crate name with nothing stating the action until the last
+  line, and never showed the install path — the property the README leads with
+  ("not `~/.cargo/bin`"). The two prompts also ordered their fields differently.
+- **`clove plugin list --all` shows `RUN AS` for discovered plugins.** "What do
+  I type?" is the most useful fact on a discovery surface; it was in the JSON
+  `commands` array and absent from the human table, which the Installed table
+  had all along. Column widths are also measured in characters rather than
+  bytes, so a non-ASCII description no longer misaligns every row after it.
+- **`clove plugin list --all` says when an installed plugin has an update.**
+  It filtered installed plugins out of the discovered set entirely, so a newer
+  release was invisible — on the one surface where a user would learn that
+  `plugin update` exists. Installed rows now carry `latest_version` when a
+  strictly greater stable release exists, by the same rule `update` applies, and
+  the human table marks them `[update available: X]`.
+- **Plugin discovery works behind a TLS-intercepting proxy.** The client
+  verified against its bundled roots only, so in an environment with a corporate
+  egress proxy — where `cargo`, `git` and `curl` all work because they honour
+  `$SSL_CERT_FILE` / `$CARGO_HTTP_CAINFO` — `plugin list --all` returned an
+  opaque failure that degraded to a warning, and `plugin install` failed
+  outright. It now reads the same variables (plus `$CLOVE_CAINFO`). The extra
+  roots are **added** to the bundled set, never substituted for it: a bundle
+  that is missing or unparseable leaves the trust set exactly as it was, so a
+  misconfiguration cannot silently turn into "nothing verifies".
+- **Discovery has an overall deadline.** The 8s timeout was per request, and
+  retries (up to 3 attempts, up to 5s of backoff) multiplied by pagination (up
+  to 50 pages) put the worst case at ~28 minutes for a command whose stated
+  design goal is not appearing to hang. A 30s ceiling now bounds the walk, and
+  hitting it — or the page cap — is reported rather than returned as a
+  complete-looking list that then gets cached for a day.
+- **The plugin install suite runs on Windows.** It carried `#![cfg(unix)]`
+  because its `cargo` shim and its fake plugin were `#!/bin/sh` scripts, so CI's
+  `windows-latest` leg silently skipped all 33 tests — which is how two
+  Windows-only bugs shipped (a path built without `EXE_SUFFIX`, and a suffixed
+  binary name reaching `cargo --bin`). Both are now one compiled fixture binary
+  wearing two hats, since a `.cmd` shim would not do: `std::process::Command`
+  appends `.exe` to an extension-less name rather than walking `PATHEXT`, and the
+  "installed plugin" is spawned directly by clove and has to be a real
+  executable.
+- **A rejected install no longer claims to have been rolled back before the
+  rollback runs.** The compatibility message ended with "the install has been
+  rolled back", and the rollback then appended its own verdict — so a failed
+  rollback read "…has been rolled back. Rolling the install back FAILED — the
+  binary is still present."
+- **`clove plugin update` no longer reports a green light for plugins it never
+  checked.** A git-installed plugin is not re-resolved through crates.io (by
+  design — that would swap the code the user chose for a same-named crate), but
+  it was rendered as "no newer version known" and then summarised as "everything
+  is up to date". The payload now separates `checked` from `skipped`, the line
+  says "not checked; reinstall to update it", and the summary counts only what
+  was checked.
+- **`clove plugin install --git` no longer claims to have installed something
+  when it did not.** Re-running it hit cargo's own "already installed" refusal
+  and clove still reported `installed: true` with a commit and a path — breaking
+  the premise the published schema rests on. It now has the same
+  already-installed guard as the crates.io path, and says that `--force` is how
+  a git-installed plugin is updated.
+- **`clove plugin search` no longer states a negative it could not check.** With
+  the registry unreachable it printed the warning and then "no published plugins
+  matched" — a claim about crates.io made while unable to reach it.
+- **A name that already names its multiplexer is no longer expanded again.**
+  `plugin install sync-github` — the spelling `plugin list` prints and every
+  hint now teaches — probed `clove-sync-sync-github`,
+  `clove-import-sync-github` and `clove-export-sync-github`: three impossible
+  candidates, three wasted requests, and an error listing names nobody could
+  publish.
+- **The registry cache is keyed by the registry it came from.** Pointing
+  `$CLOVE_REGISTRY_URL` at a different registry served the previous one's
+  answers for 24 hours; only `--refresh` escaped.
+- **`clove plugin list --all` prints its sections on a successful empty
+  answer.** It returned early unless something was found or something went
+  wrong, so a working registry with no plugins yet printed nothing at all —
+  indistinguishable from a broken command, and reachable for real between
+  publishing `clove-plugin` and its first dependent.
+- **Registry errors name the registry that was actually contacted**, instead of
+  saying "crates.io" for whatever `$CLOVE_REGISTRY_URL` points at, and no longer
+  double-colon `ureq`'s own `io:` prefix into the sentence.
+- **`clove plugin list` compat notes no longer describe enforcement that does
+  not exist.** Dispatch is a probe-free `stat` walk by design, so it neither
+  warns nor refuses; the notes now say what the plugin *declares*
+  (`[built for an older clove]`, `[declares it needs a newer clove]`) rather
+  than promising a warning nothing prints.
+- **`clove plugin list --format jsonl` no longer appends a non-item line.** It
+  had grown a trailing `{v, ok, _meta}` line to carry the discovery warning,
+  making it the only jsonl surface in the repo whose last line has no `data` —
+  so `jq -r .data.name` emitted a spurious `null`, contradicting the documented
+  "one envelope per line, `data` is a single item" contract. The warning now
+  goes to stderr, as it already did in human mode; `--format json` remains the
+  way to consume it structurally.
 - **A malformed number in a web query string silently meant the default.**
   `?limit=abc` and `?limit=-5` fell through `.ok()` to the endpoint default —
   which on the web is *unlimited* — so a client typo asking for one page

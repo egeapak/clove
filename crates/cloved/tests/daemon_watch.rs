@@ -283,28 +283,68 @@ fn startup_sweep_1k_50_modified_under_500ms() {
 }
 
 #[test]
-fn rapid_edits_debounce_into_one_batch() {
-    // M3-G06: 10 chunks 10ms apart to one file → exactly one applied batch.
+fn rapid_edits_debounce_into_fewer_batches_than_edits() {
+    // M3-G06, end-to-end: a burst of edits to one file reaches the index as a
+    // coalesced batch rather than one batch per write.
+    //
+    // **This test deliberately does not assert an exact batch count.** It used to
+    // assert exactly one, and that made it flaky: the assertion held only while
+    // every inter-write gap stayed under the debounce window, which the OS does
+    // not guarantee. Under parallel load a 10ms sleep can stretch past the
+    // window, the burst flushes early, and a correct implementation fails the
+    // test. (Observed: `left: 2, right: 1`.)
+    //
+    // The exact rule — N events inside the window become exactly one batch, an
+    // event after it starts a new one — is asserted deterministically against a
+    // virtual clock by the `collect_burst` unit tests in `cloved::watcher`. What
+    // is worth testing *here*, and only here, is the wiring: that real
+    // filesystem events reach the debouncer and get coalesced at all. That is
+    // expressible without depending on timing.
     let repo = init_repo();
     let id = repo.add_item("debounced");
     repo.reindex();
+
+    // A generous quiet window, so the burst below is comfortably inside it even
+    // on a loaded machine. This is belt-and-braces: the assertion no longer
+    // depends on it.
+    let config = repo.clove_dir.join("config.toml");
+    let base_config = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(
+        &config,
+        format!("{base_config}[daemon]\nwatch_debounce_ms = 1000\n"),
+    )
+    .unwrap();
+
     let mut child = spawn_ready(&repo.clove_dir);
     let before = batches(&repo.clove_dir);
 
+    const EDITS: u64 = 10;
     let path = repo.clove_dir.join("issues").join(format!("{id}.md"));
     let base = std::fs::read_to_string(&path).unwrap();
-    for i in 0..10 {
-        // Append a comment line (keeps frontmatter valid) 10ms apart.
+    for i in 0..EDITS {
+        // Append a line (keeps frontmatter valid), back-to-back: the burst is the
+        // point, and sleeping between writes is what created the original race.
         std::fs::write(&path, format!("{base}\nedit {i}\n")).unwrap();
-        std::thread::sleep(Duration::from_millis(10));
     }
 
-    // Wait past the debounce window for the single batch to land.
-    let ok = wait_until(Duration::from_secs(3), || batches(&repo.clove_dir) > before);
+    // Wait for the batch to land, then let any straggler batch land too, so the
+    // count below cannot be read mid-burst.
+    let ok = wait_until(Duration::from_secs(30), || {
+        batches(&repo.clove_dir) > before
+    });
     assert!(ok, "debounced batch never applied");
-    std::thread::sleep(Duration::from_millis(400));
+    std::thread::sleep(Duration::from_millis(2500));
+
     let delta = batches(&repo.clove_dir) - before;
-    assert_eq!(delta, 1, "rapid edits must coalesce into exactly one batch");
+    assert!(
+        delta >= 1,
+        "the edits must reach the index (got {delta} batches)"
+    );
+    assert!(
+        delta < EDITS,
+        "edits must coalesce: {delta} batches for {EDITS} rapid writes is no \
+         coalescing at all"
+    );
 
     sigterm(child.id());
     let _ = child.wait();

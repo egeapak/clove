@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://clove.dev/schema/v1/plugin-install.json",
+  "title": "clove plugin install/uninstall/update envelope",
+  "description": "The success envelope of the three mutating `clove plugin` commands. Each has its own `data` shape, distinguished by which of `installed` / `uninstalled` / `updated` is present. `ok: true` does NOT mean something changed: an already-installed package and an up-to-date check both succeed with a payload saying nothing happened — callers must read the payload, not the exit code, to learn whether the machine changed. A failure uses `error.json` instead.",
+  "type": "object",
+  "required": ["v", "ok", "data"],
+  "properties": {
+    "v": { "const": 1 },
+    "ok": { "const": true },
+    "data": {
+      "oneOf": [
+        { "$ref": "#/$defs/installed" },
+        { "$ref": "#/$defs/notInstalled" },
+        { "$ref": "#/$defs/uninstalled" },
+        { "$ref": "#/$defs/updated" }
+      ]
+    },
+    "_meta": { "$ref": "#/$defs/meta" }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "installed": {
+      "title": "install succeeded",
+      "description": "A plugin was built and placed in clove's install root. `version` is set on the crates.io path; `source`/`commit` on the `--git` path, where `commit` is the exact revision that was inspected and then built (a tag or branch is resolved to a SHA before cargo is invoked, so the approved tree is the built tree).",
+      "type": "object",
+      "required": ["installed", "package", "binary", "path"],
+      "properties": {
+        "installed": { "const": true },
+        "package": {
+          "description": "The crate that was installed.",
+          "type": "string"
+        },
+        "version": { "type": ["string", "null"] },
+        "binary": {
+          "description": "The single executable that was installed. It always equals the crate name — a crate may not install a binary belonging to another plugin's namespace.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Absolute path of the installed executable, inside clove's install root — never `~/.cargo/bin`.",
+          "type": "string"
+        },
+        "source": {
+          "description": "The git URL, on the `--git` path only.",
+          "type": "string"
+        },
+        "commit": {
+          "description": "The resolved commit SHA that was built, on the `--git` path only.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "notInstalled": {
+      "title": "install made no change",
+      "description": "The command succeeded without installing anything: the plugin was already present and `--force` was not given. Declining the confirmation is not a JSON outcome — the prompt is only ever shown in human format, so a declined install prints to the terminal and emits no envelope.",
+      "type": "object",
+      "required": ["installed"],
+      "properties": {
+        "installed": { "const": false },
+        "already_installed": { "const": true },
+        "package": { "type": "string" },
+        "version": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "uninstalled": {
+      "title": "uninstall succeeded",
+      "description": "A plugin clove had installed was removed. Only plugins recorded in clove's own install root are eligible, so this can never remove something clove did not put there.",
+      "type": "object",
+      "required": ["uninstalled", "package", "version"],
+      "properties": {
+        "uninstalled": { "const": true },
+        "package": { "type": "string" },
+        "version": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "updated": {
+      "title": "update result",
+      "description": "What `clove plugin update` did. `updated` is empty when everything was current, when the user declined, or when every candidate was blocked by a gate (a yanked release, a crate that no longer depends on `clove-plugin`); the blocked reasons are reported on stderr, not here. `checked` counts the plugins considered — it is 0 only when no clove-installed plugin exists.",
+      "type": "object",
+      "required": ["updated"],
+      "properties": {
+        "updated": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["package", "from", "to"],
+            "properties": {
+              "package": { "type": "string" },
+              "from": { "type": "string" },
+              "to": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        },
+        "checked": {
+          "description": "How many installed plugins were actually re-resolved against the registry. Excludes the skipped ones — counting a git-installed plugin here and then reporting \"everything is up to date\" claimed a check that never happened.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "skipped": {
+          "description": "Installed plugins `update` did not check because they did not come from the registry (a git or path install). Update one by reinstalling it from its source.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "scope": {
+          "description": "`all` when every clove-installed plugin was considered (no name, or `--all`), `one` when a single plugin was named. This is what disambiguates `checked: 0`.",
+          "enum": ["all", "one"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "meta": {
+      "type": "object",
+      "properties": {
+        "warnings": {
+          "description": "Non-fatal problems — e.g. installing from an unpinned git ref, or a per-package failure during a multi-package update that did not stop the run.",
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
