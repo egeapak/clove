@@ -294,10 +294,41 @@ fn fake_cargo(dir: &Path) {
 /// Put `dir` first on `PATH` for `cmd`, portably.
 fn prepend_path(cmd: &mut Command, dir: &Path) {
     let mut dirs = vec![dir.to_path_buf()];
-    dirs.extend(std::env::split_paths(
-        &std::env::var_os("PATH").unwrap_or_default(),
-    ));
+    // Drop the cargo target directory from the inherited `PATH`.
+    //
+    // **On Windows, cargo puts `target\debug` and `target\debug\deps` on `PATH`**
+    // so a test binary can find its DLLs; on Unix it uses `LD_LIBRARY_PATH`
+    // instead, so `PATH` stays clean. That makes the last entry of clove's
+    // plugin search path a directory full of this workspace's own plugin
+    // binaries — `clove-echo.exe`, `clove-import-tk.exe`, … — plus the
+    // hash-suffixed test harnesses (`clove-<hash>.exe`), which match the
+    // `clove-*` shape and enumerate as plugins.
+    //
+    // Isolating `current_exe` was not enough on its own: that closed the *first*
+    // search-path entry, and this is the last one. `PATH` cannot simply be
+    // emptied — the `--git` tests need the real `git` on it — so the target dir
+    // is filtered out by prefix and everything else is kept.
+    let target_dir = cargo_target_dir();
+    dirs.extend(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).filter(|entry| {
+            match &target_dir {
+                Some(target) => !entry.starts_with(target),
+                None => true,
+            }
+        }),
+    );
     cmd.env("PATH", std::env::join_paths(dirs).unwrap());
+}
+
+/// The cargo target directory this test binary was built into.
+///
+/// Derived from the running executable (`<target>/debug/deps/<test>-<hash>`)
+/// rather than guessed from the manifest, so it is right under a custom
+/// `CARGO_TARGET_DIR` too.
+fn cargo_target_dir() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    // …/deps/<test binary>  →  …/deps  →  …/debug  →  …/target
+    exe.parent()?.parent()?.parent().map(Path::to_path_buf)
 }
 
 /// A `file://` URL git accepts on this platform.
