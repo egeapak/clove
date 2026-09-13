@@ -160,25 +160,10 @@ fn resolve_claude_dir(
         return Ok(dir.to_owned());
     }
     if global {
-        return Ok(home_dir()?.join(".claude"));
+        // `--global` is this command's own flag, so it names the error field.
+        return Ok(crate::clove_home::home_dir("--global")?.join(".claude"));
     }
     Ok(project_dir.join(".claude"))
-}
-
-/// The user's home directory (`$HOME`, or `%USERPROFILE%` on Windows). clove has
-/// no `dirs`-style dependency, so this is resolved by hand.
-fn home_dir() -> Result<Utf8PathBuf, CloveError> {
-    let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-    let raw = std::env::var_os(var).ok_or_else(|| CloveError::InvalidField {
-        field: "--global".to_owned(),
-        reason: format!("cannot resolve the home directory: ${var} is not set"),
-    })?;
-    Utf8PathBuf::from_path_buf(std::path::PathBuf::from(raw)).map_err(|path| {
-        CloveError::InvalidField {
-            field: "--global".to_owned(),
-            reason: format!("home directory is not valid UTF-8: {}", path.display()),
-        }
-    })
 }
 
 /// Register the `clove mcp` server and its tool permissions in `settings.json`,

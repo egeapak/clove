@@ -79,11 +79,43 @@ as `cargo nextest` runs `cargo-nextest`: `clove sync github` →
 **`clove-sync-github`**, `clove import tk`/`beads` →
 **`clove-import-tk`**/**`clove-import-beads`**. (`clove export json`/`jsonl` stays
 built-in — that's clove's own serialization, not a foreign integration.) Without
-the plugin, the command prints a clean `unknown <mux> provider; install
-clove-<mux>-<provider>` error (exit 4); installing it lights the command up with
-no core rebuild. The daemon's periodic sync spawns the same `clove sync github`,
+the plugin, the command prints a clean `unknown <mux> provider; install it with
+clove plugin install <mux>-<provider>` error (exit 4); installing it lights the
+command up with no core rebuild. The daemon's periodic sync spawns the same `clove sync github`,
 so it needs the plugin too. See [`docs/PLUGIN_SYSTEM.md`](docs/PLUGIN_SYSTEM.md) for
 the dispatch/discovery/env contract.
+
+`clove plugin list` shows what is installed and whether each plugin is compatible
+with this clove; `clove plugin list --all` and `clove plugin search <text>` also
+report plugins published to crates.io. There is no curated registry — a plugin is
+discoverable because it depends on `clove-plugin`, which is what makes it a
+plugin. Discovery is strictly additive: if it is unavailable, the installed list
+still prints and plugin dispatch is unaffected; the cause appears in
+`_meta.warnings`.
+
+`clove plugin` also installs and removes them, so you never have to translate a
+provider name into a crate name by hand:
+
+```sh
+clove plugin install sync-github     # resolves to the clove-sync-github crate
+clove plugin install --git https://github.com/you/clove-sync-gitlab   # unpublished
+clove plugin update                  # re-resolve every clove-installed plugin
+clove plugin uninstall sync-github
+```
+
+Installing builds and runs third-party code, so both **ask before proceeding**:
+`install` prints what it resolved — crate, version, binary, owner, repository,
+downloads, and for `--git` the exact commit — and `update` prints each
+old → new version before changing anything. Neither ever claims a plugin is
+vetted: clove does not audit plugins, and every signal in those prompts is one
+the publisher controls. A run
+with no terminal to ask on (CI, an agent) **refuses** rather than proceeding
+silently — pass `--yes` to state the decision explicitly. Plugins land in
+clove's own install root, not `~/.cargo/bin`, so `clove plugin uninstall` only
+ever removes something clove put there. `--git` builds a specific commit: the
+tree clove inspected is the tree cargo builds, even if you named a mutable
+branch or tag. See [`docs/PLUGIN_REGISTRY.md`](docs/PLUGIN_REGISTRY.md) for the
+gates, the install root, and the JSON shapes.
 
 ## Quick start
 
@@ -229,7 +261,7 @@ cd crates/clove-web/web && npm run check && npm run test   # svelte-check + vite
 | [`docs/DESIGN.md`](docs/DESIGN.md) | the authoritative, implementation-ready spec (read this first) |
 | [`docs/RELEASE.md`](docs/RELEASE.md) | the release runbook (crates.io + pre-built binaries) |
 | [`docs/PLUGIN_SYSTEM.md`](docs/PLUGIN_SYSTEM.md) | the cargo-style plugin system: dispatch, discovery, and the host↔plugin contract |
-| [`docs/PLUGIN_REGISTRY.md`](docs/PLUGIN_REGISTRY.md) | plugin list/install/`--help` discovery and the registry manifest schema |
+| [`docs/PLUGIN_REGISTRY.md`](docs/PLUGIN_REGISTRY.md) | plugin `list`/`search`/`--help` discovery, host↔plugin compatibility, and the install root |
 | [`docs/json-schema/`](docs/json-schema/) | JSON Schemas for the stable `--format json` output |
 | [`CHANGELOG.md`](CHANGELOG.md) | release notes |
 

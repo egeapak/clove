@@ -15,8 +15,8 @@ and the `clove-plugin-echo` test fixture.
 
 Integrations users may not want are **separately-installable binaries**, not
 compile-time features. `clove <x>` that matches no built-in resolves `clove-<x>`
-on the search path (current-exe dir → `$CLOVE_PLUGIN_PATH` → `$PATH`) and hands
-off, exactly like `cargo <x>` → `cargo-<x>`. The `sync`/`import`/`export`
+on the search path (current-exe dir → `$CLOVE_PLUGIN_PATH` → `<clove-home>/bin`
+→ `$PATH`) and hands off, exactly like `cargo <x>` → `cargo-<x>`. The `sync`/`import`/`export`
 multiplexers extend this per-provider: `clove sync github` → `clove-sync-github`,
 `clove import tk` → `clove-import-tk`. `import` and `export` keep the pure native
 `json`/`jsonl` built-ins — inverse round-trip (`import json|jsonl` restores an

@@ -658,6 +658,12 @@ fn plugin_dir() -> &'static Path {
 
 fn clove(dir: &Path, addr: SocketAddr) -> Command {
     let mut cmd = Command::cargo_bin("clove").unwrap();
+    // Pin the clove-managed home into `dir`: `<clove-home>/bin` is on the plugin
+    // search path, and `assert_cmd` inherits `$HOME`, so without this a developer
+    // with plugins installed under `~/.local/share/clove/bin` would have them
+    // resolve inside these tests — silently breaking the "no plugin installed"
+    // assertions.
+    cmd.env("CLOVE_HOME", dir.join("clove-home"));
     cmd.current_dir(dir);
     cmd.env_remove("CLOVE_FORMAT");
     cmd.env_remove("EDITOR");

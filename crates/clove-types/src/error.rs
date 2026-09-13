@@ -138,6 +138,16 @@ pub enum CloveError {
     #[error("not yet implemented: {feature}")]
     NotYetImplemented { feature: String },
 
+    /// The plugin registry (crates.io) could not be reached or understood —
+    /// offline, rate-limited, a TLS/proxy failure, or a malformed response.
+    ///
+    /// Never raised for "this plugin does not exist": a 404 is an authoritative
+    /// answer, not an error. Classified at exit 5 alongside the other
+    /// environment failures, since the command was well-formed and the world
+    /// was not cooperating.
+    #[error("registry error: {message}")]
+    Registry { message: String },
+
     /// A failure the daemon reported over IPC, carrying the classification it
     /// already computed.
     ///
@@ -201,6 +211,7 @@ pub fn error_code(error: &CloveError) -> (&'static str, u8) {
         CloveError::NoRepo { .. } => ("NO_REPO", 5),
         CloveError::Io { .. } => ("IO_ERROR", 5),
         CloveError::NotYetImplemented { .. } => ("NOT_YET_IMPLEMENTED", 1),
+        CloveError::Registry { .. } => ("REGISTRY_ERROR", 5),
 
         // A remote failure names its class on the wire; resolve that name
         // against the local table rather than trusting the numeric `exit` that
@@ -235,6 +246,7 @@ const CODES: &[(&str, u8)] = &[
     ("NO_REPO", 5),
     ("IO_ERROR", 5),
     ("NOT_YET_IMPLEMENTED", 1),
+    ("REGISTRY_ERROR", 5),
     DAEMON_ERROR,
 ];
 
@@ -327,6 +339,9 @@ mod tests {
             CloveError::NotYetImplemented {
                 feature: "f".into(),
             },
+            CloveError::Registry {
+                message: "m".into(),
+            },
             CloveError::Remote {
                 code: "IO_ERROR".into(),
                 exit: 5,
@@ -368,6 +383,7 @@ mod tests {
             | CloveError::ScanFailed { .. }
             | CloveError::Io { .. }
             | CloveError::NotYetImplemented { .. }
+            | CloveError::Registry { .. }
             | CloveError::Remote { .. }
             | CloveError::UnsupportedCapability { .. } => {}
         }

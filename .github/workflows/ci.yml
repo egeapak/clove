@@ -139,6 +139,54 @@ jobs:
         run: cargo check -p clove-cli --no-default-features
       - name: cloved without git-sync
         run: cargo check -p cloved --no-default-features
+      # The registry client (ureq -> rustls) must stay on `ring`. A rustls with
+      # default features unifies the tree onto aws-lc-sys and triples the binary,
+      # so the workspace pins `ring` explicitly (root Cargo.toml).
+      #
+      # What this actually asserts: aws-lc-sys is unreachable through **normal**
+      # (non-dev, non-build) edges. `-e normal` is what does the scoping. `-p` is
+      # deliberately absent: it does NOT restrict `-i`, and cargo silently ignores
+      # an unknown `-p` and widens to the whole workspace, so including it would
+      # only imply a filter that is not there. The `-e normal` restriction is
+      # required regardless — aws-lc-sys is legitimately reachable via clove-cli's
+      # `jsonschema` dev-dependency, and it stays in Cargo.lock through
+      # clove-sync-github's octocrab either way.
+      - name: registry TLS stays on ring (no aws-lc-sys via normal edges)
+        run: |
+          set -uo pipefail
+          # Guard against a silently broken invocation. `cargo tree` happily
+          # ignores a typo'd package and prints an unrelated tree; `cargo pkgid`
+          # fails loudly (exit 101), so it is what actually catches a check that
+          # has stopped checking.
+          if ! cargo pkgid -p clove-cli >/dev/null 2>&1; then
+            echo "guard failed: 'clove-cli' is not a package in this workspace."
+            echo "This check has stopped checking what it claims to - fix the check, not the code."
+            exit 1
+          fi
+          # Positive control: the registry client must be present at all, or an
+          # "aws-lc-sys is absent" result would be vacuously true.
+          if ! cargo tree -e normal -i ring 2>/dev/null | grep -q '^ring'; then
+            echo "positive control failed: ring is absent from the normal tree."
+            echo "Either the registry client was removed, or this check is broken."
+            exit 1
+          fi
+          # `cargo tree -i` exits 0 with "nothing to print" on stderr when the
+          # package is in the lockfile but filtered out of this tree, and 101 when
+          # it is absent from the lockfile entirely. Both mean "not reachable";
+          # anything else means the check did not run.
+          found=$(cargo tree -e normal -i aws-lc-sys 2>/dev/null)
+          status=$?
+          if [ "$status" -ne 0 ] && [ "$status" -ne 101 ]; then
+            echo "cargo tree failed unexpectedly (exit $status) - result not conclusive."
+            exit 1
+          fi
+          if [ -n "$found" ]; then
+            echo "aws-lc-sys is reachable through normal edges:"
+            echo "$found"
+            echo "The rustls 'ring' pin in the root Cargo.toml has been defeated by feature unification."
+            exit 1
+          fi
+          echo "ok: ring present, aws-lc-sys absent from all normal dependency edges"
       # Informational: track the shipped binary size. The release profile is fat
       # LTO + codegen-units=1 + panic=abort + strip (see root Cargo.toml). cargo
       # forces the test/bench harness back to unwind, so `cargo test --release`

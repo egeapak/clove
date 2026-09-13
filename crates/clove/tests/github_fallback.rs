@@ -19,6 +19,12 @@ use tempfile::TempDir;
 
 fn clove(dir: &Path) -> Command {
     let mut cmd = Command::cargo_bin("clove").unwrap();
+    // Pin the clove-managed home into `dir`: `<clove-home>/bin` is on the plugin
+    // search path, and `assert_cmd` inherits `$HOME`, so without this a developer
+    // with plugins installed under `~/.local/share/clove/bin` would have them
+    // resolve inside these tests — silently breaking the "no plugin installed"
+    // assertions.
+    cmd.env("CLOVE_HOME", dir.join("clove-home"));
     cmd.current_dir(dir);
     cmd.env_remove("CLOVE_FORMAT");
     cmd.env_remove("EDITOR");
@@ -69,7 +75,9 @@ fn sync_unknown_provider_is_a_clean_validation_error() {
     );
     let message = v["error"]["message"].as_str().unwrap_or_default();
     assert!(
-        message.contains("install clove-sync-gitlab"),
-        "error should point at the missing plugin: {v}"
+        message.contains("clove plugin install sync-gitlab"),
+        "the error must name the command that installs it — `cargo install` puts the \
+         binary in ~/.cargo/bin, which `clove plugin uninstall` then declines to \
+         manage: {v}"
     );
 }

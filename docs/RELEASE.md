@@ -58,17 +58,66 @@ git rev-parse HEAD        # note this SHA — it's what you tag
 Names can be claimed by anyone at any time. Right before publishing:
 
 ```sh
+# The User-Agent is mandatory: crates.io answers 403 to anonymous API requests
+# for *every* crate, so without `-A` this loop reports TAKEN for all fourteen —
+# including the ones that are genuinely free.
+UA="clove-release-check (+https://github.com/egeapak/clove)"
 for c in clove-types clove-core clove-plugin clove-index clove-import clove-ipc \
          clove-mcp clove-tui clove-web cloved clove-cli \
          clove-sync-github clove-import-tk clove-import-beads; do
-  code=$(curl -s -o /dev/null -w '%{http_code}' "https://crates.io/api/v1/crates/$c")
-  echo "$c -> HTTP $code ($([ "$code" = 404 ] && echo FREE || echo TAKEN))"
+  code=$(curl -s -A "$UA" -o /dev/null -w '%{http_code}' "https://crates.io/api/v1/crates/$c")
+  case "$code" in
+    404) verdict=FREE ;;
+    200) verdict=TAKEN ;;
+    *)   verdict="UNKNOWN (HTTP $code — check the request, do not assume)" ;;
+  esac
+  echo "$c -> HTTP $code ($verdict)"
 done
 ```
+
+Any status other than 200/404 means the check itself failed and tells you
+**nothing** about availability — resolve that before reading the results.
 
 All fourteen must report **FREE (404)** for a first release. If any is TAKEN,
 **stop** — resolve the collision (rename that crate, or contact the owner)
 before continuing, exactly as was done for `clove` → `clove-cli`.
+
+### 2a. Name reservation is a *gate*, not a nicety
+
+`clove plugin install <name>` resolves `<name>` against crates.io — so the moment
+`clove-cli` is live, `clove plugin install sync-github` is a documented command
+pointing at a crates.io name. If that name is not ours, the command installs
+**someone else's binary** onto the user's `PATH` under a first-party-looking
+name.
+
+Therefore: **`clove-sync-github`, `clove-import-tk`, and `clove-import-beads`
+must be published (not merely verified free) before `clove-cli`.** Step 3 orders
+them that way. Do not reorder them after `clove-cli` "because they are leaves" —
+the dependency graph permits it, the threat model does not.
+
+**The resolver probes more than one name per provider.** `candidate_crate_names`
+(`crates/clove/src/registry/mod.rs`) expands a *bare provider* into four
+candidates, and only collapses to one when the name already carries its
+multiplexer:
+
+| what the user types | probed |
+|---|---|
+| `sync-github` (what `plugin list` prints, and what every hint teaches) | `clove-sync-github` |
+| `clove-sync-github` (an exact crate name) | `clove-sync-github` |
+| `github` (a bare provider) | `clove-sync-github`, `clove-import-github`, `clove-export-github`, `clove-github` |
+
+The taught spellings resolve to exactly one name, which is what the reservation
+list above covers. The bare-provider form is the loose end: a squatter on
+`clove-import-github` makes `clove plugin install github` **ambiguous** and
+therefore refused. That is a denial, not a compromise — `resolve_candidate`
+refuses rather than guessing, and the exact spelling still works — so it does
+not block a release. If you want the bare form to stay unambiguous, reserve the
+other three rungs for each first-party provider as stub crates too; that is a
+cost/annoyance trade, not a security one.
+
+The same reasoning applies to any *future* first-party plugin: reserve the name
+with a real publish (a stub `0.0.0` release is enough to hold it) in the same
+release that first documents the `clove plugin install` shorthand for it.
 
 ---
 
@@ -107,16 +156,23 @@ A valid topological publish order:
 8. `clove-mcp`
 9. `clove-web`
 10. `cloved`
-11. `clove-cli`
-12. `clove-sync-github`
-13. `clove-import-tk`
-14. `clove-import-beads`
+11. `clove-sync-github`   ← name-reservation gate (§2a)
+12. `clove-import-tk`     ← name-reservation gate (§2a)
+13. `clove-import-beads`  ← name-reservation gate (§2a)
+14. `clove-cli`
 
 > `xtask` (`publish = false`), the `clove-plugin-echo` test fixture
 > (`publish = false`), and the `fuzz/` crate (a separate excluded workspace) are
-> **not** published — skip them. The three `clove-{sync-github,import-tk,import-beads}`
-> plugins carry `publish = true` and go last: they depend on `clove-import` and
-> `clove-plugin`, and nothing depends on them.
+> **not** published — skip them.
+>
+> The three `clove-{sync-github,import-tk,import-beads}` plugins carry
+> `publish = true`. They are graph leaves — they depend only on `clove-types`,
+> `clove-core`, `clove-plugin`, and `clove-import` (all live by step 5), and
+> nothing in the workspace depends on them — so they may be published at any
+> point after `clove-import`. They are placed **immediately before `clove-cli`**
+> deliberately, per §2a: `clove-cli` is what teaches users
+> `clove plugin install sync-github`, and that shorthand must not be live before
+> the name it resolves to is ours.
 
 Internal deps already declare both `path` **and** `version = "0.1.0"` (see
 `[workspace.dependencies]` in the root `Cargo.toml`), which is exactly what
@@ -162,15 +218,19 @@ cargo publish -p clove-tui
 cargo publish -p clove-mcp
 cargo publish -p clove-web     # see the web-UI gotcha above
 cargo publish -p cloved
-cargo publish -p clove-cli
+# --- name-reservation gate (§2a): these three go BEFORE clove-cli ---
 cargo publish -p clove-sync-github
 cargo publish -p clove-import-tk
 cargo publish -p clove-import-beads
+# --- only now is `clove plugin install <name>` safe to ship ---
+cargo publish -p clove-cli
 ```
 
 If a publish fails midway, fix the cause and **resume from the failed crate** —
 the already-published crates are permanent and must not (and cannot) be
-re-uploaded at the same version.
+re-uploaded at the same version. If one of the three plugin publishes fails,
+**stop before `clove-cli`** — do not publish the CLI with an unreserved plugin
+name outstanding.
 
 **Sanity-check installs from the registry** once `clove-cli` is live:
 
@@ -179,6 +239,54 @@ cargo install clove-cli    # installs the `clove` command
 cargo install cloved       # optional daemon
 clove version
 ```
+
+---
+
+## 4a. Post-publish verification
+
+Publishing is irreversible, so verify what actually landed rather than assuming
+the uploads matched the plan. Run this from a scratch directory, **not** the
+repo — the point is to exercise the registry, not the local workspace.
+
+```sh
+UA="clove-release-check (+https://github.com/egeapak/clove)"
+
+# 1. Every crate is live at the released version.
+for c in clove-types clove-core clove-plugin clove-index clove-import clove-ipc \
+         clove-mcp clove-tui clove-web cloved clove-cli \
+         clove-sync-github clove-import-tk clove-import-beads; do
+  v=$(curl -s -A "$UA" "https://crates.io/api/v1/crates/$c" \
+      | grep -o '"max_version":"[^"]*"' | head -1)
+  echo "$c -> ${v:-MISSING}"
+done            # expect max_version 0.1.0 for all fourteen
+```
+
+Then check the two registry behaviours `clove plugin` depends on
+(`docs/PLUGIN_REGISTRY.md`):
+
+```sh
+# 2. Discovery works: the plugins must appear as reverse deps of clove-plugin.
+#    `clove plugin list` reads exactly this endpoint.
+curl -s -A "$UA" \
+  "https://crates.io/api/v1/crates/clove-plugin/reverse_dependencies?per_page=100" \
+  | grep -o '"name":"clove-[a-z-]*"' | sort -u
+#    expect clove-sync-github, clove-import-tk, clove-import-beads
+#    (propagation is not instant — if they are missing, wait a few minutes
+#     and re-run before concluding anything is wrong)
+
+# 3. End-to-end install through the shipped command, in a throwaway root.
+export CLOVE_HOME="$(mktemp -d)"
+clove plugin list                       # should show the three, marked available
+clove plugin install sync-github --yes
+clove sync github --help                # dispatch resolves to the installed binary
+clove plugin uninstall sync-github
+rm -rf "$CLOVE_HOME"
+```
+
+If step 2 returns nothing after propagation, `clove plugin list` will be empty
+for users — that is a release-blocking regression in discovery even though every
+crate published fine. If step 3 installs a binary whose name does not match the
+crate, stop and investigate before announcing.
 
 ---
 

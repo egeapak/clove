@@ -79,7 +79,7 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
 | 2 | item not found |\n\
 | 3 | dependency cycle |\n\
 | 4 | validation error |\n\
-| 5 | i/o or missing `.clove/` |\n\
+| 5 | i/o or missing `.clove/`; also `REGISTRY_ERROR` — the plugin registry, `cargo` or `git` could not be reached |\n\
 | 6 | index error |\n\
 | 7 | daemon error |\n\
 \n\
@@ -121,19 +121,58 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
   recreates items preserving their ids (existing ids skipped unless\n\
   `--overwrite`). A full `export → import` round-trip.\n\
 - `clove import tk <.tickets-dir> [--dry-run]` — import tk tickets (needs the\n\
-  `clove-import-tk` plugin; `cargo install clove-import-tk`).\n\
+  `clove-import-tk` plugin; `clove plugin install import-tk`).\n\
 - `clove import beads <issues.jsonl> [--dry-run]` — import a Beads JSONL export\n\
   (needs the `clove-import-beads` plugin).\n\
 - `clove sync github <owner/repo> [--dry-run] [--prefer P] [--no-comments]` —\n\
   two-way GitHub sync (pull + push + comments in one pass; conflict policy\n\
   `newer|local|remote|manual`). Needs the `clove-sync-github` plugin\n\
-  (`cargo install clove-sync-github`) + a token via `GITHUB_TOKEN` or\n\
+  (`clove plugin install sync-github`) + a token via `GITHUB_TOKEN` or\n\
   `gh auth token`; without the plugin it exits 4 with an install hint. The\n\
   single GitHub path (replaces the old\n\
   one-way `import github` / `export github`).\n\
 - File imports are idempotent on `external_ref`: re-running skips already-imported\n\
   items. `--dry-run` reports `{{ would_create, would_skip, conflicts }}` and\n\
   writes nothing.\n\
+- `clove plugin list [--all] [--refresh]` — installed plugins (name, version,\n\
+  what they run as, host<->plugin compat `status`). Plain `list` is a pure\n\
+  filesystem walk and never uses the network; `--all` additionally lists plugins\n\
+  published to crates.io (discovered as the reverse dependencies of\n\
+  `clove-plugin`), cached for 24h. If discovery fails or the registry is not\n\
+  published yet, the installed list still prints and the reason appears in\n\
+  `_meta.warnings` and the command still exits 0 — a registry outage is\n\
+  never an error, so do not treat a missing Available section as a failure.\n\
+- `clove plugin install <name> [--yes] [--force] [--strict] [--allow-yanked]` —\n\
+  build and install a published plugin. This compiles and runs third-party code,\n\
+  so it always requires an explicit decision: a non-interactive run (no TTY, or\n\
+  `--format json`) **refuses** unless `--yes` is given. A bare provider name is\n\
+  resolved by constructing the candidate crate names; if several exist the\n\
+  command refuses and asks for the exact crate rather than guessing.\n\
+- `clove plugin install --git <url> [--tag T | --rev R | --branch B] [--package P]`\n\
+  — install from any git forge (plain `git`, not `gh`). The repository is cloned\n\
+  shallowly and inspected: a package counts as a plugin only if it depends on\n\
+  `clove-plugin`, builds a `clove-*` binary, AND is publishable. Several\n\
+  candidates means `--package` is required rather than clove guessing. Without\n\
+  `--tag`/`--rev` it warns that the default branch moves.\n\
+- `clove plugin uninstall <name>` — remove a plugin clove installed. Needs no\n\
+  network: the package is resolved from cargo's own bookkeeping. A plugin\n\
+  installed by something else (e.g. `cargo install` into ~/.cargo/bin) is\n\
+  reported as unmanaged rather than failing obscurely.\n\
+- `clove plugin update [<name>] [--all] [--yes]` — re-resolve installed plugins.\n\
+  Shows each old -> new version before changing anything, and only re-resolves\n\
+  crates.io installs (a git-sourced plugin is left alone, not silently swapped\n\
+  for a same-named crate — reinstall it with `plugin install --git <url> --force`\n\
+  to update it). The payload separates `checked` from `skipped` for that reason,\n\
+  and moves only to a strictly greater STABLE version: a pre-release is reported\n\
+  and held, and a registry offering an older version than the installed one is\n\
+  never treated as an upgrade. Anything refused (yanked, no longer a\n\
+  `clove-plugin` dependent, failed build, failed rollback) is reported in\n\
+  `_meta.warnings`, so exit 0 with an empty `updated` is not by itself a\n\
+  clean bill of health.\n\
+- `clove plugin search <text> [--refresh]` — filter published plugins by\n\
+  name/description. When that filter matches nothing, the candidate crate\n\
+  names are constructed and probed directly, so a published plugin is found\n\
+  even when the cached set is stale or discovery is unavailable.\n\
 - `clove init --merge-driver` installs a git merge driver for\n\
   `.clove/issues/*.md`. On `git merge`, same-value scalar edits and dependency/\n\
   label set-unions auto-resolve; only genuinely divergent edits conflict.\n\

@@ -208,7 +208,19 @@ executable suffix (`.exe` on Windows). Search, in order:
    found even if that dir isn't on `PATH`.
 2. **`$CLOVE_PLUGIN_PATH`** (`:`-separated, or `;` on Windows) — explicit opt-in
    dirs, for dev/testing and non-standard installs.
-3. **Every directory on `$PATH`.**
+3. **`<clove-home>/bin`** — the clove-managed install root, where
+   `clove plugin install` puts binaries. Resolved from `$CLOVE_HOME`, else
+   `$XDG_DATA_HOME/clove`, else `~/.local/share/clove` (`%APPDATA%\clove` on
+   Windows). It sits *below* `$CLOVE_PLUGIN_PATH` deliberately: that variable is
+   the user's explicit override, and a binary clove fetched from the internet
+   must never outrank it. It sits *above* `$PATH` so a clove-managed install
+   still beats an incidental one.
+
+   **Never `~/.clove`.** Repository discovery treats any ancestor directory
+   containing a `.clove/` *directory* as a repository root, with no marker check
+   — so an install root at `~/.clove` would make `$HOME` itself resolve as a
+   clove repository for every command run beneath it.
+4. **Every directory on `$PATH`.**
 
 First match wins. Resolution is a pure `stat`-for-executable walk (no exec) so
 `clove --list` / help can enumerate cheaply. On Unix, require the file be
@@ -288,6 +300,24 @@ Rules: booleans are exactly `0`/`1`; enums are the lowercase wire spelling; a va
 whose value is logically absent (e.g. `CLOVE_PROVIDER` for a generic plugin) is
 **omitted**, never set to empty. New context is added by *appending* vars, never
 repurposing one — plugins must ignore unknown `CLOVE_*` vars.
+
+**Host-only `CLOVE_*` vars (read by clove, _not_ exported to plugins)**
+
+These configure the host itself and are deliberately absent from the table
+above. They are listed here so the `CLOVE_*` namespace stays documented in one
+place and so nobody mistakes their absence for an oversight:
+
+| Var | Read by | Meaning |
+|-----|---------|---------|
+| `CLOVE_HOME` | `clove_home.rs` | The clove-managed root (§5): `bin/` for installed plugins, plus the registry cache. Falls back to `$XDG_DATA_HOME/clove`, then `~/.local/share/clove` (`%APPDATA%\clove` on Windows). |
+| `CLOVE_PLUGIN_PATH` | `plugin.rs` | Extra plugin search directories (§5). |
+| `CLOVE_REGISTRY_URL` | `registry/crates_io.rs` | Overrides the crates.io API root **for discovery and name resolution only** — `cargo install` still fetches from the real crates.io, so this does not make clove use a mirror; it exists for tests. The counterpart of `CLOVE_GITHUB_API_URL` in the sync tests. |
+
+`CLOVE_HOME` is **not** exported to plugins today: no plugin needs the install
+root, and the §6.2 contract is deliberately minimal — every exported var is one
+the host has to keep compatible forever. If a plugin ever needs it, export it as
+a resolved value rather than letting the plugin re-derive the fallback ladder,
+which is exactly the disagreement this section exists to prevent.
 
 ### 6.3 Output & exit codes — plugins are first-class clove citizens
 
