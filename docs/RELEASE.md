@@ -13,7 +13,8 @@ the whole runbook once before running any `cargo publish`.
 > still `clove` — `[[bin]] name = "clove"`). The ten core crate names were
 > verified **free** on crates.io on 2026-07-18; the four crates the plugin system
 > added (`clove-plugin` + the three `clove-{sync-github,import-tk,import-beads}`
-> plugins) must be re-verified too. Re-verify all fourteen at publish time (step 2).
+> plugins) and `clove-engine` (the read tier, added after that check) must be
+> re-verified too. Re-verify all fifteen at publish time (step 2).
 
 ---
 
@@ -59,11 +60,11 @@ Names can be claimed by anyone at any time. Right before publishing:
 
 ```sh
 # The User-Agent is mandatory: crates.io answers 403 to anonymous API requests
-# for *every* crate, so without `-A` this loop reports TAKEN for all fourteen —
+# for *every* crate, so without `-A` this loop reports TAKEN for all fifteen —
 # including the ones that are genuinely free.
 UA="clove-release-check (+https://github.com/egeapak/clove)"
 for c in clove-types clove-core clove-plugin clove-index clove-import clove-ipc \
-         clove-mcp clove-tui clove-web cloved clove-cli \
+         clove-tui clove-engine clove-mcp clove-web cloved clove-cli \
          clove-sync-github clove-import-tk clove-import-beads; do
   code=$(curl -s -A "$UA" -o /dev/null -w '%{http_code}' "https://crates.io/api/v1/crates/$c")
   case "$code" in
@@ -78,7 +79,7 @@ done
 Any status other than 200/404 means the check itself failed and tells you
 **nothing** about availability — resolve that before reading the results.
 
-All fourteen must report **FREE (404)** for a first release. If any is TAKEN,
+All fifteen must report **FREE (404)** for a first release. If any is TAKEN,
 **stop** — resolve the collision (rename that crate, or contact the owner)
 before continuing, exactly as was done for `clove` → `clove-cli`.
 
@@ -135,14 +136,29 @@ clove-index        → clove-types, clove-core
 clove-import       → clove-types, clove-core
 clove-ipc          → clove-types, clove-core
 clove-tui          → clove-types, clove-core
-clove-mcp          → clove-types, clove-core, clove-ipc
-clove-web          → clove-types, clove-core, clove-index
+clove-engine       → clove-types, clove-core, clove-index, clove-ipc
+clove-mcp          → clove-types, clove-core, clove-ipc, clove-engine
+clove-web          → clove-types, clove-core, clove-index, clove-engine
 cloved             → clove-types, clove-core, clove-index, clove-ipc, clove-web
-clove-cli          → clove-types, clove-core, clove-plugin, clove-index, clove-import, clove-ipc, clove-mcp, clove-tui, clove-web
+clove-cli          → clove-types, clove-core, clove-plugin, clove-index, clove-import, clove-ipc, clove-engine, clove-mcp, clove-tui, clove-web
 clove-sync-github  → clove-types, clove-core, clove-plugin, clove-import (github)
 clove-import-tk    → clove-types, clove-core, clove-plugin, clove-import
 clove-import-beads → clove-types, clove-core, clove-plugin, clove-import
 ```
+
+> Regenerate this table from the source of truth rather than editing it by hand
+> — it went stale once already when `clove-engine` was added: the table and the
+> publish order below both still omitted it, which would have failed the release
+> at `cargo publish -p clove-mcp`, seven crates in and unrepeatable:
+>
+> ```sh
+> cargo metadata --no-deps --format-version 1 \
+>   | jq -r '.packages[] | select(.publish != []) | "\(.name) → \([.dependencies[] | select(.kind == null) | .name] | map(select(startswith("clove"))) | unique | join(", "))"'
+> ```
+>
+> `select(.kind == null)` keeps normal dependencies only — a dev-dependency does
+> not constrain publish order, and several crates dev-depend on siblings they do
+> not otherwise use.
 
 A valid topological publish order:
 
@@ -153,13 +169,14 @@ A valid topological publish order:
 5. `clove-import`
 6. `clove-ipc`
 7. `clove-tui`
-8. `clove-mcp`
-9. `clove-web`
-10. `cloved`
-11. `clove-sync-github`   ← name-reservation gate (§2a)
-12. `clove-import-tk`     ← name-reservation gate (§2a)
-13. `clove-import-beads`  ← name-reservation gate (§2a)
-14. `clove-cli`
+8. `clove-engine`         ← must precede `clove-mcp`, `clove-web`, and `clove-cli`
+9. `clove-mcp`
+10. `clove-web`
+11. `cloved`
+12. `clove-sync-github`   ← name-reservation gate (§2a)
+13. `clove-import-tk`     ← name-reservation gate (§2a)
+14. `clove-import-beads`  ← name-reservation gate (§2a)
+15. `clove-cli`
 
 > `xtask` (`publish = false`), the `clove-plugin-echo` test fixture
 > (`publish = false`), and the `fuzz/` crate (a separate excluded workspace) are
@@ -215,6 +232,7 @@ cargo publish -p clove-index
 cargo publish -p clove-import
 cargo publish -p clove-ipc
 cargo publish -p clove-tui
+cargo publish -p clove-engine  # the read tier; clove-mcp/clove-web/clove-cli all need it
 cargo publish -p clove-mcp
 cargo publish -p clove-web     # see the web-UI gotcha above
 cargo publish -p cloved
@@ -253,12 +271,12 @@ UA="clove-release-check (+https://github.com/egeapak/clove)"
 
 # 1. Every crate is live at the released version.
 for c in clove-types clove-core clove-plugin clove-index clove-import clove-ipc \
-         clove-mcp clove-tui clove-web cloved clove-cli \
+         clove-tui clove-engine clove-mcp clove-web cloved clove-cli \
          clove-sync-github clove-import-tk clove-import-beads; do
   v=$(curl -s -A "$UA" "https://crates.io/api/v1/crates/$c" \
       | grep -o '"max_version":"[^"]*"' | head -1)
   echo "$c -> ${v:-MISSING}"
-done            # expect max_version 0.1.0 for all fourteen
+done            # expect max_version 0.1.0 for all fifteen
 ```
 
 Then check the two registry behaviours `clove plugin` depends on

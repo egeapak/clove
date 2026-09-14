@@ -6,6 +6,9 @@ version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 # M0 is file-only; the SQLite stack (rusqlite/blake3) is added in M1 (T-S01).
 [dependencies]

@@ -6,6 +6,9 @@ version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 # The MCP server is async (rmcp is built on tokio) and routes to the cloved
 # daemon over the tarpc seam (clove-ipc), falling back to direct clove-core
