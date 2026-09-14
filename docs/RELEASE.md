@@ -199,19 +199,30 @@ crates.io requires — no Cargo.toml surgery is needed before publishing.
 
 ## 4. Publish, one crate at a time
 
-> **Web-UI gotcha — read before publishing `clove-web`.** The embedded SvelteKit
-> SPA lives in the git-ignored `crates/clove-web/dist-gz/`, so it is **not** part
-> of the packaged `.crate`. When a user runs `cargo install clove-cli`,
-> `clove-web/build.rs` rebuilds the SPA **only if `npm` is on their machine**;
-> without npm they get the placeholder page. Two acceptable stances:
+> **Build the web UI before packaging `clove-web`.** The crate ships its built
+> SPA: `crates/clove-web/Cargo.toml` names `dist-gz/**` in `include`, so the
+> git-ignored build output goes into the `.crate` and `cargo install clove-cli`
+> embeds the real UI **with no npm on the user's machine**. npm is a build-time
+> dependency of this repo, never a runtime one.
 >
-> - **Accept it** (recommended for v0.1.0): `cargo install` users who have Node
->   get the real UI; everyone else uses the pre-built GitHub Release binaries
->   (step 6), which always embed the real SPA. Document this in the README.
-> - **Ship the built SPA in the crate**: add an `include = [...]` to
->   `crates/clove-web/Cargo.toml` covering `dist-gz/**`, run `npm run build`
->   before packaging, and publish with `--no-verify`. Heavier; defer unless a
->   Node-free `cargo install` with a working UI is a hard requirement.
+> The consequence is that **whatever is in `dist-gz/` at package time is what
+> every `cargo install` user gets**. Refresh it first:
+>
+> ```sh
+> ( cd crates/clove-web/web && npm ci && npm run build )   # repopulates dist/
+> cargo build -p clove-web                                 # mirrors dist/ -> dist-gz/
+> find crates/clove-web/dist-gz -type f | wc -l            # expect ~50, not 1
+> ```
+>
+> A count of 1 means `dist-gz/` holds only the placeholder `index.html.gz` —
+> stop and fix the SPA build before publishing, or you will ship the placeholder
+> permanently.
+>
+> No `--no-verify` is needed. `build.rs` returns early when it finds a prebuilt
+> `dist-gz/` and no `web/` sources — exactly the packaged-crate layout — so
+> verification no longer overwrites the included assets with a placeholder. If
+> that guard is ever removed, publishing silently regresses to the placeholder;
+> `crates/clove-web/tests/packaging.rs` is what catches it.
 
 Publish the leaf first as a **dry run** to catch metadata/packaging problems
 without uploading (dry-run of non-leaf crates fails until their deps are live,
