@@ -36,10 +36,24 @@ fn main() {
     }
     println!("cargo:rerun-if-env-changed=CLOVE_SKIP_WEB_BUILD");
 
+    // A published .crate ships a prebuilt `dist-gz/` (see `include` in
+    // Cargo.toml) but no `web/` sources and no `dist/`. Regenerating from
+    // `dist/` here would mirror a freshly-written placeholder over the real UI,
+    // so the assets survive only if we stop before touching them.
+    if is_prebuilt(dist_gz) && !web.join("package.json").exists() {
+        return;
+    }
+
     ensure_placeholder(dist);
     maybe_npm_build(web, dist);
     // Always (re)generate the embedded gzip mirror from the finalized dist.
     gzip_tree(dist, dist_gz);
+}
+
+/// Whether `dist-gz/` holds a real built SPA rather than the placeholder mirror.
+/// Keyed on the hashed asset dir that only a real SvelteKit build produces.
+fn is_prebuilt(dist_gz: &Path) -> bool {
+    dist_gz.join("_app").is_dir()
 }
 
 /// Build `dist/` with npm when possible; otherwise leave the placeholder/previous

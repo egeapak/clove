@@ -128,6 +128,31 @@ clove-tui = { path = "crates/clove-tui", version = "0.1.0" }
 clove-web = { path = "crates/clove-web", version = "0.1.0" }
 clove-plugin = { path = "crates/clove-plugin", version = "0.1.0" }
 
+# Debug-build size controls. `target/` was 2.5 GB for a plain `cargo build
+# --workspace`, nearly all of it DWARF. Line tables keep `RUST_BACKTRACE` frames
+# fully symbolised (function, file AND line) — CI sets it in every job — and drop
+# only the type/variable DWARF a step debugger needs to inspect locals.
+#
+# Do NOT add `strip = "debuginfo"` here: it drops the `at ./src/foo.rs:12` line
+# off every backtrace frame, which is the exact detail line tables exist to keep.
+[profile.dev]
+debug = "line-tables-only"
+
+# We never step into third-party code, so their debug info is dead weight, and
+# dependencies dominate the build. This is the bulk of the saving.
+[profile.dev.package."*"]
+debug = false
+
+# Test/bench binaries are their own profiles and do not inherit `profile.dev`.
+[profile.test]
+debug = "line-tables-only"
+
+[profile.test.package."*"]
+debug = false
+
+[profile.bench.package."*"]
+debug = false
+
 [profile.release]
 lto = true            # fat LTO: cross-crate inlining/dedup; meaningfully smaller than "thin"
 codegen-units = 1

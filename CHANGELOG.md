@@ -4,9 +4,30 @@ All notable changes to clove are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.0] - 2026-09-14
+
+The first public release: milestones M0–M4, plus the unified read path
+(`clove-engine`) and the crates.io plugin registry. The feature set the release
+is built on is summarised under **Foundation (M0–M4)** at the end of this
+section; everything above it is what changed after that foundation was
+complete.
 
 ### Added
+
+- **The published crate ships the built web UI, so `cargo install` needs no
+  Node.** `clove-web` embeds its SPA and serves it from the binary — npm was
+  always a build-time dependency, never a runtime one — but the built assets
+  live in a git-ignored `dist-gz/`, which meant they were absent from the
+  packaged `.crate`. A user installing from crates.io without npm therefore got
+  the "SPA was not built" placeholder. `dist-gz/**` is now named in the crate's
+  `include`, and `build.rs` returns early when it finds prebuilt assets and no
+  `web/` sources beside them — the packaged-crate layout — instead of mirroring
+  a fresh placeholder over them. That second half is what makes `--no-verify`
+  unnecessary: `cargo publish` can verify the crate without destroying the UI it
+  is verifying. Installing from git still builds the SPA from source and still
+  wants npm. `crates/clove-web/tests/packaging.rs` pins both halves, because
+  either one regressing fails silently — the binary builds and serves, just with
+  a placeholder.
 
 - **`clove-engine`: the read tier, once.** Every clove read has three possible
   answers — a running `cloved`, the local SQLite index, or a scan of the files —
@@ -812,11 +833,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   case, because the write persists a whole-frontmatter snapshot — a concurrent
   edit landing mid-window was lost entirely rather than partially.
 
-## [0.1.0] - 2026-07-20
+### Foundation (M0–M4)
 
-The initial feature set (milestones M0–M4). First tagged public release.
-
-### Added
+The feature set the entries above build on — the initial milestones, first
+shipped to this changelog on 2026-07-20 and released as part of 0.1.0.
 
 - **Core CLI (`clove`)** — git-native work-item tracker over Markdown +
   YAML-frontmatter files under `.clove/issues/` as the single source of truth.

@@ -6,6 +6,16 @@ version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+# `dist-gz/` is git-ignored (it is generated), so it ships only because it is
+# named here — and it must ship, or `cargo install` on a machine without npm
+# embeds the placeholder UI instead of the real SPA. Listing `include` at all
+# also drops `web/` (the SvelteKit sources) and `tests/` from the .crate, which
+# is intended: the published crate carries the built assets, not the toolchain
+# that builds them. Keep `build.rs`'s prebuilt guard in step with this list.
+include = ["src/**", "build.rs", "dist-gz/**"]
 
 [dependencies]
 clove-types.workspace = true

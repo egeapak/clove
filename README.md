@@ -68,9 +68,14 @@ cargo install --locked --git https://github.com/egeapak/clove clove-import-tk cl
 ```
 
 This installs the `clove` CLI and the optional `cloved` daemon onto your `PATH`.
-A Rust (stable) toolchain compiles them; no Node is required (the web UI embeds a
-placeholder unless built with Node — see
-[`crates/clove-web/web/README.md`](crates/clove-web/web/README.md)).
+A Rust (stable) toolchain compiles them; Node is never needed to *run* clove —
+the web UI is compiled into the binary and served by `clove serve` itself.
+
+Installing from **crates.io** (`cargo install clove-cli`) needs no Node at all:
+the published crate ships the built SPA. Installing from **git**, as above,
+builds the SPA from source and so needs `npm` on your machine; without it the
+binary falls back to a placeholder page while the JSON API stays fully live.
+See [`crates/clove-web/web/README.md`](crates/clove-web/web/README.md).
 
 **Integrations are cargo-style plugins.** The core `clove` binary carries only
 its own native surface; every foreign-tracker integration is a

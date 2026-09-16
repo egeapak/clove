@@ -6,6 +6,9 @@ version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 # File-based importers (beads/tk) use only clove-core; the GitHub
 # importer/exporter (T-M03) adds tokio + octocrab behind the `github` feature.
