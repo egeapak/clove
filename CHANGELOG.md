@@ -4,7 +4,7 @@ All notable changes to clove are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.0] - 2026-09-14
+## [0.1.0] - 2026-09-16
 
 The first public release: milestones M0–M4, plus the unified read path
 (`clove-engine`) and the crates.io plugin registry. The feature set the release
@@ -565,6 +565,15 @@ complete.
   daemon errors as text — so over IPC this change is visible as the error
   *strings* above, with the classification in place for the write routing that
   will use it.
+- **Debug builds emit line tables only, cutting `target/` by a third.** A plain
+  `cargo build --workspace` produced 2.5 GB, nearly all of it DWARF; it is now
+  1.7 GB. `[profile.dev]` and `[profile.test]` set
+  `debug = "line-tables-only"`, and third-party packages get no debug info at
+  all — we never step into them, and they dominate the build. Backtraces are
+  unaffected: line tables keep function, file and line, which is what
+  `RUST_BACKTRACE=1` resolves against. This affects contributors building from
+  source only; released binaries are built by `[profile.release]`, which is
+  unchanged.
 
 ### Performance
 
@@ -832,6 +841,19 @@ complete.
   it excludes other syncs, not the CLI, web, MCP, or daemon. Worse than the CLI
   case, because the write persists a whole-frontmatter snapshot — a concurrent
   edit landing mid-window was lost entirely rather than partially.
+
+### Security
+
+- **Updated rustls to 0.23.45 for RUSTSEC-2026-0285.** rustls accepted TLS 1.3
+  handshake messages sent at the wrong encryption level when they followed a
+  key-changing message in the same record, contrary to RFC 8446 §5.1, which
+  requires the connection be terminated with an `unexpected_message` alert. The
+  handshake transcript stays authenticated, so a network-position attacker
+  cannot alter or complete a handshake; the practical effect is that a peer
+  could send handshake messages in plaintext that should have been encrypted
+  without rustls rejecting the connection. This is the same bug class as Go's
+  CVE-2025-61730. It reaches clove through the GitHub sync client (octocrab)
+  and the crates.io registry client (ureq), both of which speak TLS.
 
 ### Foundation (M0–M4)
 
