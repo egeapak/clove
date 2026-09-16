@@ -31,7 +31,10 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             suffix: linux-x86_64
-          - os: macos-13
+          # `macos-13` was retired on 2025-12-04; that label now queues forever
+          # rather than failing. `macos-15-intel` is the replacement x86_64
+          # image, and the last one — Actions drops macOS x86_64 in Aug 2027.
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             suffix: macos-x86_64
           - os: macos-latest
