@@ -79,6 +79,9 @@ struct Table {
     /// instead of racing for its lock.
     slots: HashMap<Utf8PathBuf, SlotCell>,
     exiting: bool,
+    /// The last project was stopped while its teardown was still running:
+    /// exit as soon as the table is empty, unless a project is admitted first.
+    exit_when_empty: bool,
 }
 
 struct Inner {
@@ -233,6 +236,7 @@ impl Hub {
                 ));
             }
             if load {
+                table.exit_when_empty = false;
                 table.slots.entry(key.clone()).or_default().clone()
             } else {
                 table.slots.get(&key).cloned().ok_or_else(not_loaded)?
@@ -474,6 +478,10 @@ impl Hub {
             if current {
                 table.slots.remove(&slot.clove_dir);
             }
+            if table.exit_when_empty && table.slots.is_empty() {
+                table.exiting = true;
+                self.0.shutdown.cancel();
+            }
         }
         let slug = slot
             .web_slug
@@ -531,6 +539,14 @@ impl Hub {
             let mut table = self.table();
             if table.slots.is_empty() {
                 table.exiting = true;
+            } else if stopping
+                && table
+                    .slots
+                    .values()
+                    .all(|e| e.stopping.load(Ordering::SeqCst))
+            {
+                // Only stopping projects left: the hub goes once they are down.
+                table.exit_when_empty = true;
             }
             table.exiting
         };
@@ -922,7 +938,10 @@ mod tests {
 
     /// A call for `clove_dir` as its own client makes it: with its token.
     fn call(clove_dir: &Utf8Path, load: bool) -> Project {
-        clove_ipc::project(clove_dir, load).unwrap()
+        // The token exists once any client has loaded the project.
+        let mut project = clove_ipc::project(clove_dir, true).unwrap();
+        project.load = load;
+        project
     }
 
     /// One project's background task panicking unloads that project — and only
@@ -1059,6 +1078,40 @@ mod tests {
         assert!(!restarted.cancel.is_cancelled());
     }
 
+    /// Stopping the last project stops the hub — also when its teardown
+    /// outlasted the stop's call: the hub exits once that teardown is done,
+    /// not after its idle grace (item 3).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_hub_exits_once_its_last_projects_slow_teardown_is_done() {
+        let hub = Hub::new(false, Duration::from_secs(60));
+        let (_a_tmp, a) = store();
+        let slot = hub.attach(&call(&a, true), far()).await.unwrap();
+        let index = Arc::clone(&slot.dispatcher.index);
+        let (held_tx, held) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _busy = index.lock().unwrap();
+            held_tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(1500));
+        });
+        held.recv().unwrap();
+        drop(slot);
+        let stopped = hub
+            .detach(
+                &call(&a, false),
+                Instant::now() + Duration::from_millis(500),
+            )
+            .await
+            .unwrap();
+        assert!(stopped.stopping && !stopped.hub_exiting, "{stopped:?}");
+        let exited =
+            tokio::time::timeout(Duration::from_secs(10), hub.shutdown().cancelled()).await;
+        holder.join().unwrap();
+        assert!(
+            exited.is_ok(),
+            "the hub lingered after its last project stopped"
+        );
+    }
+
     /// A stop that lands while the project is still loading wins: the load is
     /// torn down when it completes, the loading client is told so, and the
     /// project is not left served (L-new-1).
@@ -1174,15 +1227,14 @@ mod tests {
     async fn a_symlinked_issues_directory_is_not_loaded() {
         let hub = Hub::new(false, Duration::from_secs(60));
         let (tmp, a) = store();
+        // Named as a client would have before issues/ was swapped for a link
+        // (a client checks too; this is the hub's own check).
+        let named = call(&a, true);
         let elsewhere = tmp.path().join("elsewhere");
         std::fs::create_dir(&elsewhere).unwrap();
         std::fs::remove_dir(a.join("issues")).unwrap();
         std::os::unix::fs::symlink(&elsewhere, a.join("issues")).unwrap();
-        let err = hub
-            .attach(&call(&a, true), far())
-            .await
-            .err()
-            .expect("refused");
+        let err = hub.attach(&named, far()).await.err().expect("refused");
         assert_eq!(err.code, codes::LOAD_FAILED, "{}", err.message);
         assert!(hub.status().projects.is_empty());
     }
@@ -1203,7 +1255,9 @@ mod tests {
     }
 
     /// Rewritten in place — same size, same inode, its mtime put back — the
-    /// file still holds a new token, and the hub goes by what it holds.
+    /// file no longer holds the old token, and the hub goes by what it holds:
+    /// the old token stops working (and the new value, which clove never
+    /// issued, is not trusted either).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_token_rewritten_in_place_is_read_again() {
         use std::io::{Seek as _, Write as _};
@@ -1223,9 +1277,10 @@ mod tests {
             token: new_token,
             ..old.clone()
         };
-        hub.attach(&new, far()).await.expect("the new token");
         let err = hub.attach(&old, far()).await.err().expect("refused");
-        assert_eq!(err.code, codes::BAD_TOKEN);
+        assert_eq!(err.code, codes::BAD_TOKEN, "the old token still works");
+        let err = hub.attach(&new, far()).await.err().expect("refused");
+        assert_eq!(err.code, codes::BAD_TOKEN, "an unissued token was trusted");
     }
 
     /// A symlink planted as the token is not read through.
