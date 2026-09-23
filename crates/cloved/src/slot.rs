@@ -33,9 +33,10 @@ pub struct Slot {
     pub done: CancellationToken,
     /// The web mount's slug, when the project is on the hub's web listener.
     pub web_slug: Mutex<Option<String>>,
-    /// Set by whoever starts the slot's tasks, so a slot is started once even
-    /// when several clients attached while it loaded.
-    pub started: std::sync::atomic::AtomicBool,
+    /// Initialized by whoever starts the slot (web mount, tasks). Every other
+    /// caller that attached while it loaded waits for that to finish, so none
+    /// sees the project half-started.
+    pub started: tokio::sync::OnceCell<()>,
     pub settings: Settings,
     /// `daemon.lock`, held until teardown closes it ([`Slot::release_lock`]).
     lock: Mutex<Option<File>>,
@@ -170,7 +171,7 @@ pub fn open(clove_dir: &Utf8Path, cancel: CancellationToken) -> Result<Slot, Loa
         cancel,
         done: CancellationToken::new(),
         web_slug: Mutex::new(None),
-        started: std::sync::atomic::AtomicBool::new(false),
+        started: tokio::sync::OnceCell::new(),
         settings,
         lock: Mutex::new(Some(lock)),
     })

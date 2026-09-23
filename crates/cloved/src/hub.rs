@@ -9,7 +9,6 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -183,47 +182,27 @@ impl Hub {
             }
         };
         let slot = if load {
-            let loaded = cell
-                .get_or_try_init(|| {
-                    let key = key.clone();
-                    let cancel = self.0.shutdown.child_token();
-                    async move {
-                        tokio::task::spawn_blocking(move || slot::open(&key, cancel))
-                            .await
-                            .unwrap_or_else(|e| {
-                                Err(refused(
-                                    codes::LOAD_FAILED,
-                                    format!("loading the project panicked: {e}"),
-                                ))
-                            })
-                            .map(Arc::new)
-                    }
-                })
-                .await
-                .cloned();
-            match loaded {
-                Ok(slot) => slot,
-                Err(e) => {
-                    let mut table = self.table();
-                    if table
-                        .slots
-                        .get(&key)
-                        .is_some_and(|c| Arc::ptr_eq(c, &cell) && c.get().is_none())
-                    {
-                        table.slots.remove(&key);
-                    }
-                    return Err(e);
-                }
-            }
+            // On its own task: a caller that goes away mid-load (its call
+            // cancelled) must not abort the load halfway, leaving the
+            // project's lock held by an orphaned open that the next load
+            // then finds taken. Every load runs to completion and is started.
+            let loading = tokio::spawn(self.clone().load(key.clone(), cell.clone()));
+            loading.await.unwrap_or_else(|e| {
+                Err(refused(
+                    codes::LOAD_FAILED,
+                    format!("loading the project panicked: {e}"),
+                ))
+            })?
         } else {
             // Still loading counts as not loaded: a probe must not wait on it.
-            cell.get().cloned().ok_or_else(not_loaded)?
+            let slot = cell.get().cloned().ok_or_else(not_loaded)?;
+            slot.started.get_or_init(|| self.start(&slot)).await;
+            slot
         };
-        if !slot.started.swap(true, Ordering::SeqCst) {
-            self.start(&slot).await;
-        }
         // Detached (or the hub drained) while it was loading: nothing tracks it
-        // any more, so tear it down rather than let it serve unlisted.
+        // any more, so tear it down rather than let it serve unlisted. The
+        // caller sees a slot on its way out, which a load waits out and then
+        // loads afresh.
         let registered = self
             .table()
             .slots
@@ -231,8 +210,46 @@ impl Hub {
             .is_some_and(|c| Arc::ptr_eq(c, &cell));
         if !registered {
             slot.cancel.cancel();
-            return Err(not_loaded());
         }
+        Ok(slot)
+    }
+
+    /// Load `key` into `cell` — or wait for the load already under way — and
+    /// start it.
+    async fn load(self, key: Utf8PathBuf, cell: SlotCell) -> Result<Arc<Slot>, LoadError> {
+        let loaded = cell
+            .get_or_try_init(|| {
+                let key = key.clone();
+                let cancel = self.0.shutdown.child_token();
+                async move {
+                    tokio::task::spawn_blocking(move || slot::open(&key, cancel))
+                        .await
+                        .unwrap_or_else(|e| {
+                            Err(refused(
+                                codes::LOAD_FAILED,
+                                format!("loading the project panicked: {e}"),
+                            ))
+                        })
+                        .map(Arc::new)
+                }
+            })
+            .await
+            .cloned();
+        let slot = match loaded {
+            Ok(slot) => slot,
+            Err(e) => {
+                let mut table = self.table();
+                if table
+                    .slots
+                    .get(&key)
+                    .is_some_and(|c| Arc::ptr_eq(c, &cell) && c.get().is_none())
+                {
+                    table.slots.remove(&key);
+                }
+                return Err(e);
+            }
+        };
+        slot.started.get_or_init(|| self.start(&slot)).await;
         Ok(slot)
     }
 
@@ -753,7 +770,7 @@ mod tests {
         // Load beta by hand so its task set can carry a faulty task.
         let key = slot::canonical_key(b.as_str()).unwrap();
         let beta = Arc::new(slot::open(&key, hub.shutdown().child_token()).unwrap());
-        beta.started.store(true, Ordering::SeqCst);
+        beta.started.set(()).unwrap();
         let cell: SlotCell = Arc::default();
         assert!(cell.set(Arc::clone(&beta)).is_ok());
         hub.table().slots.insert(key, cell);
@@ -776,6 +793,61 @@ mod tests {
         hub.attach(b.as_str(), true)
             .await
             .expect("beta's lock was released, so it loads afresh");
+    }
+
+    /// Every caller that loads a project gets it back only once it is fully
+    /// started — its web UI mounted — not just the first: `clove serve` reads
+    /// the web URL right after its load returns (L4).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_loads_return_only_once_the_project_is_mounted() {
+        let mut early = 0;
+        for _ in 0..10 {
+            let hub = Hub::new(true, Duration::from_secs(60));
+            let (_tmp, a) = store();
+            std::fs::write(a.join("config.toml"), "[web]\nport = 0\n").unwrap();
+            let loads: Vec<_> = (0..4)
+                .map(|_| {
+                    let (hub, a) = (hub.clone(), a.clone());
+                    tokio::spawn(async move { hub.attach(a.as_str(), true).await })
+                })
+                .collect();
+            for load in loads {
+                let slot = load.await.unwrap().unwrap();
+                let web_url = slot.dispatcher.state.lock().unwrap().snapshot().web_url;
+                early += usize::from(web_url.is_none());
+            }
+            hub.unload_all().await;
+        }
+        assert_eq!(early, 0, "loads returned before the web UI was mounted");
+    }
+
+    /// A client that gives up mid-load (its call cancelled — or cut off by a
+    /// detach) must not leave the project's lock held by an orphaned load: the
+    /// next load waits for it and succeeds (L2).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_load_abandoned_by_its_caller_never_blocks_the_next() {
+        let hub = Hub::new(false, Duration::from_secs(60));
+        let (_b_tmp, b) = store();
+        hub.attach(b.as_str(), true).await.unwrap(); // keeps the hub from exiting
+        let (_a_tmp, a) = store();
+        let a_project = Project {
+            clove_dir: a.to_string(),
+            load: false,
+        };
+        let mut failures = Vec::new();
+        for round in 0..16u64 {
+            let loader = {
+                let (hub, a) = (hub.clone(), a.clone());
+                tokio::spawn(async move { hub.attach(a.as_str(), true).await })
+            };
+            tokio::time::sleep(Duration::from_micros(round * 400)).await;
+            loader.abort();
+            if let Err(e) = hub.attach(a.as_str(), true).await {
+                failures.push(format!("round {round}: {}: {}", e.code, e.message));
+            }
+            let _ = hub.detach(&a_project).await;
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     /// A project path is the caller's own, absolute; a relative one would be
