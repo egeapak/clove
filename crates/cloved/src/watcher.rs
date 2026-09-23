@@ -15,9 +15,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 use clove_index::Index;
-use notify::{recommended_watcher, Event, RecursiveMode, Watcher};
+use notify::{recommended_watcher, Event, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::graph_cache::GraphCache;
 use crate::reindexer::sync_once;
@@ -70,9 +70,51 @@ async fn collect_burst(
     pending
 }
 
-/// Watch `issues_dir` and keep the index fresh until the task is dropped (on
+/// A watch on a project's `issues/` that is already in place: every change
+/// from the moment [`arm`] returned is queued in `events`.
+pub struct Armed {
+    events: tokio::sync::mpsc::UnboundedReceiver<PathBuf>,
+    _watcher: DropOffThread<RecommendedWatcher>,
+}
+
+/// Put the OS watch on `issues_dir` (blocking: FSEvents setup can take a good
+/// fraction of a second on a busy machine). A load arms it *before* its
+/// startup sweep, so a file written at any point after the sweep began is
+/// either swept or queued — never missed until the next change.
+pub fn arm(issues_dir: &Utf8Path) -> Result<Armed, String> {
+    let (tx, events) = tokio::sync::mpsc::unbounded_channel::<PathBuf>();
+    // The notify handler runs on notify's own thread; forward only item-file
+    // paths into the channel (non-blocking send, no runtime needed here).
+    let mut watcher = recommended_watcher(move |res: notify::Result<Event>| {
+        if let Ok(event) = res {
+            for path in event.paths {
+                if is_item_file(&path) {
+                    let _ = tx.send(path);
+                }
+            }
+        }
+    })
+    .map_err(|e| format!("watcher init failed: {e}"))?;
+    // Test knob: a slow arm, as on a loaded machine.
+    if let Some(ms) = std::env::var("CLOVED_WATCH_ARM_DELAY_MS")
+        .ok()
+        .and_then(|ms| ms.parse::<u64>().ok())
+    {
+        std::thread::sleep(Duration::from_millis(ms));
+    }
+    watcher
+        .watch(issues_dir.as_std_path(), RecursiveMode::Recursive)
+        .map_err(|e| format!("watch({issues_dir}) failed: {e}"))?;
+    Ok(Armed {
+        events,
+        _watcher: DropOffThread(Some(watcher)),
+    })
+}
+
+/// Keep the index fresh from `armed`'s changes until the task is dropped (on
 /// shutdown). `debounce` is the per-burst quiet window (DESIGN §8.5).
 pub async fn watch(
+    armed: Armed,
     issues_dir: Utf8PathBuf,
     index: Arc<Mutex<Index>>,
     state: Arc<Mutex<DaemonState>>,
@@ -80,39 +122,10 @@ pub async fn watch(
     options: WatchOptions,
     graph: Arc<GraphCache>,
 ) {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<PathBuf>();
-
-    // The notify handler runs on notify's own thread; forward only item-file
-    // paths into the channel (non-blocking send, no runtime needed here).
-    // Setting the OS watch up (and, below, tearing it down) can block for a
-    // good fraction of a second on a busy machine (FSEvents), so neither runs
-    // on one of the hub's two async workers.
-    let watched = issues_dir.clone();
-    let setup = tokio::task::spawn_blocking(move || {
-        let mut watcher = recommended_watcher(move |res: notify::Result<Event>| {
-            if let Ok(event) = res {
-                for path in event.paths {
-                    if is_item_file(&path) {
-                        let _ = tx.send(path);
-                    }
-                }
-            }
-        })
-        .map_err(|e| format!("watcher init failed: {e}"))?;
-        watcher
-            .watch(watched.as_std_path(), RecursiveMode::Recursive)
-            .map_err(|e| format!("watch({watched}) failed: {e}"))?;
-        Ok::<_, String>(watcher)
-    })
-    .await;
-    let _watcher = match setup {
-        Ok(Ok(watcher)) => DropOffThread(Some(watcher)),
-        Ok(Err(why)) => {
-            eprintln!("cloved: {why}");
-            return;
-        }
-        Err(_) => return,
-    };
+    let Armed {
+        events: mut rx,
+        _watcher,
+    } = armed;
     if let Ok(mut st) = state.lock() {
         st.set_watcher_state(WatcherState::Watching);
     }

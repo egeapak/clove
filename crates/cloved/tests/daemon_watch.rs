@@ -152,6 +152,38 @@ fn startup_sweep_picks_up_out_of_band_items() {
     drop(hub);
 }
 
+/// An item written the moment the project's load returns is indexed, however
+/// slow the watcher is to arm: a project reports started only once its
+/// watcher watches (and its startup sweep has run after that), so nothing
+/// written in between is lost until the next change.
+#[test]
+fn an_item_written_right_after_the_load_is_indexed() {
+    let repo = init_repo();
+    repo.reindex();
+    // Only the watcher may bring the item in: no refresh on read.
+    std::fs::write(
+        repo.clove_dir.join("config.toml"),
+        "config_schema = 1\nid_prefix = \"proj\"\n[index]\nauto_refresh = false\n",
+    )
+    .unwrap();
+    let hub = TestHub::spawn_with(
+        Some(&repo.clove_dir),
+        &[
+            ("CLOVED_DISABLE_WEB", "1"),
+            ("CLOVED_WATCH_ARM_DELAY_MS", "1500"),
+        ],
+    );
+    repo.add_item("written as the load returned");
+    let ok = wait_until(Duration::from_secs(20), || {
+        count_via_daemon(&hub, &repo.clove_dir) == 1
+    });
+    assert!(
+        ok,
+        "the item written right after the load was never indexed"
+    );
+    drop(hub);
+}
+
 #[test]
 fn watcher_reflects_new_item() {
     let repo = init_repo();
