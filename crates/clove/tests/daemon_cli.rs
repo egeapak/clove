@@ -491,6 +491,8 @@ fn a_relative_clove_dir_always_means_the_callers_own_project() {
             .stdout,
     );
     assert_eq!(titles(&v), vec!["only-in-b"], "{v}");
+    // Answered by the hub — the file fallback would list B's items too.
+    assert_eq!(v["_meta"]["source"], "daemon", "{v}");
 
     clove(b, &run.path)
         .args(["--clove-dir", ".clove", "daemon", "stop"])
