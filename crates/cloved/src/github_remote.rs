@@ -68,11 +68,42 @@ pub fn check_sync_target(repo_root: &camino::Utf8Path, spec: &str) -> Result<Str
     }
 }
 
+/// The repository whose work tree is exactly `repo_root`, through its own
+/// `.git` (a directory, or a gitfile for a linked work tree). Nothing else is
+/// trusted: a bare repository, or any directory of repository files a clone
+/// can carry, would let the project's content choose its remotes.
+#[cfg(feature = "git-sync")]
+fn open_work_tree(repo_root: &camino::Utf8Path) -> Result<git2::Repository, String> {
+    let not_a_root = || format!("{repo_root} is not the root of a git work tree");
+    let dot_git = repo_root.join(".git");
+    let dot_git_kind = std::fs::symlink_metadata(&dot_git).map_err(|_| not_a_root())?;
+    if !dot_git_kind.is_dir() && !dot_git_kind.is_file() {
+        return Err(not_a_root());
+    }
+    let repo = git2::Repository::open_ext(
+        repo_root.as_std_path(),
+        git2::RepositoryOpenFlags::NO_SEARCH,
+        std::iter::empty::<&std::ffi::OsStr>(),
+    )
+    .map_err(|e| format!("{} ({})", not_a_root(), e.message()))?;
+    let same = |a: &std::path::Path, b: &std::path::Path| {
+        let (a, b) = (a.canonicalize(), b.canonicalize());
+        a.is_ok() && a.ok() == b.ok()
+    };
+    let work_tree_is_root = repo
+        .workdir()
+        .is_some_and(|workdir| same(workdir, repo_root.as_std_path()));
+    let git_dir_is_own = !dot_git_kind.is_dir() || same(repo.path(), dot_git.as_std_path());
+    if repo.is_bare() || !work_tree_is_root || !git_dir_is_own {
+        return Err(not_a_root());
+    }
+    Ok(repo)
+}
+
 /// The GitHub repositories the git repository at `repo_root` has as remotes.
 #[cfg(feature = "git-sync")]
 fn project_github_repos(repo_root: &camino::Utf8Path) -> Result<Vec<String>, String> {
-    let repo = git2::Repository::open(repo_root.as_std_path())
-        .map_err(|e| format!("{repo_root} is not a git repository ({})", e.message()))?;
+    let repo = open_work_tree(repo_root)?;
     let names = repo.remotes().map_err(|e| e.message().to_owned())?;
     let mut repos: Vec<String> = names
         .iter()
@@ -175,6 +206,55 @@ mod tests {
         );
         let refused = check_sync_target(&root, "victim/private-repo").unwrap_err();
         assert!(refused.contains("not a remote"), "{refused}");
+    }
+
+    /// A repository that ships a directory holding `HEAD`, `objects/`, `refs/`
+    /// and a `config` naming another remote must not be read as the project's
+    /// repository: only the work tree's own `.git` counts.
+    #[cfg(feature = "git-sync")]
+    #[test]
+    fn a_committed_repository_directory_is_not_the_projects_repository() {
+        let (_tmp, outer) = repo_with_remotes(&[("origin", "git@github.com:me/project.git")]);
+        let planted = outer.join("sub");
+        let bare = git2::Repository::init_bare(planted.as_std_path()).unwrap();
+        bare.remote("origin", "https://github.com/victim/private")
+            .unwrap();
+        let refused = check_sync_target(&planted, "victim/private").unwrap_err();
+        assert!(
+            refused.contains("not the root of a git work tree"),
+            "{refused}"
+        );
+
+        // The same directory claiming to be its own work tree.
+        let mut config = bare.config().unwrap();
+        config.set_bool("core.bare", false).unwrap();
+        config.set_str("core.worktree", planted.as_str()).unwrap();
+        let refused = check_sync_target(&planted, "victim/private").unwrap_err();
+        assert!(
+            refused.contains("not the root of a git work tree"),
+            "{refused}"
+        );
+    }
+
+    #[cfg(feature = "git-sync")]
+    #[test]
+    fn a_linked_work_tree_reads_its_repositorys_remotes() {
+        let (_tmp, root) = repo_with_remotes(&[("origin", "git@github.com:me/project.git")]);
+        let repo = git2::Repository::open(root.as_std_path()).unwrap();
+        let signature = git2::Signature::now("t", "t@example.com").unwrap();
+        let tree = repo
+            .find_tree(repo.index().unwrap().write_tree().unwrap())
+            .unwrap();
+        repo.commit(Some("HEAD"), &signature, &signature, "init", &tree, &[])
+            .unwrap();
+        let linked = tempfile::tempdir().unwrap();
+        let linked_root = camino::Utf8PathBuf::from_path_buf(linked.path().join("wt")).unwrap();
+        repo.worktree("wt", linked_root.as_std_path(), None)
+            .unwrap();
+        assert_eq!(
+            check_sync_target(&linked_root, "me/project").unwrap(),
+            "me/project"
+        );
     }
 
     #[cfg(feature = "git-sync")]
