@@ -98,6 +98,10 @@ pub fn canonical_key(clove_dir: &str) -> Result<Utf8PathBuf, LoadError> {
 /// first query. Blocking — the hub runs it on the blocking pool.
 pub fn open(clove_dir: &Utf8Path, cancel: CancellationToken) -> Result<Slot, LoadError> {
     let issues_dir = clove_dir.join("issues");
+    // A symlinked issues/ would be served as "loaded" while every read and
+    // write of it is refused (clove_core::fs_safe).
+    clove_core::fs_safe::check_dirs(&issues_dir)
+        .map_err(|e| LoadError::failed(format!("{clove_dir}: {e}")))?;
     if !issues_dir.is_dir() {
         return Err(LoadError::failed(format!(
             "{clove_dir} is not a clove store (no issues/ directory)"

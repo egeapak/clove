@@ -936,6 +936,22 @@ mod tests {
         );
     }
 
+    /// A project whose `issues/` is a symlink is not loaded: serving it would
+    /// report "serving" while every call it answers failed.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_symlinked_issues_directory_is_not_loaded() {
+        let hub = Hub::new(false, Duration::from_secs(60));
+        let (tmp, a) = store();
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        std::fs::remove_dir(a.join("issues")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, a.join("issues")).unwrap();
+        let err = hub.attach(&call(&a, true)).await.err().expect("refused");
+        assert_eq!(err.code, codes::LOAD_FAILED, "{}", err.message);
+        assert!(hub.status().projects.is_empty());
+    }
+
     /// A token replaced on disk takes effect at once; the old one stops working.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_replaced_token_is_read_again() {
