@@ -1,17 +1,19 @@
-//! Locating and spawning the `cloved` daemon, and an `ensure_daemon` helper that
-//! probes-or-starts one. Shared by `clove daemon start` and the MCP server's
-//! auto-start (topology B), so the spawn semantics are defined in exactly one
-//! place.
+//! Locating and spawning the `cloved` hub, and an `ensure_daemon` helper that
+//! attaches to it — starting it first if needed. Shared by `clove daemon start`
+//! and the MCP server's auto-start (topology B), so the spawn semantics are
+//! defined in exactly one place.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use camino::Utf8Path;
 
-use crate::{pid_path, DaemonClient};
+use crate::client::ClientError;
+use crate::hub::HubPaths;
+use crate::DaemonClient;
 
-/// How long [`ensure_daemon`] waits for a freshly-spawned daemon to become ready
-/// (its pid file appears only after socket bind + startup sweep).
+/// How long [`ensure_daemon`] waits for a freshly-spawned hub to become ready
+/// (its pid file appears only after the socket is bound).
 const READY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Locate the `cloved` binary next to the running executable (the install layout,
@@ -44,48 +46,59 @@ pub fn cloved_path() -> std::io::Result<PathBuf> {
     }
 }
 
-/// Spawn a detached `cloved run --clove-dir <dir>` for this repository. Returns
-/// once spawned (not once ready — use [`ensure_daemon`] to wait for readiness).
-pub fn spawn_daemon(clove_dir: &Utf8Path) -> std::io::Result<()> {
+/// Spawn a detached `cloved run` hub rooted at `hub`. Returns once spawned (not
+/// once ready — use [`ensure_daemon`] to wait for readiness).
+pub fn spawn_hub(hub: &HubPaths) -> std::io::Result<()> {
     let bin = cloved_path()?;
-    spawn_detached(&bin, clove_dir)
+    spawn_detached(&bin, hub)
 }
 
-/// Return a live daemon client for `clove_dir`, starting `cloved` if none is
-/// running and waiting (up to `READY_TIMEOUT`) for it to become ready. Returns
-/// `None` if no daemon could be reached or started — callers then fall back to
-/// direct file access, so this never hard-fails.
+/// A client attached to `clove_dir` on the user's hub, loading the project —
+/// and starting the hub — if needed.
 pub fn ensure_daemon(clove_dir: &Utf8Path) -> Option<DaemonClient> {
-    if let Some(client) = DaemonClient::probe(clove_dir) {
-        return Some(client);
+    ensure_daemon_at(&HubPaths::resolve(), clove_dir).ok()
+}
+
+/// [`ensure_daemon`] against an explicit hub, reporting why it failed. Callers
+/// fall back to direct file access on an error, so this never has to succeed.
+pub fn ensure_daemon_at(hub: &HubPaths, clove_dir: &Utf8Path) -> Result<DaemonClient, ClientError> {
+    if hub.footprint_present() {
+        match DaemonClient::attach(hub, clove_dir, true) {
+            // No listener behind the footprint: a crashed hub. Start another.
+            Err(ClientError::Connect(_)) => {}
+            // Attached — or a live hub that refused this project (locked by an
+            // older daemon, unloadable). Spawning cannot fix either.
+            other => return other,
+        }
     }
-    // A daemon that cannot bind would only surface as the readiness timeout.
-    if crate::preflight(clove_dir).is_err() || spawn_daemon(clove_dir).is_err() {
-        return None;
-    }
-    let pid_file = pid_path(clove_dir);
+    // A hub that cannot bind would only surface as the readiness timeout.
+    hub.preflight().map_err(ClientError::Connect)?;
+    spawn_hub(hub).map_err(ClientError::Connect)?;
     let start = Instant::now();
     while start.elapsed() < READY_TIMEOUT {
-        if pid_file.exists() {
-            if let Some(client) = DaemonClient::probe(clove_dir) {
-                return Some(client);
+        if hub.pid().exists() {
+            match DaemonClient::attach(hub, clove_dir, true) {
+                // Readiness races a concurrent spawner's hub: the loser exits and
+                // the winner's socket may not be there yet. Keep waiting.
+                Err(ClientError::Connect(_)) => {}
+                other => return other,
             }
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    None
+    Err(ClientError::Timeout)
 }
 
-/// Spawn `cloved run --clove-dir <dir>` detached from this process and terminal.
+/// Spawn `cloved run` detached from this process and terminal. The runtime
+/// directory is passed explicitly so the hub binds where this client looks.
 #[cfg(unix)]
-fn spawn_detached(bin: &Path, clove_dir: &Utf8Path) -> std::io::Result<()> {
+fn spawn_detached(bin: &Path, hub: &HubPaths) -> std::io::Result<()> {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
 
     let mut cmd = Command::new(bin);
     cmd.arg("run")
-        .arg("--clove-dir")
-        .arg(clove_dir.as_str())
+        .env("CLOVE_RUNTIME_DIR", hub.dir().as_str())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -110,15 +123,14 @@ extern "C" {
 }
 
 #[cfg(windows)]
-fn spawn_detached(bin: &Path, clove_dir: &Utf8Path) -> std::io::Result<()> {
+fn spawn_detached(bin: &Path, hub: &HubPaths) -> std::io::Result<()> {
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     Command::new(bin)
         .arg("run")
-        .arg("--clove-dir")
-        .arg(clove_dir.as_str())
+        .env("CLOVE_RUNTIME_DIR", hub.dir().as_str())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

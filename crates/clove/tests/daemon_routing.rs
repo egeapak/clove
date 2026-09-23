@@ -22,7 +22,18 @@ fn clove() -> Command {
 }
 
 fn run_in(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
-    clove().current_dir(dir).args(args).output().unwrap()
+    clove()
+        .current_dir(dir)
+        .env("CLOVE_RUNTIME_DIR", runtime_dir(dir))
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+/// The runtime directory of this test's own daemon — inside the test repo, so
+/// no two tests (and never the user's real daemon) share one.
+fn runtime_dir(root: &std::path::Path) -> PathBuf {
+    root.join("run")
 }
 
 /// A spawned `cloved` that dies with the test, however the test ends.
@@ -53,7 +64,10 @@ impl Drop for Daemon {
 }
 
 fn spawn_daemon(clove_dir: &std::path::Path, bin: &std::path::Path) -> Daemon {
+    let run = runtime_dir(clove_dir.parent().unwrap());
     let child = Command::new(bin)
+        .env("CLOVE_RUNTIME_DIR", &run)
+        .env("CLOVED_DISABLE_WEB", "1")
         .arg("run")
         .arg("--clove-dir")
         .arg(clove_dir)
@@ -63,7 +77,7 @@ fn spawn_daemon(clove_dir: &std::path::Path, bin: &std::path::Path) -> Daemon {
         .stderr(std::process::Stdio::null())
         .spawn()
         .expect("spawn cloved");
-    let pid = clove_dir.join("daemon.pid");
+    let pid = run.join("hub.pid");
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(5) {
         if pid.exists() {
@@ -296,7 +310,10 @@ fn routed_reads_fall_back_after_daemon_crash() {
         !daemon_sock(&clove_dir).exists(),
         "corpse socket cleaned by the liveness probe"
     );
-    assert!(!clove_dir.join("daemon.pid").exists(), "corpse pid cleaned");
+    assert!(
+        !runtime_dir(root).join("hub.pid").exists(),
+        "corpse pid cleaned"
+    );
 }
 
 /// `clove search` answers identically with a live daemon, with only a local
@@ -438,8 +455,7 @@ fn no_index_bypasses_a_live_daemon() {
     drop(daemon);
 }
 
-/// The daemon's socket for `clove_dir`, in the per-user runtime directory.
-fn daemon_sock(clove_dir: &std::path::Path) -> std::path::PathBuf {
-    let clove_dir = camino::Utf8Path::from_path(clove_dir).expect("utf-8 test path");
-    clove_ipc::sock_path(clove_dir).into_std_path_buf()
+/// The daemon's socket for the repo holding `clove_dir`.
+fn daemon_sock(clove_dir: &std::path::Path) -> PathBuf {
+    runtime_dir(clove_dir.parent().unwrap()).join("hub.sock")
 }

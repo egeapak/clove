@@ -368,11 +368,16 @@ pub struct DaemonArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum DaemonAction {
-    /// Start the daemon for this repository (spawns `cloved` detached).
+    /// Have the daemon serve this repository (spawns `cloved` detached if no
+    /// daemon is running; one daemon serves all of a user's repositories).
     Start,
-    /// Stop the running daemon.
-    Stop,
-    /// Show the running daemon's status.
+    /// Stop serving this repository (the daemon exits once it serves none).
+    Stop {
+        /// Stop the daemon itself, and so every repository it serves.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Show this repository's daemon status and the repositories it serves.
     Status,
 }
 

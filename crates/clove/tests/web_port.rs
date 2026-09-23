@@ -1,7 +1,8 @@
-//! #55: per-project daemons (and `clove serve`) share one configured web port.
-//! Whoever loses the bind now serves on a free port and advertises it, so every
-//! project's UI stays reachable and `clove serve` hands off to a working URL.
-//! Unix-only, like the other daemon tests.
+//! #55: the daemon and `clove serve` share one configured web port. Whoever
+//! loses the bind serves on a free port and advertises it, so every project's UI
+//! stays reachable and `clove serve` hands off to a working URL. Unix-only, like
+//! the other daemon tests; each test's daemon lives in the test repo's own
+//! runtime directory.
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -22,6 +23,7 @@ fn clove(dir: &Path) -> Command {
     cmd.env_remove("CLOVE_FORMAT");
     cmd.env_remove("CLOVED_DISABLE_WEB");
     cmd.env("CLOVE_AUTHOR", "tester@example.com");
+    cmd.env("CLOVE_RUNTIME_DIR", dir.join("run"));
     cmd
 }
 
@@ -46,31 +48,45 @@ fn title(dir: &Path) -> String {
     format!("item-{}", dir.file_name().unwrap().to_string_lossy())
 }
 
-/// Whether the web UI on loopback `port` answers `GET /api/v1/items` with 200
-/// and lists `repo`'s item.
-fn serves_repo(port: u16, repo: &Path) -> bool {
-    let response = items_response(port);
+/// Whether the web UI at loopback `port` + `base` (the app root: `/` standalone,
+/// `/p/<slug>/` on the daemon) answers `GET <base>api/v1/items` with 200 and
+/// lists `repo`'s item.
+fn serves_repo(port: u16, base: &str, repo: &Path) -> bool {
+    let response = items_response(port, base);
     response.starts_with("HTTP/1.1 200") && response.contains(&title(repo))
 }
 
-/// The raw response to `GET /api/v1/items` on loopback `port`.
-fn items_response(port: u16) -> String {
+/// The raw response to `GET <base>api/v1/items` on loopback `port`.
+fn items_response(port: u16, base: &str) -> String {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    stream
-        .write_all(b"GET /api/v1/items HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
-        .unwrap();
+    let request =
+        format!("GET {base}api/v1/items HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).unwrap();
     let mut response = String::new();
     stream.read_to_string(&mut response).unwrap();
     response
 }
 
-/// The port in the first `http://127.0.0.1:<port>` URL of `text`.
+/// The port of the first `http://127.0.0.1:<port>` URL in `text`.
 fn url_port(text: &str) -> Option<u16> {
+    url_of(text).map(|(port, _)| port)
+}
+
+/// The port and path (`/` when none) of the first `http://127.0.0.1:<port>`
+/// URL in `text`.
+fn url_of(text: &str) -> Option<(u16, String)> {
     let rest = &text[text.find("http://127.0.0.1:")? + "http://127.0.0.1:".len()..];
-    rest.split(|c: char| !c.is_ascii_digit())
-        .next()?
-        .parse()
-        .ok()
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    let path: String = rest[digits.len()..]
+        .chars()
+        .take_while(|c| !c.is_whitespace())
+        .collect();
+    let path = if path.is_empty() {
+        "/".to_owned()
+    } else {
+        path
+    };
+    Some((digits.parse().ok()?, path))
 }
 
 /// Spawn a standalone `clove serve` and return it with the port it announced,
@@ -119,8 +135,11 @@ fn daemon_that_loses_the_web_port_serves_on_a_free_one() {
         .success();
     let out = clove(repo.path()).arg("serve").output().unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    let port = url_port(&stderr);
-    let serves = port.is_some_and(|port| serves_repo(port, repo.path()));
+    let url = url_of(&stderr);
+    let serves = url
+        .as_ref()
+        .is_some_and(|(port, base)| serves_repo(*port, base, repo.path()));
+    let port = url.map(|(port, _)| port);
     clove(repo.path())
         .args(["daemon", "stop"])
         .assert()
@@ -146,8 +165,8 @@ fn daemon_web_ui_on_the_fallback_port_answers() {
         .assert()
         .success();
     let out = clove(repo.path()).arg("serve").output().unwrap();
-    let port = url_port(&String::from_utf8_lossy(&out.stderr)).expect("daemon URL");
-    let serves = serves_repo(port, repo.path());
+    let (port, base) = url_of(&String::from_utf8_lossy(&out.stderr)).expect("daemon URL");
+    let serves = serves_repo(port, &base, repo.path());
     clove(repo.path())
         .args(["daemon", "stop"])
         .assert()
@@ -162,7 +181,7 @@ fn standalone_serve_falls_back_when_the_configured_port_is_taken() {
     let repo = repo_with_web_port(taken);
 
     let (mut child, port) = spawn_serve(repo.path(), &[]);
-    let serves = serves_repo(port, repo.path());
+    let serves = serves_repo(port, "/", repo.path());
     child.kill().unwrap();
     child.wait().unwrap();
     assert_ne!(port, taken);
@@ -186,7 +205,7 @@ fn explicit_port_is_honored_not_swapped() {
     let wanted = free.local_addr().unwrap().port();
     drop(free);
     let (mut child, port) = spawn_serve(repo.path(), &["--port", &wanted.to_string()]);
-    let serves = serves_repo(port, repo.path());
+    let serves = serves_repo(port, "/", repo.path());
     child.kill().unwrap();
     child.wait().unwrap();
     assert_eq!(port, wanted);
@@ -209,7 +228,7 @@ fn explicit_port_skips_the_daemon_hand_off() {
     let wanted = free.local_addr().unwrap().port();
     drop(free);
     let (mut child, port) = spawn_serve(repo.path(), &["--port", &wanted.to_string()]);
-    let serves = serves_repo(port, repo.path());
+    let serves = serves_repo(port, "/", repo.path());
     child.kill().unwrap();
     child.wait().unwrap();
     clove(repo.path())

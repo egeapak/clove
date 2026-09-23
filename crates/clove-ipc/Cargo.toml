@@ -25,6 +25,7 @@ tarpc.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tokio-serde.workspace = true
+futures.workspace = true      # Sink/Stream for the hub handshake frames
 interprocess = { workspace = true, features = ["tokio"] }
 
 [dev-dependencies]

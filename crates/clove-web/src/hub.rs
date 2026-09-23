@@ -29,11 +29,12 @@ pub struct HubWeb {
     projects: Arc<RwLock<BTreeMap<String, Mounted>>>,
 }
 
-#[derive(Clone)]
 struct Mounted {
     name: String,
     root: Utf8PathBuf,
     router: Router,
+    /// The project's live-update watcher; dropped (and so stopped) on unmount.
+    _watcher: Option<notify::RecommendedWatcher>,
 }
 
 /// One project as `GET /api/v1/projects` lists it.
@@ -51,7 +52,8 @@ impl HubWeb {
         Self::default()
     }
 
-    /// Mount the project rooted at `root` and return its slug.
+    /// Mount the project rooted at `root` and return its slug. Its file
+    /// watcher (live updates) runs until the project is unmounted.
     ///
     /// The slug is the repo directory's name, so bookmarks survive a hub
     /// restart; only when that name is already taken by another loaded project
@@ -60,13 +62,15 @@ impl HubWeb {
         let name = root.file_name().unwrap_or("project").to_owned();
         let mut projects = self.projects.write().unwrap_or_else(|e| e.into_inner());
         let slug = unique_slug(&projects, &name, root);
-        let router = build_router(state.with_base_path(&format!("/p/{slug}")));
+        let state = state.with_base_path(&format!("/p/{slug}"));
+        let watcher = crate::watch::spawn(state.clone());
         projects.insert(
             slug.clone(),
             Mounted {
                 name,
                 root: root.to_owned(),
-                router,
+                router: build_router(state),
+                _watcher: watcher,
             },
         );
         slug
@@ -103,6 +107,11 @@ impl HubWeb {
             .fallback(dispatch)
             .layer(axum::middleware::from_fn(host_guard))
             .with_state(self.clone())
+    }
+
+    /// Serve the hub router on `listener` until it fails.
+    pub async fn serve(&self, listener: tokio::net::TcpListener) -> std::io::Result<()> {
+        axum::serve(listener, self.router()).await
     }
 
     fn router_for(&self, slug: &str) -> Option<Router> {

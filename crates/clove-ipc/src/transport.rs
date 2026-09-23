@@ -16,7 +16,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tarpc::serde_transport::Transport;
 use tarpc::tokio_serde::formats::Json;
-use tarpc::tokio_util::codec::LengthDelimitedCodec;
+use tarpc::tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 /// Wrap a connected local-socket [`Stream`] in a length-delimited JSON tarpc
 /// transport carrying `Item` (received) and `SinkItem` (sent).
@@ -27,6 +27,18 @@ where
     Item: DeserializeOwned,
     SinkItem: Serialize,
 {
-    let framed = LengthDelimitedCodec::builder().new_framed(stream);
+    transport_from_framed(LengthDelimitedCodec::builder().new_framed(stream))
+}
+
+/// Continue an already-framed connection as a tarpc transport — the hand-over
+/// after the hub handshake ([`crate::hub`]). Reusing the `Framed` rather than
+/// its inner stream keeps any bytes it already buffered.
+pub fn transport_from_framed<Item, SinkItem>(
+    framed: Framed<Stream, LengthDelimitedCodec>,
+) -> Transport<Stream, Item, SinkItem, Json<Item, SinkItem>>
+where
+    Item: DeserializeOwned,
+    SinkItem: Serialize,
+{
     tarpc::serde_transport::new(framed, Json::default())
 }

@@ -9,10 +9,13 @@
 //! - [`service`] — the `#[tarpc::service]` contract ([`CloveRpc`]) + [`RpcError`].
 //! - [`protocol`] — the request/response payload types (DESIGN §8.4).
 //! - [`client`] — [`DaemonClient`], a blocking connect-with-timeout client that
-//!   probes liveness and cleans up a stale socket (DESIGN §8.3).
-//! - path/name helpers for the socket, pid, and lock files (DESIGN §8.2).
+//!   probes liveness and cleans up a stale socket (DESIGN §8.3), and
+//!   [`HubClient`] for the hub's control service.
+//! - [`hub`] — the hub handshake, control service, and [`HubPaths`].
+//! - the per-user runtime directory the hub lives in (DESIGN §8.2).
 
 pub mod client;
+pub mod hub;
 pub mod protocol;
 pub mod service;
 pub mod spawn;
@@ -20,34 +23,28 @@ pub mod transport;
 
 use camino::{Utf8Path, Utf8PathBuf};
 
-pub use client::{cleanup_stale, ClientError, DaemonClient, DaemonHealth};
+pub use client::{
+    cleanup_hub, cleanup_legacy, legacy_daemon_pid, ClientError, DaemonClient, DaemonHealth,
+    HubClient,
+};
+pub use hub::{Detached, HubPaths, HubRpc, HubRpcClient, HubStatus, ProjectInfo};
 pub use protocol::{
     GraphRequest, GraphResponse, LeanRow, QueryKind, QueryListResponse, QueryRequest, ReindexDone,
     StatusResponse, PROTOCOL_VERSION,
 };
 pub use service::{CloveRpc, CloveRpcClient, RpcError};
-pub use spawn::{cloved_path, ensure_daemon, spawn_daemon};
-pub use transport::build_transport;
+pub use spawn::{cloved_path, ensure_daemon, ensure_daemon_at, spawn_hub};
+pub use transport::{build_transport, transport_from_framed};
 
-/// The Unix socket filename clove 0.1.0 used inside `.clove/`. Sockets now live
-/// in the per-user [`runtime_dir`]; the name is kept so leftovers are git-ignored.
+/// The Unix socket filename a clove 0.1.0 daemon binds inside `.clove/`. The hub
+/// lives in the per-user [`runtime_dir`]; the name is kept so a pre-hub daemon
+/// can be recognized (and its leftovers stay git-ignored).
 pub const SOCK_FILE: &str = "daemon.sock";
-/// The daemon PID filename inside `.clove/` (DESIGN §8.2).
+/// The pid filename a clove 0.1.0 daemon writes inside `.clove/`.
 pub const PID_FILE: &str = "daemon.pid";
-/// The daemon single-instance lock filename inside `.clove/` (DESIGN §8.2).
+/// The per-project lock filename inside `.clove/` (DESIGN §8.2): whichever daemon
+/// serves the project holds it — a hub slot, or a pre-hub daemon.
 pub const LOCK_FILE: &str = "daemon.lock";
-
-/// Path to the Unix domain socket for this `.clove/` directory: a short name in
-/// the per-user [`runtime_dir`], not a file inside `.clove/`, because a socket
-/// path is capped at [`SUN_PATH_MAX`] bytes and a deeply nested repository would
-/// exceed it (DESIGN §8.2). Keyed by the canonical path so every spelling of the
-/// same repository (symlinks, `/tmp` vs `/private/tmp`) reaches one daemon.
-pub fn sock_path(clove_dir: &Utf8Path) -> Utf8PathBuf {
-    let canonical = clove_dir
-        .canonicalize_utf8()
-        .unwrap_or_else(|_| clove_dir.to_owned());
-    runtime_dir().join(format!("{}.sock", repo_hash(&canonical)))
-}
 
 /// The longest socket path the platform accepts, excluding the trailing NUL
 /// (`sizeof(sun_path) - 1`).
@@ -99,10 +96,16 @@ fn resolve_runtime_dir(var: impl Fn(&str) -> Option<Utf8PathBuf>, uid: u32) -> U
 /// user owns or can write to.
 pub fn ensure_runtime_dir() -> std::io::Result<Utf8PathBuf> {
     let dir = runtime_dir();
+    ensure_private_dir(&dir)?;
+    Ok(dir)
+}
+
+/// [`ensure_runtime_dir`] for an explicit directory (a [`HubPaths`] root).
+pub fn ensure_private_dir(dir: &Utf8Path) -> std::io::Result<()> {
     if !dir.exists() {
-        create_private_dir(&dir)?;
+        create_private_dir(dir)?;
     }
-    if !runtime_dir_is_private(&dir) {
+    if !runtime_dir_is_private(dir) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             format!(
@@ -111,7 +114,7 @@ pub fn ensure_runtime_dir() -> std::io::Result<Utf8PathBuf> {
             ),
         ));
     }
-    Ok(dir)
+    Ok(())
 }
 
 /// Whether `dir` is a directory owned by the current user that no one else can
@@ -166,49 +169,24 @@ fn utf8_var(name: &str) -> Option<Utf8PathBuf> {
         .map(Utf8PathBuf::from)
 }
 
-/// Check, before spawning a daemon, that it will be able to bind: the runtime
-/// directory exists and is private, and the socket path fits [`SUN_PATH_MAX`].
-/// The error names the actual cause, where a failed spawn would only time out.
-pub fn preflight(clove_dir: &Utf8Path) -> std::io::Result<()> {
-    #[cfg(not(windows))]
-    ensure_runtime_dir()?;
-    socket_name(clove_dir).map(|_| ())
-}
-
-/// Path to the daemon PID file for this `.clove/` directory.
+/// The pid file of a clove 0.1.0 daemon for this `.clove/` directory.
 pub fn pid_path(clove_dir: &Utf8Path) -> Utf8PathBuf {
     clove_dir.join(PID_FILE)
 }
 
-/// Path to the daemon lock file for this `.clove/` directory.
+/// The socket of a clove 0.1.0 daemon for this `.clove/` directory.
+pub fn legacy_sock_path(clove_dir: &Utf8Path) -> Utf8PathBuf {
+    clove_dir.join(SOCK_FILE)
+}
+
+/// The per-project lock for this `.clove/` directory.
 pub fn lock_path(clove_dir: &Utf8Path) -> Utf8PathBuf {
     clove_dir.join(LOCK_FILE)
 }
 
-/// Build the platform-specific local-socket name for a `.clove/` directory, used
-/// identically by the client ([`DaemonClient`]) and the `cloved` listener so the
-/// two always agree (DESIGN §8.2): a filesystem path on Unix (`daemon.sock`), a
-/// namespaced pipe on Windows (`clove-<hash>`).
-pub fn socket_name(
-    clove_dir: &Utf8Path,
-) -> std::io::Result<interprocess::local_socket::Name<'static>> {
-    use interprocess::local_socket::prelude::*;
-    #[cfg(windows)]
-    {
-        use interprocess::local_socket::GenericNamespaced;
-        pipe_name(clove_dir).to_ns_name::<GenericNamespaced>()
-    }
-    #[cfg(not(windows))]
-    {
-        use interprocess::local_socket::GenericFilePath;
-        let path = sock_path(clove_dir);
-        check_sock_len(&path)?;
-        path.into_string().to_fs_name::<GenericFilePath>()
-    }
-}
-
 /// Reject a socket path the kernel would refuse, naming the cause and the fix.
-fn check_sock_len(path: &Utf8Path) -> std::io::Result<()> {
+#[cfg(not(windows))]
+pub(crate) fn check_sock_len(path: &Utf8Path) -> std::io::Result<()> {
     if path.as_str().len() <= SUN_PATH_MAX {
         return Ok(());
     }
@@ -222,16 +200,8 @@ fn check_sock_len(path: &Utf8Path) -> std::io::Result<()> {
     ))
 }
 
-/// The Windows named shutdown-event name for this `.clove/` directory
-/// (DESIGN §8.9). `clove daemon stop` signals it; the daemon waits on it.
-#[cfg(windows)]
-pub fn event_name(clove_dir: &Utf8Path) -> String {
-    format!("clove-shutdown-{}", repo_hash(clove_dir))
-}
-
-/// A short, stable hash of the `.clove/` directory path, used to derive the
-/// Windows named-pipe name (`\\.\pipe\clove-<hash>`) and the Windows shutdown
-/// event name (DESIGN §8.2/§8.9). Must be deterministic *across processes and
+/// A short, stable hash of a path, used to derive the hub's Windows named-pipe
+/// and shutdown-event names from its runtime directory (DESIGN §8.2/§8.9). Must be deterministic *across processes and
 /// across builds* so independently-compiled binaries (`clove`, `cloved`,
 /// `clove-mcp`) — possibly built with different toolchains (a distro-packaged
 /// `clove` alongside a `cargo install`ed `cloved`) — always agree on the name.
@@ -252,20 +222,18 @@ pub fn repo_hash(clove_dir: &Utf8Path) -> String {
     format!("{hash:016x}")
 }
 
-/// The Windows named-pipe name for this `.clove/` directory.
-#[cfg(windows)]
-pub fn pipe_name(clove_dir: &Utf8Path) -> String {
-    format!("clove-{}", repo_hash(clove_dir))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn pid_and_lock_are_under_clove_dir() {
+    fn project_files_are_under_clove_dir() {
         let dir = Utf8Path::new("/repo/.clove");
         assert_eq!(pid_path(dir), Utf8PathBuf::from("/repo/.clove/daemon.pid"));
+        assert_eq!(
+            legacy_sock_path(dir),
+            Utf8PathBuf::from("/repo/.clove/daemon.sock")
+        );
         assert_eq!(
             lock_path(dir),
             Utf8PathBuf::from("/repo/.clove/daemon.lock")
@@ -273,15 +241,20 @@ mod tests {
     }
 
     #[test]
-    fn socket_lives_in_the_runtime_dir_whatever_the_repo_depth() {
-        let deep = Utf8PathBuf::from(format!("/{}/.clove", "nested-directory/".repeat(12)));
-        let sock = sock_path(&deep);
-        assert_eq!(sock.parent().unwrap(), runtime_dir());
-        assert_eq!(
-            sock.file_name().unwrap(),
-            format!("{}.sock", repo_hash(&deep))
-        );
-        assert!(check_sock_len(&sock).is_ok(), "{sock} fits sun_path");
+    fn the_hub_lives_in_the_runtime_dir() {
+        let hub = HubPaths::resolve();
+        assert_eq!(hub.dir(), runtime_dir());
+        assert_eq!(hub.sock(), runtime_dir().join("hub.sock"));
+        assert_eq!(hub.pid(), runtime_dir().join("hub.pid"));
+        assert_eq!(hub.lock(), runtime_dir().join("hub.lock"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn an_over_long_hub_socket_is_refused_with_the_fix() {
+        let deep = HubPaths::at(format!("/{}", "nested-directory/".repeat(8)));
+        let message = deep.socket_name().unwrap_err().to_string();
+        assert!(message.contains("CLOVE_RUNTIME_DIR"), "{message}");
     }
 
     #[test]

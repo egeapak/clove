@@ -715,6 +715,7 @@ dependencies = [
  "camino",
  "clove-core",
  "clove-types",
+ "futures",
  "interprocess",
  "serde",
  "serde_json",
@@ -846,7 +847,6 @@ dependencies = [
  "clove-ipc",
  "clove-types",
  "clove-web",
- "fd-lock",
  "futures",
  "git2",
  "interprocess",
@@ -855,6 +855,8 @@ dependencies = [
  "tarpc",
  "tempfile",
  "tokio",
+ "tokio-util",
+ "widestring",
  "windows-sys 0.59.0",
 ]
 

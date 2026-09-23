@@ -40,13 +40,21 @@ pub fn run(
     }
 
     // T-D07: daemon-health check (independent of the index; runs even with
-    // --no-index, since it inspects socket/pid state, not the index).
-    if let Some(issue) = daemon_issue(clove_ipc::DaemonClient::health(daemon_dir(ctx))) {
-        // Only *dead* footprints are cleaned up; a live-but-incompatible daemon
-        // (DAEMON_VERSION_SKEW, not fixable) is reported even under --fix so we
-        // never delete a running process's socket/pid.
+    // --no-index, since it inspects socket/pid state, not the index). Only
+    // *dead* footprints are cleaned up; a live daemon — incompatible or pre-hub —
+    // is reported even under --fix, so we never delete a running process's files.
+    let hub = clove_ipc::HubPaths::resolve();
+    if let Some(issue) = daemon_issue(clove_ipc::DaemonClient::health(&hub)) {
         if args.fix && issue.fixable {
-            clove_ipc::client::cleanup_stale(daemon_dir(ctx));
+            clove_ipc::client::cleanup_hub(&hub);
+            fixed += 1;
+        } else {
+            report.issues.push(issue);
+        }
+    }
+    if let Some(issue) = legacy_daemon_issue(daemon_dir(ctx)) {
+        if args.fix && issue.fixable {
+            clove_ipc::cleanup_legacy(daemon_dir(ctx));
             fixed += 1;
         } else {
             report.issues.push(issue);
@@ -167,8 +175,8 @@ fn daemon_issue(health: clove_ipc::DaemonHealth) -> Option<DoctorIssue> {
             severity: Severity::Warning,
             code: "DAEMON_STALE_SOCKET",
             item: None,
-            message: "stale daemon socket/pid from a crashed daemon; \
-                      run `clove doctor --fix` to remove them"
+            message: "stale daemon socket/pid from a crashed daemon in the runtime \
+                      directory; run `clove doctor --fix` to remove them"
                 .to_owned(),
             fixable: true,
         }),
@@ -178,11 +186,43 @@ fn daemon_issue(health: clove_ipc::DaemonHealth) -> Option<DoctorIssue> {
             item: None,
             message: "a running daemon speaks an incompatible protocol version \
                       (likely an old `cloved` from before a `clove` upgrade); \
-                      run `clove daemon stop` then start it again"
+                      run `clove daemon stop --all` then start it again"
                 .to_owned(),
             fixable: false,
         }),
     }
+}
+
+/// A clove 0.1.0 daemon's footprint in `.clove/`: a live one still serving the
+/// project (which keeps the hub from serving it) is a non-fixable
+/// `DAEMON_LEGACY`; leftover files with nothing behind them are a fixable
+/// `DAEMON_STALE_SOCKET`.
+fn legacy_daemon_issue(clove_dir: &camino::Utf8Path) -> Option<DoctorIssue> {
+    if !clove_ipc::legacy_sock_path(clove_dir).exists() && !clove_ipc::pid_path(clove_dir).exists()
+    {
+        return None;
+    }
+    Some(match clove_ipc::legacy_daemon_pid(clove_dir) {
+        Some(pid) => DoctorIssue {
+            severity: Severity::Warning,
+            code: "DAEMON_LEGACY",
+            item: None,
+            message: format!(
+                "a clove 0.1.0 daemon (pid {pid}) still serves this project, so the \
+                 current daemon cannot; run `clove daemon stop` to stop it"
+            ),
+            fixable: false,
+        },
+        None => DoctorIssue {
+            severity: Severity::Warning,
+            code: "DAEMON_STALE_SOCKET",
+            item: None,
+            message: "stale daemon socket/pid in .clove/ from a crashed clove 0.1.0 \
+                      daemon; run `clove doctor --fix` to remove them"
+                .to_owned(),
+            fixable: true,
+        },
+    })
 }
 
 fn emit_json(report: &DoctorReport, fixed: usize) {

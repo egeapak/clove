@@ -46,7 +46,13 @@ use serde::{Deserialize, Serialize};
 /// matched file anyway to rank it. Removing the method is what makes the
 /// handshake reject a v5 daemon rather than let it keep answering searches with
 /// the old, narrower match set.
-pub const PROTOCOL_VERSION: u32 = 6;
+///
+/// **v7 is the hub** (DESIGN §8.1): one daemon per user, so every connection
+/// opens with a [`crate::hub::Hello`] naming its project (or asking for the
+/// control service) before tarpc starts. The `CloveRpc` methods are unchanged;
+/// what changed is that a connection without a `Hello` means nothing, and a v6
+/// client would have no way to say which project it meant.
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// A dependency-graph query (DESIGN §8.4 extension for `blocked`/`dep`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,6 +191,10 @@ pub struct StatusResponse {
     /// its own server (M4 web UI).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web_addr: Option<String>,
+    /// This project's web UI (`http://host:port/p/<slug>/`) on the hub's shared
+    /// listener — what `clove serve` hands off to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_url: Option<String>,
 }
 
 #[cfg(test)]
@@ -293,6 +303,7 @@ mod tests {
             ping_count: 12,
             last_ping_ms: Some(800),
             web_addr: Some("127.0.0.1:7373".to_owned()),
+            web_url: Some("http://127.0.0.1:7373/p/clove/".to_owned()),
         };
         let json = serde_json::to_string(&status).unwrap();
         assert_eq!(status, serde_json::from_str(&json).unwrap());

@@ -1,18 +1,19 @@
 //! `clove daemon <start|stop|status>` (T-D05, DESIGN §7.2/§8).
 //!
-//! The daemon is an optional accelerator: it watches `.clove/issues/` and keeps
-//! the index hot, but every read command works identically without it. `start`
-//! spawns the sibling `cloved` binary detached and waits for its pid (readiness);
-//! `stop` signals it and waits for teardown; `status` queries it over IPC.
+//! The daemon is an optional accelerator: one `cloved` per user (the hub) serves
+//! every project that asks, watching each `.clove/issues/` and keeping its index
+//! hot, but every read command works identically without it. `start` has the hub
+//! serve this project (spawning the sibling `cloved` if none runs); `stop` has it
+//! stop serving this project; `stop --all` stops the hub; `status` reports both.
 
 use clove_plugin::outln;
 use std::time::{Duration, Instant};
 
 use camino::Utf8Path;
 use clove_core::OutputFormat;
-use clove_ipc::{pid_path, DaemonClient};
+use clove_ipc::{ClientError, DaemonClient, HubClient, HubPaths};
 use clove_types::CloveError;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::cli::DaemonAction;
 use crate::context::Ctx;
@@ -28,145 +29,250 @@ pub fn run(ctx: &Ctx, format: OutputFormat, action: DaemonAction) -> Result<Exit
         .parent()
         .ok_or_else(|| daemon_err("cannot locate .clove directory"))?
         .to_owned();
+    let hub = HubPaths::resolve();
     match action {
-        DaemonAction::Start => start(&clove_dir, format),
-        DaemonAction::Stop => stop(&clove_dir, format),
-        DaemonAction::Status => status(&clove_dir, format),
+        DaemonAction::Start => start(&hub, &clove_dir, format),
+        DaemonAction::Stop { all: false } => stop(&hub, &clove_dir, format),
+        DaemonAction::Stop { all: true } => stop_hub(&hub, format),
+        DaemonAction::Status => status(&hub, &clove_dir, format),
     }
 }
 
-/// Start a detached `cloved` for this repository.
-fn start(clove_dir: &Utf8Path, format: OutputFormat) -> Result<ExitCode, CloveError> {
-    // Idempotent: a live daemon means we are already done.
-    if DaemonClient::probe(clove_dir).is_some() {
+/// Have the hub serve this project, starting the hub if none runs.
+fn start(
+    hub: &HubPaths,
+    clove_dir: &Utf8Path,
+    format: OutputFormat,
+) -> Result<ExitCode, CloveError> {
+    // Idempotent: already served means we are already done.
+    if DaemonClient::probe_at(hub, clove_dir).is_some() {
         return emit(
             format,
-            json!({ "started": false, "running": true }),
-            &format!("daemon already running for {clove_dir}"),
+            json!({ "started": false, "running": true, "pid": hub.read_pid() }),
+            &format!("daemon already serving {clove_dir}"),
         );
     }
 
-    // The probe→spawn→poll readiness semantics live in exactly one place —
-    // clove-ipc's `ensure_daemon`, which the MCP auto-start also uses. This
-    // command only adds the pid readout for the report. (Readiness is gated on
-    // a real probe round-trip inside `ensure_daemon`, so a status/read issued
-    // right after `start` returns is guaranteed to connect.)
-    clove_ipc::preflight(clove_dir)
-        .map_err(|err| daemon_err(&format!("cannot start the daemon: {err}")))?;
-    if clove_ipc::ensure_daemon(clove_dir).is_none() {
-        return Err(daemon_err(
-            "could not start the daemon (spawn failed, or it did not become \
-             ready within 5s); is `cloved` installed next to `clove`?",
-        ));
+    // The probe→spawn→attach semantics live in exactly one place — clove-ipc's
+    // `ensure_daemon_at`, which the MCP auto-start also uses.
+    match clove_ipc::ensure_daemon_at(hub, clove_dir) {
+        Ok(_) => {}
+        Err(ClientError::Refused { message, .. }) => {
+            let legacy = clove_ipc::legacy_daemon_pid(clove_dir)
+                .map(|pid| {
+                    format!(
+                        " (a clove 0.1.0 daemon, pid {pid}, serves it; \
+                         `clove daemon stop` stops it)"
+                    )
+                })
+                .unwrap_or_default();
+            return Err(daemon_err(&format!(
+                "the daemon cannot serve this project: {message}{legacy}"
+            )));
+        }
+        Err(ClientError::Connect(e) | ClientError::Name(e)) => {
+            return Err(daemon_err(&format!("could not start the daemon: {e}")));
+        }
+        Err(_) => {
+            return Err(daemon_err(
+                "could not start the daemon (it did not become ready within 5s); \
+                 is `cloved` installed next to `clove`?",
+            ));
+        }
     }
 
-    let pid = std::fs::read_to_string(pid_path(clove_dir))
-        .map(|s| s.trim().to_owned())
-        .unwrap_or_default();
+    let pid = hub.read_pid();
     emit(
         format,
         json!({ "started": true, "pid": pid }),
-        &format!("daemon started (pid {pid})"),
+        &format!(
+            "daemon serving {clove_dir} (pid {})",
+            pid.map_or_else(|| "?".to_owned(), |p| p.to_string())
+        ),
     )
 }
 
-/// Stop a running daemon and wait for it to tear down.
-fn stop(clove_dir: &Utf8Path, format: OutputFormat) -> Result<ExitCode, CloveError> {
-    let pid_file = pid_path(clove_dir);
-    let pid = match std::fs::read_to_string(&pid_file) {
-        Ok(s) => s.trim().parse::<u32>().ok(),
-        Err(_) => None,
-    };
-    let Some(pid) = pid else {
-        // Nothing to stop. Clean up any stray socket and report a no-op.
-        clove_ipc::client::cleanup_stale(clove_dir);
+/// Stop serving this project: detach it from the hub, or stop the clove 0.1.0
+/// daemon that serves it.
+fn stop(
+    hub: &HubPaths,
+    clove_dir: &Utf8Path,
+    format: OutputFormat,
+) -> Result<ExitCode, CloveError> {
+    // A pre-hub daemon still running after an upgrade. `legacy_daemon_pid` only
+    // answers when a clove daemon really listens on the project's old socket,
+    // so the pid it left behind is safe to signal (D-daemon-6).
+    if let Some(pid) = clove_ipc::legacy_daemon_pid(clove_dir) {
+        signal_pid(pid)?;
+        wait_gone(&clove_ipc::pid_path(clove_dir))?;
         return emit(
             format,
-            json!({ "stopped": false, "running": false }),
-            "no daemon running",
-        );
-    };
-
-    // Verify a live daemon actually answers on this repo's socket before
-    // signalling the pid. A `daemon.pid` can outlive its daemon (SIGKILL / power
-    // loss skip the clean-shutdown removal), and after OS pid recycling that
-    // number may name an unrelated same-user process — SIGTERM-ing it blindly
-    // would kill the wrong process and then hang waiting for a pid file nothing
-    // removes. `probe` connects over IPC and only succeeds against our daemon
-    // (D-daemon-6). If nothing answers, treat it as already stopped.
-    //
-    // Don't clean up the footprint here: `probe` already removes it in the
-    // provably-dead (connection-refused) case, and deliberately preserves it when
-    // the daemon may be alive-but-slow or on a mismatched protocol version. Doing
-    // our own unconditional cleanup would unlink a *live* daemon's socket/pid,
-    // orphaning it while we report "not running".
-    if DaemonClient::probe(clove_dir).is_none() {
-        return emit(
-            format,
-            json!({ "stopped": false, "running": false }),
-            "no daemon running",
+            json!({ "stopped": true, "legacy": true }),
+            &format!("stopped the clove 0.1.0 daemon (pid {pid})"),
         );
     }
+    // Anything left of one is a crashed daemon's corpse.
+    clove_ipc::cleanup_legacy(clove_dir);
 
-    signal_shutdown(clove_dir, pid)?;
+    let not_running = || {
+        emit(
+            format,
+            json!({ "stopped": false, "running": false }),
+            "no daemon serving this project",
+        )
+    };
+    let mut control = match HubClient::connect(hub) {
+        Ok(control) => control,
+        Err(_) => return not_running(),
+    };
+    let detached = control
+        .detach(clove_dir)
+        .map_err(|e| daemon_err(&format!("detaching this project: {e}")))?;
+    if !detached.detached {
+        return not_running();
+    }
+    if detached.hub_exiting {
+        wait_gone(&hub.pid())?;
+    }
+    emit(
+        format,
+        json!({ "stopped": true, "hub_stopped": detached.hub_exiting }),
+        "daemon stopped serving this project",
+    )
+}
 
+/// Stop the hub — every project it serves.
+fn stop_hub(hub: &HubPaths, format: OutputFormat) -> Result<ExitCode, CloveError> {
+    let not_running = || {
+        emit(
+            format,
+            json!({ "stopped": false, "running": false }),
+            "no daemon running",
+        )
+    };
+    // Signal only a hub that proves itself alive: a leftover `hub.pid` can name
+    // an unrelated process after pid reuse (D-daemon-6). An answer of any
+    // protocol version is proof enough — that is exactly the old hub an upgrade
+    // leaves behind.
+    match HubClient::connect(hub) {
+        Ok(_) | Err(ClientError::Refused { .. }) | Err(ClientError::Transport(_)) => {}
+        Err(_) => return not_running(),
+    }
+    let Some(pid) = hub.read_pid() else {
+        return not_running();
+    };
+    signal_hub(hub, pid)?;
+    wait_gone(&hub.pid())?;
+    emit(format, json!({ "stopped": true }), "daemon stopped")
+}
+
+/// Wait for a daemon's pid file to disappear (its last teardown step).
+fn wait_gone(pid_file: &Utf8Path) -> Result<(), CloveError> {
     let start = Instant::now();
     while start.elapsed() < WAIT_TIMEOUT {
         if !pid_file.exists() {
-            return emit(format, json!({ "stopped": true }), "daemon stopped");
+            return Ok(());
         }
         std::thread::sleep(Duration::from_millis(50));
     }
     Err(daemon_err("daemon did not stop within 5s"))
 }
 
-/// Query and print the running daemon's status.
-fn status(clove_dir: &Utf8Path, format: OutputFormat) -> Result<ExitCode, CloveError> {
-    let Some(mut client) = DaemonClient::probe(clove_dir) else {
-        return emit(format, json!({ "running": false }), "daemon not running");
+/// This project's daemon status, plus the hub serving it.
+fn status(
+    hub: &HubPaths,
+    clove_dir: &Utf8Path,
+    format: OutputFormat,
+) -> Result<ExitCode, CloveError> {
+    let hub_status = HubClient::connect(hub)
+        .ok()
+        .and_then(|mut c| c.status().ok());
+    let project = match DaemonClient::probe_at(hub, clove_dir) {
+        Some(mut client) => Some(
+            client
+                .status()
+                .map_err(|e| daemon_err(&format!("status query failed: {e}")))?,
+        ),
+        None => None,
     };
-    let status = client
-        .status()
-        .map_err(|e| daemon_err(&format!("status query failed: {e}")))?;
 
-    let data = json!({
-        "running": true,
-        "uptime_s": status.uptime_s,
-        "items_indexed": status.items_indexed,
-        "watcher_state": status.watcher_state,
-        "last_event_ms": status.last_event_ms,
-        "batches_applied": status.batches_applied,
-        "ping_count": status.ping_count,
-        "last_ping_ms": status.last_ping_ms,
-        "web_addr": status.web_addr,
+    let hub_json = hub_status.as_ref().map(|h| {
+        json!({
+            "pid": h.pid,
+            "uptime_s": h.uptime_s,
+            "web_addr": h.web_addr,
+            "projects": h.projects.iter().map(|p| json!({
+                "clove_dir": p.clove_dir,
+                "items_indexed": p.status.items_indexed,
+                "watcher_state": p.status.watcher_state,
+                "last_event_ms": p.status.last_event_ms,
+                "web_url": p.status.web_url,
+            })).collect::<Vec<Value>>(),
+        })
     });
+    let mut data = json!({ "running": project.is_some(), "hub": hub_json });
+    if let Some(s) = &project {
+        let fields = json!({
+            "uptime_s": s.uptime_s,
+            "items_indexed": s.items_indexed,
+            "watcher_state": s.watcher_state,
+            "last_event_ms": s.last_event_ms,
+            "batches_applied": s.batches_applied,
+            "ping_count": s.ping_count,
+            "last_ping_ms": s.last_ping_ms,
+            "web_addr": s.web_addr,
+            "web_url": s.web_url,
+        });
+        if let (Some(data), Value::Object(fields)) = (data.as_object_mut(), fields) {
+            data.extend(fields);
+        }
+    }
+
     match format {
         OutputFormat::Json | OutputFormat::Jsonl => print_json_success(data, json!({})),
         OutputFormat::Human => {
-            let web = status
-                .web_addr
-                .as_deref()
-                .map(|a| format!("  web http://{a}"))
-                .unwrap_or_default();
-            outln!(
-                "running  uptime {}s  items {}  watcher {}  batches {}  pings {}{web}",
-                status.uptime_s,
-                status.items_indexed,
-                status.watcher_state,
-                status.batches_applied,
-                status.ping_count,
-            );
+            match &project {
+                Some(s) => {
+                    let web = s
+                        .web_url
+                        .as_deref()
+                        .map(|url| format!("  web {url}"))
+                        .unwrap_or_default();
+                    outln!(
+                        "running  uptime {}s  items {}  watcher {}  batches {}  pings {}{web}",
+                        s.uptime_s,
+                        s.items_indexed,
+                        s.watcher_state,
+                        s.batches_applied,
+                        s.ping_count,
+                    );
+                }
+                None if hub_status.is_some() => outln!("daemon not serving this project"),
+                None => outln!("daemon not running"),
+            }
+            if let Some(h) = &hub_status {
+                let web = h
+                    .web_addr
+                    .as_deref()
+                    .map(|a| format!("  web http://{a}/"))
+                    .unwrap_or_default();
+                outln!(
+                    "daemon pid {}  uptime {}s  projects {}{web}",
+                    h.pid,
+                    h.uptime_s,
+                    h.projects.len()
+                );
+                for p in &h.projects {
+                    outln!("  {}  items {}", p.clove_dir, p.status.items_indexed);
+                }
+            }
         }
     }
     Ok(ExitCode::Success)
 }
 
 /// Emit a small success envelope (`json`) or a one-line message (`human`).
-fn emit(
-    format: OutputFormat,
-    data: serde_json::Value,
-    human: &str,
-) -> Result<ExitCode, CloveError> {
+fn emit(format: OutputFormat, data: Value, human: &str) -> Result<ExitCode, CloveError> {
     match format {
         OutputFormat::Json | OutputFormat::Jsonl => print_json_success(data, json!({})),
         OutputFormat::Human => outln!("{human}"),
@@ -188,9 +294,33 @@ fn daemon_err(msg: &str) -> CloveError {
     }
 }
 
-/// Signal the daemon to shut down: SIGTERM (Unix) / named event (Windows).
+/// Signal the hub to shut down: SIGTERM (Unix) / its named event (Windows).
 #[cfg(unix)]
-fn signal_shutdown(_clove_dir: &Utf8Path, pid: u32) -> Result<(), CloveError> {
+fn signal_hub(_hub: &HubPaths, pid: u32) -> Result<(), CloveError> {
+    signal_pid(pid)
+}
+
+#[cfg(windows)]
+fn signal_hub(hub: &HubPaths, _pid: u32) -> Result<(), CloveError> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenEventW, SetEvent, EVENT_MODIFY_STATE};
+    let name = hub.event_name();
+    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: open the hub's named shutdown event and signal it.
+    unsafe {
+        let handle = OpenEventW(EVENT_MODIFY_STATE, 0, wide.as_ptr());
+        if handle.is_null() {
+            return Err(daemon_err("daemon shutdown event not found"));
+        }
+        SetEvent(handle);
+        CloseHandle(handle);
+    }
+    Ok(())
+}
+
+/// SIGTERM a verified daemon pid.
+#[cfg(unix)]
+fn signal_pid(pid: u32) -> Result<(), CloveError> {
     // SAFETY: kill(2) with a parsed pid and SIGTERM (15).
     let rc = unsafe { libc_kill(pid as i32, 15) };
     if rc == -1 {
@@ -203,28 +333,17 @@ fn signal_shutdown(_clove_dir: &Utf8Path, pid: u32) -> Result<(), CloveError> {
     Ok(())
 }
 
+/// A clove 0.1.0 Windows daemon is never verified (see
+/// `clove_ipc::legacy_daemon_pid`), so there is nothing to signal.
+#[cfg(windows)]
+fn signal_pid(_pid: u32) -> Result<(), CloveError> {
+    Ok(())
+}
+
 #[cfg(unix)]
 extern "C" {
     #[link_name = "kill"]
     fn libc_kill(pid: i32, sig: i32) -> i32;
-}
-
-#[cfg(windows)]
-fn signal_shutdown(clove_dir: &Utf8Path, _pid: u32) -> Result<(), CloveError> {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{OpenEventW, SetEvent, EVENT_MODIFY_STATE};
-    let name = clove_ipc::event_name(clove_dir);
-    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-    // SAFETY: open the daemon's named shutdown event and signal it.
-    unsafe {
-        let handle = OpenEventW(EVENT_MODIFY_STATE, 0, wide.as_ptr());
-        if handle.is_null() {
-            return Err(daemon_err("daemon shutdown event not found"));
-        }
-        SetEvent(handle);
-        CloseHandle(handle);
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -234,7 +353,7 @@ mod tests {
     /// Daemon-communication failures classify as `DAEMON_ERROR` / exit 7, not
     /// the `IO_ERROR` / exit 5 they used to borrow from a fabricated path.
     ///
-    /// Pinned here rather than end-to-end because the six call sites are a spawn
+    /// Pinned here rather than end-to-end because the call sites are a spawn
     /// timeout, a shutdown timeout, a signal failure, and an RPC failure against
     /// a *live* daemon — none reproducible cheaply or deterministically in a
     /// test. This asserts the mapping; the call sites are covered by inspection.

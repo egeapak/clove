@@ -7,7 +7,7 @@
 
 use std::net::{IpAddr, SocketAddr};
 
-use clove_ipc::DaemonClient;
+use clove_ipc::{DaemonClient, HubPaths};
 use clove_types::CloveError;
 use clove_web::AppState;
 
@@ -21,16 +21,24 @@ pub fn run(
     no_index: bool,
     deep: bool,
 ) -> Result<(), CloveError> {
-    // Hand off to a running daemon if it is already serving the web UI: the
-    // daemon serves by default, so we point the user at it instead of binding a
-    // second server (and blocking this process). An explicit `--port` the daemon
-    // isn't on is honored with a standalone server instead.
+    // Hand off to a running daemon: it serves every project's web UI on one
+    // port, so we have it serve this one too and point the user there instead of
+    // binding a second server (and blocking this process). With no daemon
+    // running, none is started — `serve` runs standalone as it always has. An
+    // explicit `--port` the daemon isn't on is honored with a standalone server.
     if let Some(clove_dir) = ctx.issues_dir.parent() {
-        if let Some(mut client) = DaemonClient::probe(clove_dir) {
+        let hub = HubPaths::resolve();
+        let client = if hub.footprint_present() {
+            DaemonClient::attach(&hub, clove_dir, true).ok()
+        } else {
+            None
+        };
+        if let Some(mut client) = client {
             if let Ok(status) = client.status() {
-                match status.web_addr {
-                    Some(addr) if args.port.is_none_or(|port| port_of(&addr) == Some(port)) => {
-                        let url = format!("http://{addr}");
+                match status.web_addr.zip(status.web_url) {
+                    Some((addr, url))
+                        if args.port.is_none_or(|port| port_of(&addr) == Some(port)) =>
+                    {
                         if !quiet {
                             eprintln!("clove web UI served by the running daemon: {url}");
                         }

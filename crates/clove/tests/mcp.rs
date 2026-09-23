@@ -20,7 +20,40 @@ fn clove(dir: &Path) -> Command {
     cmd.current_dir(dir);
     cmd.env_remove("CLOVE_FORMAT");
     cmd.env("CLOVE_AUTHOR", "tester@example.com");
+    // Any daemon a test starts lives in the test repo's own runtime directory.
+    cmd.env("CLOVE_RUNTIME_DIR", runtime_dir(dir));
     cmd
+}
+
+/// The runtime directory of the daemon a test in `dir` may start.
+fn runtime_dir(dir: &Path) -> std::path::PathBuf {
+    dir.join("run")
+}
+
+/// Stops the daemon a test started in a runtime directory when the test ends,
+/// however it ends.
+#[cfg(unix)]
+struct StopDaemon(std::path::PathBuf);
+
+#[cfg(unix)]
+impl Drop for StopDaemon {
+    fn drop(&mut self) {
+        if let Some(pid) = std::fs::read_to_string(self.0.join("hub.pid"))
+            .ok()
+            .and_then(|p| p.trim().parse::<i32>().ok())
+        {
+            // SAFETY: kill(2) with the pid this test's own daemon wrote.
+            unsafe {
+                libc_kill(pid, 15);
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+extern "C" {
+    #[link_name = "kill"]
+    fn libc_kill(pid: i32, sig: i32) -> i32;
 }
 
 /// The id from a `clove new --format json` stdout.
@@ -322,6 +355,10 @@ fn no_repo_does_not_spawn_daemon_or_create_clove_dir() {
         assert!(
             !dir.path().join(".clove").exists(),
             "no repo → the server must not create a .clove/ directory"
+        );
+        assert!(
+            !runtime_dir(dir.path()).join("hub.pid").exists(),
+            "no repo → the server must not start a daemon"
         );
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -717,12 +754,8 @@ fn auto_starts_daemon_and_heartbeats() {
     use clove_ipc::DaemonClient;
     use std::time::{Duration, Instant};
 
-    extern "C" {
-        #[link_name = "kill"]
-        fn libc_kill(pid: i32, sig: i32) -> i32;
-    }
-
     let dir = init_repo();
+    let _stop = StopDaemon(runtime_dir(dir.path()));
     let clove_dir = camino::Utf8PathBuf::from_path_buf(dir.path().join(".clove")).unwrap();
 
     // `clove mcp` auto-starts the daemon by locating `cloved` next to its own
@@ -746,11 +779,13 @@ fn auto_starts_daemon_and_heartbeats() {
 
     // The MCP server should have brought a daemon up. Wait briefly for readiness.
     let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(6) && !clove_dir.join("daemon.pid").exists() {
+    while start.elapsed() < Duration::from_secs(6)
+        && !runtime_dir(dir.path()).join("hub.pid").exists()
+    {
         std::thread::sleep(Duration::from_millis(50));
     }
     assert!(
-        clove_dir.join("daemon.pid").exists(),
+        runtime_dir(dir.path()).join("hub.pid").exists(),
         "clove mcp should have auto-started the daemon"
     );
 
@@ -768,7 +803,10 @@ fn auto_starts_daemon_and_heartbeats() {
 
     // Ping stats accrue: query the daemon directly and confirm the count climbs
     // as the heartbeat fires.
-    let mut client = DaemonClient::probe(&clove_dir).expect("daemon alive");
+    let hub = clove_ipc::HubPaths::at(
+        camino::Utf8PathBuf::from_path_buf(runtime_dir(dir.path())).unwrap(),
+    );
+    let mut client = DaemonClient::probe_at(&hub, &clove_dir).expect("daemon alive");
     let first = client.status().unwrap().ping_count;
     assert!(first >= 1, "startup ensure + probe should have pinged");
     std::thread::sleep(Duration::from_millis(450)); // ~3 heartbeat ticks
@@ -779,15 +817,6 @@ fn auto_starts_daemon_and_heartbeats() {
     );
 
     s.shutdown();
-
-    // Tear down the spawned daemon so the test leaves nothing running.
-    if let Ok(pid) = std::fs::read_to_string(clove_dir.join("daemon.pid")) {
-        if let Ok(pid) = pid.trim().parse::<i32>() {
-            unsafe {
-                libc_kill(pid, 15);
-            }
-        }
-    }
 }
 
 /// A write the *daemon* rejects must carry the same error classification the
@@ -800,13 +829,8 @@ fn auto_starts_daemon_and_heartbeats() {
 #[cfg(unix)]
 #[test]
 fn daemon_rejected_write_carries_the_shared_error_code() {
-    extern "C" {
-        #[link_name = "kill"]
-        fn libc_kill(pid: i32, sig: i32) -> i32;
-    }
-
     let dir = init_repo();
-    let clove_dir = camino::Utf8PathBuf::from_path_buf(dir.path().join(".clove")).unwrap();
+    let _stop = StopDaemon(runtime_dir(dir.path()));
     let cloved = escargot::CargoBuild::new()
         .package("cloved")
         .bin("cloved")
@@ -834,14 +858,6 @@ fn daemon_rejected_write_carries_the_shared_error_code() {
     );
 
     s.shutdown();
-
-    if let Ok(pid) = std::fs::read_to_string(clove_dir.join("daemon.pid")) {
-        if let Ok(pid) = pid.trim().parse::<i32>() {
-            unsafe {
-                libc_kill(pid, 15);
-            }
-        }
-    }
 }
 
 /// gh-21: after subscribing to `clove://ready`, a mutation that bumps the daemon's
@@ -854,13 +870,8 @@ fn subscribed_resource_updated_on_mutation() {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
-    extern "C" {
-        #[link_name = "kill"]
-        fn libc_kill(pid: i32, sig: i32) -> i32;
-    }
-
     let dir = init_repo();
-    let clove_dir = camino::Utf8PathBuf::from_path_buf(dir.path().join(".clove")).unwrap();
+    let _stop = StopDaemon(runtime_dir(dir.path()));
     let cloved = escargot::CargoBuild::new()
         .package("cloved")
         .bin("cloved")
@@ -952,13 +963,6 @@ fn subscribed_resource_updated_on_mutation() {
 
     drop(stdin);
     let _ = child.wait();
-    if let Ok(pid) = std::fs::read_to_string(clove_dir.join("daemon.pid")) {
-        if let Ok(pid) = pid.trim().parse::<i32>() {
-            unsafe {
-                libc_kill(pid, 15);
-            }
-        }
-    }
 }
 
 /// The MCP read tools take the same `sort`/`desc` the CLI and web take, and
@@ -1301,6 +1305,8 @@ fn read_tools_use_the_daemon_tier_and_agree_with_the_files() {
         .run()
         .expect("build cloved");
     let mut daemon = std::process::Command::new(cloved.path())
+        .env("CLOVE_RUNTIME_DIR", runtime_dir(dir.path()))
+        .env("CLOVED_DISABLE_WEB", "1")
         .arg("run")
         .arg("--clove-dir")
         .arg(dir.path().join(".clove"))
@@ -1308,7 +1314,7 @@ fn read_tools_use_the_daemon_tier_and_agree_with_the_files() {
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn cloved");
-    let pid = dir.path().join(".clove/daemon.pid");
+    let pid = runtime_dir(dir.path()).join("hub.pid");
     let start = std::time::Instant::now();
     while start.elapsed() < std::time::Duration::from_secs(5) && !pid.exists() {
         std::thread::sleep(std::time::Duration::from_millis(20));

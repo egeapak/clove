@@ -76,6 +76,7 @@ impl CloveRpc for Dispatcher {
                 ping_count: 0,
                 last_ping_ms: None,
                 web_addr: None,
+                web_url: None,
             },
         }
     }
