@@ -47,14 +47,13 @@ fn clove_binary() -> Utf8PathBuf {
 /// `clove --clove-dir <clove_dir> sync github <repo_spec>` (which resolves the
 /// `clove-sync-github` plugin). Best-effort: returns `false` (after logging) on a
 /// spawn failure or a non-zero exit rather than propagating. The child inherits
-/// this process's environment (so a `GITHUB_TOKEN` set for the daemon is passed
-/// through) and streams its own stdout/stderr.
+/// the hub's pinned environment (DESIGN §8.8: no `GITHUB_TOKEN`; the plugin
+/// authenticates with `gh auth token`) and streams its own stdout/stderr.
 ///
-/// `--clove-dir` pins the child to the *exact* directory the daemon manages —
-/// the daemon may have been started with a non-standard `--clove-dir` (a CLI
-/// flag, not inherited into the child's env), so relying on cwd rediscovery could
-/// aim the child at a different repository. Global flags precede the subcommand,
-/// per the `clove` CLI contract.
+/// `--clove-dir` pins the child to the *exact* project directory: the hub
+/// serves many projects from its own runtime directory, so cwd rediscovery
+/// would find none of them. Global flags precede the subcommand, per the
+/// `clove` CLI contract.
 pub fn github_sync_once(clove_dir: &Utf8Path, repo_spec: &str) -> bool {
     let clove = clove_binary();
     let status = Command::new(clove.as_std_path())

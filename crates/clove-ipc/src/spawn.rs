@@ -125,6 +125,9 @@ fn keep_var(name: &str) -> bool {
         "TMPDIR",
         "XDG_RUNTIME_DIR",
         "XDG_DATA_HOME",
+        // Where `gh auth token` finds a non-default GitHub CLI config.
+        "XDG_CONFIG_HOME",
+        "GH_CONFIG_DIR",
         "CLOVE_HOME",
         "CLOVE_GITHUB_API_URL",
         "CLOVE_GITHUB_RETRY_MS",
@@ -203,7 +206,16 @@ mod tests {
 
     #[test]
     fn the_hub_keeps_only_what_it_needs_from_its_spawner() {
-        for kept in ["PATH", "HOME", "CLOVED_WEB_PORT", "LC_ALL"] {
+        // `gh auth token` (the daemon's GitHub sync) looks in XDG_CONFIG_HOME
+        // or GH_CONFIG_DIR for a non-default gh config.
+        for kept in [
+            "PATH",
+            "HOME",
+            "CLOVED_WEB_PORT",
+            "LC_ALL",
+            "XDG_CONFIG_HOME",
+            "GH_CONFIG_DIR",
+        ] {
             assert!(keep_var(kept), "{kept}");
         }
         for dropped in [

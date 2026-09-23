@@ -1689,7 +1689,8 @@ tests/CI.
 and belongs to none, so it must not carry one client's shell into all of them.
 A client spawns it with an emptied environment plus only: `PATH`, `HOME`,
 `USER`/`LOGNAME`, `TMPDIR`, `XDG_RUNTIME_DIR`, `XDG_DATA_HOME`, `CLOVE_HOME`,
-`LANG`/`LC_*`, the `CLOVED_*` knobs (`CLOVED_DISABLE_WEB`, `CLOVED_WEB_PORT`,
+`XDG_CONFIG_HOME` and `GH_CONFIG_DIR` (where `gh auth token` finds a GitHub CLI
+config kept somewhere other than `~/.config/gh`), `LANG`/`LC_*`, the `CLOVED_*` knobs (`CLOVED_DISABLE_WEB`, `CLOVED_WEB_PORT`,
 `CLOVED_IDLE_SHUTDOWN_MS`, `CLOVED_HUB_GRACE_MS`, `CLOVED_STATS_SNAPSHOT_MS`,
 `CLOVED_GITHUB_SYNC_MS`, …), `CLOVE_GITHUB_API_URL`/`CLOVE_GITHUB_RETRY_MS` (test
 seams), `CLOVE_RUNTIME_DIR` (always set, absolute), and on Windows `SystemRoot`,
