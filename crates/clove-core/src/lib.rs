@@ -10,6 +10,7 @@ pub mod config;
 pub mod doctor;
 pub mod edit;
 pub mod fixtures;
+pub mod fs_safe;
 pub mod graph;
 pub mod ops;
 pub mod parse;

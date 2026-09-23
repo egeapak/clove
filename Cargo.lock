@@ -609,6 +609,7 @@ dependencies = [
  "fd-lock",
  "getrandom 0.2.17",
  "insta",
+ "libc",
  "memchr",
  "petgraph",
  "proptest",
@@ -725,6 +726,7 @@ dependencies = [
  "tokio",
  "tokio-serde",
  "tokio-util",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

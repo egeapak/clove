@@ -5,8 +5,6 @@
 //! report per-file parse failures without aborting the whole scan, so one
 //! corrupt file never hides the rest of the repository.
 
-use std::fs::OpenOptions;
-
 use camino::{Utf8Path, Utf8PathBuf};
 use chrono::{DateTime, Utc};
 use rayon::prelude::*;
@@ -333,16 +331,10 @@ impl ItemStore {
     /// read-modify-write window.
     pub fn write_lock(&self) -> Result<StoreWriteLock, CloveError> {
         let path = self.repo_root.join(".clove").join("write.lock");
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(path.as_std_path())
-            .map_err(|source| CloveError::Io {
-                path: path.clone(),
-                source,
-            })?;
+        let file = crate::fs_safe::open_lock_file(&path).map_err(|source| CloveError::Io {
+            path: path.clone(),
+            source,
+        })?;
         Ok(StoreWriteLock {
             path,
             lock: fd_lock::RwLock::new(file),

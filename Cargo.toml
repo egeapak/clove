@@ -74,6 +74,7 @@ getrandom = "0.2"               # ID entropy
 memchr = "2"                    # fast frontmatter boundary scanning
 blake3 = "1"                    # content hashing for staleness (M1)
 rayon = "1"                     # parallel parse above 500 items
+libc = "0.2"                    # O_NOFOLLOW / peer-uid checks on Unix
 fd-lock = "4"                   # advisory file locking
 git2 = "0.21"                   # M3 daemon git auto-sync only (vendored libgit2 C build blocks macOS->Windows cross-check; M0 worktree detection uses a `git` CLI wrapper instead)
 # RFC3339 timestamps. clock = Utc::now() (used everywhere); drop the default
