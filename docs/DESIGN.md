@@ -1468,7 +1468,7 @@ every project's *acceleration*, never its data.
 |---|---|---|
 | `<runtime>/hub.sock` (Unix) / `\\.\\pipe\\clove-hub-<hash(user SID, runtime dir)>` (Windows) | IPC transport | hub removes on clean shutdown |
 | `<runtime>/hub.pid` | the hub's pid: readiness, and `clove daemon stop --all` | hub removes on clean shutdown |
-| `<runtime>/hub.lock` | one hub per runtime directory; held from before bind to after unbind, so it — not the socket — says whether a hub is alive | held by the hub process |
+| `<runtime>/hub.lock` | one hub per runtime directory; held from before bind to after unbind, so it — not the socket — says whether a hub is alive. Clients ask by taking it *shared* for an instant, so a starting hub retries its exclusive lock for up to a second before concluding another hub holds it; and a client removes a dead hub's `hub.sock`/`hub.pid` only while holding it exclusively, so a hub that bound in the meantime keeps its files | held by the hub process |
 | `.clove/daemon.lock` | one daemon per project (a hub slot, or a 0.1.0 daemon) | held while the project is served |
 | `.clove/daemon.token` | the project's token, which every call for it carries (§8.4) | kept; created by the first client that needs it |
 | `.clove/reindex.lock` | Prevents concurrent `clove reindex` | held for reindex duration |
@@ -1506,12 +1506,20 @@ entry list.
 
 **Files under `.clove/` are symlink-safe.** They arrive with the repository, so a
 malicious clone can plant any of them as a symlink to a file the user cares
-about. The lock files (`daemon.lock`, `reindex.lock`, `write.lock`) are opened
-with `O_NOFOLLOW` and never truncated; `index.db` (and its `-wal`/`-shm`) is
-refused outright when it is a symlink, since SQLite would write through it;
-`index.db.tmp` is unlinked (the link, not its target) before it is created;
-item and comment files are written through `O_EXCL` temp files renamed into
-place. `clove_core::fs_safe` holds the helpers.
+about. The lock files (`daemon.lock`, `reindex.lock`, `write.lock`, the sync
+state's `.lock`) are opened with `O_NOFOLLOW` and never truncated; `index.db`
+(and its `-wal`/`-shm`) is refused outright when it is a symlink, since SQLite
+would write through it; `index.db.tmp` is unlinked (the link, not its target)
+before it is created; `daemon.token` is read `O_NOFOLLOW` and created through an
+`O_EXCL` temp file linked into place without replacing anything; and every
+other file — items, comments, the GitHub sync state, `.gitignore` (repaired by
+`clove doctor --fix`, written by `clove init`), `config.toml` — is written
+through a randomly named `O_EXCL` temp file renamed into place, refusing a
+symlink at the target. **Directories too:** a symlinked `issues/`, comment
+directory, or `sync/` would redirect even freshly named files, so every
+directory below `.clove/` must be a real one — the store refuses to read or
+write through a symlinked one, and new ones are created a level at a time,
+refusing a link found on the way. `clove_core::fs_safe` holds the helpers.
 
 `clove daemon start` checks the directory and the socket-path length first and
 reports the cause instead of timing out. **The hub writes `hub.pid` only after
@@ -1524,12 +1532,20 @@ under it — exits within a second instead of lingering unreachable.
 
 1. Check for the hub socket (§8.2). If absent → fallback.
 2. Connect with a 50ms timeout, check the peer, complete the version handshake,
-   and ask `attach` for this project with `load: false`. On `ECONNREFUSED` with
-   no process holding `hub.lock` → delete the stale `hub.sock`/`hub.pid` →
-   fallback. On a timeout, a lock-holding hub, or any refusal (`NOT_LOADED`,
-   `PROTOCOL_MISMATCH`, …) → fallback **without** touching the files: the hub is
-   alive, just not usable for this project right now.
+   and ask `attach` for this project with `load: false`. A hub that accepted the
+   connection gets **500ms** to answer the handshake and the `attach` — only a
+   live hub is waited on; a dead socket fails at connect. On `ECONNREFUSED`
+   with no process holding `hub.lock` → delete the stale `hub.sock`/`hub.pid`
+   (under the exclusive lock, §8.2) → fallback. On a timeout, a lock-holding
+   hub, or any refusal (`NOT_LOADED`, `BAD_TOKEN`, `PROTOCOL_MISMATCH`, …) →
+   fallback **without** touching the files: the hub is alive, just not usable
+   for this project right now.
 3. On `ok` → proceed with IPC; every later call names the same project.
+
+The answer budget has a cost: a wedged hub — one that accepts connections but
+never answers — adds about half a second to every command before it falls
+back, until `clove daemon stop --all` ends it. `clove doctor` reports such a
+hub as `DAEMON_UNRESPONSIVE`.
 
 A read probe never loads a project: whether a daemon can answer must not decide
 to start serving. Loading is explicit — `clove daemon start` and the MCP
@@ -1761,22 +1777,28 @@ mounted.
 | `/` | with exactly one project, a redirect into it; otherwise a project picker |
 | any other path | with exactly one project, a redirect to the same path under it (old bookmarks and scripts keep working); otherwise 404 |
 
-The slug is the repository directory's name, slugified, so a bookmark survives a
-hub restart. **A slug belongs to one repository for the hub's lifetime**: a
-repository keeps its slug across unmount and remount, and a slug once given out
-is never handed to another repository — a second project with the same name
-gains a suffix from its path hash — so a tab left open on `/p/<slug>/` can never
-start writing into a different project. Unmounting a project closes its open
-event sockets. The SPA is built once for the root: SvelteKit reads its runtime base
+The slug is `<name>-<hash>`: the repository directory's name, slugified, and the
+first 8 hex digits of an FNV-1a hash of its canonical path (the full hash in the
+astronomically unlikely case two paths share those 8). **A slug is a function of
+the repository alone** — never of load order or of what else is loaded — so it
+survives unmount, remount and hub restarts, and no other repository can ever
+get it: a tab left open on `/p/<slug>/` reaches that repository or nothing
+(404), never a different project that happens to share its name. Unmounting a
+project closes its open event sockets. The SPA is built once for the root: SvelteKit reads its runtime base
 from the `__sveltekit_<hash> = { base: "" }` global in the fallback `index.html`,
 so each project's router serves that page with `base: "/p/<slug>"` (and its
 `/_app/` asset URLs) rewritten; every `{base}` link, the API root, and the event
 socket URL derive from it. The top bar offers a project switcher when the hub
 serves more than one. The DNS-rebinding `Host` guard wraps the whole listener;
 the event socket additionally requires its `Origin` to be exactly this server
-(host *and* port — another local port is another origin); and every HTML page
-carries a `Content-Security-Policy` (`default-src 'self'`, inline script/style
-for SvelteKit's boot script, `connect-src 'self' ws://<host>`, no framing).
+(host *and* port — another local port is another origin); every HTML page
+carries a `Content-Security-Policy` — `default-src 'self'`, `connect-src 'self'
+ws://<host>`, no framing, inline styles allowed, and `script-src` limited to
+`'self'` plus the sha256 hashes of the page's own two inline scripts (the theme
+bootstrap and SvelteKit's start block), computed per base when the hub rewrites
+the page and once for `clove serve`'s page; the project picker runs no script
+(`script-src 'none'`); and every response, JSON and errors included, carries
+`X-Content-Type-Options: nosniff`.
 
 `clove serve` hands off to the hub whenever one is running — or starting (it
 holds `hub.lock`; `serve` waits up to five seconds for its socket): it has the hub

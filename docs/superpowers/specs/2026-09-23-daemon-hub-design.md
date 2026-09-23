@@ -25,6 +25,20 @@
 >   server verification, periodic GitHub sync only to a project's own remote,
 >   stable per-path web slugs, event-socket Origin must match host *and* port,
 >   CSP on HTML.
+>
+> **Revised again by the second review round.** Materially:
+> - **Per-project token.** `Project` also carries the project's
+>   `.clove/daemon.token` (random, `0600`, per clone, git-ignored, created by
+>   the first client that needs it); the hub refuses a mismatch with
+>   `BAD_TOKEN`. It scopes automated clients per project — a gate for
+>   automation, not a security boundary against the local user. Hub-wide calls
+>   and the web UI are not token-gated.
+> - **Slugs are `<name>-<path hash>`**, a function of the repository alone
+>   (stable across restarts, never another repository's).
+> - `script-src` pins the SPA's inline scripts by hash (no `'unsafe-inline'`),
+>   the picker runs none, every response is `nosniff`; symlinked directories
+>   under `.clove/` are refused; the sync remote gate reads only the work
+>   tree's own `.git`; Windows checks read the pipe handle, not a pid.
 
 ## 1. Why
 
