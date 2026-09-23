@@ -34,7 +34,8 @@ fn doctor_flags_and_fixes_stale_daemon_footprint() {
     init(dir);
     let clove_dir = dir.join(".clove");
     // Simulate a crashed daemon: corpse socket + pid, nobody listening.
-    std::fs::write(clove_dir.join("daemon.sock"), b"").unwrap();
+    clove_ipc::ensure_runtime_dir().unwrap();
+    std::fs::write(daemon_sock(&clove_dir), b"").unwrap();
     std::fs::write(clove_dir.join("daemon.pid"), b"999999").unwrap();
 
     // doctor (no fix) must report the stale footprint as a warning, exit 0.
@@ -62,7 +63,7 @@ fn doctor_flags_and_fixes_stale_daemon_footprint() {
 
     // --fix removes the corpse files.
     clove(dir).args(["doctor", "--fix"]).assert().success();
-    assert!(!clove_dir.join("daemon.sock").exists());
+    assert!(!daemon_sock(&clove_dir).exists());
     assert!(!clove_dir.join("daemon.pid").exists());
 
     // Clean store now reports no daemon finding.
@@ -145,7 +146,7 @@ fn start_status_stop_round_trip() {
     clove(dir).args(["daemon", "stop"]).assert().success();
     let clove_dir = dir.join(".clove");
     assert!(!clove_dir.join("daemon.pid").exists());
-    assert!(!clove_dir.join("daemon.sock").exists());
+    assert!(!daemon_sock(&clove_dir).exists());
 
     // status after stop
     let out = clove(dir)
@@ -156,6 +157,35 @@ fn start_status_stop_round_trip() {
         .stdout
         .clone();
     assert_eq!(json(&out)["data"]["running"], serde_json::json!(false));
+}
+
+/// #54: `.clove/daemon.sock` in a deeply nested repository overflowed the
+/// 104-byte `sun_path`, so the daemon could never bind. The socket now lives in
+/// the per-user runtime directory, whatever the repository's depth.
+#[test]
+fn daemon_runs_for_a_repo_nested_past_the_socket_path_limit() {
+    if !cloved_built() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("nested-directory/".repeat(8));
+    std::fs::create_dir_all(&dir).unwrap();
+    assert!(
+        dir.join(".clove/daemon.sock").as_os_str().len() > 108,
+        "the repo must be deep enough to overflow the old in-repo socket path"
+    );
+    init(&dir);
+
+    clove(&dir).args(["daemon", "start"]).assert().success();
+    assert_eq!(
+        daemon_status(&dir)["data"]["running"],
+        serde_json::json!(true)
+    );
+    clove(&dir).args(["daemon", "stop"]).assert().success();
+    assert_eq!(
+        daemon_status(&dir)["data"]["running"],
+        serde_json::json!(false)
+    );
 }
 
 fn daemon_status(dir: &Path) -> serde_json::Value {
@@ -197,8 +227,12 @@ fn daemons_are_per_project_and_independent() {
     assert_eq!(s1["data"]["items_indexed"], serde_json::json!(1));
     assert_eq!(s2["data"]["running"], serde_json::json!(true));
     assert_eq!(s2["data"]["items_indexed"], serde_json::json!(2));
-    assert!(d1.join(".clove/daemon.sock").exists());
-    assert!(d2.join(".clove/daemon.sock").exists());
+    let (sock1, sock2) = (
+        daemon_sock(&d1.join(".clove")),
+        daemon_sock(&d2.join(".clove")),
+    );
+    assert_ne!(sock1, sock2, "each project gets its own socket");
+    assert!(sock1.exists() && sock2.exists());
 
     // Stopping one leaves the other running (isolation).
     clove(d1).args(["daemon", "stop"]).assert().success();
@@ -253,4 +287,10 @@ fn daemon_is_reachable_from_any_subdirectory() {
     assert_eq!(v["_meta"]["source"], serde_json::json!("daemon"));
 
     clove(root).args(["daemon", "stop"]).assert().success();
+}
+
+/// The daemon's socket for `clove_dir`, in the per-user runtime directory.
+fn daemon_sock(clove_dir: &std::path::Path) -> std::path::PathBuf {
+    let clove_dir = camino::Utf8Path::from_path(clove_dir).expect("utf-8 test path");
+    clove_ipc::sock_path(clove_dir).into_std_path_buf()
 }

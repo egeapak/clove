@@ -467,7 +467,7 @@ mod daemon {
         // That is the opposite of what `cloved` does. The flake's actual cause is
         // still unidentified — see the roadmap's follow-up list.
         let pid = clove_dir.join("daemon.pid");
-        let sock = clove_dir.join("daemon.sock");
+        let sock = daemon_sock(clove_dir);
         let start = Instant::now();
         while start.elapsed() < Duration::from_secs(10) {
             if pid.exists() && sock.exists() {
@@ -634,4 +634,10 @@ mod daemon {
         let _ = daemon.wait();
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
+}
+
+/// The daemon's socket for `clove_dir`, in the per-user runtime directory.
+fn daemon_sock(clove_dir: &std::path::Path) -> std::path::PathBuf {
+    let clove_dir = camino::Utf8Path::from_path(clove_dir).expect("utf-8 test path");
+    clove_ipc::sock_path(clove_dir).into_std_path_buf()
 }

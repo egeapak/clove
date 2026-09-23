@@ -378,7 +378,8 @@ fn footprint_present(clove_dir: &Utf8Path) -> bool {
     }
     #[cfg(not(windows))]
     {
-        sock_path(clove_dir).exists()
+        let sock = sock_path(clove_dir);
+        sock.exists() && sock.parent().is_some_and(crate::runtime_dir_is_private)
     }
 }
 
@@ -497,6 +498,7 @@ mod tests {
 
     #[test]
     fn health_classifies_absent_and_dead() {
+        crate::ensure_runtime_dir().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let clove_dir = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
         // No footprint at all.
@@ -522,6 +524,7 @@ mod tests {
 
     #[test]
     fn probe_cleans_up_stale_socket_and_pid() {
+        crate::ensure_runtime_dir().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let clove_dir = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
         // A leftover socket file + pid with nothing listening (a crashed daemon).
@@ -539,6 +542,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn probe_keeps_socket_when_daemon_is_alive_but_slow() {
+        crate::ensure_runtime_dir().unwrap();
         use interprocess::local_socket::traits::tokio::Listener as _;
         use interprocess::local_socket::ListenerOptions;
         use std::sync::{Arc, Barrier};

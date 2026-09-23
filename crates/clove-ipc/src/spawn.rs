@@ -59,7 +59,8 @@ pub fn ensure_daemon(clove_dir: &Utf8Path) -> Option<DaemonClient> {
     if let Some(client) = DaemonClient::probe(clove_dir) {
         return Some(client);
     }
-    if spawn_daemon(clove_dir).is_err() {
+    // A daemon that cannot bind would only surface as the readiness timeout.
+    if crate::preflight(clove_dir).is_err() || spawn_daemon(clove_dir).is_err() {
         return None;
     }
     let pid_file = pid_path(clove_dir);

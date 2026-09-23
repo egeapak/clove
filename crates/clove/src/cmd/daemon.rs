@@ -51,6 +51,8 @@ fn start(clove_dir: &Utf8Path, format: OutputFormat) -> Result<ExitCode, CloveEr
     // command only adds the pid readout for the report. (Readiness is gated on
     // a real probe round-trip inside `ensure_daemon`, so a status/read issued
     // right after `start` returns is guaranteed to connect.)
+    clove_ipc::preflight(clove_dir)
+        .map_err(|err| daemon_err(&format!("cannot start the daemon: {err}")))?;
     if clove_ipc::ensure_daemon(clove_dir).is_none() {
         return Err(daemon_err(
             "could not start the daemon (spawn failed, or it did not become \
