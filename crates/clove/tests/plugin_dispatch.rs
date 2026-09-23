@@ -299,6 +299,10 @@ fn plugin_output_to_a_closed_pipe_exits_quietly() {
         .unwrap();
 
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "status {:?}; stderr: {stderr}", out.status);
+    assert!(
+        out.status.success(),
+        "status {:?}; stderr: {stderr}",
+        out.status
+    );
     assert!(!stderr.contains("panicked"), "plugin panicked: {stderr}");
 }

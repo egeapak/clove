@@ -322,7 +322,7 @@ fn socket_and_state_dir_are_owner_only() {
     let (_tmp, clove_dir) = init_repo_with_items(1);
     let mut child = spawn_ready(&clove_dir);
 
-    let sock = clove_dir.join("daemon.sock");
+    let sock = clove_ipc::sock_path(&clove_dir);
     let sock_mode = std::fs::metadata(sock.as_std_path())
         .unwrap()
         .permissions()
@@ -348,7 +348,7 @@ fn stale_socket_recovery_is_fast() {
     // Hard-kill leaves a corpse socket + pid.
     sigkill(child.id());
     let _ = child.wait();
-    assert!(clove_dir.join("daemon.sock").exists());
+    assert!(clove_ipc::sock_path(&clove_dir).exists());
 
     // The next probe must fail fast (connect timeout + cleanup) and clean up
     // (DESIGN §8.3; M3-G04 measures the resulting `clove ls` < 200ms).
@@ -361,7 +361,7 @@ fn stale_socket_recovery_is_fast() {
         "stale-socket probe {elapsed:?} exceeds 200ms"
     );
     assert!(
-        !clove_dir.join("daemon.sock").exists(),
+        !clove_ipc::sock_path(&clove_dir).exists(),
         "stale sock cleaned"
     );
     assert!(!clove_dir.join("daemon.pid").exists(), "stale pid cleaned");

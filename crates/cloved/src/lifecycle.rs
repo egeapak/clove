@@ -175,6 +175,8 @@ pub fn run(clove_dir: &Utf8Path) -> anyhow::Result<()> {
     };
 
     let serve_result: anyhow::Result<()> = runtime.block_on(async {
+        #[cfg(not(windows))]
+        clove_ipc::ensure_runtime_dir().context("preparing the daemon runtime directory")?;
         // A corpse socket from a crashed daemon: safe to remove — we hold the lock.
         let _ = std::fs::remove_file(sock_path(clove_dir));
         let name = socket_name(clove_dir).context("building socket name")?;

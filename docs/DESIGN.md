@@ -101,7 +101,7 @@ embedders who require an older toolchain).
       comments/
         <rfc3339nano>-<author-slug>-<4char-random>.md
   index.db              # SQLite derived cache (also holds the durable `snapshots` history table) — .gitignore'd
-  daemon.sock           # Unix socket (macOS/Linux) — .gitignore'd
+  daemon.sock           # clove 0.1.0's Unix socket; now in the runtime dir (§8.2) — .gitignore'd
   daemon.pid            # PID file — .gitignore'd
   reindex.lock          # advisory lock during reindex — .gitignore'd
 ```
@@ -1415,7 +1415,7 @@ version.
 
 | File | Purpose | Cleanup |
 |---|---|---|
-| `.clove/daemon.sock` (Unix) / `\\.\\pipe\\clove-<repo-hash>` (Windows) | IPC transport | daemon removes on clean shutdown |
+| `<runtime>/<repo-hash>.sock` (Unix) / `\\.\\pipe\\clove-<repo-hash>` (Windows) | IPC transport | daemon removes on clean shutdown |
 | `.clove/daemon.pid` | PID for `clove daemon stop` | daemon removes on clean shutdown |
 | `.clove/daemon.lock` | Prevents two daemons starting simultaneously | held by daemon process |
 | `.clove/reindex.lock` | Prevents concurrent `clove reindex` | held for reindex duration |
@@ -1424,12 +1424,20 @@ version.
 `index.db.tmp` (the temporary reindex file from §6.6). See §2.1 for the complete gitignore
 entry list.
 
+The Unix socket lives in a per-user runtime directory, not in `.clove/`: a socket path is
+capped at 103 bytes on macOS/BSD (107 on Linux), which a deeply nested repository exceeds.
+`<runtime>` is `$CLOVE_RUNTIME_DIR`, else `$XDG_RUNTIME_DIR/clove`, else
+`${TMPDIR:-/tmp}/clove-<uid>`; `<repo-hash>` hashes the canonical `.clove/` path. The daemon
+creates the directory `0700` and refuses one another user owns or can write to; clients
+only connect through a directory that passes the same check. `clove daemon start` checks
+the directory and the path length first and reports the cause instead of timing out.
+
 **Daemon writes `daemon.pid` only after binding the socket** — so the CLI never reads a PID
 without a usable socket.
 
 ### 8.3 CLI Liveness Detection
 
-1. Check for `.clove/daemon.sock`. If absent → fallback.
+1. Check for the socket (§8.2). If absent → fallback.
 2. Attempt connect with 50ms timeout. On `ECONNREFUSED` or timeout → delete stale
    `daemon.sock` and `daemon.pid` → fallback.
 3. Send `PING` → on `PONG` → proceed with IPC.

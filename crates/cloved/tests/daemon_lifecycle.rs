@@ -75,7 +75,7 @@ fn daemon_pid_appears_only_after_socket_is_bound() {
     // Readiness invariant: when the pid exists, the socket must already exist.
     assert!(clove_dir.join("daemon.pid").exists());
     assert!(
-        clove_dir.join("daemon.sock").exists(),
+        clove_ipc::sock_path(&clove_dir).exists(),
         "socket must be bound before the pid is written"
     );
     send_signal(child.id(), SIGTERM);
@@ -92,7 +92,7 @@ fn sigterm_shuts_down_cleanly_with_no_stale_files() {
     let status = wait_with_timeout(&mut child, Duration::from_secs(5)).expect("daemon exited");
     assert!(status.success(), "clean SIGTERM exit (exit 0)");
 
-    assert!(!clove_dir.join("daemon.sock").exists(), "socket removed");
+    assert!(!clove_ipc::sock_path(&clove_dir).exists(), "socket removed");
     assert!(!clove_dir.join("daemon.pid").exists(), "pid removed");
 }
 
@@ -133,7 +133,7 @@ fn sigkill_then_restart_recovers() {
 
     // A fresh daemon must reclaim the lock/socket and become ready again.
     let mut restarted = spawn_ready(&clove_dir, Duration::from_secs(5));
-    assert!(clove_dir.join("daemon.sock").exists());
+    assert!(clove_ipc::sock_path(&clove_dir).exists());
     send_signal(restarted.id(), SIGTERM);
     let _ = restarted.wait();
 }
@@ -165,7 +165,7 @@ fn idle_shutdown_self_terminates() {
     assert!(status.is_some(), "daemon self-terminated on idle");
     assert!(status.unwrap().success(), "clean idle shutdown (exit 0)");
     assert!(!pid_file.exists(), "pid removed on idle shutdown");
-    assert!(!clove_dir.join("daemon.sock").exists(), "socket removed");
+    assert!(!clove_ipc::sock_path(&clove_dir).exists(), "socket removed");
 }
 
 /// Wait for `child` up to `timeout`, returning its exit status or `None` on

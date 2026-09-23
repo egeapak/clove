@@ -140,10 +140,7 @@ fn ls_ready_query_route_through_daemon_with_parity() {
     // stale socket/pid are cleaned up by the liveness probe.
     let (_, source) = ids_and_source(&run_in(root, &["ls", "-f", "json"]).stdout);
     assert_ne!(source, "daemon", "no daemon → fall back");
-    assert!(
-        !clove_dir.join("daemon.sock").exists(),
-        "stale sock cleaned"
-    );
+    assert!(!daemon_sock(&clove_dir).exists(), "stale sock cleaned");
 }
 
 /// Parse the new-item id from `clove new ... -f json`.
@@ -278,10 +275,7 @@ fn routed_reads_fall_back_after_daemon_crash() {
     sigkill(daemon.id());
     let mut daemon = daemon;
     daemon.reap();
-    assert!(
-        clove_dir.join("daemon.sock").exists(),
-        "corpse socket remains"
-    );
+    assert!(daemon_sock(&clove_dir).exists(), "corpse socket remains");
 
     // Next routed reads fall back, return identical results, and clean up.
     let (mut blocked_ids, blocked_src) =
@@ -299,7 +293,7 @@ fn routed_reads_fall_back_after_daemon_crash() {
     assert_eq!(search_ids, vec![a], "fallback search is correct");
 
     assert!(
-        !clove_dir.join("daemon.sock").exists(),
+        !daemon_sock(&clove_dir).exists(),
         "corpse socket cleaned by the liveness probe"
     );
     assert!(!clove_dir.join("daemon.pid").exists(), "corpse pid cleaned");
@@ -442,4 +436,10 @@ fn no_index_bypasses_a_live_daemon() {
     }
 
     drop(daemon);
+}
+
+/// The daemon's socket for `clove_dir`, in the per-user runtime directory.
+fn daemon_sock(clove_dir: &std::path::Path) -> std::path::PathBuf {
+    let clove_dir = camino::Utf8Path::from_path(clove_dir).expect("utf-8 test path");
+    clove_ipc::sock_path(clove_dir).into_std_path_buf()
 }
