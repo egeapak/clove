@@ -143,6 +143,7 @@ fn stop(
     // Always ask the hub to stop the project, rather than probe first: a
     // project still loading answers a probe as not loaded, yet is about to be
     // served. The hub knows, and says whether it was serving (or loading) it.
+    let exiting_pid = hub.read_pid();
     let detached = match DaemonClient::detach_at(hub, clove_dir) {
         Ok(detached) => detached,
         Err(ClientError::Connect(_)) if !hub.running() => return not_running(),
@@ -173,7 +174,9 @@ fn stop(
         );
     }
     if detached.hub_exiting {
-        wait_gone(&hub.pid())?;
+        if let Some(pid) = exiting_pid {
+            wait_hub_gone(&hub.pid(), pid)?;
+        }
     }
     emit(
         format,
@@ -250,8 +253,42 @@ fn stop_hub(hub: &HubPaths, format: OutputFormat) -> Result<ExitCode, CloveError
         )));
     };
     signal_hub(hub, pid)?;
-    wait_gone(&hub.pid())?;
-    emit(format, json!({ "stopped": true }), "daemon stopped")
+    match wait_hub_gone(&hub.pid(), pid)? {
+        HubGone::Gone => emit(format, json!({ "stopped": true }), "daemon stopped"),
+        HubGone::Replaced(new) => emit(
+            format,
+            json!({ "stopped": true, "restarted_by_another_client": new }),
+            &format!("daemon stopped; another client has since started a new one (pid {new})"),
+        ),
+    }
+}
+
+/// How the hub a client signalled went away.
+#[derive(Debug, PartialEq, Eq)]
+enum HubGone {
+    Gone,
+    /// It stopped, and another client's start put up a new hub (this pid) in
+    /// the meantime.
+    Replaced(u32),
+}
+
+/// Wait for the hub `signalled` to go: its pid file removed, or naming
+/// another hub — one a concurrent `clove daemon start` spawned — which is not
+/// the hub this client stopped.
+fn wait_hub_gone(pid_file: &Utf8Path, signalled: u32) -> Result<HubGone, CloveError> {
+    let start = Instant::now();
+    while start.elapsed() < WAIT_TIMEOUT {
+        match std::fs::read_to_string(pid_file) {
+            Err(_) if !pid_file.exists() => return Ok(HubGone::Gone),
+            Ok(text) => match clove_ipc::parse_pid(&text) {
+                Some(pid) if pid != signalled => return Ok(HubGone::Replaced(pid)),
+                _ => {}
+            },
+            Err(_) => {}
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Err(daemon_err("daemon did not stop within 5s"))
 }
 
 /// Wait for a daemon's pid file to disappear (its last teardown step).
@@ -460,6 +497,30 @@ extern "C" {
 #[cfg(test)]
 mod tests {
     use super::{daemon_err, legacy_step, LegacyDaemon, LegacyStep};
+
+    /// `stop --all` while another client's start spawns a new hub: the hub
+    /// this client signalled did stop, and a different pid in the pid file is
+    /// the new one — not a hub that "did not stop" (item 4).
+    #[test]
+    fn a_hub_restarted_by_another_client_counts_as_stopped() {
+        use super::{wait_hub_gone, HubGone};
+        let tmp = tempfile::tempdir().unwrap();
+        let pid = camino::Utf8PathBuf::from_path_buf(tmp.path().join("hub.pid")).unwrap();
+        std::fs::write(&pid, "100\n").unwrap();
+        let writer = {
+            let pid = pid.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                std::fs::write(&pid, "200\n").unwrap();
+            })
+        };
+        let waited = wait_hub_gone(&pid, 100);
+        writer.join().unwrap();
+        assert_eq!(waited.unwrap(), HubGone::Replaced(200));
+
+        std::fs::remove_file(&pid).unwrap();
+        assert_eq!(wait_hub_gone(&pid, 200).unwrap(), HubGone::Gone);
+    }
 
     /// Where a clove 0.1.0 daemon can never be verified (Windows), its
     /// leftover pid file must not block stopping this project's hub slot for
