@@ -43,8 +43,9 @@ struct Mounted {
     router: Router,
     /// Closes the project's event sockets on unmount.
     state: AppState,
-    /// The project's live-update watcher; dropped (and so stopped) on unmount.
-    _watcher: Option<notify::RecommendedWatcher>,
+    /// The project's live-update watcher, once armed; dropped (and so
+    /// stopped) on unmount.
+    watcher: Option<notify::RecommendedWatcher>,
 }
 
 /// One project as `GET /api/v1/projects` lists it.
@@ -66,6 +67,12 @@ impl HubWeb {
     /// slug. Its file watcher (live updates) runs until the project is
     /// unmounted.
     ///
+    /// The watcher is armed on a thread of its own, not here: FSEvents setup
+    /// can take seconds on a busy Mac, and neither the project's load nor the
+    /// other projects' requests (this takes the registry lock) may wait for
+    /// it. Once armed it announces a change, so a page opened meanwhile
+    /// refetches whatever it missed.
+    ///
     /// The slug is `<name>-<hash of the path>`: a function of the repository
     /// alone, never of what else is loaded or in which order. So it survives
     /// unmount and a hub restart, and a tab left open on one repository's URL
@@ -82,21 +89,44 @@ impl HubWeb {
             }
         };
         let state = state.with_base_path(&format!("/p/{slug}"));
-        let watcher = crate::watch::spawn(state.clone());
         let previous = registry.mounted.insert(
             slug.clone(),
             Mounted {
                 name,
                 root: root.to_owned(),
                 router: build_router(state.clone()),
-                state,
-                _watcher: watcher,
+                state: state.clone(),
+                watcher: None,
             },
         );
+        drop(registry);
         if let Some(previous) = previous {
-            previous.state.close();
+            retire(previous);
         }
+        let (hub, armed_slug) = (self.clone(), slug.clone());
+        std::thread::spawn(move || hub.arm_watcher(&armed_slug, state));
         slug
+    }
+
+    /// Arm the live-update watcher of the mount at `slug` made with `state`
+    /// — unless that mount is gone by the time it is armed.
+    fn arm_watcher(&self, slug: &str, state: AppState) {
+        let Some(watcher) = crate::watch::spawn(state.clone()) else {
+            return;
+        };
+        let mut registry = self.projects.write().unwrap_or_else(|e| e.into_inner());
+        match registry.mounted.get_mut(slug) {
+            Some(mounted) if mounted.state.is_same_mount(&state) => {
+                mounted.watcher = Some(watcher);
+                drop(registry);
+                crate::watch::announce_change(&state);
+            }
+            // Unmounted (or mounted afresh) while this one armed.
+            _ => {
+                drop(registry);
+                drop(watcher);
+            }
+        }
     }
 
     /// Remove a project: its URLs answer 404 from now on, and its open event
@@ -109,7 +139,7 @@ impl HubWeb {
             .mounted
             .remove(slug);
         if let Some(mounted) = removed {
-            mounted.state.close();
+            retire(mounted);
         }
     }
 
@@ -161,6 +191,16 @@ impl HubWeb {
             1 => registry.mounted.keys().next().cloned(),
             _ => None,
         }
+    }
+}
+
+/// Close a mount's event sockets and stop its watcher — the latter on a thread
+/// of its own: stopping an FSEvents stream blocks, and the hub's teardown of
+/// the project (which the next load of it waits for) must not.
+fn retire(mounted: Mounted) {
+    mounted.state.close();
+    if mounted.watcher.is_some() {
+        std::thread::spawn(move || drop(mounted));
     }
 }
 

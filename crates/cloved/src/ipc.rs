@@ -75,11 +75,13 @@ impl Dispatcher {
 
     pub async fn query(self, req: QueryRequest) -> Result<QueryListResponse, RpcError> {
         self.touch();
+        self.watching()?;
         self.blocking(move |this| this.handle_query(req)).await
     }
 
     pub async fn graph(self, req: GraphRequest) -> Result<GraphResponse, RpcError> {
         self.touch();
+        self.watching()?;
         self.blocking(move |this| this.handle_graph(req)).await
     }
 
@@ -244,6 +246,21 @@ impl Dispatcher {
             Ok(res) => res,
             Err(_) => Err(RpcError::new("internal", "daemon worker task failed")),
         }
+    }
+
+    /// Refuse an index read until the watcher watches: before that the index
+    /// can lack a change (see [`crate::watcher::run`]). `show` and `stats`
+    /// read the files, and writes freshen the index themselves, so only the
+    /// index reads — `query` and `graph` — wait for this.
+    fn watching(&self) -> Result<(), RpcError> {
+        if self.state.lock().is_ok_and(|state| state.watching()) {
+            return Ok(());
+        }
+        Err(RpcError::new(
+            clove_ipc::hub::codes::WATCHER_ARMING,
+            "the daemon is still setting up this project's file watcher; read the \
+             index or the files meanwhile",
+        ))
     }
 
     /// Record that an IPC event happened (resets the idle-shutdown window).

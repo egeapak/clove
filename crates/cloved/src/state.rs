@@ -15,6 +15,9 @@ use clove_ipc::StatusResponse;
 pub enum WatcherState {
     /// Performing the startup mtime sweep (P3), before the daemon is ready.
     Sweeping,
+    /// Loaded, with the OS watch still being put in place (and the sweep
+    /// after it still to run): reads are not answered from the index yet.
+    Arming,
     /// Watching for changes (the steady state once ready).
     Watching,
     /// No watcher running (e.g. watcher disabled or not yet started).
@@ -26,6 +29,7 @@ impl WatcherState {
     fn as_str(self) -> &'static str {
         match self {
             WatcherState::Sweeping => "sweeping",
+            WatcherState::Arming => "arming",
             WatcherState::Watching => "watching",
             WatcherState::Idle => "idle",
         }
@@ -77,6 +81,12 @@ impl DaemonState {
     /// Set the watcher state.
     pub fn set_watcher_state(&mut self, state: WatcherState) {
         self.watcher_state = state;
+    }
+
+    /// Whether the index is kept fresh by a watch, so reads may be answered
+    /// from it.
+    pub fn watching(&self) -> bool {
+        self.watcher_state == WatcherState::Watching
     }
 
     /// Record that the watcher applied one debounced batch (the M3-G05/G06

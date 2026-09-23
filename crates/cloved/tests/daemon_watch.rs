@@ -153,9 +153,9 @@ fn startup_sweep_picks_up_out_of_band_items() {
 }
 
 /// An item written the moment the project's load returns is indexed, however
-/// slow the watcher is to arm: a project reports started only once its
-/// watcher watches (and its startup sweep has run after that), so nothing
-/// written in between is lost until the next change.
+/// slow the watcher is to arm: the load returns before the watch is in place,
+/// and the sweep run once it is picks up what was written in between — it is
+/// not lost until the next change.
 #[test]
 fn an_item_written_right_after_the_load_is_indexed() {
     let repo = init_repo();
@@ -167,20 +167,64 @@ fn an_item_written_right_after_the_load_is_indexed() {
     )
     .unwrap();
     let hub = TestHub::spawn_with(
-        Some(&repo.clove_dir),
+        None,
         &[
             ("CLOVED_DISABLE_WEB", "1"),
             ("CLOVED_WATCH_ARM_DELAY_MS", "1500"),
         ],
     );
+    let mut client = hub
+        .load(&repo.clove_dir)
+        .expect("the hub serves the project");
     repo.add_item("written as the load returned");
     let ok = wait_until(Duration::from_secs(20), || {
-        count_via_daemon(&hub, &repo.clove_dir) == 1
+        client
+            .query_list(list_all())
+            .is_ok_and(|page| page.rows.len() == 1)
     });
     assert!(
         ok,
         "the item written right after the load was never indexed"
     );
+    drop(hub);
+}
+
+/// Until its watcher watches, the daemon does not answer reads from an index
+/// that may be stale: it says so (`WATCHER_ARMING`), and the client reads the
+/// index or the files itself. Writes are served throughout, and what was
+/// written is served once the watcher is armed.
+#[test]
+fn reads_wait_for_the_watcher_but_writes_do_not() {
+    let repo = init_repo();
+    repo.reindex();
+    let hub = TestHub::spawn_with(
+        None,
+        &[
+            ("CLOVED_DISABLE_WEB", "1"),
+            ("CLOVED_WATCH_ARM_DELAY_MS", "3000"),
+        ],
+    );
+    let mut client = hub
+        .load(&repo.clove_dir)
+        .expect("the hub serves the project");
+    assert_eq!(client.status().unwrap().watcher_state, "arming");
+    match client.query_list(list_all()) {
+        Err(clove_ipc::ClientError::App(e)) => assert_eq!(e.code, "WATCHER_ARMING", "{e:?}"),
+        other => panic!("a read while arming was answered: {other:?}"),
+    }
+    client
+        .create(clove_types::NewSpec {
+            title: "written while arming".to_owned(),
+            ..Default::default()
+        })
+        .expect("a write while arming is served");
+    let ok = wait_until(Duration::from_secs(20), || {
+        client
+            .query_list(list_all())
+            .is_ok_and(|page| page.rows.len() == 1)
+    });
+    assert!(ok, "the write was never served once the watcher armed");
+    assert_eq!(client.status().unwrap().watcher_state, "watching");
     drop(hub);
 }
 

@@ -39,6 +39,24 @@ fn run_in(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
         .unwrap()
 }
 
+/// Wait until the daemon's watcher for the project at `root` watches: until
+/// then the daemon leaves reads to the index and the files.
+fn wait_watching(root: &std::path::Path) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let out = run_in(root, &["daemon", "status", "-f", "json"]);
+        let status: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
+        if status["data"]["watcher_state"] == "watching" {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the daemon's watcher never armed: {status}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
 /// The runtime directory of this test's own daemon — inside the test repo, so
 /// no two tests (and never the user's real daemon) share one.
 fn runtime_dir(root: &std::path::Path) -> PathBuf {
@@ -94,6 +112,7 @@ fn spawn_daemon(clove_dir: &std::path::Path, bin: &std::path::Path) -> Daemon {
             // call, as `clove daemon start` makes it.
             let loaded = run_in(clove_dir.parent().unwrap(), &["daemon", "start"]);
             assert!(loaded.status.success(), "{loaded:?}");
+            wait_watching(clove_dir.parent().unwrap());
             return daemon;
         }
         std::thread::sleep(Duration::from_millis(20));

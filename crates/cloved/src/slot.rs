@@ -40,9 +40,6 @@ pub struct Slot {
     pub settings: Settings,
     /// `daemon.lock`, held until teardown closes it ([`Slot::release_lock`]).
     lock: Mutex<Option<File>>,
-    /// The watch put on `issues/` before the startup sweep, until
-    /// [`Slot::tasks`] hands it to the watcher task.
-    armed: Mutex<Option<crate::watcher::Armed>>,
 }
 
 /// A project's daemon behaviour, from its `.clove/config.toml` (defaults when it
@@ -97,8 +94,10 @@ pub fn canonical_key(clove_dir: &str) -> Result<Utf8PathBuf, LoadError> {
 }
 
 /// Load the project at `clove_dir` (already canonical): take its lock, open the
-/// index, and run the startup sweep (DESIGN §8.6) so it answers fresh from the
-/// first query. Blocking — the hub runs it on the blocking pool.
+/// index, and run the startup sweep (DESIGN §8.6). Blocking — the hub runs it
+/// on the blocking pool. The file watch is put in place afterwards, by the
+/// slot's watcher task, and until then reads are not answered from the index
+/// (see [`crate::watcher::run`]).
 pub fn open(clove_dir: &Utf8Path, cancel: CancellationToken) -> Result<Slot, LoadError> {
     let issues_dir = clove_dir.join("issues");
     // A symlinked issues/ would be served as "loaded" while every read and
@@ -155,14 +154,13 @@ pub fn open(clove_dir: &Utf8Path, cancel: CancellationToken) -> Result<Slot, Loa
     let state = Arc::new(Mutex::new(DaemonState::new(items)));
     let graph = Arc::new(GraphCache::new(index.clone()));
 
-    // Watch first, then sweep: a file written after the sweep has read it is
-    // queued by the watch, so nothing slips between the two.
-    let armed = crate::watcher::arm(&issues_dir)
-        .map_err(|why| LoadError::failed(format!("{clove_dir}: {why}")))?;
     if let Ok(mut st) = state.lock() {
         st.set_watcher_state(WatcherState::Sweeping);
     }
     crate::reindexer::sync_once(&issues_dir, &index, &state);
+    if let Ok(mut st) = state.lock() {
+        st.set_watcher_state(WatcherState::Arming);
+    }
 
     let dispatcher = Dispatcher {
         index,
@@ -185,7 +183,6 @@ pub fn open(clove_dir: &Utf8Path, cancel: CancellationToken) -> Result<Slot, Loa
         started: tokio::sync::OnceCell::new(),
         settings,
         lock: Mutex::new(Some(lock)),
-        armed: Mutex::new(Some(armed)),
     })
 }
 
@@ -240,25 +237,21 @@ impl Slot {
     pub fn tasks(&self) -> JoinSet<SlotTask> {
         let d = &self.dispatcher;
         let mut tasks = JoinSet::new();
-        let armed = self.armed.lock().unwrap_or_else(|e| e.into_inner()).take();
-        if let Some(armed) = armed {
-            let watch = crate::watcher::watch(
-                armed,
-                d.issues_dir.clone(),
-                d.index.clone(),
-                d.state.clone(),
-                self.settings.debounce,
-                crate::watcher::WatchOptions {
-                    repo_root: self.repo_root.clone(),
-                    git_sync: self.settings.git_sync,
-                },
-                d.graph.clone(),
-            );
-            tasks.spawn(async move {
-                watch.await;
-                SlotTask::Watcher
-            });
-        }
+        let watch = crate::watcher::run(
+            d.issues_dir.clone(),
+            d.index.clone(),
+            d.state.clone(),
+            self.settings.debounce,
+            crate::watcher::WatchOptions {
+                repo_root: self.repo_root.clone(),
+                git_sync: self.settings.git_sync,
+            },
+            d.graph.clone(),
+        );
+        tasks.spawn(async move {
+            watch.await;
+            SlotTask::Watcher
+        });
         let snapshots = crate::snapshot::snapshot_loop(
             self.repo_root.clone(),
             d.index.clone(),

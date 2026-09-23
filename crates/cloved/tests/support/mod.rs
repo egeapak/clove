@@ -66,7 +66,8 @@ impl TestHub {
     }
 
     /// A hub with the given environment, ready (its pid file written), then
-    /// serving `clove_dir` if given.
+    /// serving `clove_dir` if given — its watcher watching, so the hub
+    /// answers its reads.
     pub fn spawn_with(clove_dir: Option<&Utf8Path>, env: &[(&str, &str)]) -> TestHub {
         let (run, paths) = runtime_dir();
         let child = command(&paths, env).spawn().expect("spawn cloved");
@@ -78,8 +79,20 @@ impl TestHub {
         hub.wait_ready(Duration::from_secs(5));
         if let Some(dir) = clove_dir {
             hub.load(dir).expect("the hub serves the project");
+            hub.wait_watching(dir);
         }
         hub
+    }
+
+    /// Wait until the hub's watcher for `clove_dir` watches: until then it
+    /// does not answer that project's index reads (`WATCHER_ARMING`).
+    pub fn wait_watching(&self, clove_dir: &Utf8Path) {
+        let watching = eventually(Duration::from_secs(20), || {
+            DaemonClient::probe_at(&self.paths, clove_dir)
+                .and_then(|mut client| client.status().ok())
+                .is_some_and(|status| status.watcher_state == "watching")
+        });
+        assert!(watching, "the hub's watcher for {clove_dir} never armed");
     }
 
     /// Start another hub in this one's runtime directory (after this one died)
@@ -98,6 +111,7 @@ impl TestHub {
             eventually(Duration::from_secs(5), || hub.load(clove_dir).is_ok()),
             "restarted hub serves the project"
         );
+        hub.wait_watching(clove_dir);
         hub
     }
 

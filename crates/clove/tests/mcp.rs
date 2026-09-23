@@ -34,6 +34,28 @@ fn runtime_dir(dir: &Path) -> std::path::PathBuf {
     dir.join("run")
 }
 
+/// Wait until the daemon's watcher for the project in `dir` watches: until
+/// then the daemon leaves reads to the index and the files.
+#[cfg(unix)]
+fn wait_watching(dir: &Path) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let out = clove(dir)
+            .args(["daemon", "status", "-f", "json"])
+            .output()
+            .unwrap();
+        let status: Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
+        if status["data"]["watcher_state"] == "watching" {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the daemon's watcher never armed: {status}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
 /// Stops the daemon a test started in a runtime directory when the test ends,
 /// however it ends.
 #[cfg(unix)]
@@ -1339,6 +1361,7 @@ fn read_tools_use_the_daemon_tier_and_agree_with_the_files() {
         .env("CLOVED_DISABLE_WEB", "1")
         .assert()
         .success();
+    wait_watching(dir.path());
 
     // A session WITHOUT the no-daemon opt-out: the engine may route to it.
     let mut s = Session::start_cmd(clove(dir.path()));
@@ -1663,7 +1686,14 @@ fn hanging_up_a_daemon_backed_session_exits_cleanly() {
     cmd.env("CLOVED_PATH", cloved_bin())
         .env("CLOVED_DISABLE_WEB", "1");
     let mut s = Session::start_cmd(cmd);
+    // The session starts the daemon; reads go to it once its watcher watches.
     let listed = s.call(2, "clove_list", json!({}));
+    assert!(
+        listed["structuredContent"]["source"].is_string(),
+        "{listed}"
+    );
+    wait_watching(dir.path());
+    let listed = s.call(3, "clove_list", json!({}));
     assert_eq!(listed["structuredContent"]["source"], "daemon", "{listed}");
     let status = s.hang_up();
     assert!(status.success(), "clove mcp exited with {status}");

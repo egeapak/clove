@@ -206,6 +206,10 @@ pub mod codes {
     pub const LOAD_FAILED: &str = "LOAD_FAILED";
     /// The hub has decided to exit; start a new one once it is gone.
     pub const SHUTTING_DOWN: &str = "SHUTTING_DOWN";
+    /// A read the project's daemon will not answer yet: its file watcher is
+    /// still being set up, so its index may miss a change. The caller reads
+    /// the index or the files itself.
+    pub const WATCHER_ARMING: &str = "WATCHER_ARMING";
 }
 
 /// The reply to `hub_status`.

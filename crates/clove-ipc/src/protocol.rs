@@ -173,7 +173,9 @@ pub struct StatusResponse {
     pub uptime_s: u64,
     /// Items currently in the index.
     pub items_indexed: u64,
-    /// Watcher state, e.g. `"watching"` / `"sweeping"` / `"idle"`.
+    /// Watcher state: `"sweeping"` (loading), `"arming"` (loaded, the file
+    /// watch not yet in place: index reads refused with `WATCHER_ARMING`),
+    /// `"watching"`, or `"idle"`.
     pub watcher_state: String,
     /// Milliseconds since the last watcher/IPC event, or `None` if none yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]

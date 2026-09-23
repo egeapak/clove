@@ -72,16 +72,14 @@ async fn collect_burst(
 
 /// A watch on a project's `issues/` that is already in place: every change
 /// from the moment [`arm`] returned is queued in `events`.
-pub struct Armed {
+struct Armed {
     events: tokio::sync::mpsc::UnboundedReceiver<PathBuf>,
     _watcher: DropOffThread<RecommendedWatcher>,
 }
 
-/// Put the OS watch on `issues_dir` (blocking: FSEvents setup can take a good
-/// fraction of a second on a busy machine). A load arms it *before* its
-/// startup sweep, so a file written at any point after the sweep began is
-/// either swept or queued — never missed until the next change.
-pub fn arm(issues_dir: &Utf8Path) -> Result<Armed, String> {
+/// Put the OS watch on `issues_dir`. Blocking, and on macOS at the mercy of
+/// `fseventsd`: FSEvents setup can take seconds when it is busy.
+fn arm(issues_dir: &Utf8Path) -> Result<Armed, String> {
     let (tx, events) = tokio::sync::mpsc::unbounded_channel::<PathBuf>();
     // The notify handler runs on notify's own thread; forward only item-file
     // paths into the channel (non-blocking send, no runtime needed here).
@@ -111,9 +109,69 @@ pub fn arm(issues_dir: &Utf8Path) -> Result<Armed, String> {
     })
 }
 
+/// A loaded project's watcher task: arm the watch, catch up, then keep the
+/// index fresh until the task is dropped (on teardown). Returns early only if
+/// the watch cannot be put in place, which unloads the project.
+///
+/// The load has already swept `issues/` once, without waiting for this: the
+/// project is served from the moment it is loaded. Until the watch is armed,
+/// the index can miss a change, so reads are not answered from it (the state
+/// says `Arming`; see `Dispatcher`). Once armed, a second sweep picks up
+/// whatever changed between the first and the arming — anything later is
+/// queued by the watch — and only then is the state `Watching`.
+pub async fn run(
+    issues_dir: Utf8PathBuf,
+    index: Arc<Mutex<Index>>,
+    state: Arc<Mutex<DaemonState>>,
+    debounce: Duration,
+    options: WatchOptions,
+    graph: Arc<GraphCache>,
+) {
+    let armed = match arm_on_own_thread(issues_dir.clone()).await {
+        Ok(armed) => armed,
+        Err(why) => {
+            eprintln!("cloved: {issues_dir}: {why}");
+            return;
+        }
+    };
+    let (dir, index_c, state_c, graph_c) = (
+        issues_dir.clone(),
+        index.clone(),
+        state.clone(),
+        graph.clone(),
+    );
+    let caught_up = tokio::task::spawn_blocking(move || {
+        if sync_once(&dir, &index_c, &state_c) {
+            graph_c.mark_dirty();
+        }
+    })
+    .await;
+    if caught_up.is_err() {
+        eprintln!("cloved: {issues_dir}: the sweep after arming the watcher panicked");
+        return;
+    }
+    watch(armed, issues_dir, index, state, debounce, options, graph).await;
+}
+
+/// [`arm`] on a thread of its own rather than the blocking pool: an arm stuck
+/// behind `fseventsd` must neither hold a pool thread nor keep the runtime
+/// from shutting down, and one that outlives its project (torn down while it
+/// armed) just drops what it made.
+async fn arm_on_own_thread(issues_dir: Utf8PathBuf) -> Result<Armed, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("cloved-arm".to_owned())
+        .spawn(move || {
+            let _ = tx.send(arm(&issues_dir));
+        })
+        .map_err(|e| format!("arming the watcher: {e}"))?;
+    rx.await
+        .map_err(|_| "arming the watcher: its thread died".to_owned())?
+}
+
 /// Keep the index fresh from `armed`'s changes until the task is dropped (on
 /// shutdown). `debounce` is the per-burst quiet window (DESIGN §8.5).
-pub async fn watch(
+async fn watch(
     armed: Armed,
     issues_dir: Utf8PathBuf,
     index: Arc<Mutex<Index>>,

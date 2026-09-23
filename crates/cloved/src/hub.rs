@@ -368,7 +368,8 @@ impl Hub {
                 slot.settings.default_type,
             )
             .with_heartbeat(heartbeat);
-            // Mounting starts the project's file watcher, whose setup blocks.
+            // Mounting takes the web registry's lock; the web watcher is
+            // armed on a thread of its own, so the load does not wait for it.
             let (web, root) = (site.web.clone(), slot.repo_root.clone());
             let Ok(slug) = tokio::task::spawn_blocking(move || web.mount(&root, app)).await else {
                 tokio::spawn(self.clone().supervise(Arc::clone(slot), slot.tasks()));
@@ -460,7 +461,8 @@ impl Hub {
             flushing.release_lock();
         })
         .await;
-        // Unmounting drops the web watcher, whose teardown blocks.
+        // Unmounting takes the web registry's lock (the web watcher is
+        // stopped on a thread of its own).
         let (hub, forgotten) = (self.clone(), Arc::clone(&slot));
         let _ = tokio::task::spawn_blocking(move || hub.forget(&forgotten)).await;
         slot.done.cancel();

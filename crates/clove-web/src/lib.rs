@@ -176,6 +176,12 @@ impl AppState {
         self.closing.send_replace(true);
     }
 
+    /// Whether `other` is this very state (or a clone of it) rather than one
+    /// built for another mount of the same project.
+    pub(crate) fn is_same_mount(&self, other: &AppState) -> bool {
+        Arc::ptr_eq(&self.closing, &other.closing)
+    }
+
     /// Resolves once [`AppState::close`] has been called.
     pub(crate) fn closed(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
         let mut rx = self.closing.subscribe();

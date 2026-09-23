@@ -398,7 +398,12 @@ fn status(
                     h.projects.len()
                 );
                 for p in &h.projects {
-                    outln!("  {}  items {}", p.clove_dir, p.status.items_indexed);
+                    outln!(
+                        "  {}  items {}  watcher {}",
+                        p.clove_dir,
+                        p.status.items_indexed,
+                        p.status.watcher_state
+                    );
                 }
             }
         }

@@ -59,6 +59,19 @@ fn daemon_status(dir: &Path, run: &Path) -> serde_json::Value {
     )
 }
 
+/// Wait until the daemon's watcher for the project in `dir` watches: until
+/// then the daemon leaves reads to the index and the files.
+fn wait_watching(dir: &Path, run: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while daemon_status(dir, run)["data"]["watcher_state"] != "watching" {
+        assert!(
+            Instant::now() < deadline,
+            "the daemon's watcher never armed"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 fn doctor_codes(dir: &Path, run: &Path) -> Vec<String> {
     let out = clove(dir, run)
         .args(["doctor", "-f", "json"])
@@ -428,6 +441,7 @@ fn daemon_is_reachable_from_any_subdirectory() {
         .args(["daemon", "start"])
         .assert()
         .success();
+    wait_watching(root, &run.path);
 
     let sub = root.join("a").join("b").join("c");
     std::fs::create_dir_all(&sub).unwrap();
@@ -570,6 +584,139 @@ fn a_stop_while_the_start_is_still_loading_wins() {
     }
 }
 
+/// `clove` with a hub that is slow to arm its file watchers (the daemon's and
+/// the web UI's), as FSEvents can be on macOS — the web UI on a free port.
+fn slow_watcher_clove(dir: &Path, run: &Path, arm_delay_ms: &str) -> Command {
+    let mut c = clove(dir, run);
+    c.env_remove("CLOVED_DISABLE_WEB")
+        .env("CLOVED_WEB_PORT", "0")
+        .env("CLOVED_WATCH_ARM_DELAY_MS", arm_delay_ms);
+    c
+}
+
+/// An item written straight to the store, as an editor or `git pull` would.
+fn write_item_behind_the_daemons_back(dir: &Path, title: &str) -> String {
+    let root = camino::Utf8PathBuf::from_path_buf(dir.to_path_buf()).unwrap();
+    let store = clove_core::ItemStore::new(root);
+    let prefix = clove_core::load_config(store.repo_root())
+        .unwrap()
+        .id_prefix;
+    let item = store
+        .create(
+            &prefix,
+            clove_core::NewItem {
+                title: title.to_owned(),
+                item_type: clove_types::ItemType::Chore,
+                priority: clove_types::Priority(2),
+                labels: Vec::new(),
+                deps: Vec::new(),
+                parent: None,
+                assignee: None,
+                body: String::new(),
+            },
+            chrono::Utc::now(),
+        )
+        .unwrap();
+    item.frontmatter.id.to_string()
+}
+
+/// `clove daemon start` does not wait for the file watchers: with arming
+/// held up for 15s it returns promptly (it used to wait out FSEvents setup
+/// and time out at 10s), and until the watcher watches, reads fall back to
+/// the index or the files — fresh, never the daemon's possibly stale answer.
+#[test]
+fn a_start_does_not_wait_for_the_file_watcher() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let run = Run::new();
+    init(dir, &run.path);
+    clove(dir, &run.path)
+        .args(["new", "before the start"])
+        .assert()
+        .success();
+
+    let began = Instant::now();
+    let start = slow_watcher_clove(dir, &run.path, "15000")
+        .args(["daemon", "start", "-f", "json"])
+        .output()
+        .unwrap();
+    let took = began.elapsed();
+    assert!(start.status.success(), "{start:?}");
+    assert!(took < Duration::from_secs(5), "the start took {took:?}");
+
+    let status = daemon_status(dir, &run.path);
+    assert_eq!(status["data"]["running"], true, "{status}");
+    assert_eq!(status["data"]["watcher_state"], "arming", "{status}");
+
+    // Written after the start, while the watcher is not yet watching: a read
+    // must not be the daemon's (it could not know), and must see the item.
+    write_item_behind_the_daemons_back(dir, "while arming");
+    let listed = json(
+        &clove(dir, &run.path)
+            .args(["ls", "-f", "json"])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    assert_ne!(listed["_meta"]["source"], "daemon", "{listed}");
+    let mut listed_titles = titles(&listed);
+    listed_titles.sort();
+    assert_eq!(
+        listed_titles,
+        vec!["before the start".to_owned(), "while arming".to_owned()],
+        "{listed}"
+    );
+
+    clove(dir, &run.path)
+        .args(["daemon", "stop", "--all"])
+        .assert()
+        .success();
+}
+
+/// Once armed, the daemon serves what was written while it armed — through
+/// it or behind its back — with no refresh on read to help it: the sweep
+/// after arming picks up what the watch could not have seen.
+#[test]
+fn what_is_written_while_the_watcher_arms_is_served_once_it_watches() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let run = Run::new();
+    init(dir, &run.path);
+    let config = dir.join(".clove/config.toml");
+    let text = std::fs::read_to_string(&config).unwrap();
+    assert!(text.contains("auto_refresh = true"), "{text}");
+    std::fs::write(
+        &config,
+        text.replace("auto_refresh = true", "auto_refresh = false"),
+    )
+    .unwrap();
+
+    slow_watcher_clove(dir, &run.path, "2000")
+        .args(["daemon", "start"])
+        .assert()
+        .success();
+    write_item_behind_the_daemons_back(dir, "behind its back");
+    wait_watching(dir, &run.path);
+    let listed = json(
+        &clove(dir, &run.path)
+            .args(["ls", "-f", "json"])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    assert_eq!(listed["_meta"]["source"], "daemon", "{listed}");
+    assert_eq!(
+        titles(&listed),
+        vec!["behind its back".to_owned()],
+        "{listed}"
+    );
+
+    clove(dir, &run.path)
+        .args(["daemon", "stop", "--all"])
+        .assert()
+        .success();
+}
+
 /// Reads never write: with a hub running, `clove ls` creates no token and
 /// touches no `.gitignore` — and a committed `.clove` symlink (`.clove -> ~`,
 /// say) gets no token work at all, so nothing lands in the link's target.
@@ -697,6 +844,7 @@ fn a_relative_clove_dir_always_means_the_callers_own_project() {
         .args(["--clove-dir", ".clove", "daemon", "start"])
         .assert()
         .success();
+    wait_watching(b, &run.path);
     let v = json(
         &clove(b, &run.path)
             .args(["--clove-dir", ".clove", "ls", "-f", "json"])
