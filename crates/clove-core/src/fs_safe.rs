@@ -4,7 +4,8 @@
 //! can ship `.clove/daemon.lock` (or `index.db`, …) as a symlink to a file the
 //! user cares about. A plain `File::create` follows the link and truncates the
 //! target. Every file clove creates or writes there by a *fixed* name goes
-//! through here instead.
+//! through here instead, and so does every directory it writes into: a
+//! symlinked `issues/` or `sync/` would redirect even freshly named files.
 
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -41,6 +42,94 @@ pub fn refuse_symlink(path: &Utf8Path) -> io::Result<()> {
         )),
         _ => Ok(()),
     }
+}
+
+/// The `.clove` directory a path lies under: its nearest ancestor so named.
+fn clove_dir_of(path: &Utf8Path) -> Option<&Utf8Path> {
+    path.ancestors().find(|p| p.file_name() == Some(".clove"))
+}
+
+/// The directories from just below `.clove/` down to `dir` itself, outermost
+/// first; empty when `dir` is not under a `.clove` directory.
+fn dirs_below_clove(dir: &Utf8Path) -> Vec<&Utf8Path> {
+    let Some(clove_dir) = clove_dir_of(dir) else {
+        return Vec::new();
+    };
+    let mut below: Vec<&Utf8Path> = dir.ancestors().take_while(|p| *p != clove_dir).collect();
+    below.reverse();
+    below
+}
+
+fn symlinked_dir(path: &Utf8Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!("refusing to use {path}: it is a symlink, not a directory"),
+    )
+}
+
+/// Fail if any existing directory under `.clove/` on the way to `dir` (itself
+/// included) is a symlink. Missing directories are fine.
+pub fn check_dirs(dir: &Utf8Path) -> io::Result<()> {
+    for step in dirs_below_clove(dir) {
+        match std::fs::symlink_metadata(step) {
+            Ok(meta) if meta.file_type().is_symlink() => return Err(symlinked_dir(step)),
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// `create_dir_all` that never follows a symlink planted under `.clove/`:
+/// every directory from there down to `dir` must be a real directory or is
+/// created as one.
+pub fn create_dirs(dir: &Utf8Path) -> io::Result<()> {
+    let below = dirs_below_clove(dir);
+    let Some(first) = below.first() else {
+        return std::fs::create_dir_all(dir);
+    };
+    if let Some(above) = first.parent() {
+        std::fs::create_dir_all(above)?;
+    }
+    for step in below {
+        match std::fs::create_dir(step) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                let meta = std::fs::symlink_metadata(step)?;
+                if meta.file_type().is_symlink() {
+                    return Err(symlinked_dir(step));
+                }
+                if !meta.is_dir() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("{step} is not a directory"),
+                    ));
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// Replace `path` with `bytes` atomically (a fresh sibling temp file, fsynced,
+/// then renamed over it), never writing through a symlink: not one at `path`,
+/// nor a symlinked directory under `.clove/` on the way there.
+pub fn write_atomic(path: &Utf8Path, bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write as _;
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "path has no parent directory")
+    })?;
+    check_dirs(parent)?;
+    refuse_symlink(path)?;
+    // The temp name is random and created exclusively, so nothing planted can
+    // stand in for it; the rename replaces the directory entry, not a target.
+    let mut temp = tempfile::NamedTempFile::new_in(parent.as_std_path())?;
+    temp.write_all(bytes)?;
+    temp.as_file().sync_all()?;
+    temp.persist(path.as_std_path()).map_err(|e| e.error)?;
+    Ok(())
 }
 
 /// `O_NOFOLLOW` on Unix, where the kernel refuses the link atomically. Windows

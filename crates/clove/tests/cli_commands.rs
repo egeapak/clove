@@ -67,6 +67,21 @@ fn init_is_idempotent_and_writes_gitignore() {
     assert!(dir.path().join(".clove/config.toml").exists());
 }
 
+/// Re-running `init` in a clone whose `.clove/.gitignore` is a planted symlink
+/// must not write through it.
+#[cfg(unix)]
+#[test]
+fn init_never_writes_through_a_planted_gitignore() {
+    let dir = init_repo();
+    let victim = dir.path().join("precious");
+    std::fs::write(&victim, "precious\n").unwrap();
+    let gitignore = dir.path().join(".clove/.gitignore");
+    std::fs::remove_file(&gitignore).unwrap();
+    std::os::unix::fs::symlink(&victim, &gitignore).unwrap();
+    let _ = clove(dir.path()).arg("init").output().unwrap();
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious\n");
+}
+
 #[test]
 fn new_show_round_trip() {
     let dir = init_repo();

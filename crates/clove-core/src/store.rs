@@ -274,6 +274,7 @@ impl ItemStore {
 
     /// Read and parse the item with the given id.
     pub fn get(&self, id: &CloveId) -> Result<Item, CloveError> {
+        self.check_issues_dir()?;
         let path = self.path_for(id);
         if !path.exists() {
             return Err(CloveError::NotFound { id: id.to_string() });
@@ -493,10 +494,20 @@ impl ItemStore {
             .collect()
     }
 
+    /// A symlinked `issues/` would serve (and receive) another directory's files
+    /// as this project's.
+    fn check_issues_dir(&self) -> Result<(), CloveError> {
+        crate::fs_safe::check_dirs(&self.issues_dir).map_err(|source| CloveError::Io {
+            path: self.issues_dir.clone(),
+            source,
+        })
+    }
+
     /// Collect the candidate item file paths: real `.md` files only, skipping
     /// symlinks (§12.3), directories (comment dirs), temp files, and non-UTF-8
     /// names.
     fn item_file_paths(&self) -> Result<Vec<Utf8PathBuf>, CloveError> {
+        self.check_issues_dir()?;
         let read_dir = std::fs::read_dir(&self.issues_dir).map_err(|source| CloveError::Io {
             path: self.issues_dir.clone(),
             source,

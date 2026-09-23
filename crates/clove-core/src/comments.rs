@@ -81,7 +81,7 @@ pub fn add_comment_at(
     timestamp: DateTime<Utc>,
 ) -> Result<Utf8PathBuf, CloveError> {
     let dir = comments_dir(issues_dir, id);
-    std::fs::create_dir_all(&dir).map_err(|source| CloveError::Io {
+    crate::fs_safe::create_dirs(&dir).map_err(|source| CloveError::Io {
         path: dir.clone(),
         source,
     })?;
@@ -137,6 +137,10 @@ pub fn add_comment_at(
 /// tiebreak below.
 pub fn list_comments(issues_dir: &Utf8Path, id: &CloveId) -> Result<Vec<Comment>, CloveError> {
     let dir = comments_dir(issues_dir, id);
+    crate::fs_safe::check_dirs(&dir).map_err(|source| CloveError::Io {
+        path: dir.clone(),
+        source,
+    })?;
     if !dir.is_dir() {
         return Ok(Vec::new());
     }

@@ -202,6 +202,10 @@ fn atomic_write(path: &Utf8Path, bytes: &[u8]) -> Result<(), CloveError> {
         path: path.to_owned(),
         source: io::Error::new(io::ErrorKind::InvalidInput, "path has no parent directory"),
     })?;
+    crate::fs_safe::check_dirs(parent).map_err(|source| CloveError::Io {
+        path: parent.to_owned(),
+        source,
+    })?;
 
     let mut temp =
         NamedTempFile::new_in(parent.as_std_path()).map_err(|source| CloveError::Io {
