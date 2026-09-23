@@ -45,7 +45,9 @@ pub fn run(
     // is reported even under --fix, so we never delete a running process's files.
     // No runtime directory (Windows without a user profile) means no hub.
     if let Ok(hub) = clove_ipc::HubPaths::resolve() {
-        if let Some(issue) = daemon_issue(clove_ipc::DaemonClient::health(&hub)) {
+        let log = hub.log();
+        let log = log.exists().then_some(log);
+        if let Some(issue) = daemon_issue(clove_ipc::DaemonClient::health(&hub), log.as_deref()) {
             if args.fix && issue.fixable {
                 clove_ipc::client::cleanup_hub(&hub);
                 fixed += 1;
@@ -175,8 +177,16 @@ fn daemon_dir(ctx: &Ctx) -> &camino::Utf8Path {
 ///   the hub lock without a socket yet) → a non-fixable `DAEMON_UNRESPONSIVE`:
 ///   alive as far as anyone can tell, so its files stay.
 /// - `Absent`/`Healthy` → no finding (a live, healthy daemon is never touched).
-fn daemon_issue(health: clove_ipc::DaemonHealth) -> Option<DoctorIssue> {
+///
+/// A live daemon's finding names its log, when it has one.
+fn daemon_issue(
+    health: clove_ipc::DaemonHealth,
+    log: Option<&camino::Utf8Path>,
+) -> Option<DoctorIssue> {
     use clove_ipc::DaemonHealth;
+    let log_note = log
+        .map(|log| format!(" (its log is {log})"))
+        .unwrap_or_default();
     match health {
         DaemonHealth::Absent | DaemonHealth::Healthy => None,
         DaemonHealth::Dead => Some(DoctorIssue {
@@ -192,19 +202,21 @@ fn daemon_issue(health: clove_ipc::DaemonHealth) -> Option<DoctorIssue> {
             severity: Severity::Warning,
             code: "DAEMON_VERSION_SKEW",
             item: None,
-            message: "a running daemon speaks an incompatible protocol version \
-                      (likely an old `cloved` from before a `clove` upgrade); \
-                      run `clove daemon stop --all` then start it again"
-                .to_owned(),
+            message: format!(
+                "a running daemon speaks an incompatible protocol version \
+                 (likely an old `cloved` from before a `clove` upgrade); \
+                 run `clove daemon stop --all` then start it again{log_note}"
+            ),
             fixable: false,
         }),
         DaemonHealth::Unresponsive => Some(DoctorIssue {
             severity: Severity::Warning,
             code: "DAEMON_UNRESPONSIVE",
             item: None,
-            message: "a daemon is running but did not answer in time (busy, or still \
-                      starting); if it stays that way, `clove daemon stop --all`"
-                .to_owned(),
+            message: format!(
+                "a daemon is running but did not answer in time (busy, or still \
+                 starting); if it stays that way, `clove daemon stop --all`{log_note}"
+            ),
             fixable: false,
         }),
     }
@@ -331,20 +343,32 @@ mod tests {
     #[test]
     fn daemon_issue_maps_each_health_state() {
         // A healthy or absent daemon is never a finding.
-        assert!(daemon_issue(DaemonHealth::Absent).is_none());
-        assert!(daemon_issue(DaemonHealth::Healthy).is_none());
+        assert!(daemon_issue(DaemonHealth::Absent, None).is_none());
+        assert!(daemon_issue(DaemonHealth::Healthy, None).is_none());
 
         // Dead corpse files → fixable stale-socket warning.
-        let dead = daemon_issue(DaemonHealth::Dead).unwrap();
+        let dead = daemon_issue(DaemonHealth::Dead, None).unwrap();
         assert_eq!(dead.code, "DAEMON_STALE_SOCKET");
         assert_eq!(dead.severity, Severity::Warning);
         assert!(dead.fixable);
 
         // A live-but-incompatible daemon → non-fixable version-skew warning, so
         // `--fix` never deletes a running process's socket/pid.
-        let skew = daemon_issue(DaemonHealth::Incompatible).unwrap();
+        let skew = daemon_issue(DaemonHealth::Incompatible, None).unwrap();
         assert_eq!(skew.code, "DAEMON_VERSION_SKEW");
         assert_eq!(skew.severity, Severity::Warning);
         assert!(!skew.fixable);
+
+        // A live daemon's finding says where its log is.
+        let busy = daemon_issue(
+            DaemonHealth::Unresponsive,
+            Some(camino::Utf8Path::new("/run/clove/hub.log")),
+        )
+        .unwrap();
+        assert!(
+            busy.message.contains("/run/clove/hub.log"),
+            "{}",
+            busy.message
+        );
     }
 }

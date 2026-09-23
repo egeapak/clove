@@ -127,6 +127,7 @@ pub async fn run(
     options: WatchOptions,
     graph: Arc<GraphCache>,
 ) {
+    let arming = std::time::Instant::now();
     let armed = match arm_on_own_thread(issues_dir.clone()).await {
         Ok(armed) => armed,
         Err(why) => {
@@ -134,6 +135,10 @@ pub async fn run(
             return;
         }
     };
+    let took = arming.elapsed();
+    if took > Duration::from_secs(1) {
+        eprintln!("cloved: {issues_dir}: the file watch took {took:.1?} to set up");
+    }
     let (dir, index_c, state_c, graph_c) = (
         issues_dir.clone(),
         index.clone(),

@@ -316,6 +316,7 @@ impl Hub {
         let slot = match loaded {
             Ok(slot) => slot,
             Err(e) => {
+                eprintln!("cloved: could not serve {key}: {}", e.message);
                 let mut table = self.table();
                 if table
                     .slots
@@ -348,6 +349,7 @@ impl Hub {
 
     /// Mount the slot on the web listener and start its supervised tasks.
     async fn start(&self, slot: &Arc<Slot>) {
+        eprintln!("cloved: serving {}", slot.clove_dir);
         let site = match slot.settings.web_enabled && self.0.web_enabled {
             true => self.web_site(slot.settings.web_port).await,
             false => None,
@@ -465,6 +467,7 @@ impl Hub {
         // stopped on a thread of its own).
         let (hub, forgotten) = (self.clone(), Arc::clone(&slot));
         let _ = tokio::task::spawn_blocking(move || hub.forget(&forgotten)).await;
+        eprintln!("cloved: stopped serving {}", slot.clove_dir);
         slot.done.cancel();
     }
 

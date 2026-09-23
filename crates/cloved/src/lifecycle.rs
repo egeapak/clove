@@ -82,6 +82,12 @@ pub fn run(paths: &HubPaths) -> anyhow::Result<()> {
         let mut shutdown =
             ShutdownSignal::install(paths).context("installing the shutdown signal")?;
         write_pid(paths).context("writing pid file")?;
+        eprintln!(
+            "cloved: hub pid {} serving from {} (protocol {})",
+            std::process::id(),
+            paths.dir(),
+            clove_ipc::PROTOCOL_VERSION
+        );
 
         tokio::select! {
             _ = hub.accept_loop(listener) => {},
@@ -92,6 +98,7 @@ pub fn run(paths: &HubPaths) -> anyhow::Result<()> {
         }
         hub.shutdown().cancel();
         hub.unload_all().await;
+        eprintln!("cloved: hub pid {} exiting", std::process::id());
         Ok(())
     });
 

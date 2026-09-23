@@ -169,8 +169,10 @@ fn spawn_detached(bin: &Path, hub: &HubPaths) -> std::io::Result<()> {
 /// `cloved run` — no project, the scrubbed environment, and the runtime
 /// directory as both its working directory and `CLOVE_RUNTIME_DIR`, so the hub
 /// binds where this client looks and inherits nothing of the client's place.
+/// Its stderr goes to [`HubPaths::log`] (nowhere, if that cannot be opened).
 fn hub_command(bin: &Path, hub: &HubPaths) -> std::process::Command {
     use std::process::{Command, Stdio};
+    let stderr = open_hub_log(hub).map_or_else(|_| Stdio::null(), Stdio::from);
     let mut cmd = Command::new(bin);
     cmd.arg("run")
         .current_dir(hub.dir().as_std_path())
@@ -179,8 +181,26 @@ fn hub_command(bin: &Path, hub: &HubPaths) -> std::process::Command {
         .env("CLOVE_RUNTIME_DIR", hub.dir().as_str())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(stderr);
     cmd
+}
+
+/// A log past this size is set aside (as `hub.log.1`) when a hub starts.
+const HUB_LOG_LIMIT: u64 = 1024 * 1024;
+
+/// Open the hub's log for appending: owner-only, never through a symlink,
+/// and set aside first once it has grown past [`HUB_LOG_LIMIT`] — so it is
+/// bounded at two files of about that size.
+fn open_hub_log(hub: &HubPaths) -> std::io::Result<std::fs::File> {
+    let log = hub.log();
+    if std::fs::symlink_metadata(&log)
+        .is_ok_and(|meta| meta.is_file() && meta.len() > HUB_LOG_LIMIT)
+    {
+        // Renaming replaces whatever is at `hub.log.1` itself, a link included,
+        // without following it.
+        let _ = std::fs::rename(&log, hub.dir().join("hub.log.1"));
+    }
+    clove_core::fs_safe::open_private_log(&log)
 }
 
 #[cfg(unix)]

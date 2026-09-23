@@ -717,6 +717,80 @@ fn what_is_written_while_the_watcher_arms_is_served_once_it_watches() {
         .success();
 }
 
+/// A hub a client starts writes its stderr to `hub.log` in its runtime
+/// directory — owner-only, appended — where it used to go to /dev/null.
+#[test]
+fn a_started_daemon_logs_to_its_runtime_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let run = Run::new();
+    init(dir, &run.path);
+    clove(dir, &run.path)
+        .args(["daemon", "start"])
+        .assert()
+        .success();
+    let log = run.path.join("hub.log");
+    let meta = std::fs::symlink_metadata(&log).expect("no hub.log");
+    assert!(meta.is_file());
+    assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+    let pid = std::fs::read_to_string(run.pid_file()).unwrap();
+    let text = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        text.contains(&format!("pid {}", pid.trim())),
+        "the hub did not log its start: {text:?}"
+    );
+    let status = daemon_status(dir, &run.path);
+    assert_eq!(
+        status["data"]["log"].as_str(),
+        log.to_str(),
+        "status does not name the log: {status}"
+    );
+    clove(dir, &run.path)
+        .args(["daemon", "stop", "--all"])
+        .assert()
+        .success();
+}
+
+/// A `hub.log` planted as a symlink is not written through, and a log past
+/// 1 MiB is set aside once, at start, rather than growing for good.
+#[test]
+fn the_daemon_log_is_not_followed_and_is_rotated() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let run = Run::new();
+    init(dir, &run.path);
+    clove_ipc::ensure_private_dir(camino::Utf8Path::from_path(&run.path).unwrap()).unwrap();
+    let victim = tmp.path().join("victim");
+    std::fs::write(&victim, "precious\n").unwrap();
+    std::os::unix::fs::symlink(&victim, run.path.join("hub.log")).unwrap();
+    clove(dir, &run.path)
+        .args(["daemon", "start"])
+        .assert()
+        .success();
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious\n");
+    clove(dir, &run.path)
+        .args(["daemon", "stop", "--all"])
+        .assert()
+        .success();
+
+    std::fs::remove_file(run.path.join("hub.log")).unwrap();
+    let old = vec![b'x'; 1536 * 1024];
+    std::fs::write(run.path.join("hub.log"), &old).unwrap();
+    clove(dir, &run.path)
+        .args(["daemon", "start"])
+        .assert()
+        .success();
+    let kept = std::fs::metadata(run.path.join("hub.log.1")).expect("the old log was not kept");
+    assert_eq!(kept.len(), old.len() as u64);
+    let fresh = std::fs::metadata(run.path.join("hub.log")).unwrap().len();
+    assert!(fresh < 64 * 1024, "hub.log still holds {fresh} bytes");
+    clove(dir, &run.path)
+        .args(["daemon", "stop", "--all"])
+        .assert()
+        .success();
+}
+
 /// Reads never write: with a hub running, `clove ls` creates no token and
 /// touches no `.gitignore` — and a committed `.clove` symlink (`.clove -> ~`,
 /// say) gets no token work at all, so nothing lands in the link's target.

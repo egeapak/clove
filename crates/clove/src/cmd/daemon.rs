@@ -63,19 +63,31 @@ fn start(
                     "a clove 0.1.0 daemon (pid {pid}) already serves this project; \
                      `clove daemon stop` stops it, then start again"
                 ),
-                _ => format!("the daemon cannot serve this project: {message}"),
+                _ => format!(
+                    "the daemon cannot serve this project: {message}{}",
+                    log_note(hub)
+                ),
             }));
         }
         Err(ClientError::Connect(e) | ClientError::Name(e)) => {
-            return Err(daemon_err(&format!("could not start the daemon: {e}")));
+            return Err(daemon_err(&format!(
+                "could not start the daemon: {e}{}",
+                log_note(hub)
+            )));
         }
         Err(ClientError::Timeout) => {
-            return Err(daemon_err(
+            return Err(daemon_err(&format!(
                 "the daemon did not finish starting and loading this project within \
-                 10s (a large project's first load can take longer); try again",
-            ));
+                 10s (a large project's first load can take longer); try again{}",
+                log_note(hub)
+            )));
         }
-        Err(e) => return Err(daemon_err(&format!("could not start the daemon: {e}"))),
+        Err(e) => {
+            return Err(daemon_err(&format!(
+                "could not start the daemon: {e}{}",
+                log_note(hub)
+            )))
+        }
     }
 
     let pid = hub.read_pid();
@@ -183,6 +195,16 @@ fn stop(
         json!({ "stopped": true, "hub_stopped": detached.hub_exiting }),
         "daemon stopped serving this project",
     )
+}
+
+/// Where to look for what the daemon itself said, when it has a log.
+fn log_note(hub: &HubPaths) -> String {
+    let log = hub.log();
+    if log.exists() {
+        format!(" (the daemon's log is {log})")
+    } else {
+        String::new()
+    }
 }
 
 /// The project's daemon token is unusable: the error names the file.
@@ -345,7 +367,13 @@ fn status(
             })).collect::<Vec<Value>>(),
         })
     });
-    let mut data = json!({ "running": project.is_some(), "hub": hub_json });
+    let log = hub.log();
+    let log = log.exists().then_some(log);
+    let mut data = json!({
+        "running": project.is_some(),
+        "hub": hub_json,
+        "log": log.as_ref().map(|log| log.as_str()),
+    });
     if let Some(s) = &project {
         let fields = json!({
             "uptime_s": s.uptime_s,
@@ -405,6 +433,9 @@ fn status(
                         p.status.watcher_state
                     );
                 }
+            }
+            if let Some(log) = &log {
+                outln!("daemon log {log}");
             }
         }
     }

@@ -100,6 +100,11 @@ impl HubPaths {
         self.dir.join("hub.lock")
     }
 
+    /// Where a hub a client starts writes its stderr.
+    pub fn log(&self) -> Utf8PathBuf {
+        self.dir.join("hub.log")
+    }
+
     /// The pid the hub advertised, if its pid file is readable and names a
     /// process that could be signalled (never 0 or 1, never negative as an
     /// `i32` — `kill(0)` and `kill(-1)` address process groups).

@@ -33,6 +33,29 @@ pub fn create_private_file(path: &Utf8Path) -> io::Result<File> {
     options.open(path)
 }
 
+/// Open an owner-only log file for appending, creating it if missing, without
+/// following a symlink at `path`; anything but a regular file is refused.
+pub fn open_private_log(path: &Utf8Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.append(true).create(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    no_follow(&mut options, path)?;
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{path} is not a regular file"),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(file)
+}
+
 /// Fail if `path` is a symlink (a missing path is fine).
 pub fn refuse_symlink(path: &Utf8Path) -> io::Result<()> {
     match std::fs::symlink_metadata(path) {
