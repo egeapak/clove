@@ -727,7 +727,6 @@ fn query_json_filter_takes_one_value_or_many() {
     );
 }
 
-#[cfg(unix)]
 /// Token records for this test's processes go here, never the user's clove home.
 const TEST_CLOVE_HOME: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/test-clove-home");
 
