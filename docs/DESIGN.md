@@ -1432,9 +1432,11 @@ version.
   truth.
 - `tokio::runtime::Builder::new_multi_thread()` with 2 worker threads for all
   slots; every blocking step (loads, sweeps, queries, writes, path
-  canonicalization, the teardown checkpoint, setting up and tearing down the
-  file watchers) runs on the blocking pool, so one project's heavy query does
-  not starve another's calls.
+  canonicalization, the teardown checkpoint) runs on the blocking pool, so one
+  project's heavy query does not starve another's calls. Setting up and
+  stopping a file watch runs on a thread of its own instead, off every
+  project's load and teardown: on macOS both are round trips to `fseventsd`,
+  which at times stalls them for seconds, one after another (§8.5).
 - **One slot per repository, shared across all worktrees.** `clove` is a
   per-project tracker: work items belong to the *project*, not a branch, so **all
   git worktrees of a project share the main worktree's `.clove/`** (and thus one
@@ -1472,6 +1474,7 @@ every project's *acceleration*, never its data.
 |---|---|---|
 | `<runtime>/hub.sock` (Unix) / `\\.\\pipe\\clove-hub-<hash(user SID, runtime dir)>` (Windows) | IPC transport | hub removes on clean shutdown |
 | `<runtime>/hub.pid` | the hub's pid: readiness, and `clove daemon stop --all` | hub removes on clean shutdown |
+| `<runtime>/hub.log` | the stderr of a hub a client started: its start and exit, each project it starts and stops serving or could not load, a slow file watch, errors. Appended, `0600`, opened `O_NOFOLLOW` (anything but a regular file and the hub logs nowhere); past 1 MiB it is renamed `hub.log.1` when the next hub starts. `clove daemon status` names it, and a failed `clove daemon start` and `clove doctor` point to it | kept |
 | `<runtime>/hub.lock` | one hub per runtime directory; held from before bind to after unbind, so it — not the socket — says whether a hub is alive. Clients ask by taking it *shared* for an instant, so a starting hub retries its exclusive lock for up to a second before concluding another hub holds it; and a client removes a dead hub's `hub.sock`/`hub.pid` only while holding it exclusively, so a hub that bound in the meantime keeps its files | held by the hub process |
 | `.clove/daemon.lock` | one daemon per project (a hub slot, or a 0.1.0 daemon) | held while the project is served |
 | `.clove/daemon.token` | the project's token, which every call for it carries (§8.4) | kept; created by the first client that needs it |
@@ -1582,7 +1585,7 @@ the teardown out and then loads. A `clove reindex` whose daemon is stopped mid-c
 | `clove daemon start` | the hub serves this project (spawned if none runs) |
 | `clove daemon stop` | the hub stops serving this project; the hub exits if it was the last. A hub this client cannot talk to (another protocol, not answering) is reported, with `stop --all` as the remedy. A live clove 0.1.0 daemon on `.clove/daemon.sock` — one that answers `ping` in any protocol version — is SIGTERMed instead, which is the upgrade path; one that cannot be verified (does not answer, socket a symlink or not this user's) is neither signalled nor has its files deleted, and `stop` fails saying so. On Windows no 0.1.0 daemon can be verified (it listened on a pipe named after the repository), so a leftover `.clove/daemon.pid` is only noted — naming the file to delete once no such daemon runs — and `stop` goes on to stop this project's hub slot |
 | `clove daemon stop --all` | stop the hub (SIGTERM / the named event), after it proves itself alive: a welcome of any protocol version, a busy hub that did not answer in time, or a lock holder — a stale `hub.pid` can name an unrelated process. Only a pid > 1 that fits an `i32` is ever signalled. It then waits for *that* hub to go: a pid file naming another pid means a concurrent `clove daemon start` put up a new hub, which is reported as such rather than as a hub that "did not stop" |
-| `clove daemon status` | this project's status plus the hub's pid, web address, and project list |
+| `clove daemon status` | this project's status plus the hub's pid, web address, and project list with each project's watcher state (`arming`, `watching`, §8.6); the hub's log (§8.2); and a warning when the hub keeps its token records under another clove home than this client (§8.4) |
 
 Fallback: direct SQLite access (WAL shared flock) or file-scan.
 
@@ -1632,7 +1635,18 @@ bytes — so whatever it holds now is what counts, however it was rewritten.
   that arrived any other way — committed to the repository, or restored from an
   archive with its `0600` intact, or on Windows where there is no mode — has no
   record, so the hub refuses it and a loading client replaces it. A lost record
-  only means a fresh token.
+  only means a fresh token. **Records count only in private directories:** the
+  records directory and the project's directory in it must each be a real
+  directory — not a symlink — that on Unix the user owns and no one else can
+  write to (the runtime directory's rule, §8.2), checked on every lookup as well
+  as when a record is made; otherwise the token is not trusted and none is
+  issued there (the one in place is kept).
+- **Client and hub must share a clove home.** The hub checks tokens against
+  *its* records, so a client with another `CLOVE_HOME` has every call refused.
+  `hub_status` reports the hub's records directory; `clove daemon status` warns
+  when it is not the client's and `clove doctor` reports
+  `DAEMON_CLOVE_HOME_MISMATCH`. A relative `CLOVE_HOME` is made absolute for
+  the hub a client spawns, which runs from its runtime directory.
 - **Only a loading client writes.** `clove daemon start`, the MCP server's
   auto-start and `clove serve` (calls with `load: true`) create a missing token,
   replace an untrusted one, and add `daemon.token` to a `.clove/.gitignore`
@@ -1655,8 +1669,8 @@ user**, who can read every token they own; hub-wide calls (`ping`,
 no token, and the web UI is not token-gated — it stays loopback-only, behind
 the `Host`/`Origin` guards (§8.10), and may list every project.
 
-**`CloveRpc`:** hub-level `ping` and `hub_status` (pid, uptime, web address, and
-each project's `STATUS`); per project `attach` (is it served — loading it when
+**`CloveRpc`:** hub-level `ping` and `hub_status` (pid, uptime, web address,
+token records directory, and each project's `STATUS`); per project `attach` (is it served — loading it when
 `load` — counted as a ping for the project's telemetry and idle window: the
 client's liveness probe and heartbeat), `detach` (returns once the slot's
 teardown has run and its lock is free — or, past the call's deadline, reports
@@ -1666,7 +1680,11 @@ it still stopping; see §8.3), `status`, `change_generation`, `query`,
 `stats`. `STATUS` carries `web_addr` (the shared listener's `host:port`) and
 `web_url` (this project's `http://host:port/p/<slug>/`). Per-call refusals ride
 `RpcError.code`: `BAD_PROJECT`, `BAD_TOKEN`, `NOT_LOADED`, `PROJECT_LOCKED`,
-`LOAD_FAILED`, `SHUTTING_DOWN`.
+`LOAD_FAILED`, `SHUTTING_DOWN`, and `WATCHER_ARMING` for an index read (`query`,
+`graph`) while the project's watch is not yet in place (§8.6). Both of the
+latter two additions — `hub_status.token_records` and `WATCHER_ARMING` — are
+additive within protocol 8: an older client ignores the field and falls back
+on the refusal like on any daemon error.
 
 **`PROTOCOL_VERSION`** gates a mixed-version pair; the client fails a mismatch
 and falls back, which is safe because the daemon is a cache, not a source of
@@ -1702,13 +1720,32 @@ and do not bump.
   feedback loops.
 - **Debounce:** 200ms per-file (reset timer on each new event for the same path).
 - **Batch:** all events within a 200ms window → single SQLite transaction.
+- **Arming is off the load's path.** On macOS a watch is an FSEvents stream,
+  and starting or stopping one is a round trip to `fseventsd`, which at times
+  takes seconds and serializes with every other start and stop in the process.
+  So a load never waits for its watch (§8.6), the watch is set up and stopped
+  on a thread of its own (a stuck one holds no pool thread, and a project torn
+  down while it armed just drops it), and the web UI's live-update watcher
+  arms the same way after its mount and, once armed, tells open pages to
+  refetch. A watch that took over a second to arm is logged (§8.2).
 
 ### 8.6 Startup Mtime Sweep
 
-Before a project answers its first attach (and, for `cloved run --clove-dir`,
-before `hub.pid` is written): query `file_mtimes`, scan directory, find changed
-files, re-parse and re-index. This covers files changed while the project was not
-served (e.g., `git pull`). Must complete before the load reports ready.
+Before a project answers its first attach: query `file_mtimes`, scan
+directory, find changed files, re-parse and re-index. This covers files changed
+while the project was not served (e.g., `git pull`). Must complete before the
+load reports ready — the load does **not** wait for the file watch (§8.5).
+
+Until the watch is in place the index can miss a change, so the project's
+watcher state is `arming` and its **index reads are refused** with
+`WATCHER_ARMING`: the client reads the index or the files itself, with its own
+staleness check (`_meta.source` is then not `daemon`). `show`, `stats`,
+`status` and every write are served throughout — writes freshen the index
+themselves. Once armed, a **second sweep** picks up whatever changed between
+the first and the arming (anything later is queued by the watch), and only
+then is the state `watching` and reads are answered. So a write made the moment
+a load returns — through the daemon or behind its back — is served once the
+project watches, never lost until the next change.
 
 ### 8.7 Git Auto-Sync (Disabled by Default)
 
@@ -1754,7 +1791,8 @@ tests/CI.
 **The hub starts with a minimal, pinned environment.** It serves every project
 and belongs to none, so it must not carry one client's shell into all of them.
 A client spawns it with an emptied environment plus only: `PATH`, `HOME`,
-`USER`/`LOGNAME`, `TMPDIR`, `XDG_RUNTIME_DIR`, `XDG_DATA_HOME`, `CLOVE_HOME`,
+`USER`/`LOGNAME`, `TMPDIR`, `XDG_RUNTIME_DIR`, `XDG_DATA_HOME`, `CLOVE_HOME`
+(made absolute),
 `XDG_CONFIG_HOME` and `GH_CONFIG_DIR` (where `gh auth token` finds a GitHub CLI
 config kept somewhere other than `~/.config/gh`), `LANG`/`LC_*`, the `CLOVED_*` knobs (`CLOVED_DISABLE_WEB`, `CLOVED_WEB_PORT`,
 `CLOVED_IDLE_SHUTDOWN_MS`, `CLOVED_HUB_GRACE_MS`, `CLOVED_STATS_SNAPSHOT_MS`,

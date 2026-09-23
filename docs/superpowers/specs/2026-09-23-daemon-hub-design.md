@@ -57,6 +57,16 @@
 > last project stopped slowly exits once it is down; `stop --all` tells a
 > restarted daemon from one that did not stop; a reindex cut off by a stop
 > rebuilds locally after the daemon's.
+>
+> **Fifth review round.** Arming the watcher before the sweep made a start
+> as slow as FSEvents, which `fseventsd` stalls for seconds at times. A load
+> now sweeps and returns; the watch arms on its own thread, a second sweep
+> follows it, and until then the project is `arming` and refuses index reads
+> (`WATCHER_ARMING`) so clients read the index or files themselves. The web
+> watcher arms and stops off the load and teardown paths too. A started hub
+> logs to `<runtime>/hub.log`; token records count only in private
+> directories on every read; the hub reports its records directory and
+> status/doctor warn when a client's clove home differs.
 
 ## 1. Why
 
