@@ -160,6 +160,14 @@ fn stop(
     if !detached.detached {
         return not_running();
     }
+    if detached.stopping {
+        return emit(
+            format,
+            json!({ "stopped": false, "stopping": true }),
+            "the daemon is still stopping this project (flushing its index); it stops \
+             serving it once that is done",
+        );
+    }
     if detached.hub_exiting {
         wait_gone(&hub.pid())?;
     }

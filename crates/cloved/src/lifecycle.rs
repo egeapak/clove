@@ -70,7 +70,8 @@ pub fn run(paths: &HubPaths) -> anyhow::Result<()> {
         // user has — restrict it to the owner (D-daemon-SEC-1).
         restrict_to_owner(&paths.sock(), 0o600);
 
-        let hub = Hub::new(std::env::var_os("CLOVED_DISABLE_WEB").is_none(), grace());
+        let hub = Hub::new(std::env::var_os("CLOVED_DISABLE_WEB").is_none(), grace())
+            .with_load_delay(env_ms("CLOVED_LOAD_DELAY_MS").unwrap_or_default());
 
         // Register the shutdown-signal handler BEFORE advertising readiness (the
         // pid file): "pid present ⇒ ready to shut down cleanly" (DESIGN §8.9).
@@ -138,10 +139,15 @@ async fn orphaned(paths: &HubPaths) {
 
 /// The hub's grace period with no project (`CLOVED_HUB_GRACE_MS` for tests).
 fn grace() -> Duration {
-    std::env::var("CLOVED_HUB_GRACE_MS")
+    env_ms("CLOVED_HUB_GRACE_MS").unwrap_or(DEFAULT_GRACE)
+}
+
+/// A millisecond test knob from the environment.
+fn env_ms(name: &str) -> Option<Duration> {
+    std::env::var(name)
         .ok()
         .and_then(|ms| ms.parse::<u64>().ok())
-        .map_or(DEFAULT_GRACE, Duration::from_millis)
+        .map(Duration::from_millis)
 }
 
 /// Create the runtime directory owner-only and refuse one another user can

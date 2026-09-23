@@ -1429,8 +1429,9 @@ version.
   truth.
 - `tokio::runtime::Builder::new_multi_thread()` with 2 worker threads for all
   slots; every blocking step (loads, sweeps, queries, writes, path
-  canonicalization, the teardown checkpoint) runs on the blocking pool, so one
-  project's heavy query does not starve another's calls.
+  canonicalization, the teardown checkpoint, setting up and tearing down the
+  file watchers) runs on the blocking pool, so one project's heavy query does
+  not starve another's calls.
 - **One slot per repository, shared across all worktrees.** `clove` is a
   per-project tracker: work items belong to the *project*, not a branch, so **all
   git worktrees of a project share the main worktree's `.clove/`** (and thus one
@@ -1560,6 +1561,19 @@ admitted by a hub that is about to exit. `clove serve` loads the project into a
 hub that is already running — waiting a few seconds for one that holds its lock
 but has not bound yet — but never starts one.
 
+**Stopping takes as long as it takes, and says so.** A slot's teardown flushes
+its index, which waits for any work already holding it — a daemon-side
+reindex of a large project can take many seconds. A load that finds its project
+mid-teardown waits for it, for as long as the caller's own call allows (the
+tarpc deadline, 10s for a load), then loads the project afresh. A `detach`
+waits the same way; when the teardown outlasts the call, the reply says the
+project is **still stopping** (its lock still held) and `clove daemon stop`
+prints that instead of claiming it stopped. **A stop during a load wins:** a
+project still loading is marked stopping, the load tears itself down as soon as
+it completes, and the loading client is told the project was stopped while it
+loaded — it does not load it again. A load that arrives *after* the stop waits
+the teardown out and then loads.
+
 | Command | Effect |
 |---|---|
 | `clove daemon start` | the hub serves this project (spawned if none runs) |
@@ -1625,7 +1639,8 @@ behind the `Host`/`Origin` guards (§8.10), and may list every project.
 each project's `STATUS`); per project `attach` (is it served — loading it when
 `load` — counted as a ping for the project's telemetry and idle window: the
 client's liveness probe and heartbeat), `detach` (returns once the slot's
-teardown has run and its lock is free), `status`, `change_generation`, `query`,
+teardown has run and its lock is free — or, past the call's deadline, reports
+it still stopping; see §8.3), `status`, `change_generation`, `query`,
 `graph`, `reindex`, and the write/read set `create`, `set_status`, `edit`,
 `apply_edit`, `add_comment`, `dep_add`, `dep_remove`, `set_parent`, `show`,
 `stats`. `STATUS` carries `web_addr` (the shared listener's `host:port`) and
@@ -1644,7 +1659,7 @@ truth. It is **8**:
 | 5 | `QueryRequest`'s five scalar filter fields → one `filters: view::Filters`; `GraphRequest::Blocked` carries an `order` and drops the dead `include_warnings` |
 | 6 | `search` RPC and `SearchRequest` **removed** — search is a file scan on every surface (§7.8, read-path roadmap §6.1), so the daemon has nothing to answer with |
 | 7 | the hub: every connection opens with a version `Hello`; every project-scoped call carries a `Project` (path, `load`); `hub_status`, `attach`, `detach` added; `STATUS.web_url` added |
-| 8 | `Project` carries the project token, and refuses unknown fields. A v7 hub would drop a v8 client's token on the floor, so the two meet at the handshake instead |
+| 8 | `Project` carries the project token, and refuses unknown fields; `Detached` reports a teardown still under way. A v7 hub would drop a v8 client's token on the floor, so the two meet at the handshake instead |
 
 A v6 client never reaches the hub (it looks for `.clove/daemon.sock`); a hub
 client never reaches a 0.1.0 daemon (it looks in the runtime directory) except
@@ -1723,7 +1738,8 @@ A client spawns it with an emptied environment plus only: `PATH`, `HOME`,
 `XDG_CONFIG_HOME` and `GH_CONFIG_DIR` (where `gh auth token` finds a GitHub CLI
 config kept somewhere other than `~/.config/gh`), `LANG`/`LC_*`, the `CLOVED_*` knobs (`CLOVED_DISABLE_WEB`, `CLOVED_WEB_PORT`,
 `CLOVED_IDLE_SHUTDOWN_MS`, `CLOVED_HUB_GRACE_MS`, `CLOVED_STATS_SNAPSHOT_MS`,
-`CLOVED_GITHUB_SYNC_MS`, …), `CLOVE_GITHUB_API_URL`/`CLOVE_GITHUB_RETRY_MS` (test
+`CLOVED_GITHUB_SYNC_MS`, `CLOVED_LOAD_DELAY_MS` — a test stand-in for a large
+project's slow load, …), `CLOVE_GITHUB_API_URL`/`CLOVE_GITHUB_RETRY_MS` (test
 seams), `CLOVE_RUNTIME_DIR` (always set, absolute), and on Windows `SystemRoot`,
 `windir`, `LOCALAPPDATA`, `APPDATA`, `USERPROFILE`, `TEMP`/`TMP`, `PATHEXT`. Its
 working directory is its own private runtime directory (`<runtime>`, §8.2) —

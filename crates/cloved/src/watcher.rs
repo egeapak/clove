@@ -84,26 +84,35 @@ pub async fn watch(
 
     // The notify handler runs on notify's own thread; forward only item-file
     // paths into the channel (non-blocking send, no runtime needed here).
-    let mut watcher = match recommended_watcher(move |res: notify::Result<Event>| {
-        if let Ok(event) = res {
-            for path in event.paths {
-                if is_item_file(&path) {
-                    let _ = tx.send(path);
+    // Setting the OS watch up (and, below, tearing it down) can block for a
+    // good fraction of a second on a busy machine (FSEvents), so neither runs
+    // on one of the hub's two async workers.
+    let watched = issues_dir.clone();
+    let setup = tokio::task::spawn_blocking(move || {
+        let mut watcher = recommended_watcher(move |res: notify::Result<Event>| {
+            if let Ok(event) = res {
+                for path in event.paths {
+                    if is_item_file(&path) {
+                        let _ = tx.send(path);
+                    }
                 }
             }
-        }
-    }) {
-        Ok(w) => w,
-        Err(e) => {
-            eprintln!("cloved: watcher init failed: {e}");
+        })
+        .map_err(|e| format!("watcher init failed: {e}"))?;
+        watcher
+            .watch(watched.as_std_path(), RecursiveMode::Recursive)
+            .map_err(|e| format!("watch({watched}) failed: {e}"))?;
+        Ok::<_, String>(watcher)
+    })
+    .await;
+    let _watcher = match setup {
+        Ok(Ok(watcher)) => DropOffThread(Some(watcher)),
+        Ok(Err(why)) => {
+            eprintln!("cloved: {why}");
             return;
         }
+        Err(_) => return,
     };
-
-    if let Err(e) = watcher.watch(issues_dir.as_std_path(), RecursiveMode::Recursive) {
-        eprintln!("cloved: watch({issues_dir}) failed: {e}");
-        return;
-    }
     if let Ok(mut st) = state.lock() {
         st.set_watcher_state(WatcherState::Watching);
     }
@@ -145,8 +154,18 @@ pub async fn watch(
             eprintln!("cloved: watcher batch task panicked");
         }
     }
+}
 
-    drop(watcher);
+/// Drops its value on a thread of its own — the watcher, whose teardown
+/// blocks, when its task is aborted on an async worker.
+struct DropOffThread<T: Send + 'static>(Option<T>);
+
+impl<T: Send + 'static> Drop for DropOffThread<T> {
+    fn drop(&mut self) {
+        if let Some(value) = self.0.take() {
+            std::thread::spawn(move || drop(value));
+        }
+    }
 }
 
 /// Auto-commit the batch's files when built with `git-sync` and enabled in config.

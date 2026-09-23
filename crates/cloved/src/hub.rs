@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -35,8 +36,11 @@ use crate::slot::{self, LoadError, Slot, SlotTask};
 
 /// How long a fresh connection may take to send its [`Hello`].
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
-/// How long a detach or shutdown waits for a slot's teardown.
+/// How long hub shutdown waits for each slot's teardown.
 const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long before a call's deadline the hub stops waiting, so its answer
+/// still reaches the caller in time.
+const REPLY_MARGIN: Duration = Duration::from_millis(250);
 
 /// The hub's shared web listener.
 struct WebSite {
@@ -48,7 +52,21 @@ struct WebSite {
 #[derive(Clone)]
 pub struct Hub(Arc<Inner>);
 
-type SlotCell = Arc<OnceCell<Arc<Slot>>>;
+/// One project in the table: its slot once loaded, and whether it has been
+/// asked to stop — set by a detach even while the load is still under way,
+/// so the load tears itself down when it completes.
+#[derive(Default)]
+struct Entry {
+    slot: OnceCell<Arc<Slot>>,
+    stopping: AtomicBool,
+}
+
+type SlotCell = Arc<Entry>;
+
+/// `deadline`, less the time the answer needs to get back.
+fn answer_by(deadline: Instant) -> tokio::time::Instant {
+    tokio::time::Instant::from_std(deadline.checked_sub(REPLY_MARGIN).unwrap_or(deadline))
+}
 
 /// The slot table, and whether the hub has decided to exit. Both live under
 /// one lock so that deciding to exit and admitting a new project cannot
@@ -73,6 +91,9 @@ struct Inner {
     started: Instant,
     shutdown: CancellationToken,
     grace: Duration,
+    /// Extra time every load takes once it holds the project's lock — a test
+    /// knob standing in for a large project (`CLOVED_LOAD_DELAY_MS`).
+    load_delay: Duration,
 }
 
 fn refused(code: &'static str, message: impl Into<String>) -> LoadError {
@@ -97,6 +118,16 @@ impl Hub {
             started: Instant::now(),
             shutdown: CancellationToken::new(),
             grace,
+            load_delay: Duration::ZERO,
+        }))
+    }
+
+    /// Make every load take `delay` longer, holding the project's lock.
+    pub fn with_load_delay(self, delay: Duration) -> Hub {
+        let inner = Arc::try_unwrap(self.0).unwrap_or_else(|_| panic!("configured after use"));
+        Hub(Arc::new(Inner {
+            load_delay: delay,
+            ..inner
         }))
     }
 
@@ -138,29 +169,44 @@ impl Hub {
     }
 
     /// The caller's project's slot, loading it first when the call allows.
-    pub async fn attach(&self, project: &Project) -> Result<Arc<Slot>, LoadError> {
-        let (clove_dir, load) = (project.clove_dir.as_str(), project.load);
-        let slot = self.attach_once(project).await?;
-        if !slot.cancel.is_cancelled() {
-            return Ok(slot);
+    ///
+    /// A slot caught mid-teardown (a detach, an idle eviction) is gone for a
+    /// probe; a load waits for the teardown — however long it takes, up to the
+    /// caller's own `deadline` — and then loads the project afresh.
+    pub async fn attach(
+        &self,
+        project: &Project,
+        deadline: Instant,
+    ) -> Result<Arc<Slot>, LoadError> {
+        let clove_dir = project.clove_dir.as_str();
+        loop {
+            let slot = self.attach_once(project).await?;
+            if !slot.cancel.is_cancelled() {
+                return Ok(slot);
+            }
+            if !project.load {
+                return Err(refused(
+                    codes::NOT_LOADED,
+                    format!("the daemon is not serving {clove_dir}"),
+                ));
+            }
+            let torn_down = tokio::time::timeout_at(answer_by(deadline), async {
+                slot.done.cancelled().await;
+                // Past `done` the slot is out of the table; give the loop a
+                // beat rather than spin should it still be handed back.
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            })
+            .await;
+            if torn_down.is_err() {
+                return Err(refused(
+                    codes::NOT_LOADED,
+                    format!(
+                        "the daemon is still stopping {clove_dir} (flushing its index); \
+                         try again once it has"
+                    ),
+                ));
+            }
         }
-        // Caught mid-teardown (an idle eviction, say). A probe reports it gone;
-        // a load waits for the teardown to finish and loads the project afresh.
-        let unloaded = || {
-            refused(
-                codes::NOT_LOADED,
-                format!("the daemon is not serving {clove_dir}"),
-            )
-        };
-        if !load {
-            return Err(unloaded());
-        }
-        let _ = tokio::time::timeout(TEARDOWN_TIMEOUT, slot.done.cancelled()).await;
-        let slot = self.attach_once(project).await?;
-        if slot.cancel.is_cancelled() {
-            return Err(unloaded());
-        }
-        Ok(slot)
     }
 
     async fn attach_once(&self, project: &Project) -> Result<Arc<Slot>, LoadError> {
@@ -178,7 +224,7 @@ impl Hub {
             Err(e) => return Err(e),
         };
         self.authorize(&key, &project.token).await?;
-        let cell = {
+        let cell: SlotCell = {
             let mut table = self.table();
             if table.exiting {
                 return Err(refused(
@@ -192,6 +238,9 @@ impl Hub {
                 table.slots.get(&key).cloned().ok_or_else(not_loaded)?
             }
         };
+        // Whether this call came to a project already asked to stop (and so
+        // waits it out) or was itself cut off by that stop.
+        let stopping_on_arrival = cell.stopping.load(Ordering::SeqCst);
         let slot = if load {
             // On its own task: a caller that goes away mid-load (its call
             // cancelled) must not abort the load halfway, leaving the
@@ -206,14 +255,12 @@ impl Hub {
             })?
         } else {
             // Still loading counts as not loaded: a probe must not wait on it.
-            let slot = cell.get().cloned().ok_or_else(not_loaded)?;
+            let slot = cell.slot.get().cloned().ok_or_else(not_loaded)?;
             slot.started.get_or_init(|| self.start(&slot)).await;
             slot
         };
-        // Detached (or the hub drained) while it was loading: nothing tracks it
-        // any more, so tear it down rather than let it serve unlisted. The
-        // caller sees a slot on its way out, which a load waits out and then
-        // loads afresh.
+        // The hub drained while it was loading: nothing tracks it any more, so
+        // tear it down rather than let it serve unlisted.
         let registered = self
             .table()
             .slots
@@ -222,6 +269,14 @@ impl Hub {
         if !registered {
             slot.cancel.cancel();
         }
+        // Stopped while this call was loading it: the stop came later, so it
+        // wins, and this call says so rather than load the project again.
+        if load && !stopping_on_arrival && cell.stopping.load(Ordering::SeqCst) {
+            return Err(refused(
+                codes::NOT_LOADED,
+                format!("{clove_dir} was stopped while it was loading"),
+            ));
+        }
         Ok(slot)
     }
 
@@ -229,19 +284,27 @@ impl Hub {
     /// start it.
     async fn load(self, key: Utf8PathBuf, cell: SlotCell) -> Result<Arc<Slot>, LoadError> {
         let loaded = cell
+            .slot
             .get_or_try_init(|| {
                 let key = key.clone();
                 let cancel = self.0.shutdown.child_token();
+                let delay = self.0.load_delay;
                 async move {
-                    tokio::task::spawn_blocking(move || slot::open(&key, cancel))
-                        .await
-                        .unwrap_or_else(|e| {
-                            Err(refused(
-                                codes::LOAD_FAILED,
-                                format!("loading the project panicked: {e}"),
-                            ))
-                        })
-                        .map(Arc::new)
+                    tokio::task::spawn_blocking(move || {
+                        let opened = slot::open(&key, cancel);
+                        if opened.is_ok() && !delay.is_zero() {
+                            std::thread::sleep(delay);
+                        }
+                        opened
+                    })
+                    .await
+                    .unwrap_or_else(|e| {
+                        Err(refused(
+                            codes::LOAD_FAILED,
+                            format!("loading the project panicked: {e}"),
+                        ))
+                    })
+                    .map(Arc::new)
                 }
             })
             .await
@@ -253,21 +316,30 @@ impl Hub {
                 if table
                     .slots
                     .get(&key)
-                    .is_some_and(|c| Arc::ptr_eq(c, &cell) && c.get().is_none())
+                    .is_some_and(|c| Arc::ptr_eq(c, &cell) && c.slot.get().is_none())
                 {
                     table.slots.remove(&key);
                 }
                 return Err(e);
             }
         };
+        // Asked to stop while loading: started only to be torn down at once,
+        // which releases the lock and takes it out of the table.
+        if cell.stopping.load(Ordering::SeqCst) {
+            slot.cancel.cancel();
+        }
         slot.started.get_or_init(|| self.start(&slot)).await;
         Ok(slot)
     }
 
     /// The project-scoped half of a call: the caller's project, resolved to
     /// its slot's dispatcher.
-    async fn dispatcher(&self, project: &Project) -> Result<Dispatcher, RpcError> {
-        Ok(self.attach(project).await?.dispatcher.clone())
+    async fn dispatcher(
+        &self,
+        project: &Project,
+        deadline: Instant,
+    ) -> Result<Dispatcher, RpcError> {
+        Ok(self.attach(project, deadline).await?.dispatcher.clone())
     }
 
     /// Mount the slot on the web listener and start its supervised tasks.
@@ -292,7 +364,12 @@ impl Hub {
                 slot.settings.default_type,
             )
             .with_heartbeat(heartbeat);
-            let slug = site.web.mount(&slot.repo_root, app);
+            // Mounting starts the project's file watcher, whose setup blocks.
+            let (web, root) = (site.web.clone(), slot.repo_root.clone());
+            let Ok(slug) = tokio::task::spawn_blocking(move || web.mount(&root, app)).await else {
+                tokio::spawn(self.clone().supervise(Arc::clone(slot), slot.tasks()));
+                return;
+            };
             if let Ok(mut s) = slot.dispatcher.state.lock() {
                 s.set_web(
                     Some(site.addr.to_string()),
@@ -379,7 +456,9 @@ impl Hub {
             flushing.release_lock();
         })
         .await;
-        self.forget(&slot);
+        // Unmounting drops the web watcher, whose teardown blocks.
+        let (hub, forgotten) = (self.clone(), Arc::clone(&slot));
+        let _ = tokio::task::spawn_blocking(move || hub.forget(&forgotten)).await;
         slot.done.cancel();
     }
 
@@ -390,7 +469,7 @@ impl Hub {
             let current = table
                 .slots
                 .get(&slot.clove_dir)
-                .and_then(|cell| cell.get())
+                .and_then(|cell| cell.slot.get())
                 .is_some_and(|s| Arc::ptr_eq(s, slot));
             if current {
                 table.slots.remove(&slot.clove_dir);
@@ -406,27 +485,47 @@ impl Hub {
         }
     }
 
-    /// Stop serving `project`. Returns once its teardown has run (its
-    /// `daemon.lock` released), so a reload right after cannot find it held.
-    /// When nothing is left, the hub decides — under the table lock, so no
-    /// concurrent load can slip in between — to exit.
-    pub async fn detach(&self, project: &Project) -> Result<Detached, RpcError> {
+    /// Stop serving `project` — also one still loading, whose load then tears
+    /// itself down when it completes. Returns once the teardown has run (its
+    /// `daemon.lock` released), or, when that takes longer than the caller
+    /// waits (`deadline`), says it is still stopping. When nothing is left,
+    /// the hub decides — under the table lock, so no concurrent load can slip
+    /// in between — to exit.
+    pub async fn detach(&self, project: &Project, deadline: Instant) -> Result<Detached, RpcError> {
         let key = self.key(&project.clove_dir).await;
-        let slot = match &key {
+        let entry = match &key {
             Ok(key) => {
                 self.authorize(key, &project.token).await?;
-                self.table().slots.get(key).and_then(|c| c.get().cloned())
+                let entry = self.table().slots.get(key).cloned();
+                if let Some(entry) = &entry {
+                    entry.stopping.store(true, Ordering::SeqCst);
+                }
+                entry
             }
             Err(e) if e.code == codes::BAD_PROJECT => return Err(e.clone().into()),
             Err(_) => None,
         };
-        let detached = match slot {
-            Some(slot) => {
-                slot.cancel.cancel();
-                let _ = tokio::time::timeout(TEARDOWN_TIMEOUT, slot.done.cancelled()).await;
-                true
+        let (detached, stopping) = match entry {
+            None => (false, false),
+            Some(entry) => {
+                let finished = tokio::time::timeout_at(answer_by(deadline), async {
+                    // A load under way sees `stopping` and tears itself down;
+                    // wait for it first. (An init that fails at once just
+                    // means no load is running.)
+                    let slot = entry
+                        .slot
+                        .get_or_try_init(|| async { Err(()) })
+                        .await
+                        .ok()
+                        .cloned();
+                    if let Some(slot) = slot {
+                        slot.cancel.cancel();
+                        slot.done.cancelled().await;
+                    }
+                })
+                .await;
+                (true, finished.is_err())
             }
-            None => false,
         };
         let hub_exiting = {
             let mut table = self.table();
@@ -446,6 +545,7 @@ impl Hub {
         Ok(Detached {
             detached,
             hub_exiting,
+            stopping,
         })
     }
 
@@ -455,7 +555,7 @@ impl Hub {
             .table()
             .slots
             .values()
-            .filter_map(|cell| cell.get().cloned())
+            .filter_map(|cell| cell.slot.get().cloned())
             .collect();
         let mut projects: Vec<ProjectInfo> = loaded
             .iter()
@@ -488,10 +588,10 @@ impl Hub {
             table.exiting = true;
             table.slots.drain().map(|(_, cell)| cell).collect()
         };
-        for slot in cells.iter().filter_map(|cell| cell.get()) {
+        for slot in cells.iter().filter_map(|cell| cell.slot.get()) {
             slot.cancel.cancel();
         }
-        for slot in cells.iter().filter_map(|cell| cell.get()) {
+        for slot in cells.iter().filter_map(|cell| cell.slot.get()) {
             let _ = tokio::time::timeout(TEARDOWN_TIMEOUT, slot.done.cancelled()).await;
         }
     }
@@ -600,8 +700,8 @@ impl CloveRpc for Service {
         self.0.status()
     }
 
-    async fn attach(self, _: Context, project: Project) -> Result<(), RpcError> {
-        let slot = self.0.attach(&project).await?;
+    async fn attach(self, ctx: Context, project: Project) -> Result<(), RpcError> {
+        let slot = self.0.attach(&project, ctx.deadline).await?;
         // The project heartbeat: count it and reset the idle window.
         if let Ok(mut state) = slot.dispatcher.state.lock() {
             state.record_ping();
@@ -609,53 +709,84 @@ impl CloveRpc for Service {
         Ok(())
     }
 
-    async fn detach(self, _: Context, project: Project) -> Result<Detached, RpcError> {
-        self.0.detach(&project).await
+    async fn detach(self, ctx: Context, project: Project) -> Result<Detached, RpcError> {
+        self.0.detach(&project, ctx.deadline).await
     }
 
-    async fn status(self, _: Context, project: Project) -> Result<StatusResponse, RpcError> {
-        Ok(self.0.dispatcher(&project).await?.status().await)
+    async fn status(self, ctx: Context, project: Project) -> Result<StatusResponse, RpcError> {
+        Ok(self
+            .0
+            .dispatcher(&project, ctx.deadline)
+            .await?
+            .status()
+            .await)
     }
 
-    async fn change_generation(self, _: Context, project: Project) -> Result<u64, RpcError> {
-        Ok(self.0.dispatcher(&project).await?.change_generation().await)
+    async fn change_generation(self, ctx: Context, project: Project) -> Result<u64, RpcError> {
+        Ok(self
+            .0
+            .dispatcher(&project, ctx.deadline)
+            .await?
+            .change_generation()
+            .await)
     }
 
     async fn query(
         self,
-        _: Context,
+        ctx: Context,
         project: Project,
         req: QueryRequest,
     ) -> Result<QueryListResponse, RpcError> {
-        self.0.dispatcher(&project).await?.query(req).await
+        self.0
+            .dispatcher(&project, ctx.deadline)
+            .await?
+            .query(req)
+            .await
     }
 
     async fn graph(
         self,
-        _: Context,
+        ctx: Context,
         project: Project,
         req: GraphRequest,
     ) -> Result<GraphResponse, RpcError> {
-        self.0.dispatcher(&project).await?.graph(req).await
+        self.0
+            .dispatcher(&project, ctx.deadline)
+            .await?
+            .graph(req)
+            .await
     }
 
-    async fn reindex(self, _: Context, project: Project) -> Result<ReindexDone, RpcError> {
-        self.0.dispatcher(&project).await?.reindex().await
+    async fn reindex(self, ctx: Context, project: Project) -> Result<ReindexDone, RpcError> {
+        self.0
+            .dispatcher(&project, ctx.deadline)
+            .await?
+            .reindex()
+            .await
     }
 
-    async fn create(self, _: Context, project: Project, spec: NewSpec) -> Result<Value, RpcError> {
-        self.0.dispatcher(&project).await?.create(spec).await
+    async fn create(
+        self,
+        ctx: Context,
+        project: Project,
+        spec: NewSpec,
+    ) -> Result<Value, RpcError> {
+        self.0
+            .dispatcher(&project, ctx.deadline)
+            .await?
+            .create(spec)
+            .await
     }
 
     async fn set_status(
         self,
-        _: Context,
+        ctx: Context,
         project: Project,
         id: String,
         status: ItemStatus,
     ) -> Result<Value, RpcError> {
         self.0
-            .dispatcher(&project)
+            .dispatcher(&project, ctx.deadline)
             .await?
             .set_status(id, status)
             .await
@@ -663,13 +794,13 @@ impl CloveRpc for Service {
 
     async fn edit(
         self,
-        _: Context,
+        ctx: Context,
         project: Project,
         id: String,
         assignments: Vec<String>,
     ) -> Result<Value, RpcError> {
         self.0
-            .dispatcher(&project)
+            .dispatcher(&project, ctx.deadline)
             .await?
             .edit(id, assignments)
             .await
@@ -677,24 +808,28 @@ impl CloveRpc for Service {
 
     async fn apply_edit(
         self,
-        _: Context,
+        ctx: Context,
         project: Project,
         id: String,
         req: EditRequest,
     ) -> Result<Value, RpcError> {
-        self.0.dispatcher(&project).await?.apply_edit(id, req).await
+        self.0
+            .dispatcher(&project, ctx.deadline)
+            .await?
+            .apply_edit(id, req)
+            .await
     }
 
     async fn add_comment(
         self,
-        _: Context,
+        ctx: Context,
         project: Project,
         id: String,
         author: String,
         body: String,
     ) -> Result<Value, RpcError> {
         self.0
-            .dispatcher(&project)
+            .dispatcher(&project, ctx.deadline)
             .await?
             .add_comment(id, author, body)
             .await
@@ -702,23 +837,27 @@ impl CloveRpc for Service {
 
     async fn dep_add(
         self,
-        _: Context,
-        project: Project,
-        id: String,
-        dep_id: String,
-    ) -> Result<Value, RpcError> {
-        self.0.dispatcher(&project).await?.dep_add(id, dep_id).await
-    }
-
-    async fn dep_remove(
-        self,
-        _: Context,
+        ctx: Context,
         project: Project,
         id: String,
         dep_id: String,
     ) -> Result<Value, RpcError> {
         self.0
-            .dispatcher(&project)
+            .dispatcher(&project, ctx.deadline)
+            .await?
+            .dep_add(id, dep_id)
+            .await
+    }
+
+    async fn dep_remove(
+        self,
+        ctx: Context,
+        project: Project,
+        id: String,
+        dep_id: String,
+    ) -> Result<Value, RpcError> {
+        self.0
+            .dispatcher(&project, ctx.deadline)
             .await?
             .dep_remove(id, dep_id)
             .await
@@ -726,31 +865,35 @@ impl CloveRpc for Service {
 
     async fn set_parent(
         self,
-        _: Context,
+        ctx: Context,
         project: Project,
         id: String,
         parent: Option<String>,
     ) -> Result<Value, RpcError> {
         self.0
-            .dispatcher(&project)
+            .dispatcher(&project, ctx.deadline)
             .await?
             .set_parent(id, parent)
             .await
     }
 
-    async fn show(self, _: Context, project: Project, id: String) -> Result<Value, RpcError> {
-        self.0.dispatcher(&project).await?.show(id).await
+    async fn show(self, ctx: Context, project: Project, id: String) -> Result<Value, RpcError> {
+        self.0
+            .dispatcher(&project, ctx.deadline)
+            .await?
+            .show(id)
+            .await
     }
 
     async fn stats(
         self,
-        _: Context,
+        ctx: Context,
         project: Project,
         top: u32,
         include_epics: bool,
     ) -> Result<Value, RpcError> {
         self.0
-            .dispatcher(&project)
+            .dispatcher(&project, ctx.deadline)
             .await?
             .stats(top, include_epics)
             .await
@@ -768,6 +911,11 @@ mod tests {
         (dir, clove_dir)
     }
 
+    /// A deadline no test reaches.
+    fn far() -> Instant {
+        Instant::now() + Duration::from_secs(60)
+    }
+
     /// A call for `clove_dir` as its own client makes it: with its token.
     fn call(clove_dir: &Utf8Path, load: bool) -> Project {
         clove_ipc::project(clove_dir, load).unwrap()
@@ -781,14 +929,14 @@ mod tests {
         let hub = Hub::new(false, Duration::from_secs(60));
         let (_a_tmp, a) = store();
         let (_b_tmp, b) = store();
-        let alpha = hub.attach(&call(&a, true)).await.unwrap();
+        let alpha = hub.attach(&call(&a, true), far()).await.unwrap();
 
         // Load beta by hand so its task set can carry a faulty task.
         let key = slot::canonical_key(b.as_str()).unwrap();
         let beta = Arc::new(slot::open(&key, hub.shutdown().child_token()).unwrap());
         beta.started.set(()).unwrap();
         let cell: SlotCell = Arc::default();
-        assert!(cell.set(Arc::clone(&beta)).is_ok());
+        assert!(cell.slot.set(Arc::clone(&beta)).is_ok());
         hub.table().slots.insert(key, cell);
         let mut tasks = beta.tasks();
         tasks.spawn(async { panic!("injected fault") });
@@ -806,7 +954,7 @@ mod tests {
         assert_eq!(served, vec![alpha.clove_dir.to_string()]);
         assert!(!alpha.cancel.is_cancelled(), "alpha untouched");
         assert!(!hub.shutdown().is_cancelled(), "the hub keeps running");
-        hub.attach(&call(&b, true))
+        hub.attach(&call(&b, true), far())
             .await
             .expect("beta's lock was released, so it loads afresh");
     }
@@ -824,7 +972,7 @@ mod tests {
             let loads: Vec<_> = (0..4)
                 .map(|_| {
                     let (hub, a) = (hub.clone(), a.clone());
-                    tokio::spawn(async move { hub.attach(&call(&a, true)).await })
+                    tokio::spawn(async move { hub.attach(&call(&a, true), far()).await })
                 })
                 .collect();
             for load in loads {
@@ -844,29 +992,104 @@ mod tests {
     async fn a_load_abandoned_by_its_caller_never_blocks_the_next() {
         let hub = Hub::new(false, Duration::from_secs(60));
         let (_b_tmp, b) = store();
-        hub.attach(&call(&b, true)).await.unwrap(); // keeps the hub from exiting
+        hub.attach(&call(&b, true), far()).await.unwrap(); // keeps the hub from exiting
         let (_a_tmp, a) = store();
         let a_project = call(&a, false);
         let mut failures = Vec::new();
         for round in 0..16u64 {
             let loader = {
                 let (hub, a) = (hub.clone(), a.clone());
-                tokio::spawn(async move { hub.attach(&call(&a, true)).await })
+                tokio::spawn(async move { hub.attach(&call(&a, true), far()).await })
             };
             tokio::time::sleep(Duration::from_micros(round * 400)).await;
             loader.abort();
-            let mut reload = hub.attach(&call(&a, true)).await;
-            // A teardown slower than the hub's wait (a heavily loaded machine)
-            // reports NOT_LOADED; that is not what this test is about.
-            if reload.as_ref().is_err_and(|e| e.code == codes::NOT_LOADED) {
-                reload = hub.attach(&call(&a, true)).await;
-            }
-            if let Err(e) = reload {
+            if let Err(e) = hub.attach(&call(&a, true), far()).await {
                 failures.push(format!("round {round}: {}: {}", e.code, e.message));
             }
-            let _ = hub.detach(&a_project).await;
+            let _ = hub.detach(&a_project, far()).await;
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// A teardown held up past the hub's old 5s wait — its index checkpoint
+    /// stuck behind in-flight work — is reported honestly by the stop (still
+    /// stopping, lock still held), and a start right after waits it out and
+    /// succeeds (M-new).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_slow_teardown_is_reported_and_waited_out() {
+        let hub = Hub::new(false, Duration::from_secs(60));
+        let (_b_tmp, b) = store();
+        let (_a_tmp, a) = store();
+        hub.attach(&call(&b, true), far()).await.unwrap(); // keeps the hub alive
+        let slot = hub.attach(&call(&a, true), far()).await.unwrap();
+
+        // Stand in for a daemon-side reindex holding the index.
+        let index = Arc::clone(&slot.dispatcher.index);
+        let (held_tx, held) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _busy = index.lock().unwrap();
+            held_tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(6500));
+        });
+        held.recv().unwrap();
+        drop(slot);
+
+        let stopped = hub
+            .detach(
+                &call(&a, false),
+                Instant::now() + Duration::from_millis(600),
+            )
+            .await
+            .unwrap();
+        assert!(stopped.detached && stopped.stopping, "{stopped:?}");
+        let lock = clove_core::fs_safe::open_lock_file(&clove_ipc::lock_path(&a)).unwrap();
+        assert!(
+            matches!(lock.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
+            "the stop said 'still stopping' but the project's lock is free"
+        );
+        drop(lock);
+
+        let restarted = hub.attach(&call(&a, true), far()).await;
+        holder.join().unwrap();
+        let restarted = restarted.expect("the start waited out the slow teardown");
+        assert!(!restarted.cancel.is_cancelled());
+    }
+
+    /// A stop that lands while the project is still loading wins: the load is
+    /// torn down when it completes, the loading client is told so, and the
+    /// project is not left served (L-new-1).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stop_during_a_load_wins() {
+        let hub =
+            Hub::new(false, Duration::from_secs(60)).with_load_delay(Duration::from_millis(800));
+        let (_b_tmp, b) = store();
+        let (_a_tmp, a) = store();
+        hub.attach(&call(&b, true), far()).await.unwrap(); // keeps the hub from exiting
+        let loader = {
+            let (hub, a) = (hub.clone(), a.clone());
+            tokio::spawn(async move { hub.attach(&call(&a, true), far()).await })
+        };
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let detached = hub.detach(&call(&a, false), far()).await.unwrap();
+        assert!(
+            detached.detached,
+            "the stop saw nothing to stop: {detached:?}"
+        );
+        let loaded = loader.await.unwrap();
+        assert!(loaded.is_err(), "the load it raced still succeeded");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let served: Vec<String> = hub
+            .status()
+            .projects
+            .into_iter()
+            .map(|p| p.clove_dir)
+            .collect();
+        assert!(
+            !served
+                .iter()
+                .any(|dir| dir.ends_with(a.as_str().trim_start_matches("/private"))),
+            "A is served after its stop: {served:?}"
+        );
     }
 
     /// A project path is the caller's own, absolute; a relative one would be
@@ -880,7 +1103,7 @@ mod tests {
                 load,
                 token: "0".repeat(64),
             };
-            let err = hub.attach(&relative).await.err().expect("refused");
+            let err = hub.attach(&relative, far()).await.err().expect("refused");
             assert_eq!(err.code, codes::BAD_PROJECT);
         }
     }
@@ -892,10 +1115,14 @@ mod tests {
         let hub = Hub::new(false, Duration::from_secs(60));
         let (_a_tmp, a) = store();
         let (_b_tmp, b) = store();
-        hub.attach(&call(&a, true)).await.unwrap();
-        let detached = hub.detach(&call(&a, false)).await.unwrap();
+        hub.attach(&call(&a, true), far()).await.unwrap();
+        let detached = hub.detach(&call(&a, false), far()).await.unwrap();
         assert!(detached.hub_exiting);
-        let err = hub.attach(&call(&b, true)).await.err().expect("refused");
+        let err = hub
+            .attach(&call(&b, true), far())
+            .await
+            .err()
+            .expect("refused");
         assert_eq!(err.code, codes::SHUTTING_DOWN);
     }
 
@@ -913,21 +1140,21 @@ mod tests {
             token: "f".repeat(64),
             ..a_call.clone()
         };
-        let err = hub.attach(&wrong).await.err().expect("refused");
+        let err = hub.attach(&wrong, far()).await.err().expect("refused");
         assert_eq!(err.code, codes::BAD_TOKEN);
         let borrowed = Project {
             token: a_call.token.clone(),
             ..b_call.clone()
         };
-        let err = hub.attach(&borrowed).await.err().expect("refused");
+        let err = hub.attach(&borrowed, far()).await.err().expect("refused");
         assert_eq!(err.code, codes::BAD_TOKEN);
         assert!(
             hub.status().projects.is_empty(),
             "a refused call loaded something"
         );
 
-        hub.attach(&a_call).await.expect("A's own token");
-        let err = hub.detach(&borrowed).await.expect_err("refused");
+        hub.attach(&a_call, far()).await.expect("A's own token");
+        let err = hub.detach(&borrowed, far()).await.expect_err("refused");
         assert_eq!(err.code, codes::BAD_TOKEN);
         assert_eq!(
             hub.status().projects.len(),
@@ -947,7 +1174,11 @@ mod tests {
         std::fs::create_dir(&elsewhere).unwrap();
         std::fs::remove_dir(a.join("issues")).unwrap();
         std::os::unix::fs::symlink(&elsewhere, a.join("issues")).unwrap();
-        let err = hub.attach(&call(&a, true)).await.err().expect("refused");
+        let err = hub
+            .attach(&call(&a, true), far())
+            .await
+            .err()
+            .expect("refused");
         assert_eq!(err.code, codes::LOAD_FAILED, "{}", err.message);
         assert!(hub.status().projects.is_empty());
     }
@@ -958,12 +1189,12 @@ mod tests {
         let hub = Hub::new(false, Duration::from_secs(60));
         let (_tmp, a) = store();
         let old = call(&a, true);
-        hub.attach(&old).await.unwrap();
+        hub.attach(&old, far()).await.unwrap();
         std::fs::remove_file(clove_core::daemon_token::token_path(&a)).unwrap();
         let new = call(&a, true);
         assert_ne!(new.token, old.token);
-        hub.attach(&new).await.expect("the new token");
-        let err = hub.attach(&old).await.err().expect("refused");
+        hub.attach(&new, far()).await.expect("the new token");
+        let err = hub.attach(&old, far()).await.err().expect("refused");
         assert_eq!(err.code, codes::BAD_TOKEN);
     }
 
@@ -975,7 +1206,7 @@ mod tests {
         let hub = Hub::new(false, Duration::from_secs(60));
         let (_tmp, a) = store();
         let old = call(&a, true);
-        hub.attach(&old).await.unwrap();
+        hub.attach(&old, far()).await.unwrap();
         let path = clove_core::daemon_token::token_path(&a);
         let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
         let new_token: String = old.token.chars().rev().collect();
@@ -988,8 +1219,8 @@ mod tests {
             token: new_token,
             ..old.clone()
         };
-        hub.attach(&new).await.expect("the new token");
-        let err = hub.attach(&old).await.err().expect("refused");
+        hub.attach(&new, far()).await.expect("the new token");
+        let err = hub.attach(&old, far()).await.err().expect("refused");
         assert_eq!(err.code, codes::BAD_TOKEN);
     }
 
@@ -1008,7 +1239,7 @@ mod tests {
             load: true,
             token: token.to_owned(),
         };
-        let err = hub.attach(&planted).await.err().expect("refused");
+        let err = hub.attach(&planted, far()).await.err().expect("refused");
         assert_eq!(err.code, codes::BAD_TOKEN);
     }
 }

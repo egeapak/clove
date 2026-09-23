@@ -231,10 +231,14 @@ pub struct ProjectInfo {
 /// The reply to `detach`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Detached {
-    /// Whether the project was being served.
+    /// Whether the project was being served (or loaded).
     pub detached: bool,
     /// Whether the hub is exiting because nothing is left to serve.
     pub hub_exiting: bool,
+    /// The project's teardown had not finished by the call's deadline — its
+    /// index still flushing, its `daemon.lock` still held. It will finish.
+    #[serde(default)]
+    pub stopping: bool,
 }
 
 /// A connection before and after the handshake: the length-delimited frames
