@@ -47,6 +47,16 @@
 > Teardowns wait as long as the caller's own deadline and a stop reports
 > "still stopping" when they outlast it; a stop during a load wins; a hub
 > stopped mid-load has exited when its pid file goes.
+>
+> **Fourth review round.** A load arms the project's watcher before its
+> startup sweep and only then counts as started. Only a loading client
+> writes the token (reads never do), a symlinked `.clove` gets no token work,
+> and a token is trusted only if clove recorded issuing it (a per-user record
+> under the clove home); `clove doctor` flags a tracked token. `clove daemon
+> stop` always asks the hub (a loading project is stopped too); a hub whose
+> last project stopped slowly exits once it is down; `stop --all` tells a
+> restarted daemon from one that did not stop; a reindex cut off by a stop
+> rebuilds locally after the daemon's.
 
 ## 1. Why
 
