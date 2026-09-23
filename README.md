@@ -202,7 +202,9 @@ resolves the conflict by policy (`--prefer newer|local|remote|manual`; default
 too (`--no-comments` to skip). `--dry-run` plans without touching either side. A
 per-repo last-sync clock lives under `.clove/sync/` (git-ignored), and a running
 daemon can run the sync on a timer (`[daemon] github_sync_interval_min` +
-`github_sync_repo`). Auth via `GITHUB_TOKEN` or the `gh` CLI. Requires the
+`github_sync_repo`, which must be one of the project's own GitHub remotes). Auth
+via `GITHUB_TOKEN` or the `gh` CLI — the daemon's timed sync uses `gh` only, since
+the daemon does not inherit your shell's `GITHUB_TOKEN`. Requires the
 **`clove-sync-github` plugin** (`cargo install clove-sync-github`; see
 [Install](#install)) — the pre-built release bundle includes it.
 

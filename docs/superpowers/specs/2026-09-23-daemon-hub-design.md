@@ -3,6 +3,28 @@
 > **Status:** Design + implementation plan — 2026-09-23, targeting clove 0.1.1.
 > Reverses DESIGN.md §8.1's "one `cloved` per `.clove/` — never system-wide"
 > (the user approved the reversal). DESIGN.md §8 is rewritten alongside this.
+>
+> **Revised by the review fix round (same day); DESIGN.md §8 is the live
+> description and wins where the two disagree.** Materially:
+> - **No connection binding.** The handshake carries only the protocol version;
+>   every project-scoped call carries a `Project { clove_dir, load }` — the
+>   caller's own `.clove/`, made absolute and canonical *by the client* — and the
+>   hub resolves it per call, refusing a relative path (`BAD_PROJECT`). `HubRpc`
+>   is gone: `ping`/`hub_status`/`attach`/`detach` are `CloveRpc` methods, and
+>   `detach` names the caller's own project. No RPC, MCP tool, or web API takes a
+>   parameter that names another project (§2.3/§2.4 below describe the
+>   superseded per-connection design).
+> - **Project-agnostic spawn.** `cloved run` has no `--clove-dir`; a hub is spawned
+>   bare, working from its own private runtime directory (never `/`, never the
+>   spawner's directory), with a pinned minimal environment (no `GITHUB_TOKEN`; the
+>   daemon's timed sync uses `gh auth token`) — §2.6 below is superseded.
+> - **Exit decision is atomic with admission** (one lock); `ensure_daemon` waits
+>   out a `SHUTTING_DOWN` hub and uses `hub.lock` as the liveness oracle.
+> - **Security:** peer-user checks on both ends, symlink-safe runtime dir and
+>   `.clove/` files, Windows per-user runtime dir + SID-keyed pipe + SID DACL +
+>   server verification, periodic GitHub sync only to a project's own remote,
+>   stable per-path web slugs, event-socket Origin must match host *and* port,
+>   CSP on HTML.
 
 ## 1. Why
 
