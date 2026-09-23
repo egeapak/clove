@@ -114,8 +114,11 @@ CLI:
 
 ### 2.5 Web: one port, one prefix per project
 
-The hub binds one listener (`CLOVED_WEB_PORT`, else 7373; ephemeral fallback from
-#55). Routes:
+The hub binds one listener when the first web-enabled project loads
+(`CLOVED_WEB_PORT`, else that project's `[web] port`, 7373 by default; ephemeral
+fallback from #55). As built, lazily: binding at hub start would have ignored
+`[web] port` entirely and held the port for a hub serving only web-disabled
+projects. Routes:
 
 - `/p/<slug>/api/v1/…` and `/p/<slug>/…` — dispatched to that slot's router (the
   existing `build_router`) with the prefix stripped. Slots register/unregister
