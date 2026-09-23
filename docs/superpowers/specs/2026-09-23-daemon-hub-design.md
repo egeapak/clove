@@ -39,6 +39,14 @@
 >   the picker runs none, every response is `nosniff`; symlinked directories
 >   under `.clove/` are refused; the sync remote gate reads only the work
 >   tree's own `.git`; Windows checks read the pipe handle, not a pid.
+>
+> **Third review round.** Protocol **8** (the token is a wire change;
+> `Project` refuses unknown fields). A token is trusted only as a private
+> (`0600`, owned) regular file — a committed one is replaced — its creation
+> git-ignores it in older repositories, and the hub reads it on every call.
+> Teardowns wait as long as the caller's own deadline and a stop reports
+> "still stopping" when they outlast it; a stop during a load wins; a hub
+> stopped mid-load has exited when its pid file goes.
 
 ## 1. Why
 
