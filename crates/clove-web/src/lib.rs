@@ -72,6 +72,10 @@ pub struct AppState {
     /// The SPA entry page rewritten for a hub prefix ([`AppState::with_base_path`]);
     /// `None` serves the embedded page as built (root base).
     index_page: Option<Arc<Vec<u8>>>,
+    /// Flipped to `true` when the project is unmounted from the hub: open event
+    /// sockets close rather than keep a tab listening to a project nobody
+    /// serves any more.
+    closing: Arc<tokio::sync::watch::Sender<bool>>,
 }
 
 impl AppState {
@@ -126,6 +130,7 @@ impl AppState {
             seq: Arc::new(AtomicU64::new(0)),
             heartbeat: None,
             index_page: None,
+            closing: Arc::new(tokio::sync::watch::channel(false).0),
         }
     }
 
@@ -164,6 +169,19 @@ impl AppState {
     pub fn with_base_path(mut self, base: &str) -> Self {
         self.index_page = assets::index_for_base(base).map(Arc::new);
         self
+    }
+
+    /// Close this project's live connections (the hub unmounted it).
+    pub fn close(&self) {
+        self.closing.send_replace(true);
+    }
+
+    /// Resolves once [`AppState::close`] has been called.
+    pub(crate) fn closed(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let mut rx = self.closing.subscribe();
+        async move {
+            let _ = rx.wait_for(|closed| *closed).await;
+        }
     }
 
     /// The rewritten SPA entry page, when this state serves under a prefix.

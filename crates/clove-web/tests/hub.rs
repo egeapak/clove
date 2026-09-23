@@ -369,3 +369,154 @@ async fn the_hub_rejects_a_non_local_host() {
         assert_eq!(reply.status, 403, "{path}");
     }
 }
+
+/// A fresh server state for an existing repo (a second mount of it).
+fn state_for(root: &Utf8Path) -> AppState {
+    AppState::new(
+        ItemStore::new(root.to_owned()),
+        root.join(".clove").join("issues"),
+        "proj".to_owned(),
+        "daemon",
+        true,
+        ItemType::Feature,
+    )
+}
+
+/// A slug belongs to one project for the hub's lifetime: after `proj` is
+/// unmounted, a different repo also named `proj` gets another slug, so a stale
+/// tab still open on `/p/proj/` can never write into it.
+#[tokio::test]
+async fn a_slug_is_never_handed_to_another_project() {
+    let (_tmp, parent) = tmp_root();
+    let hub = HubWeb::new();
+    let (a_root, a) = repo(&parent.join("one"), "proj", "A");
+    let (b_root, b) = repo(&parent.join("two"), "proj", "B");
+    assert_eq!(hub.mount(&a_root, a), "proj");
+    hub.unmount("proj");
+    let b_slug = hub.mount(&b_root, b);
+    assert_ne!(b_slug, "proj", "the slug went to another repo");
+    let addr = serve(&hub).await;
+
+    let stale = request(
+        addr,
+        "POST",
+        "/p/proj/api/v1/items",
+        "localhost",
+        Some(r#"{"title":"from a stale tab"}"#),
+    )
+    .await;
+    assert_eq!(stale.status, 404, "{}", stale.body);
+    assert_eq!(
+        std::fs::read_dir(b_root.join(".clove/issues"))
+            .unwrap()
+            .count(),
+        1,
+        "nothing was written into B"
+    );
+
+    hub.unmount(&b_slug);
+    assert_eq!(
+        hub.mount(&a_root, state_for(&a_root)),
+        "proj",
+        "A keeps its slug"
+    );
+}
+
+/// Open a WebSocket to `path`, with an optional `Origin`; returns the stream
+/// and the handshake's response head.
+async fn ws_connect(
+    addr: std::net::SocketAddr,
+    path: &str,
+    origin: Option<&str>,
+) -> (tokio::net::TcpStream, String) {
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let origin = origin
+        .map(|o| format!("Origin: {o}\r\n"))
+        .unwrap_or_default();
+    let req = format!(
+        "GET {path} HTTP/1.1\r\nHost: localhost:{}\r\n{origin}Connection: Upgrade\r\n\
+         Upgrade: websocket\r\nSec-WebSocket-Version: 13\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
+        addr.port()
+    );
+    stream.write_all(req.as_bytes()).await.unwrap();
+    let mut buf = [0u8; 1024];
+    let n = tokio::time::timeout(std::time::Duration::from_secs(5), stream.read(&mut buf))
+        .await
+        .expect("handshake reply")
+        .unwrap();
+    (stream, String::from_utf8_lossy(&buf[..n]).into_owned())
+}
+
+/// Unmounting a project closes its live-update sockets: a tab left open must
+/// not keep listening to a project the hub no longer serves.
+#[tokio::test]
+async fn unmounting_closes_the_projects_event_sockets() {
+    let (_tmp, parent) = tmp_root();
+    let hub = HubWeb::new();
+    let (a_root, a) = repo(&parent, "alpha", "A");
+    let slug = hub.mount(&a_root, a);
+    let addr = serve(&hub).await;
+    let (mut stream, head) = ws_connect(addr, "/p/alpha/api/v1/events", None).await;
+    assert!(head.starts_with("HTTP/1.1 101"), "{head}");
+
+    hub.unmount(&slug);
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut buf = [0u8; 1024];
+        loop {
+            match stream.read(&mut buf).await {
+                Ok(0) | Err(_) => return true,
+                // A close frame (opcode 0x8) ends the conversation too.
+                Ok(n) if buf[..n].contains(&0x88) => return true,
+                Ok(_) => continue,
+            }
+        }
+    })
+    .await;
+    assert!(
+        closed.unwrap_or(false),
+        "the socket stayed open after unmount"
+    );
+}
+
+/// A page on another local port is another origin: its WebSocket handshake is
+/// refused even though it, too, is loopback.
+#[tokio::test]
+async fn an_event_socket_from_another_local_port_is_refused() {
+    let (_tmp, parent) = tmp_root();
+    let hub = HubWeb::new();
+    let (a_root, a) = repo(&parent, "alpha", "A");
+    hub.mount(&a_root, a);
+    let addr = serve(&hub).await;
+    let (_s, head) = ws_connect(
+        addr,
+        "/p/alpha/api/v1/events",
+        Some("http://localhost:3000"),
+    )
+    .await;
+    assert!(head.starts_with("HTTP/1.1 403"), "{head}");
+    let same = format!("http://localhost:{}", addr.port());
+    let (_s, head) = ws_connect(addr, "/p/alpha/api/v1/events", Some(&same)).await;
+    assert!(head.starts_with("HTTP/1.1 101"), "{head}");
+}
+
+/// Hub pages carry a Content-Security-Policy.
+#[tokio::test]
+async fn hub_pages_carry_a_content_security_policy() {
+    let (_tmp, parent) = tmp_root();
+    let hub = HubWeb::new();
+    let (a_root, a) = repo(&parent, "alpha", "A");
+    let (b_root, b) = repo(&parent, "beta", "B");
+    hub.mount(&a_root, a);
+    hub.mount(&b_root, b);
+    let addr = serve(&hub).await;
+    for path in ["/", "/p/alpha/", "/p/alpha/board"] {
+        let reply = get(addr, path).await;
+        let csp = reply.header("content-security-policy").unwrap_or_default();
+        assert!(
+            csp.contains("default-src 'self'"),
+            "{path}: {:?}",
+            reply.head
+        );
+    }
+}

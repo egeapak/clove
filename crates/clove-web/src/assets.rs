@@ -128,14 +128,16 @@ pub async fn static_handler(
     let candidate = if path.is_empty() { "index.html" } else { path };
     let asset = map.get(candidate);
 
+    let csp = content_security_policy(&headers);
     // The SPA entry page. Under a hub prefix it is the rewritten copy, which
     // is never cached: the prefix is per-project, the build is not.
     if asset.is_none() || candidate == "index.html" {
         if let Some(page) = state.index_page() {
             return (
                 [
-                    (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-                    (header::CACHE_CONTROL, "no-cache"),
+                    (header::CONTENT_TYPE, "text/html; charset=utf-8".to_owned()),
+                    (header::CACHE_CONTROL, "no-cache".to_owned()),
+                    (header::CONTENT_SECURITY_POLICY, csp),
                 ],
                 page.to_vec(),
             )
@@ -147,8 +149,38 @@ pub async fn static_handler(
     let Some(asset) = asset else {
         return (StatusCode::NOT_FOUND, "index.html missing from build").into_response();
     };
+    let mut response = serve_asset(&headers, asset);
+    if asset.mime.starts_with("text/html") {
+        if let Ok(value) = csp.parse() {
+            response
+                .headers_mut()
+                .insert(header::CONTENT_SECURITY_POLICY, value);
+        }
+    }
+    response
+}
 
-    if accepts_gzip(&headers) {
+/// The Content-Security-Policy for an HTML page served to a request with
+/// these headers: everything from this origin only (inline scripts and styles
+/// included — SvelteKit boots from an inline script whose base the hub
+/// rewrites per project), and the live-update socket on this same host.
+pub(crate) fn content_security_policy(headers: &HeaderMap) -> String {
+    let socket = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .filter(|host| crate::host_is_local(host))
+        .map(|host| format!(" ws://{host}"))
+        .unwrap_or_default();
+    format!(
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; \
+         style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; \
+         connect-src 'self'{socket}; object-src 'none'; base-uri 'self'; \
+         form-action 'self'; frame-ancestors 'none'"
+    )
+}
+
+fn serve_asset(headers: &HeaderMap, asset: &Asset) -> Response {
+    if accepts_gzip(headers) {
         (
             [
                 (header::CONTENT_TYPE, asset.mime.as_str()),

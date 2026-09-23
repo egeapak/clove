@@ -52,6 +52,15 @@ fn origin_is_local(origin: &str) -> bool {
     crate::host_is_local(authority)
 }
 
+/// Whether `origin` is this very server: same host *and* port as the `Host`
+/// the request was sent to. Another loopback port is another origin — any
+/// local dev server a user has open would otherwise read the feed.
+fn origin_matches_host(origin: &str, host: &str) -> bool {
+    let after = origin.split_once("://").map(|(_, r)| r).unwrap_or(origin);
+    let authority = after.split(['/', '?', '#']).next().unwrap_or(after);
+    origin_is_local(origin) && authority.eq_ignore_ascii_case(host)
+}
+
 /// The `/api/v1/events` WebSocket upgrade handler.
 pub async fn ws_handler(
     State(state): State<AppState>,
@@ -61,7 +70,11 @@ pub async fn ws_handler(
     // Reject cross-origin handshakes before upgrading (the Host middleware covers
     // the Host header; Origin is the browser-controlled cross-origin signal).
     if let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
-        if !origin_is_local(origin) {
+        let same_origin = match headers.get(header::HOST).and_then(|v| v.to_str().ok()) {
+            Some(host) => origin_matches_host(origin, host),
+            None => origin_is_local(origin),
+        };
+        if !same_origin {
             return (StatusCode::FORBIDDEN, "forbidden: cross-origin WebSocket").into_response();
         }
     }
@@ -71,6 +84,7 @@ pub async fn ws_handler(
 async fn handle_socket(socket: WebSocket, state: AppState) {
     let (mut sender, mut receiver) = socket.split();
     let mut rx = state.events.subscribe();
+    let closed = state.closed();
 
     // Greet the client with the current sequence and serving mode.
     let hello = Event::Hello {
@@ -114,11 +128,22 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         }
     });
 
-    // Drain inbound frames (client pings/close) until the socket closes.
-    while let Some(Ok(msg)) = receiver.next().await {
-        if matches!(msg, Message::Close(_)) {
-            break;
+    // The socket needs nothing more from the project: holding its state here
+    // would keep the event channel open after the hub unmounts it.
+    drop(state);
+
+    // Drain inbound frames (client pings/close) until the socket closes, the
+    // project is unmounted, or forwarding stops.
+    let drain = async {
+        while let Some(Ok(msg)) = receiver.next().await {
+            if matches!(msg, Message::Close(_)) {
+                break;
+            }
         }
+    };
+    tokio::select! {
+        _ = drain => {}
+        _ = closed => {}
     }
     forward.abort();
 }
@@ -137,6 +162,27 @@ mod tests {
         ] {
             assert!(origin_is_local(o), "should be local: {o}");
         }
+    }
+
+    #[test]
+    fn only_this_servers_own_origin_matches() {
+        use super::origin_matches_host;
+        assert!(origin_matches_host(
+            "http://127.0.0.1:7373",
+            "127.0.0.1:7373"
+        ));
+        assert!(!origin_matches_host(
+            "http://localhost:3000",
+            "localhost:7373"
+        ));
+        assert!(!origin_matches_host(
+            "http://127.0.0.1:7373",
+            "localhost:7373"
+        ));
+        assert!(!origin_matches_host(
+            "http://evil.example:7373",
+            "evil.example:7373"
+        ));
     }
 
     #[test]

@@ -7,11 +7,11 @@
 //! server runs (the hub loads and evicts them), so the table sits behind a lock
 //! rather than being baked into an immutable axum route set.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, RwLock};
 
 use axum::extract::{Request, State};
-use axum::http::{StatusCode, Uri};
+use axum::http::{header, HeaderMap, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum::Router;
@@ -26,13 +26,24 @@ use crate::{build_router, host_guard, AppState};
 /// The hub's table of mounted projects. Cheap to clone; clones share the table.
 #[derive(Clone, Default)]
 pub struct HubWeb {
-    projects: Arc<RwLock<BTreeMap<String, Mounted>>>,
+    projects: Arc<RwLock<Registry>>,
+}
+
+#[derive(Default)]
+struct Registry {
+    mounted: BTreeMap<String, Mounted>,
+    /// Every slug ever handed out, by the repository it went to. A slug never
+    /// moves to another repository for the life of the hub: a tab left open on
+    /// `/p/<slug>/` must never start writing into a different project.
+    assigned: HashMap<Utf8PathBuf, String>,
 }
 
 struct Mounted {
     name: String,
     root: Utf8PathBuf,
     router: Router,
+    /// Closes the project's event sockets on unmount.
+    state: AppState,
     /// The project's live-update watcher; dropped (and so stopped) on unmount.
     _watcher: Option<notify::RecommendedWatcher>,
 }
@@ -56,32 +67,50 @@ impl HubWeb {
     /// watcher (live updates) runs until the project is unmounted.
     ///
     /// The slug is the repo directory's name, so bookmarks survive a hub
-    /// restart; only when that name is already taken by another loaded project
-    /// does it gain a suffix derived from the path.
+    /// restart; when that name was already given to another repository during
+    /// this hub's life it gains a suffix derived from the path. A repository
+    /// keeps its slug across unmount and remount.
     pub fn mount(&self, root: &Utf8Path, state: AppState) -> String {
         let name = root.file_name().unwrap_or("project").to_owned();
-        let mut projects = self.projects.write().unwrap_or_else(|e| e.into_inner());
-        let slug = unique_slug(&projects, &name, root);
+        let mut registry = self.projects.write().unwrap_or_else(|e| e.into_inner());
+        let slug = match registry.assigned.get(root) {
+            Some(slug) => slug.clone(),
+            None => {
+                let slug = unique_slug(&registry.assigned, &name, root);
+                registry.assigned.insert(root.to_owned(), slug.clone());
+                slug
+            }
+        };
         let state = state.with_base_path(&format!("/p/{slug}"));
         let watcher = crate::watch::spawn(state.clone());
-        projects.insert(
+        let previous = registry.mounted.insert(
             slug.clone(),
             Mounted {
                 name,
                 root: root.to_owned(),
-                router: build_router(state),
+                router: build_router(state.clone()),
+                state,
                 _watcher: watcher,
             },
         );
+        if let Some(previous) = previous {
+            previous.state.close();
+        }
         slug
     }
 
-    /// Remove a project; its URLs answer 404 from now on.
+    /// Remove a project: its URLs answer 404 from now on, and its open event
+    /// sockets close.
     pub fn unmount(&self, slug: &str) {
-        self.projects
+        let removed = self
+            .projects
             .write()
             .unwrap_or_else(|e| e.into_inner())
+            .mounted
             .remove(slug);
+        if let Some(mounted) = removed {
+            mounted.state.close();
+        }
     }
 
     /// Every mounted project, by slug.
@@ -89,6 +118,7 @@ impl HubWeb {
         self.projects
             .read()
             .unwrap_or_else(|e| e.into_inner())
+            .mounted
             .iter()
             .map(|(slug, m)| ProjectEntry {
                 slug: slug.clone(),
@@ -118,15 +148,16 @@ impl HubWeb {
         self.projects
             .read()
             .unwrap_or_else(|e| e.into_inner())
+            .mounted
             .get(slug)
             .map(|m| m.router.clone())
     }
 
     /// The slug when exactly one project is mounted.
     fn only_slug(&self) -> Option<String> {
-        let projects = self.projects.read().unwrap_or_else(|e| e.into_inner());
-        match projects.len() {
-            1 => projects.keys().next().cloned(),
+        let registry = self.projects.read().unwrap_or_else(|e| e.into_inner());
+        match registry.mounted.len() {
+            1 => registry.mounted.keys().next().cloned(),
             _ => None,
         }
     }
@@ -137,11 +168,18 @@ async fn list_projects(State(hub): State<HubWeb>) -> Response {
 }
 
 /// `/`: straight into the only project, else a picker.
-async fn root_page(State(hub): State<HubWeb>) -> Response {
+async fn root_page(State(hub): State<HubWeb>, headers: HeaderMap) -> Response {
     if let Some(slug) = hub.only_slug() {
         return Redirect::temporary(&format!("/p/{slug}/")).into_response();
     }
-    Html(picker_html(&hub.projects())).into_response()
+    (
+        [(
+            header::CONTENT_SECURITY_POLICY,
+            crate::assets::content_security_policy(&headers),
+        )],
+        Html(picker_html(&hub.projects())),
+    )
+        .into_response()
 }
 
 async fn dispatch(State(hub): State<HubWeb>, mut request: Request) -> Response {
@@ -191,15 +229,16 @@ fn not_found(message: &str) -> Response {
     .into_response()
 }
 
-fn unique_slug(taken: &BTreeMap<String, Mounted>, name: &str, root: &Utf8Path) -> String {
+fn unique_slug(assigned: &HashMap<Utf8PathBuf, String>, name: &str, root: &Utf8Path) -> String {
+    let taken = |slug: &str| assigned.values().any(|s| s == slug);
     let base = slugify(name);
-    if !taken.contains_key(&base) {
+    if !taken(&base) {
         return base;
     }
     let hash = path_hash(root);
     let mut candidate = format!("{base}-{}", &hash[..6]);
     let mut n = 2;
-    while taken.contains_key(&candidate) {
+    while taken(&candidate) {
         candidate = format!("{base}-{}-{n}", &hash[..6]);
         n += 1;
     }
