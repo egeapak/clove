@@ -164,7 +164,9 @@ list, an item detail view (Markdown body, dependency tree, comments, inline
 edits), and a timeline — with live updates via a file-watcher. The SPA is built
 into the binary (no Node needed to run). When a daemon is running it serves the
 web UI itself (port `7373` by default), and `clove serve` hands off to it instead
-of starting a second server. The web API mirrors the CLI under `/api/v1` with the
+of starting a second server. When another project already holds the port, the
+next one serves on a free port and `clove serve` prints where; an explicit
+`--port` is always honored. The web API mirrors the CLI under `/api/v1` with the
 same JSON envelope and exit-code semantics.
 
 ## Interop & GitHub sync

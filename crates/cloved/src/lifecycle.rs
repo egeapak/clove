@@ -139,10 +139,10 @@ pub fn run(clove_dir: &Utf8Path) -> anyhow::Result<()> {
         .with_heartbeat(heartbeat)
     });
     // The web address is advertised to clients only *after* a successful bind
-    // (inside `serve_web`), never up front: per-project daemons share one fixed
-    // port, so a second daemon that loses the bind must not claim it serves the
-    // web UI — else `clove serve` would hand the user off to another project's
-    // tracker (D-daemon-5).
+    // (inside `serve_web`), never up front: per-project daemons share one
+    // configured port, so the address a daemon ends up serving on is only known
+    // once it has bound — advertising the configured one would hand `clove serve`
+    // off to another project's tracker (D-daemon-5).
     let web_addr: std::net::SocketAddr = (std::net::Ipv4Addr::LOCALHOST, web_port).into();
 
     // 3. Tokio runtime — 2 workers (IPC + watcher), per DESIGN §8.1.
@@ -319,37 +319,34 @@ fn write_pid(clove_dir: &Utf8Path) -> std::io::Result<()> {
 /// is an optional accelerator like the rest of the daemon. Resolves never on the
 /// success path so the `select!` arm only completes if serving truly ends.
 ///
-/// The daemon's `web_addr` (surfaced by `STATUS` and trusted by `clove serve`) is
-/// advertised **only after the bind succeeds** and cleared if serving later
-/// errors, so a daemon that lost the shared port never claims to serve the UI
-/// (D-daemon-5).
+/// Per-project daemons share one configured port: a daemon that finds it taken
+/// serves on a free port instead. The daemon's `web_addr` (surfaced by `STATUS`
+/// and trusted by `clove serve`) is the address actually bound, advertised
+/// **only after the bind succeeds** and cleared if serving later errors, so it
+/// never points at another project's tracker (D-daemon-5).
 async fn serve_web(
     state: Option<clove_web::AppState>,
     addr: std::net::SocketAddr,
     daemon_state: Arc<Mutex<DaemonState>>,
 ) {
     if let Some(state) = state {
-        match tokio::net::TcpListener::bind(addr).await {
+        match clove_web::bind_or_free_port(addr).await {
             Ok(listener) => {
+                let bound = listener.local_addr().unwrap_or(addr);
+                if bound.port() != addr.port() {
+                    eprintln!("cloved: web UI port {addr} in use; serving on {bound}");
+                }
                 // We hold the port: now it is safe to advertise the address.
                 if let Ok(mut s) = daemon_state.lock() {
-                    s.set_web_addr(Some(addr.to_string()));
+                    s.set_web_addr(Some(bound.to_string()));
                 }
                 if let Err(e) = clove_web::serve_with_watch_on(state, listener).await {
-                    eprintln!("cloved: web server error ({addr}): {e}");
+                    eprintln!("cloved: web server error ({bound}): {e}");
                     // Serving ended in error — stop advertising a UI we no longer serve.
                     if let Ok(mut s) = daemon_state.lock() {
                         s.set_web_addr(None);
                     }
                 }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-                // Expected when another daemon or `clove serve` already holds the
-                // port (per-project daemons share one web port). The daemon keeps
-                // running without the web UI and does NOT advertise `web_addr`.
-                eprintln!(
-                    "cloved: web UI port {addr} in use; this daemon will not serve the web UI"
-                );
             }
             Err(e) => {
                 eprintln!("cloved: web server bind error ({addr}): {e}");

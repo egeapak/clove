@@ -287,6 +287,19 @@ pub async fn serve(state: AppState, addr: SocketAddr) -> std::io::Result<()> {
     serve_on(state, listener).await
 }
 
+/// Bind `addr`, or a free port on the same interface if another process already
+/// holds it. Per-project daemons and `clove serve` share one configured port; the
+/// first to bind keeps it and the rest still get a reachable UI, advertised by
+/// the address the returned listener reports.
+pub async fn bind_or_free_port(addr: SocketAddr) -> std::io::Result<tokio::net::TcpListener> {
+    match tokio::net::TcpListener::bind(addr).await {
+        Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {
+            tokio::net::TcpListener::bind(SocketAddr::new(addr.ip(), 0)).await
+        }
+        bound => bound,
+    }
+}
+
 /// Serve the web UI on an already-bound `listener`. Splitting the bind out lets a
 /// caller (the daemon) learn whether the bind succeeded *before* committing to
 /// serve — e.g. to only advertise its web address once it truly holds the port.
