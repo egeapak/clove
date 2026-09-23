@@ -422,6 +422,7 @@ mod tests {
             & 0o777
     }
 
+    #[cfg(unix)]
     const SOME_TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
     #[test]

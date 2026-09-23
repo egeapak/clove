@@ -42,6 +42,7 @@ fn run_in(dir: &Path, args: &[&str]) -> std::process::Output {
 
 /// Wait until the daemon's watcher for the project at `root` watches: until
 /// then the daemon leaves reads to the index and the files.
+#[cfg(unix)]
 fn wait_watching(root: &Path) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     loop {
