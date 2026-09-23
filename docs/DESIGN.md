@@ -1582,9 +1582,9 @@ protocol version; the hub answers exactly one `Welcome`; after an `ok` the
 *same* framed stream carries tarpc. Nothing binds a connection to a project.
 
 ```
-client → {"hello":"clove","protocol":7}
-hub    → {"welcome":"ok","protocol":7}                                          → CloveRpc
-       | {"welcome":"err","protocol":7,"code":"PROTOCOL_MISMATCH","message":…} → closed
+client → {"hello":"clove","protocol":8}
+hub    → {"welcome":"ok","protocol":8}                                          → CloveRpc
+       | {"welcome":"err","protocol":8,"code":"PROTOCOL_MISMATCH","message":…} → closed
 ```
 
 **Every project-scoped call names its project**, as a `Project { clove_dir, load,
@@ -1628,7 +1628,7 @@ teardown has run and its lock is free), `status`, `change_generation`, `query`,
 
 **`PROTOCOL_VERSION`** gates a mixed-version pair; the client fails a mismatch
 and falls back, which is safe because the daemon is a cache, not a source of
-truth. It is **7**:
+truth. It is **8**:
 
 | v | change |
 |---|---|
@@ -1636,9 +1636,10 @@ truth. It is **7**:
 | 4 | `change_generation()` for MCP `resources/updated` push |
 | 5 | `QueryRequest`'s five scalar filter fields → one `filters: view::Filters`; `GraphRequest::Blocked` carries an `order` and drops the dead `include_warnings` |
 | 6 | `search` RPC and `SearchRequest` **removed** — search is a file scan on every surface (§7.8, read-path roadmap §6.1), so the daemon has nothing to answer with |
-| 7 | the hub: every connection opens with a version `Hello`; every project-scoped call carries a `Project` (path, `load`, token); `hub_status`, `attach`, `detach` added; `STATUS.web_url` added |
+| 7 | the hub: every connection opens with a version `Hello`; every project-scoped call carries a `Project` (path, `load`); `hub_status`, `attach`, `detach` added; `STATUS.web_url` added |
+| 8 | `Project` carries the project token, and refuses unknown fields. A v7 hub would drop a v8 client's token on the floor, so the two meet at the handshake instead |
 
-A v6 client never reaches the hub (it looks for `.clove/daemon.sock`); a v7
+A v6 client never reaches the hub (it looks for `.clove/daemon.sock`); a hub
 client never reaches a 0.1.0 daemon (it looks in the runtime directory) except
 through `clove daemon stop`'s version-agnostic `ping`. A peer that does send a
 tarpc frame first gets `BAD_HELLO`.

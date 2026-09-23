@@ -48,11 +48,14 @@ use serde::{Deserialize, Serialize};
 /// the old, narrower match set.
 ///
 /// **v7 is the hub** (DESIGN §8.1): one daemon per user, so every connection
-/// opens with a [`crate::hub::Hello`] naming its project (or asking for the
-/// control service) before tarpc starts. The `CloveRpc` methods are unchanged;
-/// what changed is that a connection without a `Hello` means nothing, and a v6
-/// client would have no way to say which project it meant.
-pub const PROTOCOL_VERSION: u32 = 7;
+/// opens with a version-only [`crate::hub::Hello`] before tarpc starts, and
+/// every project-scoped call names its caller's own project.
+///
+/// **v8 adds the project token** to that `Project`. A v7 hub would ignore the
+/// token a v8 client sends (JSON drops unknown fields) and a v7 client's
+/// token-less calls would fail to decode on a v8 hub, so the versions must meet
+/// at the handshake instead, where the mismatch is a clean refusal.
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// A dependency-graph query (DESIGN §8.4 extension for `blocked`/`dep`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

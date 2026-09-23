@@ -238,21 +238,28 @@ fn a_client_of_another_protocol_is_refused_with_proof_of_life() {
         .enable_all()
         .build()
         .unwrap();
-    let welcome = rt.block_on(async {
-        use interprocess::local_socket::tokio::prelude::*;
-        let stream =
-            interprocess::local_socket::tokio::Stream::connect(hub.paths.socket_name().unwrap())
-                .await
-                .unwrap();
-        let mut framed = frame(stream);
-        send_frame(&mut framed, &Hello::Clove { protocol: 6 })
+    // 6: before the hub. 7: the hub before calls carried a project token — its
+    // calls would reach this hub without one.
+    for protocol in [6, 7] {
+        let welcome = rt.block_on(async {
+            use interprocess::local_socket::tokio::prelude::*;
+            let stream = interprocess::local_socket::tokio::Stream::connect(
+                hub.paths.socket_name().unwrap(),
+            )
             .await
             .unwrap();
-        recv_frame::<Welcome>(&mut framed).await.unwrap()
-    });
-    match welcome {
-        Some(Welcome::Err { code, .. }) => assert_eq!(code, codes::PROTOCOL_MISMATCH),
-        other => panic!("expected a protocol refusal, got {other:?}"),
+            let mut framed = frame(stream);
+            send_frame(&mut framed, &Hello::Clove { protocol })
+                .await
+                .unwrap();
+            recv_frame::<Welcome>(&mut framed).await.unwrap()
+        });
+        match welcome {
+            Some(Welcome::Err { code, .. }) => {
+                assert_eq!(code, codes::PROTOCOL_MISMATCH, "protocol {protocol}")
+            }
+            other => panic!("protocol {protocol}: expected a refusal, got {other:?}"),
+        }
     }
 }
 

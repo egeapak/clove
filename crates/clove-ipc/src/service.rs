@@ -77,6 +77,7 @@ impl RpcError {
 /// daemon rejects a relative path (`BAD_PROJECT`) — relative to what would
 /// depend on a working directory the daemon does not share with the caller.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Project {
     pub clove_dir: String,
     /// Load the project if needed. Reads send `false`: asking whether a daemon
@@ -168,4 +169,19 @@ pub trait CloveRpc {
     async fn show(project: Project, id: String) -> Result<Value, RpcError>;
     /// Work-item analytics (`clove stats`) as JSON.
     async fn stats(project: Project, top: u32, include_epics: bool) -> Result<Value, RpcError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Project;
+
+    /// A call's project is exactly what this build sends: a field it does not
+    /// know is refused, not dropped on the floor.
+    #[test]
+    fn a_project_with_an_unknown_field_is_refused() {
+        let known = r#"{"clove_dir":"/r/.clove","load":false,"token":"ab"}"#;
+        assert!(serde_json::from_str::<Project>(known).is_ok());
+        let extra = r#"{"clove_dir":"/r/.clove","load":false,"token":"ab","project":"/x"}"#;
+        assert!(serde_json::from_str::<Project>(extra).is_err());
+    }
 }
