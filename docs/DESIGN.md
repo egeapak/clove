@@ -1475,20 +1475,27 @@ every project's *acceleration*, never its data.
 
 `<runtime>` is `$CLOVE_RUNTIME_DIR`; else, on Unix, `$XDG_RUNTIME_DIR/clove`, else
 `${TMPDIR:-/tmp}/clove-<uid>`; on Windows `%LOCALAPPDATA%\clove\run` (a per-user
-profile directory), else `%USERPROFILE%\AppData\Local\clove\run`. It is always
-made absolute. It is short on Unix because a socket path is capped at 103 bytes
+profile directory), else `%USERPROFILE%\AppData\Local\clove\run` — and with
+neither set there is no per-user directory, so no hub is used or started (set
+`CLOVE_RUNTIME_DIR`). It is always made absolute. It is short on Unix because a socket path is capped at 103 bytes
 on macOS/BSD (107 on Linux). The hub creates the directory `0700` and refuses one
 that is a symlink, that another user owns, or that others can write to; clients
 only connect through a directory that passes the same check. On top of that,
-**both ends check the peer**: the client verifies that the process serving the
-socket runs as its own user (Unix `SO_PEERCRED`/`getpeereid` uid; Windows the
-pipe server's token user SID), and the hub serves only its own user's processes.
-The socket and pid file are `0600`. On Windows the pipe and shutdown-event names
-hash the user's SID with the runtime directory, and the pipe carries a protected
-DACL naming that SID explicitly (`D:P(A;;GA;;;<SID>)` — not `OW`, which means
-Administrators under an elevated token); `interprocess` creates the first
-instance with `FILE_FLAG_FIRST_PIPE_INSTANCE`, so a squatted pipe fails the bind
-rather than being joined. **Every test sets `CLOVE_RUNTIME_DIR`** to a temp
+**both ends check the peer**, on the connection itself: the client verifies
+that the socket's server runs as its own user and the hub serves only its own
+user's processes. On Unix both read the peer's uid (`SO_PEERCRED`/`getpeereid`).
+On Windows the client reads the *owner* of the pipe it is connected to
+(`GetSecurityInfo` on the handle) and the hub reads its client's user by
+impersonating it on the handle once the first frame is in — neither goes
+through a process id, which an unrelated process could have reused by the time
+it is looked up. The socket and pid file are `0600`. On Windows the pipe and
+shutdown-event names hash the user's SID with the runtime directory, and the
+pipe carries a protected descriptor naming that SID explicitly as owner and
+sole grantee (`O:<SID>D:P(A;;GA;;;<SID>)` — not `OW` or the token's default
+owner, which mean Administrators under an elevated token); a hub that cannot
+build it does not start. `interprocess` creates the first instance with
+`FILE_FLAG_FIRST_PIPE_INSTANCE`, so a squatted pipe fails the bind rather than
+being joined. **Every test sets `CLOVE_RUNTIME_DIR`** to a temp
 directory, so parallel tests never share a hub (or reach the user's).
 
 `.clove/daemon.sock` and `.clove/daemon.pid` are clove 0.1.0's per-project
@@ -1540,7 +1547,7 @@ but has not bound yet — but never starts one.
 | Command | Effect |
 |---|---|
 | `clove daemon start` | the hub serves this project (spawned if none runs) |
-| `clove daemon stop` | the hub stops serving this project; the hub exits if it was the last. A hub this client cannot talk to (another protocol, not answering) is reported, with `stop --all` as the remedy. A live clove 0.1.0 daemon on `.clove/daemon.sock` — one that answers `ping` in any protocol version — is SIGTERMed instead, which is the upgrade path; one that cannot be verified (does not answer, socket a symlink or not this user's, any on Windows) is neither signalled nor has its files deleted |
+| `clove daemon stop` | the hub stops serving this project; the hub exits if it was the last. A hub this client cannot talk to (another protocol, not answering) is reported, with `stop --all` as the remedy. A live clove 0.1.0 daemon on `.clove/daemon.sock` — one that answers `ping` in any protocol version — is SIGTERMed instead, which is the upgrade path; one that cannot be verified (does not answer, socket a symlink or not this user's) is neither signalled nor has its files deleted, and `stop` fails saying so. On Windows no 0.1.0 daemon can be verified (it listened on a pipe named after the repository), so a leftover `.clove/daemon.pid` is only noted — naming the file to delete once no such daemon runs — and `stop` goes on to stop this project's hub slot |
 | `clove daemon stop --all` | stop the hub (SIGTERM / the named event), after it proves itself alive: a welcome of any protocol version, a busy hub that did not answer in time, or a lock holder — a stale `hub.pid` can name an unrelated process. Only a pid > 1 that fits an `i32` is ever signalled |
 | `clove daemon status` | this project's status plus the hub's pid, web address, and project list |
 
@@ -1723,8 +1730,10 @@ and is not gated.)
 
 **Windows:** No SIGTERM. Use `tokio::signal::ctrl_c()` for interactive shutdown. For
 `clove daemon stop --all`, a named shutdown event: `CreateEventW` with a name derived
-from the user's SID and the runtime directory; the CLI signals the event; the hub's
-event-loop wakes, runs the shutdown sequence, and exits.
+from the user's SID and the runtime directory, created at startup before `hub.pid`
+is written — a hub that cannot create it (or name it) does not start, since
+nothing could stop it; the CLI signals the event; the hub's event-loop wakes,
+runs the shutdown sequence, and exits.
 
 Shutdown sequence (all platforms), per slot and then for the hub:
 1. Stop the slot's tasks (watcher, loops, idle timer); close its web sockets.

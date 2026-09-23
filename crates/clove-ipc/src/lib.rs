@@ -80,26 +80,35 @@ pub const SUN_PATH_MAX: usize = 107;
 ///
 /// Always absolute. Only the daemon creates it ([`ensure_runtime_dir`]);
 /// clients connect only if [`runtime_dir_is_private`] holds, so another user
-/// can't plant a socket there.
-pub fn runtime_dir() -> Utf8PathBuf {
+/// can't plant a socket there. On Windows with neither profile variable set
+/// there is no per-user directory to use, and this fails.
+pub fn runtime_dir() -> std::io::Result<Utf8PathBuf> {
     #[cfg(unix)]
     let dir = resolve_runtime_dir(utf8_var, current_uid());
     #[cfg(not(unix))]
-    let dir = resolve_windows_runtime_dir(utf8_var);
-    absolute(&dir)
+    let dir = resolve_windows_runtime_dir(utf8_var)?;
+    Ok(absolute(&dir))
 }
 
-#[cfg(not(unix))]
-fn resolve_windows_runtime_dir(var: impl Fn(&str) -> Option<Utf8PathBuf>) -> Utf8PathBuf {
+#[cfg_attr(unix, allow(dead_code))]
+fn resolve_windows_runtime_dir(
+    var: impl Fn(&str) -> Option<Utf8PathBuf>,
+) -> std::io::Result<Utf8PathBuf> {
     if let Some(dir) = var("CLOVE_RUNTIME_DIR") {
-        return dir;
+        return Ok(dir);
     }
     if let Some(dir) = var("LOCALAPPDATA") {
-        return dir.join("clove").join("run");
+        return Ok(dir.join("clove").join("run"));
     }
     var("USERPROFILE")
         .map(|home| home.join("AppData").join("Local").join("clove").join("run"))
-        .unwrap_or_else(|| Utf8PathBuf::from("clove-run"))
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "neither %LOCALAPPDATA% nor %USERPROFILE% is set, so there is no \
+                 per-user directory for the daemon; set CLOVE_RUNTIME_DIR",
+            )
+        })
 }
 
 /// `path` made absolute against the current directory (unchanged when it
@@ -133,7 +142,7 @@ fn resolve_runtime_dir(var: impl Fn(&str) -> Option<Utf8PathBuf>, uid: u32) -> U
 /// Create the [`runtime_dir`] owner-only if missing, and refuse one that another
 /// user owns or can write to.
 pub fn ensure_runtime_dir() -> std::io::Result<Utf8PathBuf> {
-    let dir = runtime_dir();
+    let dir = runtime_dir()?;
     ensure_private_dir(&dir)?;
     Ok(dir)
 }
@@ -277,11 +286,40 @@ mod tests {
 
     #[test]
     fn the_hub_lives_in_the_runtime_dir() {
-        let hub = HubPaths::resolve();
-        assert_eq!(hub.dir(), runtime_dir());
-        assert_eq!(hub.sock(), runtime_dir().join("hub.sock"));
-        assert_eq!(hub.pid(), runtime_dir().join("hub.pid"));
-        assert_eq!(hub.lock(), runtime_dir().join("hub.lock"));
+        let hub = HubPaths::resolve().unwrap();
+        let dir = runtime_dir().unwrap();
+        assert_eq!(hub.dir(), dir);
+        assert_eq!(hub.sock(), dir.join("hub.sock"));
+        assert_eq!(hub.pid(), dir.join("hub.pid"));
+        assert_eq!(hub.lock(), dir.join("hub.lock"));
+    }
+
+    /// The Windows runtime directory is per-user; with no profile variable to
+    /// build it from there is none, and a relative guess would put the hub
+    /// wherever the spawner happens to stand.
+    #[test]
+    fn a_windows_runtime_dir_needs_a_user_profile() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| Utf8PathBuf::from(*value))
+            }
+        };
+        assert_eq!(
+            resolve_windows_runtime_dir(env(&[("LOCALAPPDATA", "C:/Users/u/AppData/Local")]))
+                .unwrap(),
+            Utf8PathBuf::from("C:/Users/u/AppData/Local/clove/run")
+        );
+        assert_eq!(
+            resolve_windows_runtime_dir(env(&[("USERPROFILE", "C:/Users/u")])).unwrap(),
+            Utf8PathBuf::from("C:/Users/u/AppData/Local/clove/run")
+        );
+        let message = resolve_windows_runtime_dir(env(&[]))
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("CLOVE_RUNTIME_DIR"), "{message}");
     }
 
     #[cfg(not(windows))]

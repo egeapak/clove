@@ -43,13 +43,15 @@ pub fn run(
     // --no-index, since it inspects socket/pid state, not the index). Only
     // *dead* footprints are cleaned up; a live daemon — incompatible or pre-hub —
     // is reported even under --fix, so we never delete a running process's files.
-    let hub = clove_ipc::HubPaths::resolve();
-    if let Some(issue) = daemon_issue(clove_ipc::DaemonClient::health(&hub)) {
-        if args.fix && issue.fixable {
-            clove_ipc::client::cleanup_hub(&hub);
-            fixed += 1;
-        } else {
-            report.issues.push(issue);
+    // No runtime directory (Windows without a user profile) means no hub.
+    if let Ok(hub) = clove_ipc::HubPaths::resolve() {
+        if let Some(issue) = daemon_issue(clove_ipc::DaemonClient::health(&hub)) {
+            if args.fix && issue.fixable {
+                clove_ipc::client::cleanup_hub(&hub);
+                fixed += 1;
+            } else {
+                report.issues.push(issue);
+            }
         }
     }
     if let Some(issue) = legacy_daemon_issue(daemon_dir(ctx)) {

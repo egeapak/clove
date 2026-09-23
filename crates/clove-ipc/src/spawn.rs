@@ -62,7 +62,7 @@ pub fn spawn_hub(hub: &HubPaths) -> std::io::Result<()> {
 /// A client for `clove_dir` on the user's hub, loading the project — and
 /// starting the hub — if needed.
 pub fn ensure_daemon(clove_dir: &Utf8Path) -> Option<DaemonClient> {
-    ensure_daemon_at(&HubPaths::resolve(), clove_dir).ok()
+    ensure_daemon_at(&HubPaths::resolve().ok()?, clove_dir).ok()
 }
 
 /// [`ensure_daemon`] against an explicit hub, reporting why it failed. Callers

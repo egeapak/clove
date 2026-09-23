@@ -46,6 +46,6 @@ enum Command {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Run => lifecycle::run(&clove_ipc::HubPaths::resolve()),
+        Command::Run => lifecycle::run(&clove_ipc::HubPaths::resolve()?),
     }
 }

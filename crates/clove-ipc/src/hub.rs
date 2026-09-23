@@ -36,8 +36,8 @@ impl HubPaths {
     }
 
     /// The hub for this user: the one in [`crate::runtime_dir`].
-    pub fn resolve() -> HubPaths {
-        HubPaths::at(crate::runtime_dir())
+    pub fn resolve() -> std::io::Result<HubPaths> {
+        crate::runtime_dir().map(HubPaths::at)
     }
 
     /// Check, before spawning a hub, that it will be able to bind: the runtime
@@ -266,19 +266,46 @@ pub async fn recv_frame<T: DeserializeOwned>(framed: &mut HubFramed) -> std::io:
 /// by the client (is this really my hub?) and by the hub (is this one of my
 /// user's clients?): the runtime directory is private, but a check on the
 /// connection itself does not depend on that.
-pub fn peer_is_this_user(stream: &Stream) -> std::io::Result<bool> {
-    use interprocess::local_socket::traits::StreamCommon as _;
-    let creds = stream.peer_creds()?;
+///
+/// This is the client's check of the server. On Windows it reads the owner of
+/// the pipe the handle is connected to — the hub creates it owned by its user.
+pub fn server_is_this_user(stream: &Stream) -> std::io::Result<bool> {
     #[cfg(unix)]
     {
-        Ok(creds.euid() == Some(crate::current_uid()))
+        peer_uid_is_ours(stream)
     }
     #[cfg(windows)]
     {
-        let pid = creds
-            .pid()
-            .ok_or_else(|| std::io::Error::other("the pipe peer has no process id"))?;
-        Ok(crate::win::process_user_sid(pid)? == crate::win::current_user_sid()?)
+        Ok(crate::win::object_owner_sid(pipe_handle(stream))? == crate::win::current_user_sid()?)
+    }
+}
+
+/// The hub's check of a client: see [`server_is_this_user`]. On Windows the
+/// client's user is read by impersonating it on the connected handle, which
+/// works only once the client has sent something — call it after the
+/// [`Hello`] has been read.
+pub fn client_is_this_user(stream: &Stream) -> std::io::Result<bool> {
+    #[cfg(unix)]
+    {
+        peer_uid_is_ours(stream)
+    }
+    #[cfg(windows)]
+    {
+        Ok(crate::win::pipe_client_sid(pipe_handle(stream))? == crate::win::current_user_sid()?)
+    }
+}
+
+#[cfg(unix)]
+fn peer_uid_is_ours(stream: &Stream) -> std::io::Result<bool> {
+    use interprocess::local_socket::traits::StreamCommon as _;
+    Ok(stream.peer_creds()?.euid() == Some(crate::current_uid()))
+}
+
+#[cfg(windows)]
+fn pipe_handle(stream: &Stream) -> std::os::windows::io::BorrowedHandle<'_> {
+    use std::os::windows::io::AsHandle as _;
+    match stream {
+        Stream::NamedPipe(pipe) => pipe.inner().as_handle(),
     }
 }
 

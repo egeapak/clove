@@ -27,11 +27,11 @@ pub fn run(
     // running, none is started — `serve` runs standalone as it always has. An
     // explicit `--port` the daemon isn't on is honored with a standalone server.
     if let Some(clove_dir) = ctx.issues_dir.parent() {
-        let hub = HubPaths::resolve();
-        let client = if hub.footprint_present() || wait_for_starting_hub(&hub) {
-            DaemonClient::attach(&hub, clove_dir, true).ok()
-        } else {
-            None
+        let client = match HubPaths::resolve() {
+            Ok(hub) if hub.footprint_present() || wait_for_starting_hub(&hub) => {
+                DaemonClient::attach(&hub, clove_dir, true).ok()
+            }
+            _ => None,
         };
         if let Some(mut client) = client {
             if let Ok(status) = client.status() {

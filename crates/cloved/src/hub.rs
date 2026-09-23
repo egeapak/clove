@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use camino::{Utf8Path, Utf8PathBuf};
-use clove_ipc::hub::{codes, frame, peer_is_this_user, recv_frame, send_frame, Hello, Welcome};
+use clove_ipc::hub::{client_is_this_user, codes, frame, recv_frame, send_frame, Hello, Welcome};
 use clove_ipc::{
     transport_from_framed, CloveRpc, Detached, GraphRequest, GraphResponse, HubStatus, Project,
     ProjectInfo, QueryListResponse, QueryRequest, ReindexDone, RpcError, StatusResponse,
@@ -537,15 +537,16 @@ impl Hub {
     /// Check the peer, run the version handshake, then serve calls until
     /// either side closes or the hub exits.
     async fn serve_connection(self, stream: Stream) {
+        let mut framed = frame(stream);
+        let hello = tokio::time::timeout(HELLO_TIMEOUT, recv_frame::<Hello>(&mut framed)).await;
         // Defence in depth behind the private runtime directory: serve only
-        // this user's processes.
-        if !peer_is_this_user(&stream).unwrap_or(false) {
+        // this user's processes. Checked once the first frame is in — Windows
+        // can tell a pipe client's user only after reading from it — and
+        // before anything is sent back.
+        if !client_is_this_user(framed.get_ref()).unwrap_or(false) {
             return;
         }
-        let mut framed = frame(stream);
-        let hello = match tokio::time::timeout(HELLO_TIMEOUT, recv_frame::<Hello>(&mut framed))
-            .await
-        {
+        let hello = match hello {
             Ok(Ok(Some(hello))) => hello,
             Ok(Err(e)) if e.kind() == std::io::ErrorKind::InvalidData => {
                 let _ = send_frame(&mut framed, &refusal(codes::BAD_HELLO, &e.to_string())).await;

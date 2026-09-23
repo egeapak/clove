@@ -27,7 +27,8 @@ use tokio::runtime::Runtime;
 use tokio::time::timeout;
 
 use crate::hub::{
-    frame, peer_is_this_user, recv_frame, send_frame, Detached, Hello, HubPaths, HubStatus, Welcome,
+    frame, recv_frame, send_frame, server_is_this_user, Detached, Hello, HubPaths, HubStatus,
+    Welcome,
 };
 use crate::protocol::{
     GraphRequest, GraphResponse, QueryListResponse, QueryRequest, ReindexDone, StatusResponse,
@@ -206,7 +207,7 @@ impl DaemonClient {
     /// serving that project. Never starts a hub or loads a project — see
     /// [`crate::ensure_daemon`] for that.
     pub fn probe(clove_dir: &Utf8Path) -> Option<DaemonClient> {
-        DaemonClient::probe_at(&HubPaths::resolve(), clove_dir)
+        DaemonClient::probe_at(&HubPaths::resolve().ok()?, clove_dir)
     }
 
     /// [`DaemonClient::probe`] against an explicit hub.
@@ -240,8 +241,10 @@ impl DaemonClient {
         clove_dir: &Utf8Path,
         load: bool,
     ) -> Result<DaemonClient, ClientError> {
-        let project = project(clove_dir, load).map_err(ClientError::Token)?;
+        // Connect first: whether a hub is there (and whether its files are a
+        // corpse) is a question about the hub, not about this project.
         let (rt, client) = connect(hub)?;
+        let project = project(clove_dir, load).map_err(ClientError::Token)?;
         let mut this = DaemonClient {
             rt: Some(rt),
             client,
@@ -506,7 +509,7 @@ fn connect(hub: &HubPaths) -> Result<(Runtime, CloveRpcClient), ClientError> {
             .map_err(ClientError::Connect)?;
         // Talk only to a hub of our own user: the runtime directory is
         // private, but that is a property of the filesystem, not of the peer.
-        if !peer_is_this_user(&stream).map_err(ClientError::Connect)? {
+        if !server_is_this_user(&stream).map_err(ClientError::Connect)? {
             return Err(ClientError::Connect(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 "the daemon socket is served by another user",
@@ -636,7 +639,7 @@ pub fn legacy_daemon(clove_dir: &Utf8Path) -> LegacyDaemon {
                 Ok(Err(_)) => return Some(false),
                 Ok(Ok(stream)) => stream,
             };
-            if !peer_is_this_user(&stream).unwrap_or(false) {
+            if !server_is_this_user(&stream).unwrap_or(false) {
                 return None;
             }
             // `ping` is the one call a 0.1.0 daemon and this build agree on:
@@ -814,7 +817,7 @@ mod tests {
     }
 
     /// A symlink planted as the token is neither followed nor sent: the client
-    /// falls back without calling the hub.
+    /// falls back without making a call.
     #[cfg(unix)]
     #[test]
     fn a_symlinked_token_is_refused_by_the_client() {
@@ -826,6 +829,10 @@ mod tests {
         std::os::unix::fs::symlink(&other, clove_core::daemon_token::token_path(&clove_dir))
             .unwrap();
         let (_run, hub) = hub_dir();
+        let welcome = Welcome::Ok {
+            protocol: PROTOCOL_VERSION,
+        };
+        let _hub = fake_hub(&hub, Some(welcome), Duration::from_secs(2));
         let refused = DaemonClient::attach(&hub, &clove_dir, false).err();
         assert!(
             matches!(refused, Some(ClientError::Token(_))),

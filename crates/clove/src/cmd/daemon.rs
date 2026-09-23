@@ -29,7 +29,7 @@ pub fn run(ctx: &Ctx, format: OutputFormat, action: DaemonAction) -> Result<Exit
         .parent()
         .ok_or_else(|| daemon_err("cannot locate .clove directory"))?
         .to_owned();
-    let hub = HubPaths::resolve();
+    let hub = HubPaths::resolve().map_err(|e| daemon_err(&e.to_string()))?;
     match action {
         DaemonAction::Start => start(&hub, &clove_dir, format),
         DaemonAction::Stop { all: false } => stop(&hub, &clove_dir, format),
@@ -100,8 +100,8 @@ fn stop(
     // on the project's old socket is signalled (a stale pid can name an
     // unrelated process, D-daemon-6), only proven corpses are removed, and
     // anything in between is left exactly as it is.
-    match clove_ipc::legacy_daemon(clove_dir) {
-        LegacyDaemon::Alive(pid) => {
+    match legacy_step(clove_ipc::legacy_daemon(clove_dir), cfg!(windows)) {
+        LegacyStep::Stop(pid) => {
             signal_pid(pid)?;
             wait_gone(&clove_ipc::pid_path(clove_dir))?;
             return emit(
@@ -110,17 +110,24 @@ fn stop(
                 &format!("stopped the clove 0.1.0 daemon (pid {pid})"),
             );
         }
-        LegacyDaemon::Dead => clove_ipc::cleanup_legacy(clove_dir),
-        LegacyDaemon::Unknown(pid) => {
-            let pid = pid.map(|p| format!(" (pid {p})")).unwrap_or_default();
+        LegacyStep::Clean => clove_ipc::cleanup_legacy(clove_dir),
+        LegacyStep::Refuse(pid) => {
             return Err(daemon_err(&format!(
-                "a clove 0.1.0 daemon{pid} may still be serving this project, but it \
+                "a clove 0.1.0 daemon{} may still be serving this project, but it \
                  could not be verified (it did not answer, or its socket is not this \
                  user's); its files in .clove/ were left in place — check the process \
-                 and stop it yourself"
+                 and stop it yourself",
+                pid_note(pid)
             )));
         }
-        LegacyDaemon::Absent => {}
+        LegacyStep::Note(pid) => eprintln!(
+            "note: {} is left from a clove 0.1.0 daemon{}, which cannot be verified on \
+             Windows; it was not stopped or removed — if no such daemon runs any more, \
+             delete the file",
+            clove_ipc::pid_path(clove_dir),
+            pid_note(pid)
+        ),
+        LegacyStep::Continue => {}
     }
 
     let not_running = || {
@@ -160,6 +167,37 @@ fn stop(
         json!({ "stopped": true, "hub_stopped": detached.hub_exiting }),
         "daemon stopped serving this project",
     )
+}
+
+/// What `clove daemon stop` does about a clove 0.1.0 daemon's footprint.
+#[derive(Debug, PartialEq, Eq)]
+enum LegacyStep {
+    /// It answered: signal it.
+    Stop(u32),
+    /// Proven corpses: remove them, then stop this project's hub slot.
+    Clean,
+    /// Could not be verified here: leave it alone and say so.
+    Refuse(Option<u32>),
+    /// Cannot be verified on this platform at all (Windows): leave it alone,
+    /// note it, and still stop this project's hub slot — a leftover pid file
+    /// must not block `stop` forever.
+    Note(Option<u32>),
+    /// Nothing there.
+    Continue,
+}
+
+fn legacy_step(legacy: LegacyDaemon, never_verifiable: bool) -> LegacyStep {
+    match legacy {
+        LegacyDaemon::Alive(pid) => LegacyStep::Stop(pid),
+        LegacyDaemon::Dead => LegacyStep::Clean,
+        LegacyDaemon::Unknown(pid) if never_verifiable => LegacyStep::Note(pid),
+        LegacyDaemon::Unknown(pid) => LegacyStep::Refuse(pid),
+        LegacyDaemon::Absent => LegacyStep::Continue,
+    }
+}
+
+fn pid_note(pid: Option<u32>) -> String {
+    pid.map(|p| format!(" (pid {p})")).unwrap_or_default()
 }
 
 /// Stop the hub — every project it serves.
@@ -390,7 +428,26 @@ extern "C" {
 
 #[cfg(test)]
 mod tests {
-    use super::daemon_err;
+    use super::{daemon_err, legacy_step, LegacyDaemon, LegacyStep};
+
+    /// Where a clove 0.1.0 daemon can never be verified (Windows), its
+    /// leftover pid file must not block stopping this project's hub slot for
+    /// good; where it can, an unverifiable one still stops `stop`.
+    #[test]
+    fn an_unverifiable_old_daemon_blocks_stop_only_where_one_could_be_verified() {
+        assert_eq!(
+            legacy_step(LegacyDaemon::Unknown(Some(4242)), true),
+            LegacyStep::Note(Some(4242))
+        );
+        assert_eq!(
+            legacy_step(LegacyDaemon::Unknown(Some(4242)), false),
+            LegacyStep::Refuse(Some(4242))
+        );
+        assert_eq!(
+            legacy_step(LegacyDaemon::Alive(4242), true),
+            LegacyStep::Stop(4242)
+        );
+    }
 
     /// Daemon-communication failures classify as `DAEMON_ERROR` / exit 7, not
     /// the `IO_ERROR` / exit 5 they used to borrow from a fabricated path.

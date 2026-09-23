@@ -63,7 +63,7 @@ pub fn run(paths: &HubPaths) -> anyhow::Result<()> {
         #[cfg(not(windows))]
         let _ = std::fs::remove_file(paths.sock());
         let name = paths.socket_name().context("building socket name")?;
-        let listener = owner_only(ListenerOptions::new().name(name))
+        let listener = owner_only(ListenerOptions::new().name(name))?
             .create_tokio()
             .with_context(|| format!("binding {}", paths.sock()))?;
         // The control socket is a mutating RPC channel for every project the
@@ -74,7 +74,8 @@ pub fn run(paths: &HubPaths) -> anyhow::Result<()> {
 
         // Register the shutdown-signal handler BEFORE advertising readiness (the
         // pid file): "pid present ⇒ ready to shut down cleanly" (DESIGN §8.9).
-        let mut shutdown = ShutdownSignal::install(paths);
+        let mut shutdown =
+            ShutdownSignal::install(paths).context("installing the shutdown signal")?;
         write_pid(paths).context("writing pid file")?;
 
         tokio::select! {
@@ -151,29 +152,26 @@ fn ensure_dir(paths: &HubPaths) -> std::io::Result<()> {
 
 /// On Windows, give the hub's pipe a protected DACL that admits only this
 /// user's SID (the default grants read access to Everyone), so no other local
-/// user can reach a channel that writes to every project. The SID is explicit
-/// rather than `OW`, which maps to Administrators under an elevated token.
+/// user can reach a channel that writes to every project, and make that SID
+/// its owner — the owner is what a client checks. The SID is explicit rather
+/// than `OW`/the token default, which mean Administrators under an elevated
+/// token. Without such a descriptor the hub does not start.
 /// Unix gets the same from the socket's mode and the private runtime directory.
 #[cfg(windows)]
-fn owner_only(options: ListenerOptions<'_>) -> ListenerOptions<'_> {
+fn owner_only(options: ListenerOptions<'_>) -> anyhow::Result<ListenerOptions<'_>> {
     use interprocess::os::windows::local_socket::ListenerOptionsExt;
     use interprocess::os::windows::security_descriptor::SecurityDescriptor;
-    let owner_only = clove_ipc::win::current_user_sid()
-        .ok()
-        .and_then(|sid| widestring::U16CString::from_str(format!("D:P(A;;GA;;;{sid})")).ok())
-        .and_then(|sddl| SecurityDescriptor::deserialize(&sddl).ok());
-    match owner_only {
-        Some(sd) => options.security_descriptor(sd),
-        None => {
-            eprintln!("cloved: could not build an owner-only pipe descriptor; using the default");
-            options
-        }
-    }
+    let sid = clove_ipc::win::current_user_sid().context("reading this user's SID")?;
+    let sddl = widestring::U16CString::from_str(format!("O:{sid}D:P(A;;GA;;;{sid})"))
+        .context("building the pipe's security descriptor")?;
+    let descriptor = SecurityDescriptor::deserialize(&sddl)
+        .context("building the pipe's security descriptor")?;
+    Ok(options.security_descriptor(descriptor))
 }
 
 #[cfg(not(windows))]
-fn owner_only(options: ListenerOptions<'_>) -> ListenerOptions<'_> {
-    options
+fn owner_only(options: ListenerOptions<'_>) -> anyhow::Result<ListenerOptions<'_>> {
+    Ok(options)
 }
 
 /// Restrict a runtime file to owner-only access (Unix). A no-op on other
@@ -216,15 +214,17 @@ enum ShutdownSignal {
 
 #[cfg(unix)]
 impl ShutdownSignal {
-    fn install(_paths: &HubPaths) -> Self {
+    fn install(_paths: &HubPaths) -> std::io::Result<Self> {
         use tokio::signal::unix::{signal, SignalKind};
-        match (
-            signal(SignalKind::terminate()),
-            signal(SignalKind::interrupt()),
-        ) {
-            (Ok(term), Ok(interrupt)) => ShutdownSignal::Signals { term, interrupt },
-            _ => ShutdownSignal::Failed,
-        }
+        Ok(
+            match (
+                signal(SignalKind::terminate()),
+                signal(SignalKind::interrupt()),
+            ) {
+                (Ok(term), Ok(interrupt)) => ShutdownSignal::Signals { term, interrupt },
+                _ => ShutdownSignal::Failed,
+            },
+        )
     }
 
     async fn recv(&mut self) {
@@ -241,45 +241,78 @@ impl ShutdownSignal {
 }
 
 /// Windows has no SIGTERM: wait on Ctrl-C (interactive) or the named shutdown
-/// event that `clove daemon stop --all` signals (DESIGN §8.9).
+/// event that `clove daemon stop --all` signals (DESIGN §8.9). The event is
+/// created at install, before the pid file advertises readiness; a hub that
+/// cannot create it would be one nothing can stop, so it does not start.
 #[cfg(windows)]
 struct ShutdownSignal {
-    event: String,
+    event: NamedEvent,
+}
+
+/// An owned handle to the shutdown event.
+#[cfg(windows)]
+struct NamedEvent(windows_sys::Win32::Foundation::HANDLE);
+
+// SAFETY: an event handle may be waited on from any thread.
+#[cfg(windows)]
+unsafe impl Send for NamedEvent {}
+#[cfg(windows)]
+unsafe impl Sync for NamedEvent {}
+
+#[cfg(windows)]
+impl Drop for NamedEvent {
+    fn drop(&mut self) {
+        // SAFETY: the handle was created by CreateEventW and is closed once.
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) };
+    }
 }
 
 #[cfg(windows)]
 impl ShutdownSignal {
-    fn install(paths: &HubPaths) -> Self {
-        ShutdownSignal {
-            event: paths.event_name().unwrap_or_default(),
+    fn install(paths: &HubPaths) -> std::io::Result<Self> {
+        use windows_sys::Win32::System::Threading::CreateEventW;
+        let name = paths.event_name()?;
+        if name.is_empty() {
+            return Err(std::io::Error::other("the shutdown event has no name"));
         }
+        let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        // SAFETY: default security, manual reset, initially unsignaled, and a
+        // valid NUL-terminated UTF-16 name.
+        let handle = unsafe { CreateEventW(std::ptr::null(), 1, 0, wide.as_ptr()) };
+        if handle.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(ShutdownSignal {
+            event: NamedEvent(handle),
+        })
     }
 
     async fn recv(&mut self) {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {},
-            _ = wait_named_event(self.event.clone()) => {},
+            _ = wait_signaled(&self.event) => {},
         }
     }
 }
 
-/// Block (off-runtime) on a named manual-reset Windows event until it is signaled.
+/// Resolve once `event` is signaled. Waits in short slices on the blocking
+/// pool, so a hub exiting for another reason never leaves a thread blocked on
+/// it for good.
 #[cfg(windows)]
-async fn wait_named_event(name: String) {
-    let _ = tokio::task::spawn_blocking(move || {
-        use windows_sys::Win32::Foundation::CloseHandle;
-        use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
-        let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-        // SAFETY: standard Win32 named-event create/wait/close. A null name attr
-        // and a valid null-terminated UTF-16 name are passed.
-        unsafe {
-            let handle = CreateEventW(std::ptr::null(), 1, 0, wide.as_ptr());
-            if handle.is_null() {
-                return;
-            }
-            WaitForSingleObject(handle, INFINITE);
-            CloseHandle(handle);
+async fn wait_signaled(event: &NamedEvent) {
+    use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+    use windows_sys::Win32::System::Threading::WaitForSingleObject;
+    loop {
+        let handle = event.0 as usize;
+        // SAFETY: the handle outlives this wait: `event` is borrowed across it.
+        let waited = tokio::task::spawn_blocking(move || unsafe {
+            WaitForSingleObject(handle as windows_sys::Win32::Foundation::HANDLE, 250)
+        })
+        .await;
+        match waited {
+            Ok(status) if status == WAIT_OBJECT_0 => return,
+            Ok(_) => {}
+            Err(_) => return,
         }
-    })
-    .await;
+    }
 }
