@@ -195,7 +195,7 @@ fn run(
         ),
         (OutputFormat::Human, Some(report)) => {
             outln!(
-                "{}: pulled {} new / {} updated, pushed {} new / {} updated, comments +{}/-{}, {} in sync, {} conflicts",
+                "{}: pulled {} new / {} updated, pushed {} new / {} updated, comments {} pulled / {} pushed, {} in sync, {} conflicts",
                 applied_label(direction, &cli.target),
                 report.pulled_created,
                 report.pulled_updated,
