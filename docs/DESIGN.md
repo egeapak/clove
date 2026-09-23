@@ -1600,15 +1600,22 @@ project.
 **The project token scopes automated clients per project.** Each project has a
 random secret in `.clove/daemon.token` — 256 bits from the OS RNG, hex-encoded,
 created by the first client that needs it (`O_EXCL` temp file, `0600`, linked
-into place without replacing anything; a symlink there is refused, never
-followed) and git-ignored, so it stays with the clone. Every project-scoped
+into place without replacing anything) and git-ignored, so it stays with the
+clone; a client that creates it also adds `daemon.token` to a `.clove/.gitignore`
+written by an older clove (through the symlink-safe write). **Only a token this
+user's clove made is trusted:** a regular file — never a symlink — and on Unix
+owned by the user with mode `0600`. Anything else, such as a token committed to
+the repository (a checkout writes it `0644`), is refused by the hub and replaced
+by the client with a fresh one, renamed over it. On Windows only the file type
+is checked: there is no mode, and a checkout is owned by the user anyway. A
+token the client can neither read nor replace makes `clove daemon status` and
+`stop` fail naming the file. Every project-scoped
 call carries it, and the hub refuses a call whose token is not the one in the
 named project's `.clove/` (`BAD_TOKEN`) before loading anything; the client
 then falls back like after any refusal. So a client confined to repository A —
 an agent sandbox, a CI job — can read A's token but not B's, and can act through
-the shared hub on A only. The hub keeps each project's token in memory and reads
-the file again whenever it changes (size, mtime, inode), so replacing the file
-rotates the token. **It is a gate for automation, not a security boundary
+the shared hub on A only. The hub reads the file again on every call — a few
+dozen bytes — so whatever it holds now is what counts, however it was rewritten. **It is a gate for automation, not a security boundary
 against the local user**, who can read every token they own; hub-wide calls
 (`ping`, `hub_status`, and `clove daemon stop --all`, which signals the hub's
 pid) need no token, and the web UI is not token-gated — it stays loopback-only,

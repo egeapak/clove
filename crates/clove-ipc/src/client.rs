@@ -816,28 +816,30 @@ mod tests {
         );
     }
 
-    /// A symlink planted as the token is neither followed nor sent: the client
-    /// falls back without making a call.
+    /// A token the client can neither use nor replace is never sent: the call
+    /// fails with a token error naming the file, before anything is asked.
     #[cfg(unix)]
     #[test]
-    fn a_symlinked_token_is_refused_by_the_client() {
+    fn an_unusable_token_is_not_sent() {
+        use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let clove_dir = Utf8PathBuf::from_path_buf(tmp.path().join(".clove")).unwrap();
         std::fs::create_dir_all(&clove_dir).unwrap();
-        let other = tmp.path().join("other-token");
-        std::fs::write(&other, "0123456789abcdef0123456789abcdef\n").unwrap();
-        std::os::unix::fs::symlink(&other, clove_core::daemon_token::token_path(&clove_dir))
-            .unwrap();
+        let token = clove_core::daemon_token::token_path(&clove_dir);
+        std::fs::write(&token, "0123456789abcdef0123456789abcdef\n").unwrap();
+        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(&clove_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
         let (_run, hub) = hub_dir();
         let welcome = Welcome::Ok {
             protocol: PROTOCOL_VERSION,
         };
         let _hub = fake_hub(&hub, Some(welcome), Duration::from_secs(2));
         let refused = DaemonClient::attach(&hub, &clove_dir, false).err();
-        assert!(
-            matches!(refused, Some(ClientError::Token(_))),
-            "{refused:?}"
-        );
+        std::fs::set_permissions(&clove_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        match refused {
+            Some(ClientError::Token(e)) => assert!(e.to_string().contains("daemon.token"), "{e}"),
+            other => panic!("expected a token error, got {other:?}"),
+        }
     }
 
     #[test]

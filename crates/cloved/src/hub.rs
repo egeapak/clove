@@ -32,7 +32,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::ipc::Dispatcher;
 use crate::slot::{self, LoadError, Slot, SlotTask};
-use crate::token::Tokens;
 
 /// How long a fresh connection may take to send its [`Hello`].
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -74,7 +73,6 @@ struct Inner {
     started: Instant,
     shutdown: CancellationToken,
     grace: Duration,
-    tokens: Arc<Tokens>,
 }
 
 fn refused(code: &'static str, message: impl Into<String>) -> LoadError {
@@ -99,7 +97,6 @@ impl Hub {
             started: Instant::now(),
             shutdown: CancellationToken::new(),
             grace,
-            tokens: Arc::default(),
         }))
     }
 
@@ -134,8 +131,8 @@ impl Hub {
 
     /// Admit a call for the project at `key` only with that project's token.
     async fn authorize(&self, key: &Utf8Path, token: &str) -> Result<(), LoadError> {
-        let (tokens, key, token) = (Arc::clone(&self.0.tokens), key.to_owned(), token.to_owned());
-        tokio::task::spawn_blocking(move || tokens.check(&key, &token))
+        let (key, token) = (key.to_owned(), token.to_owned());
+        tokio::task::spawn_blocking(move || crate::token::check(&key, &token))
             .await
             .unwrap_or_else(|e| Err(refused(codes::BAD_TOKEN, e.to_string())))
     }
@@ -949,6 +946,32 @@ mod tests {
         std::fs::remove_file(clove_core::daemon_token::token_path(&a)).unwrap();
         let new = call(&a, true);
         assert_ne!(new.token, old.token);
+        hub.attach(&new).await.expect("the new token");
+        let err = hub.attach(&old).await.err().expect("refused");
+        assert_eq!(err.code, codes::BAD_TOKEN);
+    }
+
+    /// Rewritten in place — same size, same inode, its mtime put back — the
+    /// file still holds a new token, and the hub goes by what it holds.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_token_rewritten_in_place_is_read_again() {
+        use std::io::{Seek as _, Write as _};
+        let hub = Hub::new(false, Duration::from_secs(60));
+        let (_tmp, a) = store();
+        let old = call(&a, true);
+        hub.attach(&old).await.unwrap();
+        let path = clove_core::daemon_token::token_path(&a);
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let new_token: String = old.token.chars().rev().collect();
+        let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.seek(std::io::SeekFrom::Start(0)).unwrap();
+        writeln!(file, "{new_token}").unwrap();
+        file.set_modified(modified).unwrap();
+        drop(file);
+        let new = Project {
+            token: new_token,
+            ..old.clone()
+        };
         hub.attach(&new).await.expect("the new token");
         let err = hub.attach(&old).await.err().expect("refused");
         assert_eq!(err.code, codes::BAD_TOKEN);

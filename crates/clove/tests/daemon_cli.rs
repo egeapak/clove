@@ -456,6 +456,55 @@ fn titles(v: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
+/// A token the client can neither read nor replace (here: mode 000 in a
+/// read-only `.clove/`) is what `status` and `stop` report — naming the file —
+/// not a project the daemon "isn't serving" or a remedy that doesn't fit.
+#[test]
+fn an_unreadable_token_is_named_by_status_and_stop() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let run = Run::new();
+    init(dir, &run.path);
+    clove(dir, &run.path)
+        .args(["daemon", "start"])
+        .assert()
+        .success();
+    let clove_dir = dir.join(".clove");
+    let token = clove_dir.join("daemon.token");
+    let set_mode = |path: &Path, mode: u32| {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap()
+    };
+    set_mode(&token, 0o000);
+    set_mode(&clove_dir, 0o500);
+    let status = clove(dir, &run.path)
+        .args(["daemon", "status"])
+        .output()
+        .unwrap();
+    let stop = clove(dir, &run.path)
+        .args(["daemon", "stop"])
+        .output()
+        .unwrap();
+    set_mode(&clove_dir, 0o755);
+    set_mode(&token, 0o600);
+
+    for (what, out) in [("status", &status), ("stop", &stop)] {
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!out.status.success(), "{what}: {text}");
+        assert!(text.contains("daemon.token"), "{what}: {text}");
+        assert!(!text.contains("not serving"), "{what}: {text}");
+        assert!(!text.contains("--all"), "{what}: {text}");
+    }
+    clove(dir, &run.path)
+        .args(["daemon", "stop"])
+        .assert()
+        .success();
+}
+
 /// A relative `--clove-dir` names the caller's own project — never whichever
 /// project the daemon's working directory happens to hold.
 #[test]

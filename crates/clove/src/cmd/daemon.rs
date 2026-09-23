@@ -146,6 +146,7 @@ fn stop(
             return not_running()
         }
         Err(ClientError::Connect(_)) if !hub.running() => return not_running(),
+        Err(ClientError::Token(e)) => return Err(token_err(&e)),
         Err(e) => {
             return Err(daemon_err(&format!(
                 "a daemon is running but this clove cannot talk to it ({e}); stop it \
@@ -167,6 +168,14 @@ fn stop(
         json!({ "stopped": true, "hub_stopped": detached.hub_exiting }),
         "daemon stopped serving this project",
     )
+}
+
+/// The project's daemon token is unusable: the error names the file.
+fn token_err(e: &std::io::Error) -> CloveError {
+    daemon_err(&format!(
+        "this project's daemon token cannot be used ({e}); make it readable, or \
+         delete it so a fresh one is made"
+    ))
 }
 
 /// What `clove daemon stop` does about a clove 0.1.0 daemon's footprint.
@@ -251,6 +260,13 @@ fn status(
     clove_dir: &Utf8Path,
     format: OutputFormat,
 ) -> Result<ExitCode, CloveError> {
+    // With a hub there to ask, a token this client cannot use is the answer:
+    // "not serving" would be wrong.
+    if hub.footprint_present() {
+        if let Err(e) = clove_ipc::project(clove_dir, false) {
+            return Err(token_err(&e));
+        }
+    }
     let hub_status = HubClient::connect(hub)
         .ok()
         .and_then(|mut c| c.status().ok());
