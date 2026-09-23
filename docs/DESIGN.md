@@ -1575,7 +1575,7 @@ prints that instead of claiming it stopped. **A stop during a load wins:** a
 project still loading is marked stopping, the load tears itself down as soon as
 it completes, and the loading client is told the project was stopped while it
 loaded — it does not load it again. A load that arrives *after* the stop waits
-the teardown out and then loads.
+the teardown out and then loads. A `clove reindex` whose daemon is stopped mid-call rebuilds the index itself — saying so — once the daemon's own rebuild has let go of `reindex.lock`, instead of failing on it. When the last project's teardown outlasts the stop, the hub exits as soon as it is done.
 
 | Command | Effect |
 |---|---|

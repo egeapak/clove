@@ -1,7 +1,9 @@
 //! `clove reindex` (T-S04 CLI half): rebuild the SQLite index from the files.
 
+use std::time::{Duration, Instant};
+
 use clove_core::OutputFormat;
-use clove_ipc::DaemonClient;
+use clove_ipc::{ClientError, DaemonClient};
 use clove_plugin::outln;
 use clove_types::CloveError;
 use serde_json::json;
@@ -20,11 +22,10 @@ pub fn run(ctx: &Ctx, format: OutputFormat, quiet: bool) -> Result<(), CloveErro
     // Delegate to a running daemon: it rebuilds and reopens its own handle, so
     // the CLI and daemon stay coherent (a CLI-side rebuild would leave the
     // daemon pointing at the replaced inode until its next reopen).
-    let report = match reindex_via_daemon(ctx) {
+    let report = match reindex_via_daemon(ctx, quiet) {
         Some(report) => report,
         None => {
-            let r = clove_index::reindex(&ctx.issues_dir, &ctx.db_path)
-                .map_err(|e| index_error(e, &ctx.db_path))?;
+            let r = reindex_locally(ctx)?;
             Report {
                 items_indexed: r.items_indexed as u64,
                 duration_ms: r.duration_ms as u64,
@@ -60,13 +61,54 @@ pub fn run(ctx: &Ctx, format: OutputFormat, quiet: bool) -> Result<(), CloveErro
 
 /// Ask a running daemon to reindex (so it reopens its own handle). `None` → the
 /// CLI reindexes locally.
-fn reindex_via_daemon(ctx: &Ctx) -> Option<Report> {
+fn reindex_via_daemon(ctx: &Ctx, quiet: bool) -> Option<Report> {
     let clove_dir = ctx.issues_dir.parent()?;
     let mut client = DaemonClient::probe(clove_dir)?;
-    let done = client.reindex().ok()?;
-    Some(Report {
-        items_indexed: done.items_indexed,
-        duration_ms: done.duration_ms,
-        warnings: done.warnings,
-    })
+    match client.reindex() {
+        Ok(done) => Some(Report {
+            items_indexed: done.items_indexed,
+            duration_ms: done.duration_ms,
+            warnings: done.warnings,
+        }),
+        // The daemon went away mid-call — `clove daemon stop`, say. Its
+        // rebuild may still be finishing; the local one waits for it.
+        Err(ClientError::Transport(_)) => {
+            if !quiet {
+                eprintln!(
+                    "note: the daemon stopped during the reindex; rebuilding here once \
+                     its rebuild has finished"
+                );
+            }
+            None
+        }
+        Err(_) => None,
+    }
+}
+
+/// How long a local rebuild waits for one already running (a daemon's, cut
+/// off from its client) before giving up.
+const REBUILD_WAIT: Duration = Duration::from_secs(120);
+
+/// Rebuild here, after any rebuild already running on this index.
+fn reindex_locally(ctx: &Ctx) -> Result<clove_index::ReindexReport, CloveError> {
+    let start = Instant::now();
+    loop {
+        match clove_index::reindex(&ctx.issues_dir, &ctx.db_path) {
+            Err(clove_index::IndexError::AlreadyRunning) if start.elapsed() < REBUILD_WAIT => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(clove_index::IndexError::AlreadyRunning) => {
+                return Err(CloveError::Io {
+                    path: ctx.db_path.clone(),
+                    source: std::io::Error::other(format!(
+                        "another rebuild of this index (a daemon's, or another \
+                         `clove reindex`) has been running for over {}s; try again once \
+                         it has finished",
+                        REBUILD_WAIT.as_secs()
+                    )),
+                })
+            }
+            other => return other.map_err(|e| index_error(e, &ctx.db_path)),
+        }
+    }
 }

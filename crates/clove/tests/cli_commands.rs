@@ -337,6 +337,30 @@ fn agent_doc_is_idempotent_and_checks_schema() {
         .success();
 }
 
+/// A rebuild already running — a daemon's, cut off from its client by a
+/// `clove daemon stop` — holds the reindex lock for a while yet. `clove
+/// reindex` waits for it and then rebuilds, rather than failing (item 5).
+#[test]
+fn reindex_waits_for_a_rebuild_already_running() {
+    let dir = init_repo();
+    new_item(dir.path(), "indexed", &[]);
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.path().join(".clove/reindex.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        drop(lock);
+    });
+    let v = json_ok(clove(dir.path()).arg("reindex"));
+    release.join().unwrap();
+    assert_eq!(v["data"]["items_indexed"], 1, "{v}");
+}
+
 #[test]
 fn doctor_reports_and_fixes_safe_issues() {
     let dir = init_repo();
