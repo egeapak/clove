@@ -94,7 +94,7 @@ embedders who require an older toolchain).
 ```
 .clove/
   config.toml           # repo-level config — committed
-  .gitignore            # ignores: index.db, *.db-shm, *.db-wal, daemon.sock, daemon.pid, reindex.lock, daemon.lock, index.db.tmp
+  .gitignore            # ignores: index.db, *.db-shm, *.db-wal, daemon.sock, daemon.pid, reindex.lock, daemon.lock, index.db.tmp, daemon.token, sync/
   issues/
     <id>.md             # one item per file — committed (source of truth)
     <id>/               # only present when comments exist (sibling dir to <id>.md)
@@ -104,6 +104,7 @@ embedders who require an older toolchain).
   daemon.sock           # clove 0.1.0's Unix socket; the daemon now lives in the runtime dir (§8.2) — .gitignore'd
   daemon.pid            # clove 0.1.0's PID file — .gitignore'd
   daemon.lock           # held by whichever daemon serves the project (§8.1) — .gitignore'd
+  daemon.token          # the project's daemon token (§8.4): random, 0600, per clone — .gitignore'd
   reindex.lock          # advisory lock during reindex — .gitignore'd
 ```
 
@@ -1469,6 +1470,7 @@ every project's *acceleration*, never its data.
 | `<runtime>/hub.pid` | the hub's pid: readiness, and `clove daemon stop --all` | hub removes on clean shutdown |
 | `<runtime>/hub.lock` | one hub per runtime directory; held from before bind to after unbind, so it — not the socket — says whether a hub is alive | held by the hub process |
 | `.clove/daemon.lock` | one daemon per project (a hub slot, or a 0.1.0 daemon) | held while the project is served |
+| `.clove/daemon.token` | the project's token, which every call for it carries (§8.4) | kept; created by the first client that needs it |
 | `.clove/reindex.lock` | Prevents concurrent `clove reindex` | held for reindex duration |
 
 `<runtime>` is `$CLOVE_RUNTIME_DIR`; else, on Unix, `$XDG_RUNTIME_DIR/clove`, else
@@ -1562,14 +1564,32 @@ hub    → {"welcome":"ok","protocol":7}                                        
        | {"welcome":"err","protocol":7,"code":"PROTOCOL_MISMATCH","message":…} → closed
 ```
 
-**Every project-scoped call names its project**, as a `Project { clove_dir, load }`
-argument: the caller's own `.clove/` directory — made absolute by the client
-against its *own* working directory and canonicalized — and whether the call
-may load it. The hub rejects a relative path (`BAD_PROJECT`), resolves the
-project to its slot per call (canonicalizing on the blocking pool unless the path
-already names a slot), and answers from that slot. A client only ever sends the
-project it discovered for itself; there is no parameter anywhere — RPC, MCP
-tool, or web API — that selects another project.
+**Every project-scoped call names its project**, as a `Project { clove_dir, load,
+token }` argument: the caller's own `.clove/` directory — made absolute by the
+client against its *own* working directory and canonicalized — whether the call
+may load it, and the project's token. The hub rejects a relative path
+(`BAD_PROJECT`), resolves the project to its slot per call (canonicalizing on
+the blocking pool unless the path already names a slot), checks the token, and
+answers from that slot. A client only ever sends the project it discovered for
+itself; there is no parameter anywhere — RPC or MCP tool — that selects another
+project.
+
+**The project token scopes automated clients per project.** Each project has a
+random secret in `.clove/daemon.token` — 256 bits from the OS RNG, hex-encoded,
+created by the first client that needs it (`O_EXCL` temp file, `0600`, linked
+into place without replacing anything; a symlink there is refused, never
+followed) and git-ignored, so it stays with the clone. Every project-scoped
+call carries it, and the hub refuses a call whose token is not the one in the
+named project's `.clove/` (`BAD_TOKEN`) before loading anything; the client
+then falls back like after any refusal. So a client confined to repository A —
+an agent sandbox, a CI job — can read A's token but not B's, and can act through
+the shared hub on A only. The hub keeps each project's token in memory and reads
+the file again whenever it changes (size, mtime, inode), so replacing the file
+rotates the token. **It is a gate for automation, not a security boundary
+against the local user**, who can read every token they own; hub-wide calls
+(`ping`, `hub_status`, and `clove daemon stop --all`, which signals the hub's
+pid) need no token, and the web UI is not token-gated — it stays loopback-only,
+behind the `Host`/`Origin` guards (§8.10), and may list every project.
 
 **`CloveRpc`:** hub-level `ping` and `hub_status` (pid, uptime, web address, and
 each project's `STATUS`); per project `attach` (is it served — loading it when
@@ -1580,8 +1600,8 @@ teardown has run and its lock is free), `status`, `change_generation`, `query`,
 `apply_edit`, `add_comment`, `dep_add`, `dep_remove`, `set_parent`, `show`,
 `stats`. `STATUS` carries `web_addr` (the shared listener's `host:port`) and
 `web_url` (this project's `http://host:port/p/<slug>/`). Per-call refusals ride
-`RpcError.code`: `BAD_PROJECT`, `NOT_LOADED`, `PROJECT_LOCKED`, `LOAD_FAILED`,
-`SHUTTING_DOWN`.
+`RpcError.code`: `BAD_PROJECT`, `BAD_TOKEN`, `NOT_LOADED`, `PROJECT_LOCKED`,
+`LOAD_FAILED`, `SHUTTING_DOWN`.
 
 **`PROTOCOL_VERSION`** gates a mixed-version pair; the client fails a mismatch
 and falls back, which is safe because the daemon is a cache, not a source of
@@ -1593,7 +1613,7 @@ truth. It is **7**:
 | 4 | `change_generation()` for MCP `resources/updated` push |
 | 5 | `QueryRequest`'s five scalar filter fields → one `filters: view::Filters`; `GraphRequest::Blocked` carries an `order` and drops the dead `include_warnings` |
 | 6 | `search` RPC and `SearchRequest` **removed** — search is a file scan on every surface (§7.8, read-path roadmap §6.1), so the daemon has nothing to answer with |
-| 7 | the hub: every connection opens with a version `Hello`; every project-scoped call carries a `Project`; `hub_status`, `attach`, `detach` added; `STATUS.web_url` added |
+| 7 | the hub: every connection opens with a version `Hello`; every project-scoped call carries a `Project` (path, `load`, token); `hub_status`, `attach`, `detach` added; `STATUS.web_url` added |
 
 A v6 client never reaches the hub (it looks for `.clove/daemon.sock`); a v7
 client never reaches a 0.1.0 daemon (it looks in the runtime directory) except

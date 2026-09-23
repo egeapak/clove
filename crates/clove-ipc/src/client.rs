@@ -16,7 +16,7 @@
 
 use std::time::Duration;
 
-use camino::Utf8Path;
+use camino::{Utf8Path, Utf8PathBuf};
 use clove_types::{EditRequest, ItemStatus, NewSpec};
 use interprocess::local_socket::tokio::Stream;
 use interprocess::local_socket::traits::tokio::Stream as _;
@@ -97,6 +97,12 @@ pub enum ClientError {
     /// erroring, so the fallback would silently duplicate data.
     #[error("daemon transport error: {0}")]
     Transport(String),
+
+    /// The project's daemon token could not be read or created (a read-only
+    /// `.clove/`, or a `daemon.token` that is not a token — a symlink, say).
+    /// Nothing was sent.
+    #[error("the project's daemon token is unusable: {0}")]
+    Token(std::io::Error),
 }
 
 impl ClientError {
@@ -158,16 +164,23 @@ pub enum DaemonHealth {
     Dead,
 }
 
-/// The caller's own project, as every call names it: absolute (made so against
-/// *this* process's working directory, which the hub does not share) and
-/// canonical where it resolves.
-pub fn project(clove_dir: &Utf8Path, load: bool) -> Project {
+/// The caller's own project, as every call names it: its path, absolute (made
+/// so against *this* process's working directory, which the hub does not
+/// share) and canonical where it resolves, and its daemon token — created
+/// here on first need.
+pub fn project(clove_dir: &Utf8Path, load: bool) -> std::io::Result<Project> {
+    let clove_dir = absolute_project_dir(clove_dir);
+    let token = clove_core::daemon_token::read_or_create(&clove_dir)?;
+    Ok(Project {
+        clove_dir: clove_dir.into_string(),
+        load,
+        token,
+    })
+}
+
+fn absolute_project_dir(clove_dir: &Utf8Path) -> Utf8PathBuf {
     let absolute = crate::absolute(clove_dir);
-    let clove_dir = absolute
-        .canonicalize_utf8()
-        .unwrap_or(absolute)
-        .into_string();
-    Project { clove_dir, load }
+    absolute.canonicalize_utf8().unwrap_or(absolute)
 }
 
 /// A connected client for the caller's own project on the hub.
@@ -227,11 +240,12 @@ impl DaemonClient {
         clove_dir: &Utf8Path,
         load: bool,
     ) -> Result<DaemonClient, ClientError> {
+        let project = project(clove_dir, load).map_err(ClientError::Token)?;
         let (rt, client) = connect(hub)?;
         let mut this = DaemonClient {
             rt: Some(rt),
             client,
-            project: project(clove_dir, load),
+            project,
         };
         this.check(if load { LOAD_TIMEOUT } else { ANSWER_TIMEOUT })?;
         Ok(this)
@@ -776,15 +790,46 @@ mod tests {
     /// interpret against its own.
     #[test]
     fn a_relative_project_is_made_absolute_by_the_client() {
-        let named = project(Utf8Path::new(".clove"), false);
-        assert!(Utf8Path::new(&named.clove_dir).is_absolute(), "{named:?}");
+        let named = absolute_project_dir(Utf8Path::new(".clove"));
+        assert!(named.is_absolute(), "{named}");
         let cwd = Utf8PathBuf::from_path_buf(std::env::current_dir().unwrap()).unwrap();
-        assert!(named.clove_dir.ends_with(".clove"));
+        assert!(named.as_str().ends_with(".clove"));
+        assert!(named.starts_with(cwd.canonicalize_utf8().unwrap()) || named.starts_with(&cwd));
+    }
+
+    /// A project with no token yet gets one on first use; the call carries it.
+    #[test]
+    fn a_project_without_a_token_gets_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let clove_dir = Utf8PathBuf::from_path_buf(tmp.path().join(".clove")).unwrap();
+        std::fs::create_dir_all(&clove_dir).unwrap();
+        let token_file = clove_core::daemon_token::token_path(&clove_dir);
+        assert!(!token_file.exists());
+        let named = project(&clove_dir, false).unwrap();
+        assert!(token_file.exists(), "no token file was created");
+        assert_eq!(
+            named.token,
+            clove_core::daemon_token::read(&clove_dir).unwrap()
+        );
+    }
+
+    /// A symlink planted as the token is neither followed nor sent: the client
+    /// falls back without calling the hub.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_token_is_refused_by_the_client() {
+        let tmp = tempfile::tempdir().unwrap();
+        let clove_dir = Utf8PathBuf::from_path_buf(tmp.path().join(".clove")).unwrap();
+        std::fs::create_dir_all(&clove_dir).unwrap();
+        let other = tmp.path().join("other-token");
+        std::fs::write(&other, "0123456789abcdef0123456789abcdef\n").unwrap();
+        std::os::unix::fs::symlink(&other, clove_core::daemon_token::token_path(&clove_dir))
+            .unwrap();
+        let (_run, hub) = hub_dir();
+        let refused = DaemonClient::attach(&hub, &clove_dir, false).err();
         assert!(
-            named
-                .clove_dir
-                .starts_with(cwd.canonicalize_utf8().unwrap().as_str())
-                || named.clove_dir.starts_with(cwd.as_str())
+            matches!(refused, Some(ClientError::Token(_))),
+            "{refused:?}"
         );
     }
 

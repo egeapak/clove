@@ -195,6 +195,8 @@ pub mod codes {
     pub const BAD_HELLO: &str = "BAD_HELLO";
     /// A call's project path is not absolute.
     pub const BAD_PROJECT: &str = "BAD_PROJECT";
+    /// A call's token is not its project's `.clove/daemon.token`.
+    pub const BAD_TOKEN: &str = "BAD_TOKEN";
     /// `load: false` and the hub is not serving that project.
     pub const NOT_LOADED: &str = "NOT_LOADED";
     /// Another daemon holds the project's `daemon.lock` — a pre-hub daemon, or a

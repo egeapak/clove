@@ -23,6 +23,7 @@ mod reindexer;
 mod slot;
 mod snapshot;
 mod state;
+mod token;
 mod watcher;
 
 /// The `cloved` command line. `clove daemon start` spawns `cloved run` detached

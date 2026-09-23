@@ -26,8 +26,8 @@ pub mod win;
 use camino::{Utf8Path, Utf8PathBuf};
 
 pub use client::{
-    cleanup_hub, cleanup_legacy, legacy_daemon, ClientError, DaemonClient, DaemonHealth, HubClient,
-    LegacyDaemon,
+    cleanup_hub, cleanup_legacy, legacy_daemon, project, ClientError, DaemonClient, DaemonHealth,
+    HubClient, LegacyDaemon,
 };
 pub use hub::{Detached, HubPaths, HubStatus, ProjectInfo};
 pub use protocol::{

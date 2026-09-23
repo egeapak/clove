@@ -7,6 +7,7 @@
 
 pub mod comments;
 pub mod config;
+pub mod daemon_token;
 pub mod doctor;
 pub mod edit;
 pub mod fixtures;

@@ -135,13 +135,13 @@ pub fn write_atomic(path: &Utf8Path, bytes: &[u8]) -> io::Result<()> {
 /// `O_NOFOLLOW` on Unix, where the kernel refuses the link atomically. Windows
 /// has no such open flag here, so the check is done up front instead.
 #[cfg(unix)]
-fn no_follow(options: &mut OpenOptions, _path: &Utf8Path) -> io::Result<()> {
+pub(crate) fn no_follow(options: &mut OpenOptions, _path: &Utf8Path) -> io::Result<()> {
     std::os::unix::fs::OpenOptionsExt::custom_flags(options, libc::O_NOFOLLOW);
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn no_follow(_options: &mut OpenOptions, path: &Utf8Path) -> io::Result<()> {
+pub(crate) fn no_follow(_options: &mut OpenOptions, path: &Utf8Path) -> io::Result<()> {
     refuse_symlink(path)
 }
 

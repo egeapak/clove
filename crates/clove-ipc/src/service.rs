@@ -82,6 +82,11 @@ pub struct Project {
     /// Load the project if needed. Reads send `false`: asking whether a daemon
     /// can answer must not start serving a project.
     pub load: bool,
+    /// The project's `.clove/daemon.token`. The daemon refuses a call whose
+    /// token is not the one in `clove_dir` (`BAD_TOKEN`), so a client acts
+    /// only on a project whose `.clove/` it can read. A gate for automation,
+    /// not a security boundary against the local user.
+    pub token: String,
 }
 
 /// The clove daemon RPC service (DESIGN §8.4). One daemon serves every project

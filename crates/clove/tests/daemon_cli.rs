@@ -200,6 +200,15 @@ fn start_status_stop_round_trip() {
         .stdout
         .clone();
     assert_eq!(json(&out)["data"]["started"], serde_json::json!(true));
+    // The project's daemon token was created on first need, owner-only.
+    let token = dir.join(".clove/daemon.token");
+    assert!(token.is_file(), "no daemon token was created");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&token).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
 
     // status → running with 1 item, and the hub lists this one project
     let v = daemon_status(dir, &run.path);

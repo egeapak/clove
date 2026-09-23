@@ -375,11 +375,9 @@ fn raw_client(hub: &TestHub, rt: &tokio::runtime::Runtime) -> clove_ipc::CloveRp
     })
 }
 
+/// A loading call for `dir`, as its own client makes it: with its token.
 fn project(dir: &Utf8Path) -> clove_ipc::Project {
-    clove_ipc::Project {
-        clove_dir: canonical(dir),
-        load: true,
-    }
+    clove_ipc::project(dir, true).unwrap()
 }
 
 /// Nothing binds a connection to a project: each call names its own, so one
@@ -451,6 +449,7 @@ fn a_call_naming_a_relative_project_is_refused() {
                 clove_ipc::Project {
                     clove_dir: ".clove".to_owned(),
                     load,
+                    token: project(&a).token,
                 },
             ))
             .unwrap()
@@ -458,4 +457,48 @@ fn a_call_naming_a_relative_project_is_refused() {
         assert_eq!(refused.code, codes::BAD_PROJECT, "{refused:?}");
     }
     assert_eq!(hub.projects(), vec![canonical(&a)]);
+}
+
+/// Over the wire, as any client would try it: a call carrying a wrong token,
+/// or naming project B with project A's token, is refused with `BAD_TOKEN` —
+/// nothing is read from, written to, or loaded for B.
+#[test]
+fn a_call_is_refused_without_its_projects_token() {
+    let (_ta, a) = init_clove_dir();
+    let (_tb, b) = init_clove_dir();
+    let hub = TestHub::spawn(Some(&a));
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let client = raw_client(&hub, &rt);
+    let create = |call: clove_ipc::Project| {
+        rt.block_on(client.create(
+            tarpc::context::current(),
+            call,
+            NewSpec {
+                title: "smuggled".to_owned(),
+                ..Default::default()
+            },
+        ))
+        .unwrap()
+    };
+    let wrong = clove_ipc::Project {
+        token: "0".repeat(64),
+        ..project(&a)
+    };
+    assert_eq!(create(wrong).unwrap_err().code, codes::BAD_TOKEN);
+    let b_with_a_token = clove_ipc::Project {
+        token: project(&a).token,
+        ..project(&b)
+    };
+    assert_eq!(create(b_with_a_token).unwrap_err().code, codes::BAD_TOKEN);
+
+    assert_eq!(hub.projects(), vec![canonical(&a)], "B was loaded");
+    assert_eq!(
+        std::fs::read_dir(b.join("issues")).unwrap().count(),
+        0,
+        "B was written to"
+    );
+    assert!(create(project(&a)).is_ok(), "A's own token works");
 }

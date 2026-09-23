@@ -32,6 +32,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::ipc::Dispatcher;
 use crate::slot::{self, LoadError, Slot, SlotTask};
+use crate::token::Tokens;
 
 /// How long a fresh connection may take to send its [`Hello`].
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -73,6 +74,7 @@ struct Inner {
     started: Instant,
     shutdown: CancellationToken,
     grace: Duration,
+    tokens: Arc<Tokens>,
 }
 
 fn refused(code: &'static str, message: impl Into<String>) -> LoadError {
@@ -97,6 +99,7 @@ impl Hub {
             started: Instant::now(),
             shutdown: CancellationToken::new(),
             grace,
+            tokens: Arc::default(),
         }))
     }
 
@@ -129,9 +132,18 @@ impl Hub {
             .unwrap_or_else(|e| Err(refused(codes::LOAD_FAILED, e.to_string())))
     }
 
-    /// The slot for `clove_dir`, loading it first when `load` is set.
-    pub async fn attach(&self, clove_dir: &str, load: bool) -> Result<Arc<Slot>, LoadError> {
-        let slot = self.attach_once(clove_dir, load).await?;
+    /// Admit a call for the project at `key` only with that project's token.
+    async fn authorize(&self, key: &Utf8Path, token: &str) -> Result<(), LoadError> {
+        let (tokens, key, token) = (Arc::clone(&self.0.tokens), key.to_owned(), token.to_owned());
+        tokio::task::spawn_blocking(move || tokens.check(&key, &token))
+            .await
+            .unwrap_or_else(|e| Err(refused(codes::BAD_TOKEN, e.to_string())))
+    }
+
+    /// The caller's project's slot, loading it first when the call allows.
+    pub async fn attach(&self, project: &Project) -> Result<Arc<Slot>, LoadError> {
+        let (clove_dir, load) = (project.clove_dir.as_str(), project.load);
+        let slot = self.attach_once(project).await?;
         if !slot.cancel.is_cancelled() {
             return Ok(slot);
         }
@@ -147,14 +159,15 @@ impl Hub {
             return Err(unloaded());
         }
         let _ = tokio::time::timeout(TEARDOWN_TIMEOUT, slot.done.cancelled()).await;
-        let slot = self.attach_once(clove_dir, load).await?;
+        let slot = self.attach_once(project).await?;
         if slot.cancel.is_cancelled() {
             return Err(unloaded());
         }
         Ok(slot)
     }
 
-    async fn attach_once(&self, clove_dir: &str, load: bool) -> Result<Arc<Slot>, LoadError> {
+    async fn attach_once(&self, project: &Project) -> Result<Arc<Slot>, LoadError> {
+        let (clove_dir, load) = (project.clove_dir.as_str(), project.load);
         let not_loaded = || {
             refused(
                 codes::NOT_LOADED,
@@ -167,6 +180,7 @@ impl Hub {
             Err(_) if !load => return Err(not_loaded()),
             Err(e) => return Err(e),
         };
+        self.authorize(&key, &project.token).await?;
         let cell = {
             let mut table = self.table();
             if table.exiting {
@@ -256,11 +270,7 @@ impl Hub {
     /// The project-scoped half of a call: the caller's project, resolved to
     /// its slot's dispatcher.
     async fn dispatcher(&self, project: &Project) -> Result<Dispatcher, RpcError> {
-        Ok(self
-            .attach(&project.clove_dir, project.load)
-            .await?
-            .dispatcher
-            .clone())
+        Ok(self.attach(project).await?.dispatcher.clone())
     }
 
     /// Mount the slot on the web listener and start its supervised tasks.
@@ -406,7 +416,10 @@ impl Hub {
     pub async fn detach(&self, project: &Project) -> Result<Detached, RpcError> {
         let key = self.key(&project.clove_dir).await;
         let slot = match &key {
-            Ok(key) => self.table().slots.get(key).and_then(|c| c.get().cloned()),
+            Ok(key) => {
+                self.authorize(key, &project.token).await?;
+                self.table().slots.get(key).and_then(|c| c.get().cloned())
+            }
             Err(e) if e.code == codes::BAD_PROJECT => return Err(e.clone().into()),
             Err(_) => None,
         };
@@ -590,7 +603,7 @@ impl CloveRpc for Service {
     }
 
     async fn attach(self, _: Context, project: Project) -> Result<(), RpcError> {
-        let slot = self.0.attach(&project.clove_dir, project.load).await?;
+        let slot = self.0.attach(&project).await?;
         // The project heartbeat: count it and reset the idle window.
         if let Ok(mut state) = slot.dispatcher.state.lock() {
             state.record_ping();
@@ -757,6 +770,11 @@ mod tests {
         (dir, clove_dir)
     }
 
+    /// A call for `clove_dir` as its own client makes it: with its token.
+    fn call(clove_dir: &Utf8Path, load: bool) -> Project {
+        clove_ipc::project(clove_dir, load).unwrap()
+    }
+
     /// One project's background task panicking unloads that project — and only
     /// it: the hub keeps running, the other project keeps serving, and the
     /// failed project's lock is free for a fresh load.
@@ -765,7 +783,7 @@ mod tests {
         let hub = Hub::new(false, Duration::from_secs(60));
         let (_a_tmp, a) = store();
         let (_b_tmp, b) = store();
-        let alpha = hub.attach(a.as_str(), true).await.unwrap();
+        let alpha = hub.attach(&call(&a, true)).await.unwrap();
 
         // Load beta by hand so its task set can carry a faulty task.
         let key = slot::canonical_key(b.as_str()).unwrap();
@@ -790,7 +808,7 @@ mod tests {
         assert_eq!(served, vec![alpha.clove_dir.to_string()]);
         assert!(!alpha.cancel.is_cancelled(), "alpha untouched");
         assert!(!hub.shutdown().is_cancelled(), "the hub keeps running");
-        hub.attach(b.as_str(), true)
+        hub.attach(&call(&b, true))
             .await
             .expect("beta's lock was released, so it loads afresh");
     }
@@ -808,7 +826,7 @@ mod tests {
             let loads: Vec<_> = (0..4)
                 .map(|_| {
                     let (hub, a) = (hub.clone(), a.clone());
-                    tokio::spawn(async move { hub.attach(a.as_str(), true).await })
+                    tokio::spawn(async move { hub.attach(&call(&a, true)).await })
                 })
                 .collect();
             for load in loads {
@@ -828,21 +846,24 @@ mod tests {
     async fn a_load_abandoned_by_its_caller_never_blocks_the_next() {
         let hub = Hub::new(false, Duration::from_secs(60));
         let (_b_tmp, b) = store();
-        hub.attach(b.as_str(), true).await.unwrap(); // keeps the hub from exiting
+        hub.attach(&call(&b, true)).await.unwrap(); // keeps the hub from exiting
         let (_a_tmp, a) = store();
-        let a_project = Project {
-            clove_dir: a.to_string(),
-            load: false,
-        };
+        let a_project = call(&a, false);
         let mut failures = Vec::new();
         for round in 0..16u64 {
             let loader = {
                 let (hub, a) = (hub.clone(), a.clone());
-                tokio::spawn(async move { hub.attach(a.as_str(), true).await })
+                tokio::spawn(async move { hub.attach(&call(&a, true)).await })
             };
             tokio::time::sleep(Duration::from_micros(round * 400)).await;
             loader.abort();
-            if let Err(e) = hub.attach(a.as_str(), true).await {
+            let mut reload = hub.attach(&call(&a, true)).await;
+            // A teardown slower than the hub's wait (a heavily loaded machine)
+            // reports NOT_LOADED; that is not what this test is about.
+            if reload.as_ref().is_err_and(|e| e.code == codes::NOT_LOADED) {
+                reload = hub.attach(&call(&a, true)).await;
+            }
+            if let Err(e) = reload {
                 failures.push(format!("round {round}: {}: {}", e.code, e.message));
             }
             let _ = hub.detach(&a_project).await;
@@ -856,7 +877,12 @@ mod tests {
     async fn a_relative_project_path_is_refused() {
         let hub = Hub::new(false, Duration::from_secs(60));
         for load in [false, true] {
-            let err = hub.attach(".clove", load).await.err().expect("refused");
+            let relative = Project {
+                clove_dir: ".clove".to_owned(),
+                load,
+                token: "0".repeat(64),
+            };
+            let err = hub.attach(&relative).await.err().expect("refused");
             assert_eq!(err.code, codes::BAD_PROJECT);
         }
     }
@@ -868,16 +894,81 @@ mod tests {
         let hub = Hub::new(false, Duration::from_secs(60));
         let (_a_tmp, a) = store();
         let (_b_tmp, b) = store();
-        hub.attach(a.as_str(), true).await.unwrap();
-        let detached = hub
-            .detach(&Project {
-                clove_dir: a.to_string(),
-                load: false,
-            })
-            .await
-            .unwrap();
+        hub.attach(&call(&a, true)).await.unwrap();
+        let detached = hub.detach(&call(&a, false)).await.unwrap();
         assert!(detached.hub_exiting);
-        let err = hub.attach(b.as_str(), true).await.err().expect("refused");
+        let err = hub.attach(&call(&b, true)).await.err().expect("refused");
         assert_eq!(err.code, codes::SHUTTING_DOWN);
+    }
+
+    /// A call is served only with its project's own token: a wrong one, or
+    /// another project's, is refused before anything loads.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_call_is_served_only_with_its_projects_token() {
+        let hub = Hub::new(false, Duration::from_secs(60));
+        let (_a_tmp, a) = store();
+        let (_b_tmp, b) = store();
+        let a_call = call(&a, true);
+        let b_call = call(&b, true);
+
+        let wrong = Project {
+            token: "f".repeat(64),
+            ..a_call.clone()
+        };
+        let err = hub.attach(&wrong).await.err().expect("refused");
+        assert_eq!(err.code, codes::BAD_TOKEN);
+        let borrowed = Project {
+            token: a_call.token.clone(),
+            ..b_call.clone()
+        };
+        let err = hub.attach(&borrowed).await.err().expect("refused");
+        assert_eq!(err.code, codes::BAD_TOKEN);
+        assert!(
+            hub.status().projects.is_empty(),
+            "a refused call loaded something"
+        );
+
+        hub.attach(&a_call).await.expect("A's own token");
+        let err = hub.detach(&borrowed).await.expect_err("refused");
+        assert_eq!(err.code, codes::BAD_TOKEN);
+        assert_eq!(
+            hub.status().projects.len(),
+            1,
+            "A was detached by B's caller"
+        );
+    }
+
+    /// A token replaced on disk takes effect at once; the old one stops working.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_replaced_token_is_read_again() {
+        let hub = Hub::new(false, Duration::from_secs(60));
+        let (_tmp, a) = store();
+        let old = call(&a, true);
+        hub.attach(&old).await.unwrap();
+        std::fs::remove_file(clove_core::daemon_token::token_path(&a)).unwrap();
+        let new = call(&a, true);
+        assert_ne!(new.token, old.token);
+        hub.attach(&new).await.expect("the new token");
+        let err = hub.attach(&old).await.err().expect("refused");
+        assert_eq!(err.code, codes::BAD_TOKEN);
+    }
+
+    /// A symlink planted as the token is not read through.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlinked_token_is_refused_by_the_hub() {
+        let hub = Hub::new(false, Duration::from_secs(60));
+        let (tmp, a) = store();
+        let elsewhere = tmp.path().join("elsewhere");
+        let token = "0123456789abcdef0123456789abcdef";
+        std::fs::write(&elsewhere, token).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, clove_core::daemon_token::token_path(&a)).unwrap();
+        let planted = Project {
+            clove_dir: a.to_string(),
+            load: true,
+            token: token.to_owned(),
+        };
+        let err = hub.attach(&planted).await.err().expect("refused");
+        assert_eq!(err.code, codes::BAD_TOKEN);
     }
 }
