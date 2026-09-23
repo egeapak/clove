@@ -61,6 +61,15 @@ export interface Meta {
   source: string;
 }
 
+/** A project served by the daemon hub (`GET /api/v1/projects`). */
+export interface Project {
+  slug: string;
+  name: string;
+  root: string;
+  /** The project's app URL path, e.g. `/p/clove/`. */
+  url: string;
+}
+
 export interface StatsHistoryPoint {
   date: string;
   created: number;

@@ -15,9 +15,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 use clove_index::Index;
-use notify::{recommended_watcher, Event, RecursiveMode, Watcher};
+use notify::{recommended_watcher, Event, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::graph_cache::GraphCache;
 use crate::reindexer::sync_once;
@@ -70,21 +70,20 @@ async fn collect_burst(
     pending
 }
 
-/// Watch `issues_dir` and keep the index fresh until the task is dropped (on
-/// shutdown). `debounce` is the per-burst quiet window (DESIGN §8.5).
-pub async fn watch(
-    issues_dir: Utf8PathBuf,
-    index: Arc<Mutex<Index>>,
-    state: Arc<Mutex<DaemonState>>,
-    debounce: Duration,
-    options: WatchOptions,
-    graph: Arc<GraphCache>,
-) {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<PathBuf>();
+/// A watch on a project's `issues/` that is already in place: every change
+/// from the moment [`arm`] returned is queued in `events`.
+struct Armed {
+    events: tokio::sync::mpsc::UnboundedReceiver<PathBuf>,
+    _watcher: DropOffThread<RecommendedWatcher>,
+}
 
+/// Put the OS watch on `issues_dir`. Blocking, and on macOS at the mercy of
+/// `fseventsd`: FSEvents setup can take seconds when it is busy.
+fn arm(issues_dir: &Utf8Path) -> Result<Armed, String> {
+    let (tx, events) = tokio::sync::mpsc::unbounded_channel::<PathBuf>();
     // The notify handler runs on notify's own thread; forward only item-file
     // paths into the channel (non-blocking send, no runtime needed here).
-    let mut watcher = match recommended_watcher(move |res: notify::Result<Event>| {
+    let mut watcher = recommended_watcher(move |res: notify::Result<Event>| {
         if let Ok(event) = res {
             for path in event.paths {
                 if is_item_file(&path) {
@@ -92,18 +91,104 @@ pub async fn watch(
                 }
             }
         }
-    }) {
-        Ok(w) => w,
-        Err(e) => {
-            eprintln!("cloved: watcher init failed: {e}");
+    })
+    .map_err(|e| format!("watcher init failed: {e}"))?;
+    // Test knob: a slow arm, as on a loaded machine.
+    if let Some(ms) = std::env::var("CLOVED_WATCH_ARM_DELAY_MS")
+        .ok()
+        .and_then(|ms| ms.parse::<u64>().ok())
+    {
+        std::thread::sleep(Duration::from_millis(ms));
+    }
+    watcher
+        .watch(issues_dir.as_std_path(), RecursiveMode::Recursive)
+        .map_err(|e| format!("watch({issues_dir}) failed: {e}"))?;
+    Ok(Armed {
+        events,
+        _watcher: DropOffThread(Some(watcher)),
+    })
+}
+
+/// A loaded project's watcher task: arm the watch, catch up, then keep the
+/// index fresh until the task is dropped (on teardown). Returns early only if
+/// the watch cannot be put in place, which unloads the project.
+///
+/// The load has already swept `issues/` once, without waiting for this: the
+/// project is served from the moment it is loaded. Until the watch is armed,
+/// the index can miss a change, so reads are not answered from it (the state
+/// says `Arming`; see `Dispatcher`). Once armed, a second sweep picks up
+/// whatever changed between the first and the arming — anything later is
+/// queued by the watch — and only then is the state `Watching`.
+pub async fn run(
+    issues_dir: Utf8PathBuf,
+    index: Arc<Mutex<Index>>,
+    state: Arc<Mutex<DaemonState>>,
+    debounce: Duration,
+    options: WatchOptions,
+    graph: Arc<GraphCache>,
+) {
+    let arming = std::time::Instant::now();
+    let armed = match arm_on_own_thread(issues_dir.clone()).await {
+        Ok(armed) => armed,
+        Err(why) => {
+            eprintln!("cloved: {issues_dir}: {why}");
             return;
         }
     };
-
-    if let Err(e) = watcher.watch(issues_dir.as_std_path(), RecursiveMode::Recursive) {
-        eprintln!("cloved: watch({issues_dir}) failed: {e}");
+    let took = arming.elapsed();
+    if took > Duration::from_secs(1) {
+        eprintln!("cloved: {issues_dir}: the file watch took {took:.1?} to set up");
+    }
+    let (dir, index_c, state_c, graph_c) = (
+        issues_dir.clone(),
+        index.clone(),
+        state.clone(),
+        graph.clone(),
+    );
+    let caught_up = tokio::task::spawn_blocking(move || {
+        if sync_once(&dir, &index_c, &state_c) {
+            graph_c.mark_dirty();
+        }
+    })
+    .await;
+    if caught_up.is_err() {
+        eprintln!("cloved: {issues_dir}: the sweep after arming the watcher panicked");
         return;
     }
+    watch(armed, issues_dir, index, state, debounce, options, graph).await;
+}
+
+/// [`arm`] on a thread of its own rather than the blocking pool: an arm stuck
+/// behind `fseventsd` must neither hold a pool thread nor keep the runtime
+/// from shutting down, and one that outlives its project (torn down while it
+/// armed) just drops what it made.
+async fn arm_on_own_thread(issues_dir: Utf8PathBuf) -> Result<Armed, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("cloved-arm".to_owned())
+        .spawn(move || {
+            let _ = tx.send(arm(&issues_dir));
+        })
+        .map_err(|e| format!("arming the watcher: {e}"))?;
+    rx.await
+        .map_err(|_| "arming the watcher: its thread died".to_owned())?
+}
+
+/// Keep the index fresh from `armed`'s changes until the task is dropped (on
+/// shutdown). `debounce` is the per-burst quiet window (DESIGN §8.5).
+async fn watch(
+    armed: Armed,
+    issues_dir: Utf8PathBuf,
+    index: Arc<Mutex<Index>>,
+    state: Arc<Mutex<DaemonState>>,
+    debounce: Duration,
+    options: WatchOptions,
+    graph: Arc<GraphCache>,
+) {
+    let Armed {
+        events: mut rx,
+        _watcher,
+    } = armed;
     if let Ok(mut st) = state.lock() {
         st.set_watcher_state(WatcherState::Watching);
     }
@@ -145,8 +230,18 @@ pub async fn watch(
             eprintln!("cloved: watcher batch task panicked");
         }
     }
+}
 
-    drop(watcher);
+/// Drops its value on a thread of its own — the watcher, whose teardown
+/// blocks, when its task is aborted on an async worker.
+struct DropOffThread<T: Send + 'static>(Option<T>);
+
+impl<T: Send + 'static> Drop for DropOffThread<T> {
+    fn drop(&mut self) {
+        if let Some(value) = self.0.take() {
+            std::thread::spawn(move || drop(value));
+        }
+    }
 }
 
 /// Auto-commit the batch's files when built with `git-sync` and enabled in config.

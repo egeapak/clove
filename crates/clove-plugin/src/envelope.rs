@@ -44,10 +44,10 @@ pub fn emit_success_with_meta(format: OutputFormat, data: Value, meta: Value) {
                 "data": data,
                 "_meta": meta,
             });
-            println!("{envelope}");
+            crate::outln!("{envelope}");
         }
         OutputFormat::Human => {
-            println!(
+            crate::outln!(
                 "{}",
                 serde_json::to_string_pretty(&data).unwrap_or_default()
             );
@@ -73,7 +73,7 @@ pub fn emit_error(format: OutputFormat, err: &CloveError, quiet: bool) -> u8 {
                     "exit": exit,
                 },
             });
-            println!("{envelope}");
+            crate::outln!("{envelope}");
         }
         OutputFormat::Human => {
             if !quiet {

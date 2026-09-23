@@ -3,6 +3,7 @@
 use camino::{Utf8Path, Utf8PathBuf};
 use clove_core::config::derive_prefix;
 use clove_core::{OutputFormat, GITIGNORE_ENTRIES};
+use clove_plugin::outln;
 use clove_types::CloveError;
 use serde_json::json;
 
@@ -32,19 +33,23 @@ pub fn run(
     };
 
     let issues_dir = clove_dir.join("issues");
-    mkdir_all(&issues_dir)?;
+    mkdir_all(&clove_dir, &issues_dir)?;
 
     // config.toml — never overwrite an existing one (idempotency).
     let config_path = clove_dir.join("config.toml");
     let created_config = !config_path.exists();
     if created_config {
         let prefix = args.prefix.unwrap_or_else(|| derive_prefix(&root));
-        write_file(&config_path, &render_config(&prefix))?;
+        write_clove_file(&clove_dir, &config_path, &render_config(&prefix))?;
     }
 
     // .gitignore — fixed content, LF endings; safe to rewrite each run.
     let gitignore = clove_dir.join(".gitignore");
-    write_file(&gitignore, &format!("{}\n", GITIGNORE_ENTRIES.join("\n")))?;
+    write_clove_file(
+        &clove_dir,
+        &gitignore,
+        &format!("{}\n", GITIGNORE_ENTRIES.join("\n")),
+    )?;
 
     if args.merge_driver {
         install_merge_driver(&root)?;
@@ -61,9 +66,9 @@ pub fn run(
         ),
         OutputFormat::Human => {
             if !quiet {
-                println!("Initialized clove repository in {clove_dir}");
-                println!("run 'clove agent-doc' to generate an AGENTS.md snippet");
-                println!("run 'clove setup' to register clove's MCP server with Claude Code");
+                outln!("Initialized clove repository in {clove_dir}");
+                outln!("run 'clove agent-doc' to generate an AGENTS.md snippet");
+                outln!("run 'clove setup' to register clove's MCP server with Claude Code");
             }
         }
     }
@@ -122,10 +127,20 @@ fn install_merge_driver(root: &Utf8Path) -> Result<(), CloveError> {
     Ok(())
 }
 
-fn mkdir_all(path: &Utf8Path) -> Result<(), CloveError> {
-    std::fs::create_dir_all(path).map_err(|source| CloveError::Io {
+fn mkdir_all(root: &Utf8Path, path: &Utf8Path) -> Result<(), CloveError> {
+    clove_core::fs_safe::create_dirs(root, path).map_err(|source| CloveError::Io {
         path: path.to_owned(),
         source,
+    })
+}
+
+/// A file under `.clove/`, which a clone may have planted as a symlink.
+fn write_clove_file(root: &Utf8Path, path: &Utf8Path, contents: &str) -> Result<(), CloveError> {
+    clove_core::fs_safe::write_atomic(root, path, contents.as_bytes()).map_err(|source| {
+        CloveError::Io {
+            path: path.to_owned(),
+            source,
+        }
     })
 }
 

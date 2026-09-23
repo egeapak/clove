@@ -127,7 +127,7 @@ impl PluginInfo {
 /// materialization, so `clove plugin list` can probe without a repo context.
 pub fn info_requested(info: &PluginInfo) -> bool {
     if std::env::args().skip(1).any(|arg| arg == INFO_FLAG) {
-        println!("{}", info.to_json());
+        crate::outln!("{}", info.to_json());
         true
     } else {
         false

@@ -4,6 +4,45 @@ All notable changes to clove are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-09-24
+
+### Added
+
+- One per-user daemon serves every project, over one socket and one web port (`/p/<slug>/`, with a project picker)
+- A per-project `.clove/daemon.token` scopes automated daemon calls (CLI, MCP) to their own project; clove records the tokens it issued under `<clove home>/daemon-tokens/`
+- `clove daemon stop --all`; `clove daemon status` lists each served project and its file-watcher state
+- The daemon logs to `hub.log` in its runtime directory
+- `clove doctor` reports a clove 0.1.0 daemon, an unresponsive daemon, a git-tracked daemon token, and a clove-home mismatch
+
+### Changed
+
+- The daemon socket lives in a per-user runtime directory (`$CLOVE_RUNTIME_DIR`, `$XDG_RUNTIME_DIR/clove`, or `$TMPDIR/clove-<uid>`), not in `.clove/`
+- `cloved run` takes no `--clove-dir`: the daemon starts bare and loads projects on demand
+- `clove daemon stop` stops serving this project; the daemon exits once it serves none
+- `clove daemon` JSON: `start`'s `pid` is a number, `status`'s `running` means "serving this project" (plus `hub`, `log`, `warnings`), and `stop` adds `stopping`, `hub_stopped`, `legacy`, and `restarted_by_another_client`
+- The daemon's web UI and API live under `/p/<slug>/`; bare `/api/v1/…` redirects only while one project is loaded
+- Starting the daemon for a project (`daemon start`, MCP, `serve`) adds `daemon.token` to `.clove/.gitignore`
+- The daemon runs from its runtime directory with a minimal environment; its GitHub sync takes the token from `gh auth token`
+- `clove serve` defaults to the configured `[web] port`, falls back to a free port, and hands off to a running daemon; an explicit `--port` is always honored
+- `clove reindex` waits for a rebuild already in progress instead of failing
+- A symlinked `.clove/issues/` (or directory below it) is refused for reads and writes
+- Daemon IPC protocol 8: clove 0.1.0 clients and daemons fall back to direct file access
+
+### Fixed
+
+- `clove … | head` exits quietly instead of aborting on a closed pipe
+- The daemon runs in repositories nested deeper than the platform's socket-path limit
+- `clove serve` in a second project no longer fails on the shared port or blames `[web] enabled = false`
+- `clove sync github` names comment directions: `comments 0 pulled / 6 pushed`
+- `clove doctor --fix` no longer deletes a live but slow daemon's socket and pid files, and `clove daemon stop` no longer reports such a daemon as not running
+
+### Security
+
+- Files under `.clove/` are never read or written through a planted symlink (daemon lock, index, sync state, items, `doctor --fix`, `init`)
+- Daemon-side GitHub sync only targets one of the project's own git remotes
+- Daemon clients and the daemon verify each other's user; the Windows pipe and shutdown event are owner-only
+- The web UI's event socket requires a same-port origin; pages carry a hash-pinned CSP and every response `nosniff`
+
 ## [0.1.0] - 2026-09-16
 
 The first public release: milestones M0–M4, plus the unified read path

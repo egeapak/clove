@@ -1,18 +1,22 @@
-//! A blocking client for talking to a running `cloved` (DESIGN §8.3).
+//! Blocking clients for the `cloved` hub (DESIGN §8.3).
 //!
-//! Internally this drives the async [`crate::service::CloveRpcClient`] (tarpc) on
-//! a small owned tokio runtime, exposing a synchronous API so callers (the CLI,
-//! the MCP shim's fallback) need not be async themselves.
+//! Internally these drive the async tarpc client on a small owned tokio
+//! runtime, exposing a synchronous API so callers (the CLI, the MCP shim's
+//! fallback) need not be async themselves.
 //!
-//! The entry point is [`DaemonClient::probe`]: it builds the platform socket
-//! name, connects with a short timeout, sends `ping`, and only returns a live
-//! client on success. On any failure it removes the stale `daemon.sock`/
-//! `daemon.pid` (the §8.3 cleanup) and returns `None`, so the caller falls back
-//! to direct index/file reads.
+//! The entry point is [`DaemonClient::probe`]: it connects to the user's hub
+//! with a short timeout and asks whether it serves the caller's project,
+//! without loading it — so it returns a live client only when the hub is
+//! already serving that project. When nothing is listening it removes the
+//! hub's stale socket/pid (the §8.3 cleanup) and returns `None`, so the caller
+//! falls back to direct index/file reads. Every call the client makes names
+//! the project it was built for — the caller's own, made absolute here, never
+//! a path the hub has to interpret against its own working directory.
+//! [`HubClient`] reads the hub's status.
 
 use std::time::Duration;
 
-use camino::Utf8Path;
+use camino::{Utf8Path, Utf8PathBuf};
 use clove_types::{EditRequest, ItemStatus, NewSpec};
 use interprocess::local_socket::tokio::Stream;
 use interprocess::local_socket::traits::tokio::Stream as _;
@@ -22,20 +26,33 @@ use thiserror::Error;
 use tokio::runtime::Runtime;
 use tokio::time::timeout;
 
+use crate::hub::{
+    frame, recv_frame, send_frame, server_is_this_user, Detached, Hello, HubPaths, HubStatus,
+    Welcome,
+};
 use crate::protocol::{
     GraphRequest, GraphResponse, QueryListResponse, QueryRequest, ReindexDone, StatusResponse,
 };
-use crate::service::{CloveRpcClient, RpcError};
-use crate::transport::build_transport;
-use crate::{pid_path, sock_path, socket_name, PROTOCOL_VERSION};
+use crate::service::{CloveRpcClient, Project, RpcError};
+use crate::transport::transport_from_framed;
+use crate::{legacy_sock_path, pid_path, PROTOCOL_VERSION};
 
 /// Liveness/connect timeout (DESIGN §8.3: "Attempt connect with 50ms timeout").
 pub const CONNECT_TIMEOUT: Duration = Duration::from_millis(50);
 
+/// How long a hub that did accept the connection gets to answer the handshake
+/// and a probing `attach`. A dead socket fails at connect, within
+/// [`CONNECT_TIMEOUT`]; this only bounds a live hub under load.
+pub const ANSWER_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// How long a call that loads the project may take: the hub opens (and may
+/// rebuild) its index and sweeps it before answering.
+pub const LOAD_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// A client-side IPC failure.
 #[derive(Debug, Error)]
 pub enum ClientError {
-    /// Could not build the platform socket name from the `.clove/` path.
+    /// Could not build the platform socket name.
     #[error("invalid socket name: {0}")]
     Name(std::io::Error),
 
@@ -44,9 +61,16 @@ pub enum ClientError {
     #[error("could not connect to daemon: {0}")]
     Connect(std::io::Error),
 
-    /// The connect/handshake did not complete within [`CONNECT_TIMEOUT`].
+    /// The connect/handshake did not complete in time.
     #[error("daemon connect timed out")]
     Timeout,
+
+    /// The hub answered and turned the request down — at the handshake
+    /// (`PROTOCOL_MISMATCH`) or for this project (`NOT_LOADED`,
+    /// `PROJECT_LOCKED`, …); `code` is one of [`crate::hub::codes`]. Proof that a
+    /// hub is alive.
+    #[error("{message}")]
+    Refused { code: String, message: String },
 
     /// The daemon received the call and **reported a decision**, carrying its
     /// own error classification.
@@ -74,6 +98,22 @@ pub enum ClientError {
     /// erroring, so the fallback would silently duplicate data.
     #[error("daemon transport error: {0}")]
     Transport(String),
+
+    /// The project's daemon token could not be read or created (a read-only
+    /// `.clove/`, or a `daemon.token` that is not a token — a symlink, say).
+    /// Nothing was sent.
+    #[error("the project's daemon token is unusable: {0}")]
+    Token(std::io::Error),
+}
+
+impl ClientError {
+    /// The refusal code, when the hub turned the request down.
+    pub fn refusal_code(&self) -> Option<&str> {
+        match self {
+            ClientError::Refused { code, .. } => Some(code),
+            _ => None,
+        }
+    }
 }
 
 impl From<ClientError> for clove_types::CloveError {
@@ -104,184 +144,244 @@ impl From<ClientError> for clove_types::CloveError {
     }
 }
 
-/// The diagnostic state of a daemon footprint, as classified by
+/// The diagnostic state of the hub's footprint, as classified by
 /// [`DaemonClient::health`] (non-mutating). Used by `clove doctor` to decide
-/// whether socket/pid files are safe to remove.
+/// whether the socket/pid files are safe to remove.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DaemonHealth {
-    /// No `daemon.sock` and no `daemon.pid`: no footprint.
+    /// No socket and no pid file: no footprint.
     Absent,
-    /// A daemon answered `ping` with the matching protocol version.
+    /// A hub answered the handshake with the matching protocol version.
     Healthy,
-    /// A daemon answered but speaks a different/incompatible protocol version —
-    /// it is alive (e.g. an old daemon still running after a `clove` upgrade),
-    /// so its socket/pid must not be removed; a restart is the remedy.
+    /// A hub answered but speaks a different protocol version — it is alive
+    /// (e.g. an old hub still running after a `clove` upgrade), so its files
+    /// must not be removed; a restart is the remedy.
     Incompatible,
+    /// Something accepted the connection but did not answer in time: alive and
+    /// busy, as far as anyone can tell. Its files must not be removed either.
+    Unresponsive,
     /// Socket/pid present but nothing answered: corpse files from a crash, safe
     /// to clean up.
     Dead,
 }
 
-/// A connected, handshaken daemon client backed by an owned tokio runtime.
+/// The caller's own project, as every call names it: its path, absolute (made
+/// so against *this* process's working directory, which the hub does not
+/// share) and canonical where it resolves, and its daemon token.
+///
+/// Only a call that loads the project (`clove daemon start`, the MCP server,
+/// `clove serve`) creates or replaces the token; a read uses the token that is
+/// there, or none — reads never write. A `.clove` that is itself a symlink (a
+/// clone can commit `.clove -> ~`), or whose `issues/` is not a real
+/// directory, gets no token work at all: the project goes without the daemon.
+pub fn project(clove_dir: &Utf8Path, load: bool) -> std::io::Result<Project> {
+    let given = crate::absolute(clove_dir);
+    refuse_linked_store(&given)?;
+    let clove_dir = absolute_project_dir(&given);
+    let token = if load {
+        clove_core::daemon_token::read_or_create(&clove_dir)?
+    } else {
+        clove_core::daemon_token::read(&clove_dir)?
+    };
+    Ok(Project {
+        clove_dir: clove_dir.into_string(),
+        load,
+        token,
+    })
+}
+
+/// Fail for a store whose `.clove` is a symlink or whose `issues/` is not a
+/// real directory, before anything is canonicalized away.
+fn refuse_linked_store(clove_dir: &Utf8Path) -> std::io::Result<()> {
+    let refuse = |why: String| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{why}; the daemon is not used for this project"),
+        )
+    };
+    let store = std::fs::symlink_metadata(clove_dir)?;
+    if store.file_type().is_symlink() {
+        return Err(refuse(format!("{clove_dir} is a symlink")));
+    }
+    let issues = clove_dir.join("issues");
+    match std::fs::symlink_metadata(&issues) {
+        Ok(meta) if meta.is_dir() => Ok(()),
+        Ok(_) => Err(refuse(format!("{issues} is not a directory"))),
+        Err(e) => Err(refuse(format!("{issues}: {e}"))),
+    }
+}
+
+fn absolute_project_dir(clove_dir: &Utf8Path) -> Utf8PathBuf {
+    let absolute = crate::absolute(clove_dir);
+    absolute.canonicalize_utf8().unwrap_or(absolute)
+}
+
+/// A connected client for the caller's own project on the hub.
 pub struct DaemonClient {
-    rt: Runtime,
+    // Always `Some` until drop: the runtime is shut down in the background
+    // there, since a client may be dropped inside another runtime (the MCP
+    // server's), where a blocking runtime drop panics.
+    rt: Option<Runtime>,
     client: CloveRpcClient,
+    project: Project,
+}
+
+impl Drop for DaemonClient {
+    fn drop(&mut self) {
+        if let Some(rt) = self.rt.take() {
+            rt.shutdown_background();
+        }
+    }
 }
 
 impl DaemonClient {
-    /// Connect to the daemon for `clove_dir` and verify it answers `ping`, all
-    /// within [`CONNECT_TIMEOUT`]. Returns the live client, or `None` when no
-    /// healthy daemon is present — in which case any stale `daemon.sock`/
-    /// `daemon.pid` left by a crashed daemon is removed first (DESIGN §8.3).
+    /// A client for `clove_dir` on the user's hub, if the hub is already
+    /// serving that project. Never starts a hub or loads a project — see
+    /// [`crate::ensure_daemon`] for that.
     pub fn probe(clove_dir: &Utf8Path) -> Option<DaemonClient> {
-        // Fast path: no footprint at all → definitely no daemon, nothing to clean.
-        // The footprint is the socket file on Unix, but on Windows the transport
-        // is a named pipe with no filesystem entry, so there the pid file is the
-        // liveness signal (see `footprint_present`).
-        if !footprint_present(clove_dir) {
+        DaemonClient::probe_at(&HubPaths::resolve().ok()?, clove_dir)
+    }
+
+    /// [`DaemonClient::probe`] against an explicit hub.
+    pub fn probe_at(hub: &HubPaths, clove_dir: &Utf8Path) -> Option<DaemonClient> {
+        // Fast path: no footprint at all → definitely no hub, nothing to clean.
+        if !hub.footprint_present() {
             return None;
         }
-        match Self::connect_and_ping(clove_dir) {
+        match DaemonClient::attach(hub, clove_dir, false) {
             Ok(client) => Some(client),
-            Err(ClientError::Connect(_)) => {
-                // Connection refused / no listener: the daemon is provably gone,
-                // so clean up its crashed-daemon corpse files.
-                cleanup_stale(clove_dir);
+            Err(ClientError::Connect(_)) if !hub.running() => {
+                // Connection refused and no process holds the hub lock: the
+                // hub is provably gone, so clean up its corpse files.
+                cleanup_stale_hub(hub);
                 None
             }
-            Err(_) => {
-                // Timeout, protocol mismatch, or name error: the daemon may well
-                // be *alive but slow* (a ping can miss the 50ms budget during the
-                // startup sweep or under load) — unlinking the socket here would
-                // orphan a live daemon. Leave the footprint in place and fall back
-                // to direct ops. (A truly dead socket is force-removed by the next
-                // daemon's own startup, so this cannot deadlock.)
-                None
-            }
+            // Not serving this project, a timeout, a protocol mismatch, a hub
+            // still starting: the hub may well be alive — unlinking its socket
+            // here would orphan it. Fall back to direct ops.
+            Err(_) => None,
         }
     }
 
-    /// Liveness check that does **not** mutate the filesystem (unlike
-    /// [`DaemonClient::probe`]). Returns `true` only if a daemon answers `ping`
-    /// with a compatible protocol version.
-    pub fn is_alive(clove_dir: &Utf8Path) -> bool {
-        matches!(Self::health(clove_dir), DaemonHealth::Healthy)
+    /// Connect to the hub and confirm it serves `clove_dir`, loading the
+    /// project first when `load` is set (bounded by [`LOAD_TIMEOUT`] then, by
+    /// [`ANSWER_TIMEOUT`] otherwise). Every later call carries the same
+    /// `load`, so a client that loaded its project reloads it after an idle
+    /// eviction, and a probing client never does.
+    pub fn attach(
+        hub: &HubPaths,
+        clove_dir: &Utf8Path,
+        load: bool,
+    ) -> Result<DaemonClient, ClientError> {
+        // Connect first: whether a hub is there (and whether its files are a
+        // corpse) is a question about the hub, not about this project.
+        let (rt, client) = connect(hub)?;
+        let project = project(clove_dir, load).map_err(ClientError::Token)?;
+        let mut this = DaemonClient {
+            rt: Some(rt),
+            client,
+            project,
+        };
+        this.check(if load { LOAD_TIMEOUT } else { ANSWER_TIMEOUT })?;
+        Ok(this)
     }
 
-    /// Diagnostic daemon liveness for `clove doctor` — richer than [`is_alive`].
-    /// Does **not** mutate the filesystem. Mirrors the exact classification
-    /// [`DaemonClient::probe`] uses, so a live-but-incompatible daemon (which a
-    /// protocol bump produces after a `clove` upgrade) is distinguished from
-    /// dead corpse files: the former must be left alone (and a restart advised),
-    /// the latter is safe to remove.
-    pub fn health(clove_dir: &Utf8Path) -> DaemonHealth {
-        let sock = sock_path(clove_dir).exists();
-        let pid = pid_path(clove_dir).exists();
-        if !sock && !pid {
+    /// Stop serving `clove_dir` on `hub` — also a project still loading, which
+    /// a probe cannot see (it answers `NOT_LOADED` until the load completes).
+    pub fn detach_at(hub: &HubPaths, clove_dir: &Utf8Path) -> Result<Detached, ClientError> {
+        let (rt, client) = connect(hub)?;
+        let project = project(clove_dir, false).map_err(ClientError::Token)?;
+        let mut this = DaemonClient {
+            rt: Some(rt),
+            client,
+            project,
+        };
+        this.detach()
+    }
+
+    /// The hub's health, without touching the filesystem (unlike
+    /// [`DaemonClient::probe`]). A live-but-incompatible or unresponsive hub is
+    /// told apart from dead corpse files: only the latter is safe to remove.
+    pub fn health(hub: &HubPaths) -> DaemonHealth {
+        if !hub.sock().exists() && !hub.pid().exists() {
             return DaemonHealth::Absent;
         }
-        // Decide whether there is anything to connect to. On Unix, the socket
-        // file is the connect target, so a lone `daemon.pid` (no socket) is a
-        // dead footprint. On Windows the transport is a named pipe with no
-        // filesystem entry, so the pid file is the liveness signal instead —
-        // gating on the (never-created) socket would misreport every live
-        // Windows daemon as Dead.
-        if !footprint_present(clove_dir) {
-            return DaemonHealth::Dead;
-        }
-        match Self::connect_and_ping(clove_dir) {
+        match HubClient::connect(hub) {
             Ok(_) => DaemonHealth::Healthy,
-            // Answered, but with a mismatched protocol version (or an otherwise
-            // incompatible reply): it is alive — do not touch its socket/pid.
-            // `App` is unreachable today (`ping` is infallible at the app level),
-            // but it is *proof of life*, so it belongs here rather than falling
-            // into `Dead` below — where `doctor --fix` would unlink the socket of
-            // a running daemon.
-            Err(ClientError::Transport(_) | ClientError::App(_)) => DaemonHealth::Incompatible,
-            // Could not connect at all (no listener / refused / stale socket):
-            // corpse files from a crashed daemon.
+            Err(ClientError::Refused { .. }) | Err(ClientError::Transport(_)) => {
+                DaemonHealth::Incompatible
+            }
+            Err(ClientError::Timeout) => DaemonHealth::Unresponsive,
+            // Nothing to connect to — but a process holding the hub lock is a
+            // hub still starting or shutting down, not a corpse.
+            Err(_) if hub.running() => DaemonHealth::Unresponsive,
             Err(_) => DaemonHealth::Dead,
         }
     }
 
-    /// Connect + `ping`, bounded by [`CONNECT_TIMEOUT`].
-    fn connect_and_ping(clove_dir: &Utf8Path) -> Result<DaemonClient, ClientError> {
-        let name = socket_name(clove_dir).map_err(ClientError::Name)?;
-        // A current-thread runtime: the client is synchronous (every call is a
-        // `block_on`, which also drives the tarpc dispatch task), so spawning
-        // a dedicated worker thread per client — for every CLI command that
-        // probes — is pure overhead.
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(ClientError::Connect)?;
-
-        let client = rt.block_on(async {
-            let stream = timeout(CONNECT_TIMEOUT, Stream::connect(name))
-                .await
-                .map_err(|_| ClientError::Timeout)?
-                .map_err(ClientError::Connect)?;
-            let transport = build_transport(stream);
-            let client = CloveRpcClient::new(tarpc::client::Config::default(), transport).spawn();
-
-            let version = timeout(CONNECT_TIMEOUT, client.ping(context::current()))
-                .await
-                .map_err(|_| ClientError::Timeout)?
-                .map_err(|e| ClientError::Transport(e.to_string()))?;
-            if version != PROTOCOL_VERSION {
-                return Err(ClientError::Transport(format!(
-                    "daemon protocol version {version} != {PROTOCOL_VERSION}"
-                )));
-            }
-            Ok::<_, ClientError>(client)
-        })?;
-
-        Ok(DaemonClient { rt, client })
+    /// Is this client's project (still) served? The project heartbeat: the
+    /// hub counts it as a ping, and a loading client reloads an evicted
+    /// project here.
+    pub fn ping(&mut self) -> Result<(), ClientError> {
+        let budget = if self.project.load {
+            LOAD_TIMEOUT
+        } else {
+            Duration::from_secs(1)
+        };
+        self.check(budget)
     }
 
-    /// Round-trip `ping`; `Ok(())` means the daemon is alive.
-    pub fn ping(&mut self) -> Result<(), ClientError> {
-        let version = self
-            .rt
-            .block_on(self.client.ping(context::current()))
-            .map_err(|e| ClientError::Transport(e.to_string()))?;
-        if version == PROTOCOL_VERSION {
-            Ok(())
-        } else {
-            Err(ClientError::Transport(format!(
-                "daemon protocol version {version} != {PROTOCOL_VERSION}"
-            )))
+    fn check(&mut self, budget: Duration) -> Result<(), ClientError> {
+        let project = self.project.clone();
+        let rt = self.rt.as_ref().expect("runtime present until drop");
+        let call = self.client.attach(context_within(budget), project);
+        let reply = rt.block_on(async { timeout(budget, call).await });
+        match reply {
+            Err(_) => Err(ClientError::Timeout),
+            Ok(Err(e)) => Err(ClientError::Transport(e.to_string())),
+            Ok(Ok(Err(refusal))) => Err(ClientError::Refused {
+                code: refusal.code,
+                message: refusal.message,
+            }),
+            Ok(Ok(Ok(()))) => Ok(()),
         }
+    }
+
+    /// Stop serving this project. Returns once the hub has torn it down.
+    pub fn detach(&mut self) -> Result<Detached, ClientError> {
+        let project = self.project.clone();
+        self.app(self.client.detach(context::current(), project))
     }
 
     /// Run a lean list query; returns the rows + total the CLI shapes itself.
     pub fn query_list(&mut self, req: QueryRequest) -> Result<QueryListResponse, ClientError> {
-        self.app(self.client.query(context::current(), req))
+        let project = self.project.clone();
+        self.app(self.client.query(context::current(), project, req))
     }
 
     /// Run a dependency-graph query against the daemon's cached graph.
     pub fn graph(&mut self, req: GraphRequest) -> Result<GraphResponse, ClientError> {
-        self.app(self.client.graph(context::current(), req))
+        let project = self.project.clone();
+        self.app(self.client.graph(context::current(), project, req))
     }
 
     /// Trigger a full reindex inside the daemon; returns its report.
     pub fn reindex(&mut self) -> Result<ReindexDone, ClientError> {
-        self.app(self.client.reindex(context::current()))
+        let project = self.project.clone();
+        self.app(self.client.reindex(context::current(), project))
     }
 
-    /// Fetch the daemon's operational status.
+    /// Fetch this project's operational status.
     pub fn status(&mut self) -> Result<StatusResponse, ClientError> {
-        self.rt
-            .block_on(self.client.status(context::current()))
-            .map_err(|e| ClientError::Transport(e.to_string()))
+        let project = self.project.clone();
+        self.app(self.client.status(context::current(), project))
     }
 
-    /// Read the daemon's monotonic graph change-generation counter. Used by the
-    /// MCP server's notifier to detect changes and push `resources/updated`.
+    /// Read the project's monotonic graph change-generation counter. Used by
+    /// the MCP server's notifier to detect changes and push `resources/updated`.
     pub fn change_generation(&mut self) -> Result<u64, ClientError> {
-        self.rt
-            .block_on(self.client.change_generation(context::current()))
-            .map_err(|e| ClientError::Transport(e.to_string()))
+        let project = self.project.clone();
+        self.app(self.client.change_generation(context::current(), project))
     }
 
     // ---- M4 mutations + reads (topology B). Each returns the §7.4 item JSON
@@ -289,22 +389,32 @@ impl DaemonClient {
 
     /// Create an item; returns `{ id, path }`.
     pub fn create(&mut self, spec: NewSpec) -> Result<Value, ClientError> {
-        self.app(self.client.create(context::current(), spec))
+        let project = self.project.clone();
+        self.app(self.client.create(context::current(), project, spec))
     }
 
     /// Transition an item's status; returns the updated item object.
     pub fn set_status(&mut self, id: String, status: ItemStatus) -> Result<Value, ClientError> {
-        self.app(self.client.set_status(context::current(), id, status))
+        let project = self.project.clone();
+        self.app(
+            self.client
+                .set_status(context::current(), project, id, status),
+        )
     }
 
     /// Apply `KEY=VALUE` edits atomically; returns the updated item object.
     pub fn edit(&mut self, id: String, assignments: Vec<String>) -> Result<Value, ClientError> {
-        self.app(self.client.edit(context::current(), id, assignments))
+        let project = self.project.clone();
+        self.app(
+            self.client
+                .edit(context::current(), project, id, assignments),
+        )
     }
 
     /// Apply a structured [`EditRequest`] atomically; returns the updated item object.
     pub fn apply_edit(&mut self, id: String, req: EditRequest) -> Result<Value, ClientError> {
-        self.app(self.client.apply_edit(context::current(), id, req))
+        let project = self.project.clone();
+        self.app(self.client.apply_edit(context::current(), project, id, req))
     }
 
     /// Append a comment; returns `{ id, path }`.
@@ -314,35 +424,50 @@ impl DaemonClient {
         author: String,
         body: String,
     ) -> Result<Value, ClientError> {
+        let project = self.project.clone();
         self.app(
             self.client
-                .add_comment(context::current(), id, author, body),
+                .add_comment(context::current(), project, id, author, body),
         )
     }
 
     /// Add a hard dependency `id → dep_id`; returns the updated item object.
     pub fn dep_add(&mut self, id: String, dep_id: String) -> Result<Value, ClientError> {
-        self.app(self.client.dep_add(context::current(), id, dep_id))
+        let project = self.project.clone();
+        self.app(self.client.dep_add(context::current(), project, id, dep_id))
     }
 
     /// Remove a hard dependency `id → dep_id`; returns the updated item object.
     pub fn dep_remove(&mut self, id: String, dep_id: String) -> Result<Value, ClientError> {
-        self.app(self.client.dep_remove(context::current(), id, dep_id))
+        let project = self.project.clone();
+        self.app(
+            self.client
+                .dep_remove(context::current(), project, id, dep_id),
+        )
     }
 
     /// Set (or clear) an item's parent; returns the updated item object.
     pub fn set_parent(&mut self, id: String, parent: Option<String>) -> Result<Value, ClientError> {
-        self.app(self.client.set_parent(context::current(), id, parent))
+        let project = self.project.clone();
+        self.app(
+            self.client
+                .set_parent(context::current(), project, id, parent),
+        )
     }
 
     /// Full item detail (frontmatter + body + comment_count + ready/blocked_by).
     pub fn show(&mut self, id: String) -> Result<Value, ClientError> {
-        self.app(self.client.show(context::current(), id))
+        let project = self.project.clone();
+        self.app(self.client.show(context::current(), project, id))
     }
 
     /// Work-item analytics (`clove stats`) as JSON.
     pub fn stats(&mut self, top: u32, include_epics: bool) -> Result<Value, ClientError> {
-        self.app(self.client.stats(context::current(), top, include_epics))
+        let project = self.project.clone();
+        self.app(
+            self.client
+                .stats(context::current(), project, top, include_epics),
+        )
     }
 
     /// Drive a fallible RPC call to completion, keeping the application-level
@@ -356,7 +481,8 @@ impl DaemonClient {
     where
         F: std::future::Future<Output = Result<Result<T, RpcError>, tarpc::client::RpcError>>,
     {
-        match self.rt.block_on(fut) {
+        let rt = self.rt.as_ref().expect("runtime present until drop");
+        match rt.block_on(fut) {
             Ok(Ok(value)) => Ok(value),
             Ok(Err(app_err)) => Err(ClientError::App(app_err)),
             Err(transport_err) => Err(ClientError::Transport(transport_err.to_string())),
@@ -364,43 +490,230 @@ impl DaemonClient {
     }
 }
 
-/// Whether a daemon footprint exists that is worth attempting a connect to.
-///
-/// The transport differs by platform, so the "is anything there" signal does
-/// too: on Unix the daemon binds a filesystem socket (`daemon.sock`), so its
-/// presence gates the connect; on Windows the daemon binds a namespaced named
-/// pipe that leaves no filesystem entry, so the `daemon.pid` file — written on
-/// both platforms only after a successful bind — is the liveness signal instead.
-fn footprint_present(clove_dir: &Utf8Path) -> bool {
-    #[cfg(windows)]
-    {
-        pid_path(clove_dir).exists()
-    }
-    #[cfg(not(windows))]
-    {
-        sock_path(clove_dir).exists()
+/// A tarpc context whose deadline is `budget` from now (the default is 10s).
+fn context_within(budget: Duration) -> context::Context {
+    let mut ctx = context::current();
+    ctx.deadline = std::time::Instant::now() + budget;
+    ctx
+}
+
+/// A connection to the hub for its own status.
+pub struct HubClient {
+    rt: Option<Runtime>,
+    client: CloveRpcClient,
+}
+
+impl Drop for HubClient {
+    fn drop(&mut self) {
+        if let Some(rt) = self.rt.take() {
+            rt.shutdown_background();
+        }
     }
 }
 
-/// Remove a stale `daemon.sock` and `daemon.pid` (best effort). Called when a
-/// connect/handshake fails, so a crashed daemon's corpse files do not linger
-/// (DESIGN §8.3).
-pub fn cleanup_stale(clove_dir: &Utf8Path) {
-    let _ = std::fs::remove_file(sock_path(clove_dir));
+impl HubClient {
+    /// Connect to the hub at `hub` and complete the version handshake.
+    pub fn connect(hub: &HubPaths) -> Result<HubClient, ClientError> {
+        if !hub.footprint_present() {
+            return Err(ClientError::Connect(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no daemon is running",
+            )));
+        }
+        let (rt, client) = connect(hub)?;
+        Ok(HubClient {
+            rt: Some(rt),
+            client,
+        })
+    }
+
+    /// The hub and every project it serves.
+    pub fn status(&mut self) -> Result<HubStatus, ClientError> {
+        let rt = self.rt.as_ref().expect("runtime present until drop");
+        rt.block_on(self.client.hub_status(context::current()))
+            .map_err(|e| ClientError::Transport(e.to_string()))
+    }
+}
+
+/// Connect to the hub, check that it runs as this user, and complete the
+/// version handshake within [`CONNECT_TIMEOUT`] and [`ANSWER_TIMEOUT`].
+fn connect(hub: &HubPaths) -> Result<(Runtime, CloveRpcClient), ClientError> {
+    let name = hub.socket_name().map_err(ClientError::Name)?;
+    // A current-thread runtime: the client is synchronous (every call is a
+    // `block_on`, which also drives the tarpc dispatch task), so spawning a
+    // dedicated worker thread per client — for every CLI command that probes —
+    // is pure overhead.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(ClientError::Connect)?;
+    let transport = rt.block_on(async {
+        let stream = timeout(CONNECT_TIMEOUT, Stream::connect(name))
+            .await
+            .map_err(|_| ClientError::Timeout)?
+            .map_err(ClientError::Connect)?;
+        // Talk only to a hub of our own user: the runtime directory is
+        // private, but that is a property of the filesystem, not of the peer.
+        if !server_is_this_user(&stream).map_err(ClientError::Connect)? {
+            return Err(ClientError::Connect(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "the daemon socket is served by another user",
+            )));
+        }
+        let mut framed = frame(stream);
+        let welcome = timeout(ANSWER_TIMEOUT, async {
+            send_frame(&mut framed, &Hello::current()).await?;
+            recv_frame::<Welcome>(&mut framed).await
+        })
+        .await
+        .map_err(|_| ClientError::Timeout)?
+        .map_err(|e| ClientError::Transport(e.to_string()))?;
+        match welcome {
+            Some(Welcome::Ok { protocol }) if protocol == PROTOCOL_VERSION => {
+                Ok(transport_from_framed(framed))
+            }
+            Some(Welcome::Ok { protocol }) => Err(ClientError::Transport(format!(
+                "daemon protocol version {protocol} != {PROTOCOL_VERSION}"
+            ))),
+            Some(Welcome::Err { code, message, .. }) => Err(ClientError::Refused { code, message }),
+            None => Err(ClientError::Transport(
+                "the daemon closed the connection during the handshake".to_owned(),
+            )),
+        }
+    })?;
+    let client = {
+        let _guard = rt.enter();
+        CloveRpcClient::new(tarpc::client::Config::default(), transport).spawn()
+    };
+    Ok((rt, client))
+}
+
+/// Remove a crashed hub's socket and pid (best effort) — only while holding
+/// the hub lock exclusively, so a live hub's files are never touched: a hub
+/// takes that lock before it binds and keeps it until it has unbound, even if
+/// it came up after the caller decided the footprint was dead (DESIGN §8.3).
+/// When the lock is not free, nothing is removed.
+pub(crate) fn cleanup_stale_hub(hub: &HubPaths) {
+    let Ok(lock) = clove_core::fs_safe::open_lock_file(&hub.lock()) else {
+        return;
+    };
+    if lock.try_lock().is_err() {
+        return;
+    }
+    #[cfg(not(windows))]
+    let _ = std::fs::remove_file(hub.sock());
+    let _ = std::fs::remove_file(hub.pid());
+}
+
+/// [`cleanup_stale_hub`] for `clove doctor --fix`, which has classified the
+/// footprint [`DaemonHealth::Dead`] first.
+pub fn cleanup_hub(hub: &HubPaths) {
+    cleanup_stale_hub(hub);
+}
+
+/// Remove a pre-hub (clove 0.1.0) daemon's corpse `daemon.sock`/`daemon.pid`
+/// from `.clove/`. Callers must have classified it [`LegacyDaemon::Dead`].
+pub fn cleanup_legacy(clove_dir: &Utf8Path) {
+    let _ = std::fs::remove_file(legacy_sock_path(clove_dir));
     let _ = std::fs::remove_file(pid_path(clove_dir));
+}
+
+/// What a clove 0.1.0 daemon's footprint in `.clove/` amounts to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LegacyDaemon {
+    /// No `daemon.sock` and no `daemon.pid`.
+    Absent,
+    /// A clove daemon answered `ping` on `daemon.sock`; its pid is safe to
+    /// signal.
+    Alive(u32),
+    /// Nothing listens behind the files: corpses, safe to remove.
+    Dead,
+    /// Something is there that cannot be verified — it accepted but did not
+    /// answer in time, the socket is a symlink or not this user's, or (on
+    /// Windows) there is no way to reach it. Neither signal it nor delete its
+    /// files.
+    Unknown(Option<u32>),
+}
+
+/// Classify a clove 0.1.0 daemon's footprint for `clove_dir`.
+///
+/// Any answer to `ping` counts, whatever its protocol version: the question is
+/// only whether a clove daemon is really listening before `clove daemon stop`
+/// signals the pid it left behind — a stale pid can name an unrelated process
+/// after pid reuse. The v6 `ping` has the same wire shape as today's.
+pub fn legacy_daemon(clove_dir: &Utf8Path) -> LegacyDaemon {
+    let sock = legacy_sock_path(clove_dir);
+    let pid_text = std::fs::read_to_string(pid_path(clove_dir)).ok();
+    let sock_meta = std::fs::symlink_metadata(&sock).ok();
+    if sock_meta.is_none() && pid_text.is_none() {
+        return LegacyDaemon::Absent;
+    }
+    let pid = pid_text.as_deref().and_then(crate::parse_pid);
+    #[cfg(windows)]
+    {
+        // A 0.1.0 Windows daemon listened on a pipe named after the repo; it
+        // cannot be verified from here.
+        let _ = sock_meta;
+        LegacyDaemon::Unknown(pid)
+    }
+    #[cfg(not(windows))]
+    {
+        use interprocess::local_socket::prelude::*;
+        use interprocess::local_socket::GenericFilePath;
+        use std::os::unix::fs::MetadataExt;
+
+        let Some(meta) = sock_meta else {
+            // A pid with no socket: the daemon never bound or is long gone.
+            return LegacyDaemon::Dead;
+        };
+        if meta.file_type().is_symlink() || meta.uid() != crate::current_uid() {
+            return LegacyDaemon::Unknown(pid);
+        }
+        let Ok(name) = sock.into_string().to_fs_name::<GenericFilePath>() else {
+            return LegacyDaemon::Unknown(pid);
+        };
+        let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        else {
+            return LegacyDaemon::Unknown(pid);
+        };
+        let answered = rt.block_on(async {
+            let stream = match timeout(Duration::from_millis(200), Stream::connect(name)).await {
+                Err(_) => return None,
+                Ok(Err(_)) => return Some(false),
+                Ok(Ok(stream)) => stream,
+            };
+            if !server_is_this_user(&stream).unwrap_or(false) {
+                return None;
+            }
+            // `ping` is the one call a 0.1.0 daemon and this build agree on:
+            // `{"Ping":{}}` in, a `u32` out.
+            let client = CloveRpcClient::new(
+                tarpc::client::Config::default(),
+                crate::build_transport(stream),
+            )
+            .spawn();
+            timeout(Duration::from_millis(500), client.ping(context::current()))
+                .await
+                .ok()
+                .map(|r| r.is_ok())
+        });
+        rt.shutdown_background();
+        match (answered, pid) {
+            (Some(true), Some(pid)) => LegacyDaemon::Alive(pid),
+            (Some(false), _) => LegacyDaemon::Dead,
+            _ => LegacyDaemon::Unknown(pid),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use crate::hub::codes;
     use camino::Utf8PathBuf;
-
-    #[test]
-    fn probe_returns_none_when_no_socket() {
-        let dir = tempfile::tempdir().unwrap();
-        let clove_dir = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
-        assert!(DaemonClient::probe(&clove_dir).is_none());
-    }
 
     /// A failure the daemon reports classifies exactly as the same failure
     /// raised locally — the property the whole seam exists for.
@@ -488,68 +801,184 @@ mod tests {
         assert_eq!(serde_json::from_str::<RpcError>(&wire).unwrap(), current);
     }
 
-    #[test]
-    fn is_alive_false_when_no_socket() {
+    /// Token records for these tests go in the build, never the user's home.
+    fn isolate() {
+        clove_core::daemon_token::use_records_dir(Utf8PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../target/test-clove-home/daemon-tokens"
+        )));
+    }
+
+    /// A private temp dir to root a test hub in (tempdirs are 0700 on Unix).
+    fn hub_dir() -> (tempfile::TempDir, HubPaths) {
+        isolate();
         let dir = tempfile::tempdir().unwrap();
-        let clove_dir = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
-        assert!(!DaemonClient::is_alive(&clove_dir));
+        let path = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
+        (dir, HubPaths::at(path))
+    }
+
+    /// A hub that bound between a client's failed connect and its cleanup
+    /// holds the hub lock: its files must survive that cleanup (N2).
+    #[test]
+    fn cleanup_never_removes_the_files_of_a_hub_holding_the_lock() {
+        let (_tmp, hub) = hub_dir();
+        std::fs::write(hub.sock(), "").unwrap();
+        std::fs::write(hub.pid(), "4242\n").unwrap();
+        let held = clove_core::fs_safe::open_lock_file(&hub.lock()).unwrap();
+        held.try_lock().unwrap();
+
+        cleanup_stale_hub(&hub);
+        assert!(hub.pid().exists(), "a live hub's pid file was removed");
+        assert!(hub.sock().exists(), "a live hub's socket was removed");
+
+        held.unlock().unwrap();
+        cleanup_stale_hub(&hub);
+        assert!(!hub.pid().exists());
+    }
+
+    #[test]
+    fn probe_returns_none_when_no_hub() {
+        let (_tmp, hub) = hub_dir();
+        assert!(DaemonClient::probe_at(&hub, Utf8Path::new("/repo/.clove")).is_none());
+    }
+
+    /// Every call names the caller's project absolutely — made so here,
+    /// against the caller's working directory, never left for the hub to
+    /// interpret against its own.
+    #[test]
+    fn a_relative_project_is_made_absolute_by_the_client() {
+        let named = absolute_project_dir(Utf8Path::new(".clove"));
+        assert!(named.is_absolute(), "{named}");
+        let cwd = Utf8PathBuf::from_path_buf(std::env::current_dir().unwrap()).unwrap();
+        assert!(named.as_str().ends_with(".clove"));
+        assert!(named.starts_with(cwd.canonicalize_utf8().unwrap()) || named.starts_with(&cwd));
+    }
+
+    /// A store as `clove init` leaves it, in a canonical temp dir.
+    fn store() -> (tempfile::TempDir, Utf8PathBuf) {
+        isolate();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().canonicalize().unwrap()).unwrap();
+        let clove_dir = root.join(".clove");
+        std::fs::create_dir_all(clove_dir.join("issues")).unwrap();
+        (tmp, clove_dir)
+    }
+
+    /// Only a call that loads the project makes its token; a read writes
+    /// nothing and has no token to send.
+    #[test]
+    fn only_a_load_makes_the_token() {
+        let (_tmp, clove_dir) = store();
+        let token_file = clove_core::daemon_token::token_path(&clove_dir);
+        assert!(project(&clove_dir, false).is_err());
+        assert!(!token_file.exists(), "a read created a token");
+        let loading = project(&clove_dir, true).unwrap();
+        assert!(token_file.exists(), "no token file was created");
+        assert_eq!(project(&clove_dir, false).unwrap().token, loading.token);
+    }
+
+    /// A `.clove` that is itself a symlink gets no token work: reading and
+    /// loading both refuse it, and nothing lands in the link's target.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_store_gets_no_token() {
+        let (tmp, target) = store();
+        let repo = Utf8PathBuf::from_path_buf(tmp.path().join("repo")).unwrap();
+        std::fs::create_dir(&repo).unwrap();
+        std::os::unix::fs::symlink(&target, repo.join(".clove")).unwrap();
+        for load in [false, true] {
+            let refused = project(&repo.join(".clove"), load).unwrap_err().to_string();
+            assert!(refused.contains("symlink"), "{refused}");
+        }
+        assert!(!clove_core::daemon_token::token_path(&target).exists());
+    }
+
+    /// A token the client can neither use nor replace is never sent: the call
+    /// fails with a token error naming the file, before anything is asked.
+    #[cfg(unix)]
+    #[test]
+    fn an_unusable_token_is_not_sent() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_tmp, clove_dir) = store();
+        let token = clove_core::daemon_token::token_path(&clove_dir);
+        std::fs::write(&token, "0123456789abcdef0123456789abcdef\n").unwrap();
+        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(&clove_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let (_run, hub) = hub_dir();
+        let welcome = Welcome::Ok {
+            protocol: PROTOCOL_VERSION,
+        };
+        let _hub = fake_hub(&hub, Some(welcome), Duration::from_secs(2));
+        let refused = DaemonClient::attach(&hub, &clove_dir, true).err();
+        std::fs::set_permissions(&clove_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        match refused {
+            Some(ClientError::Token(e)) => assert!(e.to_string().contains("daemon.token"), "{e}"),
+            other => panic!("expected a token error, got {other:?}"),
+        }
     }
 
     #[test]
     fn health_classifies_absent_and_dead() {
-        let dir = tempfile::tempdir().unwrap();
-        let clove_dir = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
-        // No footprint at all.
-        assert_eq!(DaemonClient::health(&clove_dir), DaemonHealth::Absent);
+        let (_tmp, hub) = hub_dir();
+        assert_eq!(DaemonClient::health(&hub), DaemonHealth::Absent);
 
-        // A lone pid file with no socket is a dead footprint.
-        std::fs::write(pid_path(&clove_dir), b"4242").unwrap();
-        assert_eq!(DaemonClient::health(&clove_dir), DaemonHealth::Dead);
+        std::fs::write(hub.pid(), b"4242").unwrap();
+        #[cfg(not(windows))]
+        assert_eq!(
+            DaemonClient::health(&hub),
+            DaemonHealth::Dead,
+            "a lone pid file with no socket is a dead footprint"
+        );
 
-        // Socket file present but nothing listening (a crashed daemon) is also
+        // Socket file present but nothing listening (a crashed hub) is also
         // Dead — and health() must NOT mutate the filesystem (unlike probe()).
-        std::fs::write(sock_path(&clove_dir), b"").unwrap();
-        assert_eq!(DaemonClient::health(&clove_dir), DaemonHealth::Dead);
-        assert!(
-            sock_path(&clove_dir).exists(),
-            "health() left the sock in place"
-        );
-        assert!(
-            pid_path(&clove_dir).exists(),
-            "health() left the pid in place"
-        );
+        std::fs::write(hub.sock(), b"").unwrap();
+        assert_eq!(DaemonClient::health(&hub), DaemonHealth::Dead);
+        assert!(hub.sock().exists(), "health() left the sock in place");
+        assert!(hub.pid().exists(), "health() left the pid in place");
     }
 
-    #[test]
-    fn probe_cleans_up_stale_socket_and_pid() {
-        let dir = tempfile::tempdir().unwrap();
-        let clove_dir = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
-        // A leftover socket file + pid with nothing listening (a crashed daemon).
-        std::fs::write(sock_path(&clove_dir), b"").unwrap();
-        std::fs::write(pid_path(&clove_dir), b"4242").unwrap();
-        assert!(DaemonClient::probe(&clove_dir).is_none());
-        assert!(!sock_path(&clove_dir).exists(), "stale sock removed");
-        assert!(!pid_path(&clove_dir).exists(), "stale pid removed");
-    }
-
-    /// Regression (D-daemon-1): a live-but-slow daemon that accepts the
-    /// connection but does not answer `ping` within the budget must NOT have its
-    /// socket unlinked — doing so orphans a running daemon. A ping *timeout* is
-    /// treated as "alive but busy", unlike a connection *refusal*.
     #[cfg(unix)]
     #[test]
-    fn probe_keeps_socket_when_daemon_is_alive_but_slow() {
+    fn probe_cleans_up_a_stale_hub_socket_and_pid() {
+        let (_tmp, hub) = hub_dir();
+        // A leftover socket file + pid with nothing listening (a crashed hub).
+        std::fs::write(hub.sock(), b"").unwrap();
+        std::fs::write(hub.pid(), b"4242").unwrap();
+        assert!(DaemonClient::probe_at(&hub, Utf8Path::new("/repo/.clove")).is_none());
+        assert!(!hub.sock().exists(), "stale sock removed");
+        assert!(!hub.pid().exists(), "stale pid removed");
+    }
+
+    /// A corpse socket is not cleaned up while some process holds the hub lock:
+    /// that is a hub starting up (or shutting down), not a crash.
+    #[cfg(unix)]
+    #[test]
+    fn probe_keeps_the_footprint_of_a_hub_holding_its_lock() {
+        let (_tmp, hub) = hub_dir();
+        std::fs::write(hub.sock(), b"").unwrap();
+        let lock = std::fs::File::create(hub.lock()).unwrap();
+        lock.try_lock().unwrap();
+        assert!(DaemonClient::probe_at(&hub, Utf8Path::new("/repo/.clove")).is_none());
+        assert!(hub.sock().exists());
+        assert!(hub.running());
+        drop(lock);
+        assert!(!hub.running());
+    }
+
+    /// A stand-in hub on `hub` that answers each connection's first frame with
+    /// `reply` (or never, when `None`) for as long as `window` lasts.
+    #[cfg(unix)]
+    fn fake_hub(
+        hub: &HubPaths,
+        reply: Option<Welcome>,
+        window: Duration,
+    ) -> std::thread::JoinHandle<()> {
         use interprocess::local_socket::traits::tokio::Listener as _;
         use interprocess::local_socket::ListenerOptions;
         use std::sync::{Arc, Barrier};
 
-        let dir = tempfile::tempdir().unwrap();
-        let clove_dir = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
-        let name = socket_name(&clove_dir).unwrap();
-
-        // A "daemon" that binds the socket and accepts connections but never
-        // replies — modelling a daemon whose workers are all busy past the 50ms
-        // ping budget (a startup sweep, or saturated blocking I/O).
+        let name = hub.socket_name().unwrap();
         let bound = Arc::new(Barrier::new(2));
         let bound_srv = Arc::clone(&bound);
         let handle = std::thread::spawn(move || {
@@ -561,36 +990,197 @@ mod tests {
                 let listener = ListenerOptions::new().name(name).create_tokio().unwrap();
                 bound_srv.wait();
                 let mut held = Vec::new();
-                // Accept (so connect() succeeds) but answer nothing, for a bounded
-                // window that outlives the client's probe.
-                let _ = timeout(Duration::from_secs(2), async {
+                let _ = timeout(window, async {
                     loop {
                         if let Ok(stream) = listener.accept().await {
-                            held.push(stream);
+                            let mut framed = frame(stream);
+                            if let Some(reply) = &reply {
+                                let _ = recv_frame::<Hello>(&mut framed).await;
+                                let _ = send_frame(&mut framed, reply).await;
+                            }
+                            held.push(framed);
                         }
                     }
                 })
                 .await;
             });
         });
-
         bound.wait();
-        assert!(
-            sock_path(&clove_dir).exists(),
-            "listener created the socket file"
-        );
+        handle
+    }
 
-        // The probe connects, pings, times out → returns None (fall back to
-        // direct ops) but leaves the live daemon's socket untouched.
+    /// Regression (D-daemon-1): a live-but-slow hub that accepts the connection
+    /// but does not answer within the budget must NOT have its socket unlinked
+    /// — doing so orphans a running hub. A timeout is "alive but busy", unlike a
+    /// refused connection.
+    #[cfg(unix)]
+    #[test]
+    fn probe_keeps_socket_when_hub_is_alive_but_slow() {
+        let (_tmp, hub) = hub_dir();
+        let handle = fake_hub(&hub, None, Duration::from_secs(2));
+        assert!(hub.sock().exists(), "listener created the socket file");
         assert!(
-            DaemonClient::probe(&clove_dir).is_none(),
-            "a non-answering daemon yields no usable client"
+            DaemonClient::probe_at(&hub, Utf8Path::new("/repo/.clove")).is_none(),
+            "a non-answering hub yields no usable client"
         );
         assert!(
-            sock_path(&clove_dir).exists(),
-            "live-but-slow daemon's socket must survive a ping timeout"
+            hub.sock().exists(),
+            "live-but-slow hub's socket must survive a timeout"
         );
-
         handle.join().unwrap();
+    }
+
+    /// A hub of another protocol refuses the handshake; the refusal carries its
+    /// code, and the probe falls back without touching the hub's files.
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_handshake_names_its_code_and_keeps_the_hub() {
+        let (_tmp, hub) = hub_dir();
+        let refusal = Welcome::Err {
+            protocol: PROTOCOL_VERSION + 1,
+            code: codes::PROTOCOL_MISMATCH.to_owned(),
+            message: "protocol mismatch".to_owned(),
+        };
+        let handle = fake_hub(&hub, Some(refusal), Duration::from_millis(500));
+        match DaemonClient::attach(&hub, Utf8Path::new("/repo/.clove"), false) {
+            Err(ClientError::Refused { code, .. }) => {
+                assert_eq!(code, codes::PROTOCOL_MISMATCH)
+            }
+            Err(other) => panic!("expected a refusal, got {other}"),
+            Ok(_) => panic!("expected a refusal, got a client"),
+        }
+        assert!(DaemonClient::probe_at(&hub, Utf8Path::new("/repo/.clove")).is_none());
+        assert!(hub.sock().exists(), "a refusing hub is alive");
+        assert_eq!(DaemonClient::health(&hub), DaemonHealth::Incompatible);
+        handle.join().unwrap();
+    }
+
+    /// A hub that accepts but does not answer in time is alive but busy — never
+    /// `Dead`, which would let `doctor --fix` unlink a running hub's socket.
+    #[cfg(unix)]
+    #[test]
+    fn a_hub_that_does_not_answer_in_time_is_not_dead() {
+        let (_tmp, hub) = hub_dir();
+        let handle = fake_hub(&hub, None, Duration::from_secs(2));
+        assert_ne!(DaemonClient::health(&hub), DaemonHealth::Dead);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn no_legacy_daemon_without_its_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let clove_dir = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
+        assert_eq!(legacy_daemon(&clove_dir), LegacyDaemon::Absent);
+    }
+
+    /// Nothing listening behind a legacy socket file: corpses.
+    #[cfg(unix)]
+    #[test]
+    fn a_legacy_footprint_nobody_answers_on_is_dead() {
+        let dir = tempfile::tempdir().unwrap();
+        let clove_dir = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
+        std::fs::write(pid_path(&clove_dir), b"4242").unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(legacy_sock_path(&clove_dir));
+        drop(listener);
+        assert_eq!(legacy_daemon(&clove_dir), LegacyDaemon::Dead);
+    }
+
+    /// A legacy socket that accepts but never answers is a live-but-slow
+    /// daemon: not provably gone, so its files are left alone.
+    #[cfg(unix)]
+    #[test]
+    fn a_legacy_daemon_that_does_not_answer_is_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let clove_dir = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
+        std::fs::write(pid_path(&clove_dir), b"4242").unwrap();
+        let _busy = std::os::unix::net::UnixListener::bind(legacy_sock_path(&clove_dir)).unwrap();
+        assert_eq!(legacy_daemon(&clove_dir), LegacyDaemon::Unknown(Some(4242)));
+    }
+
+    /// A fake clove 0.1.0 daemon on `sock`: protocol 6, `ping` as the first
+    /// tarpc request, no hello.
+    #[cfg(unix)]
+    fn legacy_server(sock: Utf8PathBuf) -> std::thread::JoinHandle<()> {
+        use futures::StreamExt;
+        use interprocess::local_socket::traits::tokio::Listener as _;
+        use interprocess::local_socket::{GenericFilePath, ListenerOptions, ToFsName};
+        use tarpc::server::{BaseChannel, Channel};
+
+        // Its request/response for `ping` have the same wire shape as
+        // `CloveRpc`'s, which is all a legacy daemon is asked.
+        #[tarpc::service]
+        trait LegacyDaemon {
+            async fn ping() -> u32;
+        }
+        #[derive(Clone)]
+        struct V6;
+        impl LegacyDaemon for V6 {
+            async fn ping(self, _: tarpc::context::Context) -> u32 {
+                6
+            }
+        }
+
+        let name = sock.into_string().to_fs_name::<GenericFilePath>().unwrap();
+        let (bound_tx, bound_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                let listener = ListenerOptions::new().name(name).create_tokio().unwrap();
+                bound_tx.send(()).unwrap();
+                let _ = timeout(Duration::from_secs(2), async {
+                    let stream = listener.accept().await.unwrap();
+                    BaseChannel::with_defaults(crate::build_transport(stream))
+                        .execute(V6.serve())
+                        .for_each(|response| response)
+                        .await;
+                })
+                .await;
+            });
+        });
+        bound_rx.recv().unwrap();
+        server
+    }
+
+    /// A clove 0.1.0 daemon is recognized from its `.clove/daemon.sock`, which
+    /// is what lets `clove daemon stop` signal it after an upgrade.
+    #[cfg(unix)]
+    #[test]
+    fn a_live_legacy_daemon_is_recognized() {
+        let dir = tempfile::tempdir().unwrap();
+        let clove_dir = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
+        std::fs::write(pid_path(&clove_dir), b"4242").unwrap();
+        let server = legacy_server(legacy_sock_path(&clove_dir));
+        assert_eq!(legacy_daemon(&clove_dir), LegacyDaemon::Alive(4242));
+        server.join().unwrap();
+    }
+
+    /// A legacy socket that is a symlink is never trusted: whoever planted it
+    /// chose what answers, and the pid beside it would then be signalled.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_legacy_socket_is_not_trusted() {
+        let dir = tempfile::tempdir().unwrap();
+        let clove_dir = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
+        std::fs::write(pid_path(&clove_dir), b"4242").unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let real = Utf8PathBuf::from_path_buf(elsewhere.path().join("real.sock")).unwrap();
+        let server = legacy_server(real.clone());
+        std::os::unix::fs::symlink(&real, legacy_sock_path(&clove_dir)).unwrap();
+        assert_eq!(legacy_daemon(&clove_dir), LegacyDaemon::Unknown(Some(4242)));
+        // Let the fake exit on its own timeout.
+        server.join().unwrap();
+    }
+
+    /// Pids that would signal a process group (0, and anything negative as an
+    /// `i32`) or init are never accepted.
+    #[test]
+    fn only_signallable_pids_parse() {
+        assert_eq!(crate::parse_pid("4242\n"), Some(4242));
+        for bad in ["0", "1", "-1", "4294967295", "2147483648", "x", ""] {
+            assert_eq!(crate::parse_pid(bad), None, "{bad}");
+        }
     }
 }

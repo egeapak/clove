@@ -5,8 +5,6 @@
 //! report per-file parse failures without aborting the whole scan, so one
 //! corrupt file never hides the rest of the repository.
 
-use std::fs::OpenOptions;
-
 use camino::{Utf8Path, Utf8PathBuf};
 use chrono::{DateTime, Utc};
 use rayon::prelude::*;
@@ -276,6 +274,7 @@ impl ItemStore {
 
     /// Read and parse the item with the given id.
     pub fn get(&self, id: &CloveId) -> Result<Item, CloveError> {
+        self.check_issues_dir()?;
         let path = self.path_for(id);
         if !path.exists() {
             return Err(CloveError::NotFound { id: id.to_string() });
@@ -333,16 +332,10 @@ impl ItemStore {
     /// read-modify-write window.
     pub fn write_lock(&self) -> Result<StoreWriteLock, CloveError> {
         let path = self.repo_root.join(".clove").join("write.lock");
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(path.as_std_path())
-            .map_err(|source| CloveError::Io {
-                path: path.clone(),
-                source,
-            })?;
+        let file = crate::fs_safe::open_lock_file(&path).map_err(|source| CloveError::Io {
+            path: path.clone(),
+            source,
+        })?;
         Ok(StoreWriteLock {
             path,
             lock: fd_lock::RwLock::new(file),
@@ -501,10 +494,21 @@ impl ItemStore {
             .collect()
     }
 
+    /// A symlinked `issues/` would serve (and receive) another directory's files
+    /// as this project's.
+    fn check_issues_dir(&self) -> Result<(), CloveError> {
+        let root = self.repo_root.join(".clove");
+        crate::fs_safe::check_dirs(&root, &self.issues_dir).map_err(|source| CloveError::Io {
+            path: self.issues_dir.clone(),
+            source,
+        })
+    }
+
     /// Collect the candidate item file paths: real `.md` files only, skipping
     /// symlinks (§12.3), directories (comment dirs), temp files, and non-UTF-8
     /// names.
     fn item_file_paths(&self) -> Result<Vec<Utf8PathBuf>, CloveError> {
+        self.check_issues_dir()?;
         let read_dir = std::fs::read_dir(&self.issues_dir).map_err(|source| CloveError::Io {
             path: self.issues_dir.clone(),
             source,

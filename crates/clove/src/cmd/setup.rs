@@ -6,6 +6,7 @@
 
 use camino::{Utf8Path, Utf8PathBuf};
 use clove_core::OutputFormat;
+use clove_plugin::outln;
 use clove_types::CloveError;
 use serde_json::{json, Value};
 
@@ -136,12 +137,12 @@ pub fn run(
         OutputFormat::Human => {
             if !quiet {
                 for line in &actions {
-                    println!("{line}");
+                    outln!("{line}");
                 }
                 if dry_run {
-                    println!("Dry run — nothing was written.");
+                    outln!("Dry run — nothing was written.");
                 } else if !changed {
-                    println!("Everything is already set up. Nothing to do.");
+                    outln!("Everything is already set up. Nothing to do.");
                 }
             }
         }

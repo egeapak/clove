@@ -296,6 +296,18 @@ impl Index {
     /// on an unreadable file; prefer [`Index::open_or_create`], which recovers
     /// from both by rebuilding.
     pub fn open(path: &Utf8Path) -> Result<Index, IndexError> {
+        // SQLite follows a symlinked database (or journal) and writes into
+        // whatever it points at; a cloned repo could plant one.
+        for file in [
+            path.to_owned(),
+            Utf8PathBuf::from(format!("{path}-wal")),
+            Utf8PathBuf::from(format!("{path}-shm")),
+        ] {
+            clove_core::fs_safe::refuse_symlink(&file).map_err(|source| IndexError::IoError {
+                path: file.clone(),
+                source,
+            })?;
+        }
         let conn = Connection::open(path).map_err(|e| {
             if is_corrupt(&e) {
                 IndexError::CorruptIndex(e.to_string())
@@ -665,6 +677,27 @@ mod tests {
         assert_eq!(
             SCHEMA_VERSION, 6,
             "index schema v6 removed the full-text tables"
+        );
+    }
+
+    /// A symlinked `index.db` is refused rather than opened: SQLite would write
+    /// its header (and every later page) into whatever the link points at.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_index_is_refused_and_its_target_left_alone() {
+        let (_dir, path) = tmp_db();
+        let victim_dir = tempfile::tempdir().unwrap();
+        let victim = victim_dir.path().join("empty.txt");
+        std::fs::write(&victim, "").unwrap();
+        std::os::unix::fs::symlink(&victim, path.as_std_path()).unwrap();
+        assert!(
+            Index::open_or_create(&path).is_err(),
+            "a symlinked index opened"
+        );
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            b"",
+            "the target was written"
         );
     }
 }

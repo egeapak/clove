@@ -7,6 +7,7 @@
 //! now always computed.
 
 use clove_core::{list_comments, OutputFormat};
+use clove_plugin::outln;
 use clove_types::CloveError;
 use serde_json::{json, Value};
 
@@ -64,25 +65,25 @@ fn print_human(
     obj: &serde_json::Map<String, Value>,
 ) {
     let fm = &item.frontmatter;
-    println!("{}  {}", fm.id.as_str(), fm.title);
-    println!("  status:   {}", fm.status.as_str());
-    println!("  type:     {}", fm.item_type.as_str());
-    println!("  priority: {}", fm.priority.get());
+    outln!("{}  {}", fm.id.as_str(), fm.title);
+    outln!("  status:   {}", fm.status.as_str());
+    outln!("  type:     {}", fm.item_type.as_str());
+    outln!("  priority: {}", fm.priority.get());
     if let Some(a) = &fm.assignee {
-        println!("  assignee: {a}");
+        outln!("  assignee: {a}");
     }
     if !fm.labels.is_empty() {
-        println!("  labels:   {}", fm.labels.join(", "));
+        outln!("  labels:   {}", fm.labels.join(", "));
     }
     if !fm.deps.is_empty() {
         let deps: Vec<&str> = fm.deps.iter().map(|d| d.as_str()).collect();
-        println!("  deps:     {}", deps.join(", "));
+        outln!("  deps:     {}", deps.join(", "));
     }
     if let Some(ready) = obj.get("ready").and_then(Value::as_bool) {
-        println!("  ready:    {ready}");
+        outln!("  ready:    {ready}");
     }
-    println!("  comments: {comment_count}");
+    outln!("  comments: {comment_count}");
     if !item.body.trim().is_empty() {
-        println!("\n{}", item.body.trim_end());
+        outln!("\n{}", item.body.trim_end());
     }
 }

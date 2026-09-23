@@ -1,8 +1,6 @@
 //! Phase 2 (T-D03) end-to-end: `clove ls`/`ready`/`query` route through a running
 //! `cloved` and produce output identical (bar `_meta.source`) to the local path.
-//! Unix-only (drives real signals). Spawns the sibling `cloved` binary from the
-//! same target dir; skips cleanly if it is not built (only happens outside the
-//! `cargo test --workspace` gate).
+//! Unix-only (drives real signals). Builds the sibling `cloved` on demand.
 #![cfg(unix)]
 #![allow(clippy::zombie_processes)]
 
@@ -12,9 +10,19 @@ use std::time::{Duration, Instant};
 
 use assert_cmd::cargo::cargo_bin;
 
-fn cloved_bin() -> Option<PathBuf> {
-    let path = cargo_bin("clove").with_file_name("cloved");
-    path.exists().then_some(path)
+/// Token records for this test's processes go here, never the user's clove home.
+const TEST_CLOVE_HOME: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/test-clove-home");
+
+/// The `cloved` binary, built on demand so these tests can never pass by
+/// skipping.
+fn cloved_bin() -> PathBuf {
+    escargot::CargoBuild::new()
+        .package("cloved")
+        .bin("cloved")
+        .run()
+        .expect("build cloved for the daemon routing tests")
+        .path()
+        .to_path_buf()
 }
 
 fn clove() -> Command {
@@ -22,7 +30,37 @@ fn clove() -> Command {
 }
 
 fn run_in(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
-    clove().current_dir(dir).args(args).output().unwrap()
+    clove()
+        .current_dir(dir)
+        .env("CLOVE_HOME", TEST_CLOVE_HOME)
+        .env("CLOVE_RUNTIME_DIR", runtime_dir(dir))
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+/// Wait until the daemon's watcher for the project at `root` watches: until
+/// then the daemon leaves reads to the index and the files.
+fn wait_watching(root: &std::path::Path) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let out = run_in(root, &["daemon", "status", "-f", "json"]);
+        let status: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
+        if status["data"]["watcher_state"] == "watching" {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the daemon's watcher never armed: {status}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
+/// The runtime directory of this test's own daemon — inside the test repo, so
+/// no two tests (and never the user's real daemon) share one.
+fn runtime_dir(root: &std::path::Path) -> PathBuf {
+    root.join("run")
 }
 
 /// A spawned `cloved` that dies with the test, however the test ends.
@@ -53,21 +91,29 @@ impl Drop for Daemon {
 }
 
 fn spawn_daemon(clove_dir: &std::path::Path, bin: &std::path::Path) -> Daemon {
+    let run = runtime_dir(clove_dir.parent().unwrap());
     let child = Command::new(bin)
+        .env("CLOVE_HOME", TEST_CLOVE_HOME)
+        .env("CLOVE_RUNTIME_DIR", &run)
+        .env("CLOVED_DISABLE_WEB", "1")
         .arg("run")
-        .arg("--clove-dir")
-        .arg(clove_dir)
         // Detach from cargo's captured pipes: a surviving daemon holding stdout
         // open is what turned a failed assertion into a hang.
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
         .expect("spawn cloved");
-    let pid = clove_dir.join("daemon.pid");
+    let pid = run.join("hub.pid");
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(5) {
         if pid.exists() {
-            return Daemon(child);
+            let daemon = Daemon(child);
+            // A daemon is started bare; the project is loaded by an ordinary
+            // call, as `clove daemon start` makes it.
+            let loaded = run_in(clove_dir.parent().unwrap(), &["daemon", "start"]);
+            assert!(loaded.status.success(), "{loaded:?}");
+            wait_watching(clove_dir.parent().unwrap());
+            return daemon;
         }
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -99,10 +145,7 @@ fn ids_and_source(out: &[u8]) -> (Vec<String>, String) {
 
 #[test]
 fn ls_ready_query_route_through_daemon_with_parity() {
-    let Some(bin) = cloved_bin() else {
-        eprintln!("skipping: cloved binary not built (run via `cargo test --workspace`)");
-        return;
-    };
+    let bin = cloved_bin();
 
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
@@ -140,10 +183,7 @@ fn ls_ready_query_route_through_daemon_with_parity() {
     // stale socket/pid are cleaned up by the liveness probe.
     let (_, source) = ids_and_source(&run_in(root, &["ls", "-f", "json"]).stdout);
     assert_ne!(source, "daemon", "no daemon → fall back");
-    assert!(
-        !clove_dir.join("daemon.sock").exists(),
-        "stale sock cleaned"
-    );
+    assert!(!daemon_sock(&clove_dir).exists(), "stale sock cleaned");
 }
 
 /// Parse the new-item id from `clove new ... -f json`.
@@ -154,10 +194,7 @@ fn new_id(out: &[u8]) -> String {
 
 #[test]
 fn tier1_tier2_commands_route_through_daemon_with_parity() {
-    let Some(bin) = cloved_bin() else {
-        eprintln!("skipping: cloved binary not built (run via `cargo test --workspace`)");
-        return;
-    };
+    let bin = cloved_bin();
 
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
@@ -250,10 +287,7 @@ fn sigkill(pid: u32) {
 /// socket on the way (DESIGN §8.3).
 #[test]
 fn routed_reads_fall_back_after_daemon_crash() {
-    let Some(bin) = cloved_bin() else {
-        eprintln!("skipping: cloved binary not built (run via `cargo test --workspace`)");
-        return;
-    };
+    let bin = cloved_bin();
 
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
@@ -278,10 +312,7 @@ fn routed_reads_fall_back_after_daemon_crash() {
     sigkill(daemon.id());
     let mut daemon = daemon;
     daemon.reap();
-    assert!(
-        clove_dir.join("daemon.sock").exists(),
-        "corpse socket remains"
-    );
+    assert!(daemon_sock(&clove_dir).exists(), "corpse socket remains");
 
     // Next routed reads fall back, return identical results, and clean up.
     let (mut blocked_ids, blocked_src) =
@@ -299,10 +330,13 @@ fn routed_reads_fall_back_after_daemon_crash() {
     assert_eq!(search_ids, vec![a], "fallback search is correct");
 
     assert!(
-        !clove_dir.join("daemon.sock").exists(),
+        !daemon_sock(&clove_dir).exists(),
         "corpse socket cleaned by the liveness probe"
     );
-    assert!(!clove_dir.join("daemon.pid").exists(), "corpse pid cleaned");
+    assert!(
+        !runtime_dir(root).join("hub.pid").exists(),
+        "corpse pid cleaned"
+    );
 }
 
 /// `clove search` answers identically with a live daemon, with only a local
@@ -321,10 +355,7 @@ fn routed_reads_fall_back_after_daemon_crash() {
 /// test could not see it.
 #[test]
 fn search_is_a_file_scan_even_with_a_live_daemon() {
-    let Some(bin) = cloved_bin() else {
-        eprintln!("skipping: cloved binary not built (run via `cargo test --workspace`)");
-        return;
-    };
+    let bin = cloved_bin();
 
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
@@ -396,10 +427,7 @@ fn search_is_a_file_scan_even_with_a_live_daemon() {
 /// implementations would have passed those with the daemon tier left on.
 #[test]
 fn no_index_bypasses_a_live_daemon() {
-    let Some(bin) = cloved_bin() else {
-        eprintln!("skipping: cloved binary not built (run via `cargo test --workspace`)");
-        return;
-    };
+    let bin = cloved_bin();
 
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
@@ -442,4 +470,9 @@ fn no_index_bypasses_a_live_daemon() {
     }
 
     drop(daemon);
+}
+
+/// The daemon's socket for the repo holding `clove_dir`.
+fn daemon_sock(clove_dir: &std::path::Path) -> PathBuf {
+    runtime_dir(clove_dir.parent().unwrap()).join("hub.sock")
 }

@@ -17,7 +17,9 @@
 //! by pretty-printing the data JSON), import needs the host's bespoke human
 //! summary and `_meta.warnings`, so this `main` uses the lower-level
 //! [`emit_success_with_meta`]/[`emit_error`] directly.
+#![deny(clippy::print_stdout)] // print via `outln!`/`out!` (see `clove_plugin::stdout`)
 
+use clove_plugin::outln;
 use std::io::Write;
 use std::process::ExitCode;
 
@@ -205,9 +207,12 @@ fn run_export(cx: &PluginContext, cli: ExportCli, format: OutputFormat) -> Resul
         None => {
             let stdout = std::io::stdout();
             let mut handle = stdout.lock();
-            export_beads(&mut handle, &items).map_err(|source| CloveError::Io {
-                path: Utf8PathBuf::from("<stdout>"),
-                source,
+            export_beads(&mut handle, &items).map_err(|source| {
+                clove_plugin::stdout::exit_if_broken_pipe(&source);
+                CloveError::Io {
+                    path: Utf8PathBuf::from("<stdout>"),
+                    source,
+                }
             })?;
             let _ = handle.flush();
         }
@@ -224,7 +229,7 @@ fn emit_plan(format: OutputFormat, plan: &clove_import::ImportPlan, warnings: &[
             render::plan_json(plan),
             json!({ "warnings": warnings }),
         ),
-        OutputFormat::Human => println!("{}", render::plan_human(plan)),
+        OutputFormat::Human => outln!("{}", render::plan_human(plan)),
     }
 }
 
@@ -237,7 +242,7 @@ fn emit_report(format: OutputFormat, report: &clove_import::ImportReport, warnin
             render::report_json(report),
             json!({ "warnings": warnings }),
         ),
-        OutputFormat::Human => println!("{}", render::report_human(report)),
+        OutputFormat::Human => outln!("{}", render::report_human(report)),
     }
 }
 

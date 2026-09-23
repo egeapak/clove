@@ -9,80 +9,243 @@
 //! - [`service`] — the `#[tarpc::service]` contract ([`CloveRpc`]) + [`RpcError`].
 //! - [`protocol`] — the request/response payload types (DESIGN §8.4).
 //! - [`client`] — [`DaemonClient`], a blocking connect-with-timeout client that
-//!   probes liveness and cleans up a stale socket (DESIGN §8.3).
-//! - path/name helpers for the socket, pid, and lock files (DESIGN §8.2).
+//!   probes liveness and cleans up a stale socket (DESIGN §8.3), and
+//!   [`HubClient`] for the hub's control service.
+//! - [`hub`] — the hub handshake, control service, and [`HubPaths`].
+//! - the per-user runtime directory the hub lives in (DESIGN §8.2).
 
 pub mod client;
+pub mod hub;
 pub mod protocol;
 pub mod service;
 pub mod spawn;
 pub mod transport;
+#[cfg(windows)]
+pub mod win;
 
 use camino::{Utf8Path, Utf8PathBuf};
 
-pub use client::{cleanup_stale, ClientError, DaemonClient, DaemonHealth};
+pub use client::{
+    cleanup_hub, cleanup_legacy, legacy_daemon, project, ClientError, DaemonClient, DaemonHealth,
+    HubClient, LegacyDaemon,
+};
+pub use hub::{Detached, HubPaths, HubStatus, ProjectInfo};
 pub use protocol::{
     GraphRequest, GraphResponse, LeanRow, QueryKind, QueryListResponse, QueryRequest, ReindexDone,
     StatusResponse, PROTOCOL_VERSION,
 };
-pub use service::{CloveRpc, CloveRpcClient, RpcError};
-pub use spawn::{cloved_path, ensure_daemon, spawn_daemon};
-pub use transport::build_transport;
+pub use service::{CloveRpc, CloveRpcClient, Project, RpcError};
+pub use spawn::{cloved_path, ensure_daemon, ensure_daemon_at, spawn_hub};
+pub use transport::{build_transport, transport_from_framed};
 
-/// The Unix socket filename inside `.clove/` (DESIGN §8.2).
+/// The Unix socket filename a clove 0.1.0 daemon binds inside `.clove/`. The hub
+/// lives in the per-user [`runtime_dir`]; the name is kept so a pre-hub daemon
+/// can be recognized (and its leftovers stay git-ignored).
 pub const SOCK_FILE: &str = "daemon.sock";
-/// The daemon PID filename inside `.clove/` (DESIGN §8.2).
+/// The pid filename a clove 0.1.0 daemon writes inside `.clove/`.
 pub const PID_FILE: &str = "daemon.pid";
-/// The daemon single-instance lock filename inside `.clove/` (DESIGN §8.2).
+/// The per-project lock filename inside `.clove/` (DESIGN §8.2): whichever daemon
+/// serves the project holds it — a hub slot, or a pre-hub daemon.
 pub const LOCK_FILE: &str = "daemon.lock";
 
-/// Path to the Unix domain socket for this `.clove/` directory.
-pub fn sock_path(clove_dir: &Utf8Path) -> Utf8PathBuf {
-    clove_dir.join(SOCK_FILE)
+/// The longest socket path the platform accepts, excluding the trailing NUL
+/// (`sizeof(sun_path) - 1`).
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
+pub const SUN_PATH_MAX: usize = 103;
+/// The longest socket path the platform accepts, excluding the trailing NUL
+/// (`sizeof(sun_path) - 1`).
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+)))]
+pub const SUN_PATH_MAX: usize = 107;
+
+/// The per-user directory holding the daemon's socket, pid, and lock:
+///
+/// 1. `$CLOVE_RUNTIME_DIR` — an explicit override (tests use it);
+/// 2. Unix: `$XDG_RUNTIME_DIR/clove`, else `$TMPDIR/clove-<uid>`, else
+///    `/tmp/clove-<uid>`; Windows: `%LOCALAPPDATA%\clove\run` (a per-user
+///    profile directory), else `%USERPROFILE%\AppData\Local\clove\run`.
+///
+/// Always absolute. Only the daemon creates it ([`ensure_runtime_dir`]);
+/// clients connect only if [`runtime_dir_is_private`] holds, so another user
+/// can't plant a socket there. On Windows with neither profile variable set
+/// there is no per-user directory to use, and this fails.
+pub fn runtime_dir() -> std::io::Result<Utf8PathBuf> {
+    #[cfg(unix)]
+    let dir = resolve_runtime_dir(utf8_var, current_uid());
+    #[cfg(not(unix))]
+    let dir = resolve_windows_runtime_dir(utf8_var)?;
+    Ok(absolute(&dir))
 }
 
-/// Path to the daemon PID file for this `.clove/` directory.
+#[cfg_attr(unix, allow(dead_code))]
+fn resolve_windows_runtime_dir(
+    var: impl Fn(&str) -> Option<Utf8PathBuf>,
+) -> std::io::Result<Utf8PathBuf> {
+    if let Some(dir) = var("CLOVE_RUNTIME_DIR") {
+        return Ok(dir);
+    }
+    if let Some(dir) = var("LOCALAPPDATA") {
+        return Ok(dir.join("clove").join("run"));
+    }
+    var("USERPROFILE")
+        .map(|home| home.join("AppData").join("Local").join("clove").join("run"))
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "neither %LOCALAPPDATA% nor %USERPROFILE% is set, so there is no \
+                 per-user directory for the daemon; set CLOVE_RUNTIME_DIR",
+            )
+        })
+}
+
+/// `path` made absolute against the current directory (unchanged when it
+/// already is, or when there is no usable current directory).
+pub fn absolute(path: &Utf8Path) -> Utf8PathBuf {
+    std::path::absolute(path)
+        .ok()
+        .and_then(|p| Utf8PathBuf::from_path_buf(p).ok())
+        .unwrap_or_else(|| path.to_owned())
+}
+
+/// Parse a pid file's content into a pid that is safe to signal: `kill(0)`
+/// and `kill(-1)` address whole process groups, and pid 1 is init.
+pub fn parse_pid(text: &str) -> Option<u32> {
+    let pid: u32 = text.trim().parse().ok()?;
+    (pid > 1 && pid <= i32::MAX as u32).then_some(pid)
+}
+
+#[cfg(unix)]
+fn resolve_runtime_dir(var: impl Fn(&str) -> Option<Utf8PathBuf>, uid: u32) -> Utf8PathBuf {
+    if let Some(dir) = var("CLOVE_RUNTIME_DIR") {
+        return dir;
+    }
+    if let Some(dir) = var("XDG_RUNTIME_DIR") {
+        return dir.join("clove");
+    }
+    let tmp = var("TMPDIR").unwrap_or_else(|| Utf8PathBuf::from("/tmp"));
+    tmp.join(format!("clove-{uid}"))
+}
+
+/// Create the [`runtime_dir`] owner-only if missing, and refuse one that another
+/// user owns or can write to.
+pub fn ensure_runtime_dir() -> std::io::Result<Utf8PathBuf> {
+    let dir = runtime_dir()?;
+    ensure_private_dir(&dir)?;
+    Ok(dir)
+}
+
+/// [`ensure_runtime_dir`] for an explicit directory (a [`HubPaths`] root).
+pub fn ensure_private_dir(dir: &Utf8Path) -> std::io::Result<()> {
+    if std::fs::symlink_metadata(dir).is_err() {
+        create_private_dir(dir)?;
+    }
+    if !runtime_dir_is_private(dir) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "daemon runtime directory {dir} must be owned by the current user and \
+                 not writable by others (set CLOVE_RUNTIME_DIR to use another directory)"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Whether `dir` is a directory — itself, not a symlink to one — owned by the
+/// current user that no one else can write to: the precondition for trusting
+/// a socket inside it. Whoever controls a symlink controls where it points.
+#[cfg(unix)]
+pub fn runtime_dir_is_private(dir: &Utf8Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(dir)
+        .is_ok_and(|m| m.is_dir() && m.uid() == current_uid() && m.mode() & 0o022 == 0)
+}
+
+/// On Windows the runtime directory lives in the user's profile, whose ACL
+/// already excludes other users; it must still be a real directory, not a link.
+#[cfg(not(unix))]
+pub fn runtime_dir_is_private(dir: &Utf8Path) -> bool {
+    std::fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir())
+}
+
+#[cfg(unix)]
+fn create_private_dir(dir: &Utf8Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+}
+
+#[cfg(not(unix))]
+fn create_private_dir(dir: &Utf8Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)
+}
+
+#[cfg(unix)]
+pub(crate) fn current_uid() -> u32 {
+    extern "C" {
+        fn getuid() -> u32;
+    }
+    // SAFETY: getuid takes no arguments, cannot fail, and touches no memory.
+    unsafe { getuid() }
+}
+
+/// An environment variable as a UTF-8 path, treated as absent when empty or not
+/// UTF-8.
+fn utf8_var(name: &str) -> Option<Utf8PathBuf> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(Utf8PathBuf::from)
+}
+
+/// The pid file of a clove 0.1.0 daemon for this `.clove/` directory.
 pub fn pid_path(clove_dir: &Utf8Path) -> Utf8PathBuf {
     clove_dir.join(PID_FILE)
 }
 
-/// Path to the daemon lock file for this `.clove/` directory.
+/// The socket of a clove 0.1.0 daemon for this `.clove/` directory.
+pub fn legacy_sock_path(clove_dir: &Utf8Path) -> Utf8PathBuf {
+    clove_dir.join(SOCK_FILE)
+}
+
+/// The per-project lock for this `.clove/` directory.
 pub fn lock_path(clove_dir: &Utf8Path) -> Utf8PathBuf {
     clove_dir.join(LOCK_FILE)
 }
 
-/// Build the platform-specific local-socket name for a `.clove/` directory, used
-/// identically by the client ([`DaemonClient`]) and the `cloved` listener so the
-/// two always agree (DESIGN §8.2): a filesystem path on Unix (`daemon.sock`), a
-/// namespaced pipe on Windows (`clove-<hash>`).
-pub fn socket_name(
-    clove_dir: &Utf8Path,
-) -> std::io::Result<interprocess::local_socket::Name<'static>> {
-    use interprocess::local_socket::prelude::*;
-    #[cfg(windows)]
-    {
-        use interprocess::local_socket::GenericNamespaced;
-        pipe_name(clove_dir).to_ns_name::<GenericNamespaced>()
+/// Reject a socket path the kernel would refuse, naming the cause and the fix.
+#[cfg(not(windows))]
+pub(crate) fn check_sock_len(path: &Utf8Path) -> std::io::Result<()> {
+    if path.as_str().len() <= SUN_PATH_MAX {
+        return Ok(());
     }
-    #[cfg(not(windows))]
-    {
-        use interprocess::local_socket::GenericFilePath;
-        sock_path(clove_dir)
-            .into_string()
-            .to_fs_name::<GenericFilePath>()
-    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!(
+            "daemon socket path {path} is {} bytes, over the platform limit of \
+             {SUN_PATH_MAX}; set CLOVE_RUNTIME_DIR to a shorter directory",
+            path.as_str().len()
+        ),
+    ))
 }
 
-/// The Windows named shutdown-event name for this `.clove/` directory
-/// (DESIGN §8.9). `clove daemon stop` signals it; the daemon waits on it.
-#[cfg(windows)]
-pub fn event_name(clove_dir: &Utf8Path) -> String {
-    format!("clove-shutdown-{}", repo_hash(clove_dir))
-}
-
-/// A short, stable hash of the `.clove/` directory path, used to derive the
-/// Windows named-pipe name (`\\.\pipe\clove-<hash>`) and the Windows shutdown
-/// event name (DESIGN §8.2/§8.9). Must be deterministic *across processes and
+/// A short, stable hash of a path, used to derive the hub's Windows named-pipe
+/// and shutdown-event names from its runtime directory (DESIGN §8.2/§8.9). Must be deterministic *across processes and
 /// across builds* so independently-compiled binaries (`clove`, `cloved`,
 /// `clove-mcp`) — possibly built with different toolchains (a distro-packaged
 /// `clove` alongside a `cargo install`ed `cloved`) — always agree on the name.
@@ -103,28 +266,124 @@ pub fn repo_hash(clove_dir: &Utf8Path) -> String {
     format!("{hash:016x}")
 }
 
-/// The Windows named-pipe name for this `.clove/` directory.
-#[cfg(windows)]
-pub fn pipe_name(clove_dir: &Utf8Path) -> String {
-    format!("clove-{}", repo_hash(clove_dir))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn paths_are_under_clove_dir() {
+    fn project_files_are_under_clove_dir() {
         let dir = Utf8Path::new("/repo/.clove");
+        assert_eq!(pid_path(dir), Utf8PathBuf::from("/repo/.clove/daemon.pid"));
         assert_eq!(
-            sock_path(dir),
+            legacy_sock_path(dir),
             Utf8PathBuf::from("/repo/.clove/daemon.sock")
         );
-        assert_eq!(pid_path(dir), Utf8PathBuf::from("/repo/.clove/daemon.pid"));
         assert_eq!(
             lock_path(dir),
             Utf8PathBuf::from("/repo/.clove/daemon.lock")
         );
+    }
+
+    #[test]
+    fn the_hub_lives_in_the_runtime_dir() {
+        let hub = HubPaths::resolve().unwrap();
+        let dir = runtime_dir().unwrap();
+        assert_eq!(hub.dir(), dir);
+        assert_eq!(hub.sock(), dir.join("hub.sock"));
+        assert_eq!(hub.pid(), dir.join("hub.pid"));
+        assert_eq!(hub.lock(), dir.join("hub.lock"));
+    }
+
+    /// The Windows runtime directory is per-user; with no profile variable to
+    /// build it from there is none, and a relative guess would put the hub
+    /// wherever the spawner happens to stand.
+    #[test]
+    fn a_windows_runtime_dir_needs_a_user_profile() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| Utf8PathBuf::from(*value))
+            }
+        };
+        assert_eq!(
+            resolve_windows_runtime_dir(env(&[("LOCALAPPDATA", "C:/Users/u/AppData/Local")]))
+                .unwrap(),
+            Utf8PathBuf::from("C:/Users/u/AppData/Local/clove/run")
+        );
+        assert_eq!(
+            resolve_windows_runtime_dir(env(&[("USERPROFILE", "C:/Users/u")])).unwrap(),
+            Utf8PathBuf::from("C:/Users/u/AppData/Local/clove/run")
+        );
+        let message = resolve_windows_runtime_dir(env(&[]))
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("CLOVE_RUNTIME_DIR"), "{message}");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn an_over_long_hub_socket_is_refused_with_the_fix() {
+        let deep = HubPaths::at(format!("/{}", "nested-directory/".repeat(8)));
+        let message = deep.socket_name().unwrap_err().to_string();
+        assert!(message.contains("CLOVE_RUNTIME_DIR"), "{message}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_dir_precedence() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| Utf8PathBuf::from(*value))
+            }
+        };
+        let all = env(&[
+            ("CLOVE_RUNTIME_DIR", "/explicit"),
+            ("XDG_RUNTIME_DIR", "/run/user/7"),
+            ("TMPDIR", "/var/tmp"),
+        ]);
+        assert_eq!(resolve_runtime_dir(all, 7), Utf8PathBuf::from("/explicit"));
+        let xdg = env(&[("XDG_RUNTIME_DIR", "/run/user/7"), ("TMPDIR", "/var/tmp")]);
+        assert_eq!(
+            resolve_runtime_dir(xdg, 7),
+            Utf8PathBuf::from("/run/user/7/clove")
+        );
+        let tmpdir = env(&[("TMPDIR", "/var/tmp")]);
+        assert_eq!(
+            resolve_runtime_dir(tmpdir, 7),
+            Utf8PathBuf::from("/var/tmp/clove-7")
+        );
+        assert_eq!(
+            resolve_runtime_dir(env(&[]), 7),
+            Utf8PathBuf::from("/tmp/clove-7")
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn over_long_socket_path_names_the_limit_and_the_fix() {
+        let long = Utf8PathBuf::from(format!("/{}.sock", "x".repeat(SUN_PATH_MAX)));
+        let message = check_sock_len(&long).unwrap_err().to_string();
+        assert!(message.contains(&SUN_PATH_MAX.to_string()), "{message}");
+        assert!(message.contains("CLOVE_RUNTIME_DIR"), "{message}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_dir_must_not_be_writable_by_others() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = Utf8Path::from_path(dir.path()).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(runtime_dir_is_private(path));
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(!runtime_dir_is_private(path), "world-writable dir trusted");
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o770)).unwrap();
+        assert!(!runtime_dir_is_private(path), "group-writable dir trusted");
     }
 
     #[test]
@@ -134,5 +393,22 @@ mod tests {
         assert_eq!(repo_hash(a), repo_hash(a), "hash must be deterministic");
         assert_ne!(repo_hash(a), repo_hash(b), "distinct paths → distinct hash");
         assert_eq!(repo_hash(a).len(), 16);
+    }
+
+    /// A symlink is never a trusted runtime directory, even to a private one:
+    /// whoever controls the link controls where the socket is looked for.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_runtime_dir_is_not_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(runtime_dir_is_private(Utf8Path::from_path(&real).unwrap()));
+        assert!(!runtime_dir_is_private(Utf8Path::from_path(&link).unwrap()));
+        assert!(ensure_private_dir(Utf8Path::from_path(&link).unwrap()).is_err());
     }
 }

@@ -7,7 +7,7 @@
 
 use std::net::{IpAddr, SocketAddr};
 
-use clove_ipc::DaemonClient;
+use clove_ipc::{DaemonClient, HubPaths};
 use clove_types::CloveError;
 use clove_web::AppState;
 
@@ -21,26 +21,38 @@ pub fn run(
     no_index: bool,
     deep: bool,
 ) -> Result<(), CloveError> {
-    // Hand off to a running daemon if it is already serving the web UI: the
-    // daemon serves by default, so we point the user at it instead of binding a
-    // second server (and blocking this process).
+    // Hand off to a running daemon: it serves every project's web UI on one
+    // port, so we have it serve this one too and point the user there instead of
+    // binding a second server (and blocking this process). With no daemon
+    // running, none is started — `serve` runs standalone as it always has. An
+    // explicit `--port` the daemon isn't on is honored with a standalone server.
     if let Some(clove_dir) = ctx.issues_dir.parent() {
-        if let Some(mut client) = DaemonClient::probe(clove_dir) {
+        let client = match HubPaths::resolve() {
+            Ok(hub) if hub.footprint_present() || wait_for_starting_hub(&hub) => {
+                DaemonClient::attach(&hub, clove_dir, true).ok()
+            }
+            _ => None,
+        };
+        if let Some(mut client) = client {
             if let Ok(status) = client.status() {
-                if let Some(addr) = status.web_addr {
-                    let url = format!("http://{addr}");
-                    if !quiet {
-                        eprintln!("clove web UI served by the running daemon: {url}");
+                match status.web_addr.zip(status.web_url) {
+                    Some((addr, url))
+                        if args.port.is_none_or(|port| port_of(&addr) == Some(port)) =>
+                    {
+                        if !quiet {
+                            eprintln!("clove web UI served by the running daemon: {url}");
+                        }
+                        if args.open {
+                            open_browser(&url);
+                        }
+                        return Ok(());
                     }
-                    if args.open {
-                        open_browser(&url);
-                    }
-                    return Ok(());
-                } else if !quiet {
-                    eprintln!(
-                        "note: a daemon is running but web serving is disabled \
-                         ([web] enabled = false); starting a standalone server"
-                    );
+                    Some(_) => {}
+                    None if !quiet => eprintln!(
+                        "note: the running daemon is not serving the web UI; \
+                         starting a standalone server"
+                    ),
+                    None => {}
                 }
             }
         }
@@ -64,8 +76,7 @@ pub fn run(
         );
     }
 
-    let addr = SocketAddr::new(ip, args.port);
-    let url = format!("http://{addr}");
+    let requested = SocketAddr::new(ip, args.port.unwrap_or(ctx.config.web.port));
 
     let state = AppState::new(
         ctx.store.clone(),
@@ -80,18 +91,6 @@ pub fn run(
     // accident — afterwards it was simply false.
     .with_read_tiers(!no_index, !no_index, deep);
 
-    if !quiet {
-        eprintln!("clove web UI: {url}");
-        if args.no_watch {
-            eprintln!("  (file-watcher disabled — no live updates)");
-        }
-        eprintln!("  press Ctrl-C to stop");
-    }
-
-    if args.open {
-        open_browser(&url);
-    }
-
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -102,10 +101,32 @@ pub fn run(
         })?;
 
     let result = runtime.block_on(async move {
-        if args.no_watch {
-            clove_web::serve(state, addr).await
+        let listener = if args.port.is_some() {
+            tokio::net::TcpListener::bind(requested).await?
         } else {
-            clove_web::serve_with_watch(state, addr).await
+            clove_web::bind_or_free_port(requested).await?
+        };
+        let url = format!("http://{}", listener.local_addr()?);
+        if !quiet {
+            if args.port.is_none() && listener.local_addr()?.port() != requested.port() {
+                eprintln!(
+                    "note: port {} is in use; using a free port",
+                    requested.port()
+                );
+            }
+            eprintln!("clove web UI: {url}");
+            if args.no_watch {
+                eprintln!("  (file-watcher disabled — no live updates)");
+            }
+            eprintln!("  press Ctrl-C to stop");
+        }
+        if args.open {
+            open_browser(&url);
+        }
+        if args.no_watch {
+            clove_web::serve_on(state, listener).await
+        } else {
+            clove_web::serve_with_watch_on(state, listener).await
         }
     });
 
@@ -113,6 +134,28 @@ pub fn run(
         path: ctx.root.clone(),
         source,
     })
+}
+
+/// The port of a `host:port` address as the daemon advertises it.
+fn port_of(addr: &str) -> Option<u16> {
+    addr.parse::<SocketAddr>().ok().map(|addr| addr.port())
+}
+
+/// A daemon another client is starting holds its lock before it binds its
+/// socket. Give it a few seconds to come up rather than race it with a second,
+/// standalone server; `false` when no daemon is starting, or it never appears.
+fn wait_for_starting_hub(hub: &HubPaths) -> bool {
+    if !hub.running() {
+        return false;
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if hub.footprint_present() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    false
 }
 
 /// Best-effort browser launch (ignores failure).

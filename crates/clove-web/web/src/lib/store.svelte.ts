@@ -1,7 +1,9 @@
 import { browser, dev } from '$app/environment';
+import { base } from '$app/paths';
 import type { Item, ConnState, ItemPage, ListQuery, Meta } from './types';
 import { api, isMockMode } from './api';
 import { queryString } from './query';
+import { eventsUrl } from './urls';
 
 /** Handle for one in-flight optimistic edit (see `Store.optimistic`). */
 export interface OptimisticEdit {
@@ -280,8 +282,7 @@ function connect() {
   // visibility/online trigger firing while a socket is already live).
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
   clearReconnect();
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const url = `${proto}//${location.host}/api/v1/events`;
+  const url = eventsUrl(location, base);
   try {
     ws = new WebSocket(url);
   } catch {

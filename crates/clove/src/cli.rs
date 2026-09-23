@@ -336,9 +336,10 @@ pub struct PluginSearchArgs {
 /// embedded web UI and a JSON/WebSocket API for this repository.
 #[derive(Debug, Args)]
 pub struct ServeArgs {
-    /// Port to listen on.
-    #[arg(long, default_value_t = 7373)]
-    pub port: u16,
+    /// Port to listen on. Defaults to the configured `[web] port` (7373), or a
+    /// free port if that one is taken; an explicit port is used or fails.
+    #[arg(long)]
+    pub port: Option<u16>,
 
     /// Address to bind. Loopback only unless `--allow-non-loopback` is given.
     #[arg(long, default_value = "127.0.0.1")]
@@ -367,11 +368,16 @@ pub struct DaemonArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum DaemonAction {
-    /// Start the daemon for this repository (spawns `cloved` detached).
+    /// Have the daemon serve this repository (spawns `cloved` detached if no
+    /// daemon is running; one daemon serves all of a user's repositories).
     Start,
-    /// Stop the running daemon.
-    Stop,
-    /// Show the running daemon's status.
+    /// Stop serving this repository (the daemon exits once it serves none).
+    Stop {
+        /// Stop the daemon itself, and so every repository it serves.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Show this repository's daemon status and the repositories it serves.
     Status,
 }
 

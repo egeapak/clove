@@ -2,6 +2,7 @@
 //! repairs, plus an index↔files divergence check when an index is present.
 
 use clove_core::{diagnose, doctor_fix, DoctorIssue, DoctorReport, OutputFormat, Severity};
+use clove_plugin::outln;
 use clove_types::CloveError;
 use serde_json::{json, Value};
 
@@ -39,13 +40,43 @@ pub fn run(
     }
 
     // T-D07: daemon-health check (independent of the index; runs even with
-    // --no-index, since it inspects socket/pid state, not the index).
-    if let Some(issue) = daemon_issue(clove_ipc::DaemonClient::health(daemon_dir(ctx))) {
-        // Only *dead* footprints are cleaned up; a live-but-incompatible daemon
-        // (DAEMON_VERSION_SKEW, not fixable) is reported even under --fix so we
-        // never delete a running process's socket/pid.
+    // --no-index, since it inspects socket/pid state, not the index). Only
+    // *dead* footprints are cleaned up; a live daemon — incompatible or pre-hub —
+    // is reported even under --fix, so we never delete a running process's files.
+    // No runtime directory (Windows without a user profile) means no hub.
+    if let Ok(hub) = clove_ipc::HubPaths::resolve() {
+        let log = hub.log();
+        let log = log.exists().then_some(log);
+        if let Some(issue) = daemon_issue(clove_ipc::DaemonClient::health(&hub), log.as_deref()) {
+            if args.fix && issue.fixable {
+                clove_ipc::client::cleanup_hub(&hub);
+                fixed += 1;
+            } else {
+                report.issues.push(issue);
+            }
+        }
+        let hub_status = clove_ipc::HubClient::connect(&hub)
+            .ok()
+            .and_then(|mut client| client.status().ok());
+        if let Some(message) = hub_status
+            .as_ref()
+            .and_then(crate::cmd::daemon::clove_home_mismatch)
+        {
+            report.issues.push(DoctorIssue {
+                severity: Severity::Warning,
+                code: "DAEMON_CLOVE_HOME_MISMATCH",
+                item: None,
+                message,
+                fixable: false,
+            });
+        }
+    }
+    if let Some(issue) = tracked_token_issue(daemon_dir(ctx)) {
+        report.issues.push(issue);
+    }
+    if let Some(issue) = legacy_daemon_issue(daemon_dir(ctx)) {
         if args.fix && issue.fixable {
-            clove_ipc::client::cleanup_stale(daemon_dir(ctx));
+            clove_ipc::cleanup_legacy(daemon_dir(ctx));
             fixed += 1;
         } else {
             report.issues.push(issue);
@@ -157,17 +188,28 @@ fn daemon_dir(ctx: &Ctx) -> &camino::Utf8Path {
 ///   e.g. an old `cloved` still running after a `clove` upgrade) → a **non**-
 ///   fixable `DAEMON_VERSION_SKEW`: deleting a live process's socket/pid would be
 ///   wrong, so we advise a restart instead.
+/// - `Unresponsive` (something accepted but did not answer in time, or holds
+///   the hub lock without a socket yet) → a non-fixable `DAEMON_UNRESPONSIVE`:
+///   alive as far as anyone can tell, so its files stay.
 /// - `Absent`/`Healthy` → no finding (a live, healthy daemon is never touched).
-fn daemon_issue(health: clove_ipc::DaemonHealth) -> Option<DoctorIssue> {
+///
+/// A live daemon's finding names its log, when it has one.
+fn daemon_issue(
+    health: clove_ipc::DaemonHealth,
+    log: Option<&camino::Utf8Path>,
+) -> Option<DoctorIssue> {
     use clove_ipc::DaemonHealth;
+    let log_note = log
+        .map(|log| format!(" (its log is {log})"))
+        .unwrap_or_default();
     match health {
         DaemonHealth::Absent | DaemonHealth::Healthy => None,
         DaemonHealth::Dead => Some(DoctorIssue {
             severity: Severity::Warning,
             code: "DAEMON_STALE_SOCKET",
             item: None,
-            message: "stale daemon socket/pid from a crashed daemon; \
-                      run `clove doctor --fix` to remove them"
+            message: "stale daemon socket/pid from a crashed daemon in the runtime \
+                      directory; run `clove doctor --fix` to remove them"
                 .to_owned(),
             fixable: true,
         }),
@@ -175,13 +217,89 @@ fn daemon_issue(health: clove_ipc::DaemonHealth) -> Option<DoctorIssue> {
             severity: Severity::Warning,
             code: "DAEMON_VERSION_SKEW",
             item: None,
-            message: "a running daemon speaks an incompatible protocol version \
-                      (likely an old `cloved` from before a `clove` upgrade); \
-                      run `clove daemon stop` then start it again"
-                .to_owned(),
+            message: format!(
+                "a running daemon speaks an incompatible protocol version \
+                 (likely an old `cloved` from before a `clove` upgrade); \
+                 run `clove daemon stop --all` then start it again{log_note}"
+            ),
+            fixable: false,
+        }),
+        DaemonHealth::Unresponsive => Some(DoctorIssue {
+            severity: Severity::Warning,
+            code: "DAEMON_UNRESPONSIVE",
+            item: None,
+            message: format!(
+                "a daemon is running but did not answer in time (busy, or still \
+                 starting); if it stays that way, `clove daemon stop --all`{log_note}"
+            ),
             fixable: false,
         }),
     }
+}
+
+/// A `.clove/daemon.token` that git tracks — committed before `.gitignore`
+/// listed it, so ignoring it now changes nothing: the next `git commit -a`
+/// would publish the live token. Asked of `git` itself; no git, or not a
+/// repository, and there is nothing to report.
+fn tracked_token_issue(clove_dir: &camino::Utf8Path) -> Option<DoctorIssue> {
+    let token = clove_core::daemon_token::token_path(clove_dir);
+    std::fs::symlink_metadata(&token).ok()?;
+    let repo_root = clove_dir.parent()?;
+    let tracked = std::process::Command::new("git")
+        .current_dir(repo_root)
+        .args(["ls-files", "--error-unmatch", "--"])
+        .arg(token.strip_prefix(repo_root).ok()?.as_str())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .ok()?
+        .success();
+    tracked.then(|| DoctorIssue {
+        severity: Severity::Warning,
+        code: "DAEMON_TOKEN_TRACKED",
+        item: None,
+        message: "git tracks .clove/daemon.token, so a commit can publish the project's \
+                  daemon token; untrack it with `git rm --cached .clove/daemon.token` \
+                  (it stays ignored from then on)"
+            .to_owned(),
+        fixable: false,
+    })
+}
+
+/// A clove 0.1.0 daemon's footprint in `.clove/`: a live one still serving the
+/// project (which keeps the hub from serving it), or one that cannot be
+/// verified either way, is a non-fixable `DAEMON_LEGACY`; only files proven to
+/// have nothing behind them are a fixable `DAEMON_STALE_SOCKET`.
+fn legacy_daemon_issue(clove_dir: &camino::Utf8Path) -> Option<DoctorIssue> {
+    use clove_ipc::LegacyDaemon;
+    let legacy = |message: String| DoctorIssue {
+        severity: Severity::Warning,
+        code: "DAEMON_LEGACY",
+        item: None,
+        message,
+        fixable: false,
+    };
+    Some(match clove_ipc::legacy_daemon(clove_dir) {
+        LegacyDaemon::Absent => return None,
+        LegacyDaemon::Alive(pid) => legacy(format!(
+            "a clove 0.1.0 daemon (pid {pid}) still serves this project, so the \
+             current daemon cannot; run `clove daemon stop` to stop it"
+        )),
+        LegacyDaemon::Unknown(pid) => legacy(format!(
+            "a clove 0.1.0 daemon{} may still serve this project but could not be \
+             verified; its files in .clove/ are left in place",
+            pid.map(|p| format!(" (pid {p})")).unwrap_or_default()
+        )),
+        LegacyDaemon::Dead => DoctorIssue {
+            severity: Severity::Warning,
+            code: "DAEMON_STALE_SOCKET",
+            item: None,
+            message: "stale daemon socket/pid in .clove/ from a crashed clove 0.1.0 \
+                      daemon; run `clove doctor --fix` to remove them"
+                .to_owned(),
+            fixable: true,
+        },
+    })
 }
 
 fn emit_json(report: &DoctorReport, fixed: usize) {
@@ -219,11 +337,11 @@ fn emit_human(report: &DoctorReport, fixed: usize) {
             Severity::Warning => "warning",
         };
         match &issue.item {
-            Some(item) => println!("{prefix}: [{}] {} ({})", issue.code, issue.message, item),
-            None => println!("{prefix}: [{}] {}", issue.code, issue.message),
+            Some(item) => outln!("{prefix}: [{}] {} ({})", issue.code, issue.message, item),
+            None => outln!("{prefix}: [{}] {}", issue.code, issue.message),
         }
     }
-    println!(
+    outln!(
         "checked {}, {} error(s), {} warning(s), {} fixed",
         report.checked,
         report.errors(),
@@ -240,20 +358,32 @@ mod tests {
     #[test]
     fn daemon_issue_maps_each_health_state() {
         // A healthy or absent daemon is never a finding.
-        assert!(daemon_issue(DaemonHealth::Absent).is_none());
-        assert!(daemon_issue(DaemonHealth::Healthy).is_none());
+        assert!(daemon_issue(DaemonHealth::Absent, None).is_none());
+        assert!(daemon_issue(DaemonHealth::Healthy, None).is_none());
 
         // Dead corpse files → fixable stale-socket warning.
-        let dead = daemon_issue(DaemonHealth::Dead).unwrap();
+        let dead = daemon_issue(DaemonHealth::Dead, None).unwrap();
         assert_eq!(dead.code, "DAEMON_STALE_SOCKET");
         assert_eq!(dead.severity, Severity::Warning);
         assert!(dead.fixable);
 
         // A live-but-incompatible daemon → non-fixable version-skew warning, so
         // `--fix` never deletes a running process's socket/pid.
-        let skew = daemon_issue(DaemonHealth::Incompatible).unwrap();
+        let skew = daemon_issue(DaemonHealth::Incompatible, None).unwrap();
         assert_eq!(skew.code, "DAEMON_VERSION_SKEW");
         assert_eq!(skew.severity, Severity::Warning);
         assert!(!skew.fixable);
+
+        // A live daemon's finding says where its log is.
+        let busy = daemon_issue(
+            DaemonHealth::Unresponsive,
+            Some(camino::Utf8Path::new("/run/clove/hub.log")),
+        )
+        .unwrap();
+        assert!(
+            busy.message.contains("/run/clove/hub.log"),
+            "{}",
+            busy.message
+        );
     }
 }

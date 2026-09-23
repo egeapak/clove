@@ -416,6 +416,10 @@ fn gitignore_missing_entries(store: &ItemStore) -> Option<Vec<String>> {
 /// canonical entries (creating the file if absent). Existing content is kept.
 fn repair_gitignore(store: &ItemStore, missing: &[String]) -> Result<(), CloveError> {
     let path = gitignore_path(store);
+    crate::fs_safe::refuse_symlink(&path).map_err(|source| CloveError::Io {
+        path: path.clone(),
+        source,
+    })?;
     let mut contents = std::fs::read_to_string(&path).unwrap_or_default();
     // The canonical full set when the file is absent / empty; otherwise just the
     // gaps, each on its own LF-terminated line after the existing content.
@@ -431,7 +435,9 @@ fn repair_gitignore(store: &ItemStore, missing: &[String]) -> Result<(), CloveEr
         contents.push_str(entry);
         contents.push('\n');
     }
-    std::fs::write(&path, contents).map_err(|source| CloveError::Io { path, source })
+    let root = path.parent().unwrap_or(&path).to_owned();
+    crate::fs_safe::write_atomic(&root, &path, contents.as_bytes())
+        .map_err(|source| CloveError::Io { path, source })
 }
 
 fn validation_code(v: &crate::validate::ValidationError) -> &'static str {

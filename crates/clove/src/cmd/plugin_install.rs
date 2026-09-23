@@ -11,6 +11,7 @@
 
 use camino::{Utf8Path, Utf8PathBuf};
 use clove_core::OutputFormat;
+use clove_plugin::outln;
 use clove_types::CloveError;
 use serde_json::{json, Value};
 
@@ -190,7 +191,7 @@ fn install_from_git(
                 // so this is never a machine-readable path. Emitting a JSON
                 // `declined` payload here was unreachable code that the
                 // published schema then had to describe.
-                println!("not installed");
+                outln!("not installed");
                 return Ok(());
             }
         }
@@ -349,7 +350,7 @@ fn install_from_registry(
             );
             if !install::ask_confirmation(&prompt) {
                 // See `install_from_git`: `Ask` implies human format.
-                println!("not installed");
+                outln!("not installed");
                 return Ok(());
             }
         }
@@ -790,7 +791,7 @@ pub fn run_update(format: OutputFormat, args: &PluginUpdateArgs) -> Result<(), C
         Consent::Ask => {
             if !install::ask_confirmation("  Update these plugins? [y/N] ") {
                 // See `install_from_git`: `Ask` implies human format.
-                println!("not updated");
+                outln!("not updated");
                 return Ok(());
             }
         }
@@ -990,7 +991,7 @@ fn emit(format: OutputFormat, data: Value, human: &str) {
 
 fn emit_with_warnings(format: OutputFormat, data: Value, human: &str, warnings: Vec<String>) {
     match format {
-        OutputFormat::Human => println!("{human}"),
+        OutputFormat::Human => outln!("{human}"),
         // These are single-result commands: one envelope, `_meta` included, in
         // both machine formats — the same shape `new`, `show`, `doctor`,
         // `version`, `reindex` and `stats` emit. The jsonl rule that bit

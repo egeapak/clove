@@ -4,6 +4,7 @@
 //! per DESIGN.md §7.6. The parser lives in [`cli`], output rendering in
 //! [`output`], the exit-code table in [`exit`], discovery in [`context`], and
 //! each subcommand under [`cmd`].
+#![deny(clippy::print_stdout)] // print via `outln!`/`out!` (see `clove_plugin::stdout`)
 
 mod cli;
 mod clove_home;

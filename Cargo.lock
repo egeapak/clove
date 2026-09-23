@@ -566,7 +566,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "clove-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -600,7 +600,7 @@ dependencies = [
 
 [[package]]
 name = "clove-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "camino",
  "chrono",
@@ -609,6 +609,7 @@ dependencies = [
  "fd-lock",
  "getrandom 0.2.17",
  "insta",
+ "libc",
  "memchr",
  "petgraph",
  "proptest",
@@ -616,6 +617,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml_neo",
+ "sha2",
  "smol_str",
  "tempfile",
  "thiserror 1.0.69",
@@ -624,7 +626,7 @@ dependencies = [
 
 [[package]]
 name = "clove-engine"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "camino",
  "chrono",
@@ -639,7 +641,7 @@ dependencies = [
 
 [[package]]
 name = "clove-import"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "blake3",
@@ -662,7 +664,7 @@ dependencies = [
 
 [[package]]
 name = "clove-import-beads"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "camino",
  "chrono",
@@ -676,7 +678,7 @@ dependencies = [
 
 [[package]]
 name = "clove-import-tk"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "camino",
  "chrono",
@@ -690,7 +692,7 @@ dependencies = [
 
 [[package]]
 name = "clove-index"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "camino",
@@ -710,11 +712,12 @@ dependencies = [
 
 [[package]]
 name = "clove-ipc"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "camino",
  "clove-core",
  "clove-types",
+ "futures",
  "interprocess",
  "serde",
  "serde_json",
@@ -724,11 +727,12 @@ dependencies = [
  "tokio",
  "tokio-serde",
  "tokio-util",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
 name = "clove-mcp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "camino",
@@ -746,7 +750,7 @@ dependencies = [
 
 [[package]]
 name = "clove-plugin"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "camino",
  "clap",
@@ -757,7 +761,7 @@ dependencies = [
 
 [[package]]
 name = "clove-plugin-echo"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clove-plugin",
  "serde_json",
@@ -765,7 +769,7 @@ dependencies = [
 
 [[package]]
 name = "clove-sync-github"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "camino",
  "clap",
@@ -778,7 +782,7 @@ dependencies = [
 
 [[package]]
 name = "clove-tui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ab_glyph",
  "anyhow",
@@ -796,7 +800,7 @@ dependencies = [
 
 [[package]]
 name = "clove-types"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "camino",
  "chrono",
@@ -811,9 +815,10 @@ dependencies = [
 
 [[package]]
 name = "clove-web"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
+ "base64",
  "camino",
  "chrono",
  "clove-core",
@@ -827,14 +832,16 @@ dependencies = [
  "rust-embed",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
+ "tower",
  "tower-http",
 ]
 
 [[package]]
 name = "cloved"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "camino",
@@ -845,7 +852,6 @@ dependencies = [
  "clove-ipc",
  "clove-types",
  "clove-web",
- "fd-lock",
  "futures",
  "git2",
  "interprocess",
@@ -854,6 +860,8 @@ dependencies = [
  "tarpc",
  "tempfile",
  "tokio",
+ "tokio-util",
+ "widestring",
  "windows-sys 0.59.0",
 ]
 
@@ -5202,7 +5210,7 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "camino",

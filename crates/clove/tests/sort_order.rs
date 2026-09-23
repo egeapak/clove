@@ -22,7 +22,38 @@ fn clove() -> Command {
 }
 
 fn run_in(dir: &Path, args: &[&str]) -> std::process::Output {
-    clove().current_dir(dir).args(args).output().unwrap()
+    clove()
+        .current_dir(dir)
+        .env("CLOVE_HOME", TEST_CLOVE_HOME)
+        .env("CLOVE_RUNTIME_DIR", runtime_dir(dir))
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+/// Wait until the daemon's watcher for the project at `root` watches: until
+/// then the daemon leaves reads to the index and the files.
+#[cfg(unix)]
+fn wait_watching(root: &Path) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let out = run_in(root, &["daemon", "status", "-f", "json"]);
+        let status: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
+        if status["data"]["watcher_state"] == "watching" {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the daemon's watcher never armed: {status}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
+/// The runtime directory of this test's own daemon — inside the test repo, so
+/// no two tests (and never the user's real daemon) share one.
+fn runtime_dir(root: &Path) -> std::path::PathBuf {
+    root.join("run")
 }
 
 /// Write one item file directly.
@@ -415,15 +446,15 @@ fn search_defaults_to_relevance_and_an_explicit_sort_replaces_it() {
     }
 }
 
+/// Token records for this test's processes go here, never the user's clove home.
+const TEST_CLOVE_HOME: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/test-clove-home");
+
 /// The third path: a live `cloved`. The sort rides `QueryRequest.order`, so a
 /// dropped wire field shows up here as `rank` order for every request.
 #[cfg(unix)]
-// The daemon is reaped by `sigterm` + `wait` at the end of each test; clippy
-// cannot see across the SIGTERM, so the lint is suppressed here as it is in
-// `daemon_routing.rs`.
-#[allow(clippy::zombie_processes)]
 mod daemon {
     use super::*;
+
     use std::path::PathBuf;
     use std::process::Child;
     use std::time::{Duration, Instant};
@@ -448,48 +479,53 @@ mod daemon {
             .to_path_buf()
     }
 
-    fn spawn_daemon(clove_dir: &Path, bin: &Path) -> Child {
+    /// A spawned `cloved` that dies with the test, however the test ends.
+    struct Daemon(Child);
+
+    impl Drop for Daemon {
+        fn drop(&mut self) {
+            unsafe {
+                libc_kill(self.0.id() as i32, 15);
+            }
+            let _ = self.0.wait();
+        }
+    }
+
+    /// Start a daemon serving `clove_dir` from the test's own runtime directory;
+    /// its pid file appears once the socket is bound and the project swept.
+    fn spawn_daemon(clove_dir: &Path, bin: &Path) -> Daemon {
+        let run = runtime_dir(clove_dir.parent().unwrap());
         let child = Command::new(bin)
+            .env("CLOVE_HOME", TEST_CLOVE_HOME)
+            .env("CLOVE_RUNTIME_DIR", &run)
+            .env("CLOVED_DISABLE_WEB", "1")
             .arg("run")
-            .arg("--clove-dir")
-            .arg(clove_dir)
+            // A daemon holding cargo's captured stdout open turns a failed
+            // assertion into a hang (see `daemon_routing.rs`).
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .expect("spawn cloved");
-        // `daemon.pid` already implies readiness: `cloved` binds the socket and
-        // completes its startup sweep *before* writing the pid — a documented
-        // invariant (`cloved::lifecycle`, DESIGN §8.2) with its own test,
-        // `daemon_pid_appears_only_after_socket_is_bound`. So the socket check
-        // below is belt-and-braces, not the fix; what addresses a loaded runner
-        // is the 10 s budget, up from 5 s.
-        //
-        // An earlier version of this comment claimed the pid is written before
-        // the socket is bound and that the race was the cause of a macOS flake.
-        // That is the opposite of what `cloved` does. The flake's actual cause is
-        // still unidentified — see the roadmap's follow-up list.
-        let pid = clove_dir.join("daemon.pid");
-        let sock = clove_dir.join("daemon.sock");
+        let daemon = Daemon(child);
+        let pid = run.join("hub.pid");
         let start = Instant::now();
         while start.elapsed() < Duration::from_secs(10) {
-            if pid.exists() && sock.exists() {
-                return child;
+            if pid.exists() {
+                // A daemon is started bare; the project is loaded by an
+                // ordinary call, as `clove daemon start` makes it.
+                let loaded = run_in(clove_dir.parent().unwrap(), &["daemon", "start"]);
+                assert!(loaded.status.success(), "{loaded:?}");
+                wait_watching(clove_dir.parent().unwrap());
+                return daemon;
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        panic!(
-            "daemon not ready (pid {}, sock {})",
-            pid.exists(),
-            sock.exists()
-        );
+        panic!("daemon not ready");
     }
 
     extern "C" {
         #[link_name = "kill"]
         fn libc_kill(pid: i32, sig: i32) -> i32;
-    }
-    fn sigterm(pid: u32) {
-        unsafe {
-            libc_kill(pid as i32, 15);
-        }
     }
 
     #[test]
@@ -542,7 +578,7 @@ mod daemon {
             .collect();
 
         let clove_dir = root.join(".clove");
-        let mut daemon = spawn_daemon(&clove_dir, &bin);
+        let daemon = spawn_daemon(&clove_dir, &bin);
 
         let mut failures = Vec::new();
         for (cmd, field, descending, want) in &truth {
@@ -558,8 +594,7 @@ mod daemon {
             }
         }
 
-        sigterm(daemon.id());
-        let _ = daemon.wait();
+        drop(daemon);
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
@@ -614,7 +649,7 @@ mod daemon {
         assert_ne!(seq("rank"), seq("priority"), "blocked fixture is weak");
 
         let clove_dir = root.join(".clove");
-        let mut daemon = spawn_daemon(&clove_dir, &bin);
+        let daemon = spawn_daemon(&clove_dir, &bin);
         let mut failures = Vec::new();
         for (field, descending, want) in &truth {
             let mut args = vec!["blocked", "--sort", field, "-f", "json"];
@@ -630,8 +665,7 @@ mod daemon {
                 ));
             }
         }
-        sigterm(daemon.id());
-        let _ = daemon.wait();
+        drop(daemon);
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }

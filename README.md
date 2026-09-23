@@ -147,6 +147,8 @@ Both are optional. Reads work directly from the file store without them.
 ```sh
 clove reindex                 # build/refresh the SQLite index (.clove/index.db, gitignored)
 clove daemon start            # watch files, keep the index + graph hot, serve reads over IPC
+clove daemon status           # this project, plus every project the daemon serves
+clove daemon stop [--all]     # stop serving this project (--all: stop the daemon)
 clove stats --snapshot        # record an analytics history point
 clove stats --history         # replay recorded snapshots (a running daemon also auto-records)
 ```
@@ -162,10 +164,14 @@ clove serve --open            # …and open it in the browser
 `clove serve` runs an HTTP/WebSocket server with a Kanban board, a filterable
 list, an item detail view (Markdown body, dependency tree, comments, inline
 edits), and a timeline — with live updates via a file-watcher. The SPA is built
-into the binary (no Node needed to run). When a daemon is running it serves the
-web UI itself (port `7373` by default), and `clove serve` hands off to it instead
-of starting a second server. The web API mirrors the CLI under `/api/v1` with the
-same JSON envelope and exit-code semantics.
+into the binary (no Node needed to run). One daemon per user serves every
+project's web UI on one port (`7373` by default), each at
+`http://127.0.0.1:7373/p/<project>/`, with a project picker at `/`; when a
+daemon is running, `clove serve` has it serve this project too and prints the URL
+instead of starting a second server. When another process holds the port, the
+server takes a free one and `clove serve` prints where; an explicit `--port` is
+always honored. The web API mirrors the CLI under `/api/v1` with the same JSON
+envelope and exit-code semantics.
 
 ## Interop & GitHub sync
 
@@ -196,7 +202,9 @@ resolves the conflict by policy (`--prefer newer|local|remote|manual`; default
 too (`--no-comments` to skip). `--dry-run` plans without touching either side. A
 per-repo last-sync clock lives under `.clove/sync/` (git-ignored), and a running
 daemon can run the sync on a timer (`[daemon] github_sync_interval_min` +
-`github_sync_repo`). Auth via `GITHUB_TOKEN` or the `gh` CLI. Requires the
+`github_sync_repo`, which must be one of the project's own GitHub remotes). Auth
+via `GITHUB_TOKEN` or the `gh` CLI — the daemon's timed sync uses `gh` only, since
+the daemon does not inherit your shell's `GITHUB_TOKEN`. Requires the
 **`clove-sync-github` plugin** (`cargo install clove-sync-github`; see
 [Install](#install)) — the pre-built release bundle includes it.
 

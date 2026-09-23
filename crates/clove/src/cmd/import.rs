@@ -17,6 +17,7 @@ use clove_import::{
     apply_restore, parse_export_json, parse_export_jsonl, plan_restore, ImportError, RestorePlan,
     RestoreReport,
 };
+use clove_plugin::outln;
 use clove_types::CloveError;
 use serde_json::{json, Value};
 
@@ -127,7 +128,7 @@ fn emit_plan(format: OutputFormat, plan: &RestorePlan, meta: Value) {
             print_json_success(data, meta);
         }
         OutputFormat::Human => {
-            println!(
+            outln!(
                 "dry run: would create {}, skip {}, overwrite {}",
                 plan.would_create.len(),
                 plan.would_skip.len(),
@@ -146,9 +147,11 @@ fn emit_report(format: OutputFormat, report: &RestoreReport, meta: Value) {
             print_json_success(data, meta);
         }
         OutputFormat::Human => {
-            println!(
+            outln!(
                 "restored: {} created, {} skipped, {} overwritten",
-                report.created, report.skipped, report.overwritten,
+                report.created,
+                report.skipped,
+                report.overwritten,
             );
         }
     }

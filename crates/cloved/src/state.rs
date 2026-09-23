@@ -15,6 +15,9 @@ use clove_ipc::StatusResponse;
 pub enum WatcherState {
     /// Performing the startup mtime sweep (P3), before the daemon is ready.
     Sweeping,
+    /// Loaded, with the OS watch still being put in place (and the sweep
+    /// after it still to run): reads are not answered from the index yet.
+    Arming,
     /// Watching for changes (the steady state once ready).
     Watching,
     /// No watcher running (e.g. watcher disabled or not yet started).
@@ -26,6 +29,7 @@ impl WatcherState {
     fn as_str(self) -> &'static str {
         match self {
             WatcherState::Sweeping => "sweeping",
+            WatcherState::Arming => "arming",
             WatcherState::Watching => "watching",
             WatcherState::Idle => "idle",
         }
@@ -43,6 +47,7 @@ pub struct DaemonState {
     ping_count: u64,
     last_ping_at: Option<Instant>,
     web_addr: Option<String>,
+    web_url: Option<String>,
 }
 
 impl DaemonState {
@@ -57,12 +62,15 @@ impl DaemonState {
             ping_count: 0,
             last_ping_at: None,
             web_addr: None,
+            web_url: None,
         }
     }
 
-    /// Record the address the daemon is serving the web UI on (M4).
-    pub fn set_web_addr(&mut self, addr: Option<String>) {
+    /// Record where this project's web UI is served: the hub's shared
+    /// listener (`host:port`) and the project's own URL on it.
+    pub fn set_web(&mut self, addr: Option<String>, url: Option<String>) {
         self.web_addr = addr;
+        self.web_url = url;
     }
 
     /// Update the indexed-item count (after a sweep/watch batch).
@@ -73,6 +81,12 @@ impl DaemonState {
     /// Set the watcher state.
     pub fn set_watcher_state(&mut self, state: WatcherState) {
         self.watcher_state = state;
+    }
+
+    /// Whether the index is kept fresh by a watch, so reads may be answered
+    /// from it.
+    pub fn watching(&self) -> bool {
+        self.watcher_state == WatcherState::Watching
     }
 
     /// Record that the watcher applied one debounced batch (the M3-G05/G06
@@ -112,6 +126,7 @@ impl DaemonState {
             ping_count: self.ping_count,
             last_ping_ms: self.last_ping_at.map(|t| t.elapsed().as_millis() as u64),
             web_addr: self.web_addr.clone(),
+            web_url: self.web_url.clone(),
         }
     }
 }

@@ -174,18 +174,14 @@ fn open_sync_lock(
 ) -> Result<fd_lock::RwLock<std::fs::File>, ImportError> {
     let lock_path = state_path.with_extension("lock");
     if let Some(parent) = lock_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| ImportError::Source {
+        let root = crate::sync::store_root(&lock_path);
+        clove_core::fs_safe::create_dirs(root, parent).map_err(|source| ImportError::Source {
             path: parent.to_owned(),
             message: format!("failed to create sync dir: {source}"),
         })?;
     }
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(lock_path.as_std_path())
-        .map_err(|source| ImportError::Source {
+    let file =
+        clove_core::fs_safe::open_lock_file(&lock_path).map_err(|source| ImportError::Source {
             path: lock_path.clone(),
             message: format!("failed to open sync lock: {source}"),
         })?;
@@ -835,5 +831,24 @@ where
                 delay = delay.saturating_mul(2);
             }
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::open_sync_lock;
+
+    /// A lock file planted as a symlink must not be followed — not even to
+    /// create the file it points at.
+    #[test]
+    fn a_planted_lock_symlink_is_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = camino::Utf8Path::from_path(dir.path()).unwrap();
+        let state = root.join(".clove/sync/github/o_r.json");
+        std::fs::create_dir_all(state.parent().unwrap()).unwrap();
+        let victim = root.join("created-elsewhere");
+        std::os::unix::fs::symlink(&victim, state.with_extension("lock")).unwrap();
+        assert!(open_sync_lock(&state).is_err());
+        assert!(!victim.exists());
     }
 }

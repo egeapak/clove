@@ -3,6 +3,7 @@
 use clove_core::graph::{render_dep_tree_human, DepTreeNode};
 use clove_core::{GraphStore, OutputFormat};
 use clove_ipc::{DaemonClient, GraphRequest, GraphResponse};
+use clove_plugin::{out, outln};
 use clove_types::{CloveError, CloveId};
 use serde_json::{json, Map, Value};
 
@@ -97,7 +98,7 @@ fn tree(
             };
             print_json_success(data, json!({ "warnings": [] }));
         }
-        OutputFormat::Human => print!("{}", render_dep_tree_human(&root)),
+        OutputFormat::Human => out!("{}", render_dep_tree_human(&root)),
     }
     Ok(())
 }
@@ -134,11 +135,11 @@ fn cycle(
         ),
         OutputFormat::Human => {
             if cycles.is_empty() {
-                println!("no cycles");
+                outln!("no cycles");
             } else {
                 for c in &cycles {
                     let ids: Vec<&str> = c.iter().map(|s| s.as_str()).collect();
-                    println!("{}", ids.join(" → "));
+                    outln!("{}", ids.join(" → "));
                 }
             }
         }

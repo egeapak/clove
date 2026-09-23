@@ -13,9 +13,12 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::sync::OnceLock;
 
+use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use rust_embed::RustEmbed;
+
+use crate::AppState;
 
 #[derive(RustEmbed)]
 #[folder = "dist-gz/"]
@@ -68,6 +71,88 @@ pub fn warm() {
     let _ = table();
 }
 
+/// The SPA entry page rewritten to run under `base` (e.g. `/p/clove`), or
+/// `None` when the build has no entry page.
+///
+/// SvelteKit's fallback page boots from an inline
+/// `__sveltekit_<hash> = { base: "" }` and reads its runtime base from that
+/// global, so setting it there moves every `{base}` link, the router, and the
+/// lazily-loaded chunks under the prefix. The page's own absolute `/_app/`
+/// preloads move with it. A page without the global (the Node-free
+/// placeholder) is returned unchanged.
+pub(crate) fn index_for_base(base: &str) -> Option<IndexPage> {
+    let raw = String::from_utf8_lossy(&table().get("index.html")?.raw).into_owned();
+    Some(IndexPage::new(rewrite_base(&raw, base)))
+}
+
+/// The entry page as built, for `clove serve` (root base).
+fn standalone_index() -> Option<&'static IndexPage> {
+    static PAGE: OnceLock<Option<IndexPage>> = OnceLock::new();
+    PAGE.get_or_init(|| {
+        let raw = &table().get("index.html")?.raw;
+        Some(IndexPage::new(String::from_utf8_lossy(raw).into_owned()))
+    })
+    .as_ref()
+}
+
+/// The SPA entry page as served under one base, with the `script-src` sources
+/// that let exactly its own inline scripts run. The hub rewrites the boot
+/// script per base, so each base has its own hashes.
+pub(crate) struct IndexPage {
+    html: Vec<u8>,
+    script_src: String,
+}
+
+impl IndexPage {
+    fn new(html: String) -> Self {
+        let mut script_src = "'self'".to_owned();
+        for hash in inline_script_hashes(&html) {
+            script_src.push(' ');
+            script_src.push_str(&hash);
+        }
+        Self {
+            html: html.into_bytes(),
+            script_src,
+        }
+    }
+}
+
+/// `'sha256-…'` for the body of every inline `<script>` in `page`.
+fn inline_script_hashes(page: &str) -> Vec<String> {
+    use base64::Engine as _;
+    use sha2::Digest as _;
+    let mut hashes = Vec::new();
+    let mut rest = page;
+    while let Some(start) = rest.find("<script") {
+        let Some(tag_len) = rest[start..].find('>') else {
+            break;
+        };
+        let body_start = start + tag_len + 1;
+        let Some(body_len) = rest[body_start..].find("</script>") else {
+            break;
+        };
+        let body_end = body_start + body_len;
+        if !rest[start..body_start].contains("src=") {
+            let digest = sha2::Sha256::digest(&rest.as_bytes()[body_start..body_end]);
+            let encoded = base64::engine::general_purpose::STANDARD.encode(digest);
+            hashes.push(format!("'sha256-{encoded}'"));
+        }
+        rest = &rest[body_end..];
+    }
+    hashes
+}
+
+fn rewrite_base(page: &str, base: &str) -> String {
+    let Some(global) = page.find("__sveltekit_") else {
+        return page.to_owned();
+    };
+    let quoted = serde_json::to_string(base).unwrap_or_else(|_| "\"\"".to_owned());
+    let (head, tail) = page.split_at(global);
+    let tail = tail.replacen(r#"base: """#, &format!("base: {quoted}"), 1);
+    let assets = format!("\"{base}/_app/");
+    format!("{head}{tail}").replace("\"/_app/", &assets)
+}
+
 fn gunzip(gz: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     let _ = flate2::read::GzDecoder::new(gz).read_to_end(&mut out);
@@ -84,7 +169,11 @@ fn cache_for(path: &str) -> &'static str {
 }
 
 /// Static + SPA-fallback handler (registered as the router fallback).
-pub async fn static_handler(headers: HeaderMap, uri: Uri) -> Response {
+pub async fn static_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
     let path = uri.path().trim_start_matches('/');
 
     // Anything under /api that reached the fallback is a genuine 404.
@@ -94,13 +183,67 @@ pub async fn static_handler(headers: HeaderMap, uri: Uri) -> Response {
 
     let map = table();
     let candidate = if path.is_empty() { "index.html" } else { path };
-    let asset = map.get(candidate).or_else(|| map.get("index.html")); // SPA fallback
+    let asset = map.get(candidate);
+
+    // The SPA entry page: under a hub prefix the rewritten copy, else the page
+    // as built. Never cached — the prefix is per-project, the build is not.
+    if asset.is_none() || candidate == "index.html" {
+        let page = match state.index_page() {
+            Some(page) => Some(page),
+            None => standalone_index(),
+        };
+        if let Some(page) = page {
+            return (
+                [
+                    (header::CONTENT_TYPE, "text/html; charset=utf-8".to_owned()),
+                    (header::CACHE_CONTROL, "no-cache".to_owned()),
+                    (
+                        header::CONTENT_SECURITY_POLICY,
+                        content_security_policy(&headers, &page.script_src),
+                    ),
+                ],
+                page.html.clone(),
+            )
+                .into_response();
+        }
+    }
+    let asset = asset.or_else(|| map.get("index.html")); // SPA fallback
 
     let Some(asset) = asset else {
         return (StatusCode::NOT_FOUND, "index.html missing from build").into_response();
     };
+    let mut response = serve_asset(&headers, asset);
+    if asset.mime.starts_with("text/html") {
+        if let Ok(value) = content_security_policy(&headers, "'self'").parse() {
+            response
+                .headers_mut()
+                .insert(header::CONTENT_SECURITY_POLICY, value);
+        }
+    }
+    response
+}
 
-    if accepts_gzip(&headers) {
+/// The Content-Security-Policy for an HTML page served to a request with
+/// these headers: everything from this origin only, scripts limited to
+/// `script_src` (the page's own inline scripts go by hash), and the
+/// live-update socket on this same host. Inline styles stay allowed.
+pub(crate) fn content_security_policy(headers: &HeaderMap, script_src: &str) -> String {
+    let socket = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .filter(|host| crate::host_is_local(host))
+        .map(|host| format!(" ws://{host}"))
+        .unwrap_or_default();
+    format!(
+        "default-src 'self'; script-src {script_src}; \
+         style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; \
+         connect-src 'self'{socket}; object-src 'none'; base-uri 'self'; \
+         form-action 'self'; frame-ancestors 'none'"
+    )
+}
+
+fn serve_asset(headers: &HeaderMap, asset: &Asset) -> Response {
+    if accepts_gzip(headers) {
         (
             [
                 (header::CONTENT_TYPE, asset.mime.as_str()),
@@ -138,4 +281,38 @@ fn accepts_gzip(headers: &HeaderMap) -> bool {
         let not_disabled = !it.any(|p| p.trim().replace(' ', "") == "q=0");
         (token == "gzip" || token == "x-gzip") && not_disabled
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rewrite_base;
+
+    const PAGE: &str = r#"<link href="/_app/immutable/entry/start.js" rel="modulepreload">
+<script>
+  __sveltekit_abc123 = {
+    base: ""
+  };
+  import("/_app/immutable/entry/app.js");
+</script>"#;
+
+    #[test]
+    fn rewrite_sets_the_runtime_base_and_prefixes_assets() {
+        let out = rewrite_base(PAGE, "/p/clove");
+        assert!(out.contains(r#"base: "/p/clove""#), "{out}");
+        assert!(out.contains(r#"href="/p/clove/_app/immutable/entry/start.js""#));
+        assert!(out.contains(r#"import("/p/clove/_app/immutable/entry/app.js")"#));
+        assert!(!out.contains(r#""/_app/"#));
+    }
+
+    #[test]
+    fn rewrite_leaves_a_page_without_the_global_alone() {
+        let placeholder = "<html><body>clove</body></html>";
+        assert_eq!(rewrite_base(placeholder, "/p/clove"), placeholder);
+    }
+
+    #[test]
+    fn rewrite_escapes_the_base_as_a_js_string() {
+        let out = rewrite_base(PAGE, r#"/p/a"b"#);
+        assert!(out.contains(r#"base: "/p/a\"b""#), "{out}");
+    }
 }

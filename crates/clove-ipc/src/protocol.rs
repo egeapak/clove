@@ -46,7 +46,16 @@ use serde::{Deserialize, Serialize};
 /// matched file anyway to rank it. Removing the method is what makes the
 /// handshake reject a v5 daemon rather than let it keep answering searches with
 /// the old, narrower match set.
-pub const PROTOCOL_VERSION: u32 = 6;
+///
+/// **v7 is the hub** (DESIGN §8.1): one daemon per user, so every connection
+/// opens with a version-only [`crate::hub::Hello`] before tarpc starts, and
+/// every project-scoped call names its caller's own project.
+///
+/// **v8 adds the project token** to that `Project`. A v7 hub would ignore the
+/// token a v8 client sends (JSON drops unknown fields) and a v7 client's
+/// token-less calls would fail to decode on a v8 hub, so the versions must meet
+/// at the handshake instead, where the mismatch is a clean refusal.
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// A dependency-graph query (DESIGN §8.4 extension for `blocked`/`dep`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,7 +173,9 @@ pub struct StatusResponse {
     pub uptime_s: u64,
     /// Items currently in the index.
     pub items_indexed: u64,
-    /// Watcher state, e.g. `"watching"` / `"sweeping"` / `"idle"`.
+    /// Watcher state: `"sweeping"` (loading), `"arming"` (loaded, the file
+    /// watch not yet in place: index reads refused with `WATCHER_ARMING`),
+    /// `"watching"`, or `"idle"`.
     pub watcher_state: String,
     /// Milliseconds since the last watcher/IPC event, or `None` if none yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -185,6 +196,10 @@ pub struct StatusResponse {
     /// its own server (M4 web UI).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web_addr: Option<String>,
+    /// This project's web UI (`http://host:port/p/<slug>/`) on the hub's shared
+    /// listener — what `clove serve` hands off to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_url: Option<String>,
 }
 
 #[cfg(test)]
@@ -293,6 +308,7 @@ mod tests {
             ping_count: 12,
             last_ping_ms: Some(800),
             web_addr: Some("127.0.0.1:7373".to_owned()),
+            web_url: Some("http://127.0.0.1:7373/p/clove/".to_owned()),
         };
         let json = serde_json::to_string(&status).unwrap();
         assert_eq!(status, serde_json::from_str(&json).unwrap());

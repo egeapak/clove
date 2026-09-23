@@ -53,12 +53,8 @@ pub fn reindex(issues_dir: &Utf8Path, db_path: &Utf8Path) -> Result<ReindexRepor
     // Acquire the advisory lock for the whole rebuild. flock-based: the OS
     // releases it if this process dies, so a crash never leaves a stale lock.
     let lock_path = clove_dir.join("reindex.lock");
-    let lock_file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&lock_path)
-        .map_err(|source| IndexError::IoError {
+    let lock_file =
+        clove_core::fs_safe::open_lock_file(&lock_path).map_err(|source| IndexError::IoError {
             path: lock_path.clone(),
             source,
         })?;
@@ -418,5 +414,19 @@ mod tests {
             Err(IndexError::AlreadyRunning) => {}
             other => panic!("expected AlreadyRunning, got {other:?}"),
         }
+    }
+
+    /// A cloned repo can plant `reindex.lock` as a symlink to a user file;
+    /// taking the lock must never truncate the target.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_reindex_lock_never_clobbers_its_target() {
+        let fx = fx(1);
+        let victim_dir = tempfile::tempdir().unwrap();
+        let victim = victim_dir.path().join("precious.txt");
+        std::fs::write(&victim, "precious").unwrap();
+        std::os::unix::fs::symlink(&victim, fx.db.parent().unwrap().join("reindex.lock")).unwrap();
+        let _ = reindex(&fx.issues, &fx.db);
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious");
     }
 }

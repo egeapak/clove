@@ -11,6 +11,7 @@ mod assets;
 mod dto;
 mod error;
 mod events;
+mod hub;
 mod read;
 mod watch;
 mod write;
@@ -32,6 +33,7 @@ use tower_http::compression::{CompressionLayer, CompressionLevel};
 
 pub use error::ApiError;
 pub use events::Event;
+pub use hub::{HubWeb, ProjectEntry};
 
 /// Maximum accepted request-body size (matches the item body cap, DESIGN §4).
 const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
@@ -67,6 +69,13 @@ pub struct AppState {
     seq: Arc<AtomicU64>,
     /// Optional per-request hook (the daemon uses it to reset idle-shutdown).
     heartbeat: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// The SPA entry page rewritten for a hub prefix ([`AppState::with_base_path`]);
+    /// `None` serves the embedded page as built (root base).
+    index_page: Option<Arc<assets::IndexPage>>,
+    /// Flipped to `true` when the project is unmounted from the hub: open event
+    /// sockets close rather than keep a tab listening to a project nobody
+    /// serves any more.
+    closing: Arc<tokio::sync::watch::Sender<bool>>,
 }
 
 impl AppState {
@@ -120,6 +129,8 @@ impl AppState {
             engine,
             seq: Arc::new(AtomicU64::new(0)),
             heartbeat: None,
+            index_page: None,
+            closing: Arc::new(tokio::sync::watch::channel(false).0),
         }
     }
 
@@ -151,6 +162,37 @@ impl AppState {
     pub fn with_heartbeat(mut self, hook: Arc<dyn Fn() + Send + Sync>) -> Self {
         self.heartbeat = Some(hook);
         self
+    }
+
+    /// Serve the SPA under `base` (e.g. `/p/clove`) instead of the root — the
+    /// daemon hub mounts each project's router under its own prefix.
+    pub fn with_base_path(mut self, base: &str) -> Self {
+        self.index_page = assets::index_for_base(base).map(Arc::new);
+        self
+    }
+
+    /// Close this project's live connections (the hub unmounted it).
+    pub fn close(&self) {
+        self.closing.send_replace(true);
+    }
+
+    /// Whether `other` is this very state (or a clone of it) rather than one
+    /// built for another mount of the same project.
+    pub(crate) fn is_same_mount(&self, other: &AppState) -> bool {
+        Arc::ptr_eq(&self.closing, &other.closing)
+    }
+
+    /// Resolves once [`AppState::close`] has been called.
+    pub(crate) fn closed(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let mut rx = self.closing.subscribe();
+        async move {
+            let _ = rx.wait_for(|closed| *closed).await;
+        }
+    }
+
+    /// The rewritten SPA entry page, when this state serves under a prefix.
+    pub(crate) fn index_page(&self) -> Option<&assets::IndexPage> {
+        self.index_page.as_deref()
     }
 
     /// Invoke the heartbeat hook, if any.
@@ -190,7 +232,7 @@ pub(crate) fn host_is_local(host: &str) -> bool {
 /// `127.0.0.1:<port>` under an attacker-controlled name; validating `Host` does.
 /// An absent `Host` (HTTP/2 uses `:authority`; some non-browser clients) is
 /// allowed — browsers always send a `Host`, which is the rebinding vector.
-async fn host_guard(
+pub(crate) async fn host_guard(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
@@ -204,6 +246,20 @@ async fn host_guard(
         return (StatusCode::FORBIDDEN, "forbidden: non-local Host header").into_response();
     }
     next.run(request).await
+}
+
+/// Middleware marking every response `X-Content-Type-Options: nosniff`, so a
+/// browser never reinterprets JSON or an error body as something runnable.
+pub(crate) async fn nosniff(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        header::HeaderValue::from_static("nosniff"),
+    );
+    response
 }
 
 /// Middleware that fires the per-request heartbeat hook before handling.
@@ -254,6 +310,7 @@ pub fn build_router(state: AppState) -> Router {
         // DNS-rebinding guard: reject any request (API + WS + assets) whose Host
         // header isn't loopback. Outermost so it runs before everything else.
         .layer(axum::middleware::from_fn(host_guard))
+        .layer(axum::middleware::from_fn(nosniff))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         // gzip-only compression for the *dynamic* API responses (e.g. /items at
         // 10k items). Static SPA assets are already served pre-gzipped from
@@ -267,6 +324,19 @@ pub fn build_router(state: AppState) -> Router {
 pub async fn serve(state: AppState, addr: SocketAddr) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     serve_on(state, listener).await
+}
+
+/// Bind `addr`, or a free port on the same interface if another process already
+/// holds it. Per-project daemons and `clove serve` share one configured port; the
+/// first to bind keeps it and the rest still get a reachable UI, advertised by
+/// the address the returned listener reports.
+pub async fn bind_or_free_port(addr: SocketAddr) -> std::io::Result<tokio::net::TcpListener> {
+    match tokio::net::TcpListener::bind(addr).await {
+        Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {
+            tokio::net::TcpListener::bind(SocketAddr::new(addr.ip(), 0)).await
+        }
+        bound => bound,
+    }
 }
 
 /// Serve the web UI on an already-bound `listener`. Splitting the bind out lets a

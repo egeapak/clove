@@ -25,7 +25,20 @@ tarpc.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tokio-serde.workspace = true
+futures.workspace = true      # Sink/Stream for the hub handshake frames
 interprocess = { workspace = true, features = ["tokio"] }
+
+# The hub pipe's user checks: the client reads the pipe's owner, the hub
+# impersonates the client; both compare with their own SID (a pipe name proves
+# nothing on Windows).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 tempfile.workspace = true

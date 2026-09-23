@@ -7,10 +7,13 @@
 
 pub mod comments;
 pub mod config;
+pub mod daemon_token;
 pub mod doctor;
 pub mod edit;
 pub mod fixtures;
+pub mod fs_safe;
 pub mod graph;
+pub mod home;
 pub mod ops;
 pub mod parse;
 pub mod repo;

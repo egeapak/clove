@@ -248,7 +248,9 @@ impl SyncState {
         }
     }
 
-    /// The on-disk path for a repo's sync state under `repo_root`.
+    /// The on-disk path for a repo's sync state under `repo_root`
+    /// (`<repo_root>/.clove/sync/github/<owner>__<repo>.json`; see
+    /// [`store_root`]).
     ///
     /// `owner/repo` is flattened to `owner__repo.json` so it is a single,
     /// filesystem-safe file name (a `/` would otherwise be a subdirectory).
@@ -269,6 +271,12 @@ impl SyncState {
     /// present-but-unparseable file is also treated as empty (never an error) so
     /// corrupt bookkeeping degrades to "re-examine everything", not a hard stop.
     pub fn load(path: &Utf8Path, repo: &str) -> Self {
+        let planted = path
+            .parent()
+            .is_some_and(|dir| clove_core::fs_safe::check_dirs(store_root(path), dir).is_err());
+        if planted {
+            return SyncState::new(repo);
+        }
         match std::fs::read_to_string(path) {
             Ok(text) => serde_json::from_str(&text).unwrap_or_else(|_| SyncState::new(repo)),
             Err(_) => SyncState::new(repo),
@@ -277,26 +285,26 @@ impl SyncState {
 
     /// Persist the state to `path` (creating parent directories), pretty-printed
     /// and atomically (temp file + rename) so a crash never leaves a half-written
-    /// state.
+    /// state. `.clove/sync/` arrives with the repository, so nothing planted
+    /// there as a symlink is written through.
     pub fn save(&self, path: &Utf8Path) -> Result<(), ImportError> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|source| ImportError::Source {
-                path: parent.to_owned(),
-                message: format!("failed to create sync-state dir: {source}"),
+            clove_core::fs_safe::create_dirs(store_root(path), parent).map_err(|source| {
+                ImportError::Source {
+                    path: parent.to_owned(),
+                    message: format!("failed to create sync-state dir: {source}"),
+                }
             })?;
         }
         let json = serde_json::to_string_pretty(self).map_err(|err| ImportError::Record {
             message: format!("failed to serialize sync state: {err}"),
         })?;
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, json.as_bytes()).map_err(|source| ImportError::Source {
-            path: tmp.clone(),
-            message: format!("failed to write sync state: {source}"),
-        })?;
-        std::fs::rename(&tmp, path).map_err(|source| ImportError::Source {
-            path: path.to_owned(),
-            message: format!("failed to commit sync state: {source}"),
-        })
+        clove_core::fs_safe::write_atomic(store_root(path), path, json.as_bytes()).map_err(
+            |source| ImportError::Source {
+                path: path.to_owned(),
+                message: format!("failed to write sync state: {source}"),
+            },
+        )
     }
 
     /// Record the fingerprint for `external_ref`, preserving any existing comment
@@ -323,6 +331,15 @@ impl SyncState {
             entry.gh_content_hash = Some(hash);
         }
     }
+}
+
+/// The store's `.clove/` for a sync-state (or lock) path from
+/// [`SyncState::path_for`]: three levels up, past `github/` and `sync/`.
+pub fn store_root(state_path: &Utf8Path) -> &Utf8Path {
+    state_path
+        .ancestors()
+        .nth(3)
+        .unwrap_or_else(|| state_path.parent().unwrap_or(state_path))
 }
 
 /// A remote issue to be created as a brand-new local item (pull).
@@ -1749,6 +1766,30 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "{not json").unwrap();
         assert!(SyncState::load(&path, "o/r").entries.is_empty());
+    }
+
+    /// `.clove/sync/` arrives with the repository: neither a planted temp-file
+    /// symlink nor a symlinked `sync/github/` may redirect the state write.
+    #[cfg(unix)]
+    #[test]
+    fn saving_never_writes_through_a_planted_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = camino::Utf8Path::from_path(dir.path()).unwrap();
+        let victim = root.join("precious");
+        std::fs::write(&victim, "precious").unwrap();
+
+        let path = SyncState::path_for(root, "o/r");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&victim, path.with_extension("json.tmp")).unwrap();
+        let _ = SyncState::new("o/r").save(&path);
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious");
+
+        let elsewhere = root.join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        std::fs::remove_dir_all(root.join(".clove/sync")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, root.join(".clove/sync")).unwrap();
+        assert!(SyncState::new("o/r").save(&path).is_err());
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
     }
 
     fn gh_comment(id: u64, body: &str) -> GhComment {

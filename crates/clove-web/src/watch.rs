@@ -34,6 +34,14 @@ pub fn spawn(state: AppState) -> Option<notify::RecommendedWatcher> {
         }
     })
     .ok()?;
+    // Test knob, shared with the daemon's own watcher: a slow arm, as FSEvents
+    // can be on a busy Mac.
+    if let Some(ms) = std::env::var("CLOVED_WATCH_ARM_DELAY_MS")
+        .ok()
+        .and_then(|ms| ms.parse::<u64>().ok())
+    {
+        std::thread::sleep(Duration::from_millis(ms));
+    }
     watcher
         .watch(issues_dir.as_std_path(), RecursiveMode::Recursive)
         .ok()?;
@@ -51,13 +59,18 @@ pub fn spawn(state: AppState) -> Option<notify::RecommendedWatcher> {
                 Err(RecvTimeoutError::Disconnected) => return,
             }
         }
-        let seq = state.next_seq();
-        let _ = state.events.send(Event::Batch {
-            changed: Vec::new(),
-            deleted: Vec::new(),
-            seq,
-        });
+        announce_change(&state);
     });
 
     Some(watcher)
+}
+
+/// Tell every open page that something changed, so it refetches.
+pub(crate) fn announce_change(state: &AppState) {
+    let seq = state.next_seq();
+    let _ = state.events.send(Event::Batch {
+        changed: Vec::new(),
+        deleted: Vec::new(),
+        seq,
+    });
 }

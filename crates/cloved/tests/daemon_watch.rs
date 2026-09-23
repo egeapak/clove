@@ -2,9 +2,9 @@
 //! batching (M3-G06), watcher reflects new/edited/deleted items, and the startup
 //! sweep picks up out-of-band changes. Unix-only (drives real signals).
 #![cfg(unix)]
-#![allow(clippy::zombie_processes)]
 
-use std::process::{Child, Command};
+mod support;
+
 use std::time::{Duration, Instant};
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -12,10 +12,7 @@ use chrono::Utc;
 use clove_core::{ItemStore, NewItem};
 use clove_ipc::{DaemonClient, QueryKind, QueryRequest};
 use clove_types::{ItemType, Priority};
-
-fn cloved_bin() -> Utf8PathBuf {
-    Utf8PathBuf::from(env!("CARGO_BIN_EXE_cloved"))
-}
+use support::TestHub;
 
 struct Repo {
     _tmp: tempfile::TempDir,
@@ -71,35 +68,6 @@ impl Repo {
     }
 }
 
-fn spawn_ready(clove_dir: &Utf8Path) -> Child {
-    let child = Command::new(cloved_bin())
-        .env("CLOVED_DISABLE_WEB", "1") // avoid all test daemons contending for port 7373
-        .arg("run")
-        .arg("--clove-dir")
-        .arg(clove_dir.as_str())
-        .spawn()
-        .expect("spawn cloved");
-    let pid = clove_dir.join("daemon.pid");
-    let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(5) {
-        if pid.exists() {
-            return child;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    panic!("daemon not ready");
-}
-
-extern "C" {
-    #[link_name = "kill"]
-    fn libc_kill(pid: i32, sig: i32) -> i32;
-}
-fn sigterm(pid: u32) {
-    unsafe {
-        libc_kill(pid as i32, 15);
-    }
-}
-
 fn list_all() -> QueryRequest {
     QueryRequest {
         kind: QueryKind::List,
@@ -110,14 +78,13 @@ fn list_all() -> QueryRequest {
     }
 }
 
-fn count_via_daemon(clove_dir: &Utf8Path) -> usize {
-    let mut client = DaemonClient::probe(clove_dir).expect("daemon alive");
+fn count_via_daemon(hub: &TestHub, clove_dir: &Utf8Path) -> usize {
+    let mut client: DaemonClient = hub.client(clove_dir);
     client.query_list(list_all()).unwrap().rows.len()
 }
 
-fn batches(clove_dir: &Utf8Path) -> u64 {
-    let mut client = DaemonClient::probe(clove_dir).expect("daemon alive");
-    client.status().unwrap().batches_applied
+fn batches(hub: &TestHub, clove_dir: &Utf8Path) -> u64 {
+    hub.client(clove_dir).status().unwrap().batches_applied
 }
 
 /// Poll until `f()` holds or `timeout` elapses.
@@ -132,27 +99,6 @@ fn wait_until(timeout: Duration, mut f: impl FnMut() -> bool) -> bool {
     f()
 }
 
-/// Spawn the daemon with extra env (e.g. the snapshot/idle overrides) and wait
-/// until its pid file appears.
-fn spawn_ready_env(clove_dir: &Utf8Path, env: &[(&str, &str)]) -> Child {
-    let mut cmd = Command::new(cloved_bin());
-    cmd.arg("run").arg("--clove-dir").arg(clove_dir.as_str());
-    cmd.env("CLOVED_DISABLE_WEB", "1"); // avoid all test daemons contending for port 7373
-    for (k, v) in env {
-        cmd.env(k, v);
-    }
-    let child = cmd.spawn().expect("spawn cloved");
-    let pid = clove_dir.join("daemon.pid");
-    let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(5) {
-        if pid.exists() {
-            return child;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    panic!("daemon not ready");
-}
-
 /// M4: a running daemon records `clove stats` history points on its interval.
 #[test]
 fn daemon_auto_snapshots_on_interval() {
@@ -161,9 +107,10 @@ fn daemon_auto_snapshots_on_interval() {
     repo.reindex();
 
     // Snapshot every 150ms; never idle-shut-down during the test.
-    let mut child = spawn_ready_env(
-        &repo.clove_dir,
+    let hub = TestHub::spawn_with(
+        Some(&repo.clove_dir),
         &[
+            ("CLOVED_DISABLE_WEB", "1"),
             ("CLOVED_STATS_SNAPSHOT_MS", "150"),
             ("CLOVED_IDLE_SHUTDOWN_MS", "0"),
         ],
@@ -178,8 +125,7 @@ fn daemon_auto_snapshots_on_interval() {
             >= 1
     });
 
-    sigterm(child.id());
-    let _ = child.wait();
+    drop(hub);
 
     assert!(
         recorded,
@@ -197,14 +143,89 @@ fn startup_sweep_picks_up_out_of_band_items() {
     repo.add_item("created before daemon");
     // No reindex: the index.db doesn't exist yet, so the startup sweep is what
     // must index this item before the daemon serves it.
-    let mut child = spawn_ready(&repo.clove_dir);
+    let hub = TestHub::spawn(Some(&repo.clove_dir));
     assert_eq!(
-        count_via_daemon(&repo.clove_dir),
+        count_via_daemon(&hub, &repo.clove_dir),
         1,
         "startup sweep indexed it"
     );
-    sigterm(child.id());
-    let _ = child.wait();
+    drop(hub);
+}
+
+/// An item written the moment the project's load returns is indexed, however
+/// slow the watcher is to arm: the load returns before the watch is in place,
+/// and the sweep run once it is picks up what was written in between — it is
+/// not lost until the next change.
+#[test]
+fn an_item_written_right_after_the_load_is_indexed() {
+    let repo = init_repo();
+    repo.reindex();
+    // Only the watcher may bring the item in: no refresh on read.
+    std::fs::write(
+        repo.clove_dir.join("config.toml"),
+        "config_schema = 1\nid_prefix = \"proj\"\n[index]\nauto_refresh = false\n",
+    )
+    .unwrap();
+    let hub = TestHub::spawn_with(
+        None,
+        &[
+            ("CLOVED_DISABLE_WEB", "1"),
+            ("CLOVED_WATCH_ARM_DELAY_MS", "1500"),
+        ],
+    );
+    let mut client = hub
+        .load_arming(&repo.clove_dir)
+        .expect("the hub serves the project");
+    repo.add_item("written as the load returned");
+    let ok = wait_until(Duration::from_secs(20), || {
+        client
+            .query_list(list_all())
+            .is_ok_and(|page| page.rows.len() == 1)
+    });
+    assert!(
+        ok,
+        "the item written right after the load was never indexed"
+    );
+    drop(hub);
+}
+
+/// Until its watcher watches, the daemon does not answer reads from an index
+/// that may be stale: it says so (`WATCHER_ARMING`), and the client reads the
+/// index or the files itself. Writes are served throughout, and what was
+/// written is served once the watcher is armed.
+#[test]
+fn reads_wait_for_the_watcher_but_writes_do_not() {
+    let repo = init_repo();
+    repo.reindex();
+    let hub = TestHub::spawn_with(
+        None,
+        &[
+            ("CLOVED_DISABLE_WEB", "1"),
+            ("CLOVED_WATCH_ARM_DELAY_MS", "3000"),
+        ],
+    );
+    let mut client = hub
+        .load_arming(&repo.clove_dir)
+        .expect("the hub serves the project");
+    assert_eq!(client.status().unwrap().watcher_state, "arming");
+    match client.query_list(list_all()) {
+        Err(clove_ipc::ClientError::App(e)) => assert_eq!(e.code, "WATCHER_ARMING", "{e:?}"),
+        other => panic!("a read while arming was answered: {other:?}"),
+    }
+    client
+        .create(clove_types::NewSpec {
+            title: "written while arming".to_owned(),
+            ..Default::default()
+        })
+        .expect("a write while arming is served");
+    let ok = wait_until(Duration::from_secs(20), || {
+        client
+            .query_list(list_all())
+            .is_ok_and(|page| page.rows.len() == 1)
+    });
+    assert!(ok, "the write was never served once the watcher armed");
+    assert_eq!(client.status().unwrap().watcher_state, "watching");
+    drop(hub);
 }
 
 #[test]
@@ -212,18 +233,17 @@ fn watcher_reflects_new_item() {
     let repo = init_repo();
     repo.add_item("first");
     repo.reindex();
-    let mut child = spawn_ready(&repo.clove_dir);
-    assert_eq!(count_via_daemon(&repo.clove_dir), 1);
+    let hub = TestHub::spawn(Some(&repo.clove_dir));
+    assert_eq!(count_via_daemon(&hub, &repo.clove_dir), 1);
 
     // Add an item out-of-band; the watcher must pick it up.
     repo.add_item("second");
     let ok = wait_until(Duration::from_secs(3), || {
-        count_via_daemon(&repo.clove_dir) == 2
+        count_via_daemon(&hub, &repo.clove_dir) == 2
     });
     assert!(ok, "watcher did not index the new item");
 
-    sigterm(child.id());
-    let _ = child.wait();
+    drop(hub);
 }
 
 #[test]
@@ -233,22 +253,21 @@ fn reindex_does_not_trigger_watcher_batches() {
     let repo = init_repo();
     repo.add_item("one");
     repo.reindex();
-    let mut child = spawn_ready(&repo.clove_dir);
-    let before = batches(&repo.clove_dir);
+    let hub = TestHub::spawn(Some(&repo.clove_dir));
+    let before = batches(&hub, &repo.clove_dir);
 
     // Rebuild the index repeatedly — only touches .clove/index.db*.
     for _ in 0..3 {
         repo.reindex();
     }
     std::thread::sleep(Duration::from_millis(600));
-    let after = batches(&repo.clove_dir);
+    let after = batches(&hub, &repo.clove_dir);
     assert_eq!(
         after, before,
         "index.db writes must not be watched (feedback loop)"
     );
 
-    sigterm(child.id());
-    let _ = child.wait();
+    drop(hub);
 }
 
 #[test]
@@ -270,16 +289,15 @@ fn startup_sweep_1k_50_modified_under_500ms() {
     }
 
     let start = Instant::now();
-    let mut child = spawn_ready(&repo.clove_dir); // returns once the pid (readiness) appears
+    let hub = TestHub::spawn(Some(&repo.clove_dir)); // returns once the pid (readiness) appears
     let ready = start.elapsed();
     assert!(
         ready < Duration::from_millis(500),
         "startup sweep + ready took {ready:?} (gate: < 500ms)"
     );
-    assert_eq!(count_via_daemon(&repo.clove_dir), 1000);
+    assert_eq!(count_via_daemon(&hub, &repo.clove_dir), 1000);
 
-    sigterm(child.id());
-    let _ = child.wait();
+    drop(hub);
 }
 
 #[test]
@@ -315,8 +333,8 @@ fn rapid_edits_debounce_into_fewer_batches_than_edits() {
     )
     .unwrap();
 
-    let mut child = spawn_ready(&repo.clove_dir);
-    let before = batches(&repo.clove_dir);
+    let hub = TestHub::spawn(Some(&repo.clove_dir));
+    let before = batches(&hub, &repo.clove_dir);
 
     const EDITS: u64 = 10;
     let path = repo.clove_dir.join("issues").join(format!("{id}.md"));
@@ -330,12 +348,12 @@ fn rapid_edits_debounce_into_fewer_batches_than_edits() {
     // Wait for the batch to land, then let any straggler batch land too, so the
     // count below cannot be read mid-burst.
     let ok = wait_until(Duration::from_secs(30), || {
-        batches(&repo.clove_dir) > before
+        batches(&hub, &repo.clove_dir) > before
     });
     assert!(ok, "debounced batch never applied");
     std::thread::sleep(Duration::from_millis(2500));
 
-    let delta = batches(&repo.clove_dir) - before;
+    let delta = batches(&hub, &repo.clove_dir) - before;
     assert!(
         delta >= 1,
         "the edits must reach the index (got {delta} batches)"
@@ -346,6 +364,5 @@ fn rapid_edits_debounce_into_fewer_batches_than_edits() {
          coalescing at all"
     );
 
-    sigterm(child.id());
-    let _ = child.wait();
+    drop(hub);
 }

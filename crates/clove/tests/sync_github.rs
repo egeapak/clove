@@ -781,6 +781,33 @@ fn push_create_writes_back_ref_and_is_idempotent() {
 }
 
 #[test]
+fn human_summary_names_comment_directions() {
+    // `comments +0/-1` read as "one comment deleted"; spell out the direction.
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    clove(dir.path(), mock.addr)
+        .args(["new", "Fix the bug"])
+        .assert()
+        .success();
+    let id = only_item_id(dir.path(), mock.addr);
+    clove(dir.path(), mock.addr)
+        .args(["comment", &id, "a local note"])
+        .assert()
+        .success();
+
+    let out = clove(dir.path(), mock.addr)
+        .args(["sync", "github", "owner/repo"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "sync failed: {out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("comments 0 pulled / 1 pushed"),
+        "summary: {stdout}"
+    );
+}
+
+#[test]
 fn import_github_is_pull_only() {
     // `clove import github` = the pull-only view of the reconcile (§4.2). A remote
     // issue is pulled; a local-only item that a full `sync` would push must NOT be

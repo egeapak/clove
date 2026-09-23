@@ -1,183 +1,161 @@
-//! Phase 1 (T-D02) lifecycle tests: pid-after-bind readiness, clean SIGTERM
-//! shutdown with no stale files, and the two-daemon guard. Unix-only (they drive
-//! real signals); the Windows named-event path is covered by the `daemon-windows`
-//! CI job.
+//! Phase 1 (T-D02) lifecycle tests, for the hub: pid-after-bind readiness,
+//! clean SIGTERM shutdown with no stale files, the two-hub guard, and idle
+//! exit. Unix-only (they drive real signals); the Windows named-event path is
+//! covered by the `daemon-windows` CI job.
 #![cfg(unix)]
-// These tests deliberately manage child-process lifetimes by hand (spawn, signal,
-// wait/kill on specific paths); the heuristic zombie-process lint can't see it.
-#![allow(clippy::zombie_processes)]
 
-use std::process::{Child, Command};
-use std::time::{Duration, Instant};
+mod support;
 
-use camino::{Utf8Path, Utf8PathBuf};
+use std::time::Duration;
 
-/// Path to the freshly built `cloved` binary under test.
-fn cloved_bin() -> Utf8PathBuf {
-    Utf8PathBuf::from(env!("CARGO_BIN_EXE_cloved"))
-}
-
-/// Create a minimal `.clove/` directory (config + issues + an index) good enough
-/// for the daemon to open.
-fn init_clove_dir() -> (tempfile::TempDir, Utf8PathBuf) {
-    let dir = tempfile::tempdir().unwrap();
-    let root = Utf8Path::from_path(dir.path()).unwrap().to_owned();
-    let clove_dir = root.join(".clove");
-    std::fs::create_dir_all(clove_dir.join("issues")).unwrap();
-    std::fs::write(
-        clove_dir.join("config.toml"),
-        "schema = 1\nid_prefix = \"proj\"\n",
-    )
-    .unwrap();
-    (dir, clove_dir)
-}
-
-/// Spawn `cloved run --clove-dir <dir>` and wait until it writes its pid file
-/// (its readiness signal), up to `timeout`.
-fn spawn_ready(clove_dir: &Utf8Path, timeout: Duration) -> Child {
-    let child = Command::new(cloved_bin())
-        .env("CLOVED_DISABLE_WEB", "1") // avoid all test daemons contending for port 7373
-        .arg("run")
-        .arg("--clove-dir")
-        .arg(clove_dir.as_str())
-        .spawn()
-        .expect("spawn cloved");
-    let pid_file = clove_dir.join("daemon.pid");
-    let start = Instant::now();
-    while start.elapsed() < timeout {
-        if pid_file.exists() {
-            return child;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    panic!("daemon did not become ready (no pid file) within {timeout:?}");
-}
-
-fn send_signal(pid: u32, sig: i32) {
-    // SAFETY: `kill(2)` with a pid we spawned and a constant signal number.
-    unsafe {
-        libc_kill(pid as i32, sig);
-    }
-}
-
-extern "C" {
-    #[link_name = "kill"]
-    fn libc_kill(pid: i32, sig: i32) -> i32;
-}
-
-const SIGTERM: i32 = 15;
-const SIGKILL: i32 = 9;
+use support::{command, init_clove_dir, TestHub, SIGKILL, SIGTERM};
 
 #[test]
-fn daemon_pid_appears_only_after_socket_is_bound() {
+fn hub_pid_appears_only_after_socket_is_bound() {
     let (_tmp, clove_dir) = init_clove_dir();
-    let mut child = spawn_ready(&clove_dir, Duration::from_secs(5));
+    let hub = TestHub::spawn(Some(&clove_dir));
     // Readiness invariant: when the pid exists, the socket must already exist.
-    assert!(clove_dir.join("daemon.pid").exists());
+    assert!(hub.paths.pid().exists());
     assert!(
-        clove_dir.join("daemon.sock").exists(),
+        hub.paths.sock().exists(),
         "socket must be bound before the pid is written"
     );
-    send_signal(child.id(), SIGTERM);
-    let _ = child.wait();
+    // …and the preloaded project is already served.
+    hub.client(&clove_dir);
+    hub.signal(SIGTERM);
 }
 
 #[test]
 fn sigterm_shuts_down_cleanly_with_no_stale_files() {
     let (_tmp, clove_dir) = init_clove_dir();
-    let mut child = spawn_ready(&clove_dir, Duration::from_secs(5));
-    let pid = child.id();
+    let mut hub = TestHub::spawn(Some(&clove_dir));
 
-    send_signal(pid, SIGTERM);
-    let status = wait_with_timeout(&mut child, Duration::from_secs(5)).expect("daemon exited");
+    hub.signal(SIGTERM);
+    let status = hub.wait_exit(Duration::from_secs(5)).expect("hub exited");
     assert!(status.success(), "clean SIGTERM exit (exit 0)");
 
-    assert!(!clove_dir.join("daemon.sock").exists(), "socket removed");
-    assert!(!clove_dir.join("daemon.pid").exists(), "pid removed");
+    assert!(!hub.paths.sock().exists(), "socket removed");
+    assert!(!hub.paths.pid().exists(), "pid removed");
+    // The project's lock is released with the hub: a new hub can serve it.
+    let again = TestHub::spawn(Some(&clove_dir));
+    again.client(&clove_dir);
 }
 
 #[test]
-fn second_daemon_refuses_to_start() {
+fn second_hub_refuses_to_start() {
     let (_tmp, clove_dir) = init_clove_dir();
-    let mut first = spawn_ready(&clove_dir, Duration::from_secs(5));
+    let first = TestHub::spawn(Some(&clove_dir));
 
-    // A second daemon on the same .clove must fail fast (lock held).
-    let second = Command::new(cloved_bin())
-        .env("CLOVED_DISABLE_WEB", "1") // avoid all test daemons contending for port 7373
-        .arg("run")
-        .arg("--clove-dir")
-        .arg(clove_dir.as_str())
+    // A second hub in the same runtime directory must fail fast (lock held).
+    let second = command(&first.paths, &[("CLOVED_DISABLE_WEB", "1")])
         .output()
         .expect("run second cloved");
     assert!(
         !second.status.success(),
-        "second daemon must exit non-zero; stderr={}",
+        "second hub must exit non-zero; stderr={}",
         String::from_utf8_lossy(&second.stderr)
     );
     assert!(
         String::from_utf8_lossy(&second.stderr).contains("already running"),
         "expected 'already running' message"
     );
+    first.client(&clove_dir);
+}
 
-    send_signal(first.id(), SIGTERM);
-    let _ = first.wait();
+/// A second hub under *another* runtime directory cannot take a project the
+/// first already serves: the project's `daemon.lock` decides.
+#[test]
+fn a_served_project_cannot_be_loaded_by_another_hub() {
+    let (_tmp, clove_dir) = init_clove_dir();
+    let first = TestHub::spawn(Some(&clove_dir));
+    let second = TestHub::spawn(None);
+    match second.load(&clove_dir) {
+        Err(clove_ipc::ClientError::Refused { code, message }) => {
+            assert_eq!(code, clove_ipc::hub::codes::PROJECT_LOCKED);
+            assert!(message.contains("daemon.lock"), "{message}");
+        }
+        Err(other) => panic!("expected PROJECT_LOCKED, got {other}"),
+        Ok(_) => panic!("the second hub served a locked project"),
+    }
+    first.client(&clove_dir);
 }
 
 #[test]
 fn sigkill_then_restart_recovers() {
     let (_tmp, clove_dir) = init_clove_dir();
-    let mut child = spawn_ready(&clove_dir, Duration::from_secs(5));
+    let mut hub = TestHub::spawn(Some(&clove_dir));
     // Hard-kill: leaves a corpse socket + pid (no clean shutdown).
-    send_signal(child.id(), SIGKILL);
-    let _ = child.wait();
+    hub.signal(SIGKILL);
+    hub.wait_exit(Duration::from_secs(5)).expect("killed");
+    assert!(hub.paths.sock().exists(), "corpse socket left behind");
 
-    // A fresh daemon must reclaim the lock/socket and become ready again.
-    let mut restarted = spawn_ready(&clove_dir, Duration::from_secs(5));
-    assert!(clove_dir.join("daemon.sock").exists());
-    send_signal(restarted.id(), SIGTERM);
-    let _ = restarted.wait();
+    // A fresh hub must reclaim the lock/socket and become ready again — and the
+    // killed hub's project lock died with it.
+    let restarted = hub.restart(&clove_dir);
+    restarted.signal(SIGTERM);
 }
 
 #[test]
-fn idle_shutdown_self_terminates() {
+fn an_idle_hub_exits_after_its_projects_idle_out() {
     let (_tmp, clove_dir) = init_clove_dir();
     // CLOVED_IDLE_SHUTDOWN_MS is the test seam for the minute-granularity
-    // `[daemon] idle_shutdown_min` (T-D05): self-terminate after 500ms idle.
-    let mut child = Command::new(cloved_bin())
-        .env("CLOVED_DISABLE_WEB", "1") // avoid all test daemons contending for port 7373
-        .arg("run")
-        .arg("--clove-dir")
-        .arg(clove_dir.as_str())
-        .env("CLOVED_IDLE_SHUTDOWN_MS", "500")
-        .spawn()
-        .expect("spawn cloved");
+    // `[daemon] idle_shutdown_min` (T-D05); CLOVED_HUB_GRACE_MS for the hub's
+    // empty-grace period.
+    let mut hub = TestHub::spawn_with(
+        Some(&clove_dir),
+        &[
+            ("CLOVED_DISABLE_WEB", "1"),
+            ("CLOVED_IDLE_SHUTDOWN_MS", "500"),
+            ("CLOVED_HUB_GRACE_MS", "200"),
+        ],
+    );
 
-    // Wait for readiness.
-    let pid_file = clove_dir.join("daemon.pid");
-    let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(5) && !pid_file.exists() {
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    assert!(pid_file.exists(), "daemon became ready");
-
-    // With no activity it must self-terminate cleanly within a few windows.
-    let status = wait_with_timeout(&mut child, Duration::from_secs(3));
-    assert!(status.is_some(), "daemon self-terminated on idle");
+    let status = hub.wait_exit(Duration::from_secs(5));
+    assert!(status.is_some(), "hub self-terminated on idle");
     assert!(status.unwrap().success(), "clean idle shutdown (exit 0)");
-    assert!(!pid_file.exists(), "pid removed on idle shutdown");
-    assert!(!clove_dir.join("daemon.sock").exists(), "socket removed");
+    assert!(!hub.paths.pid().exists(), "pid removed on idle shutdown");
+    assert!(!hub.paths.sock().exists(), "socket removed");
 }
 
-/// Wait for `child` up to `timeout`, returning its exit status or `None` on
-/// timeout (after which it is killed).
-fn wait_with_timeout(child: &mut Child, timeout: Duration) -> Option<std::process::ExitStatus> {
-    let start = Instant::now();
-    while start.elapsed() < timeout {
-        match child.try_wait().unwrap() {
-            Some(status) => return Some(status),
-            None => std::thread::sleep(Duration::from_millis(20)),
-        }
-    }
-    let _ = child.kill();
-    None
+/// Stopping the hub while a project is still loading: once the hub's pid
+/// file is gone — which is when `clove daemon stop --all` reports it stopped —
+/// the hub has exited and holds neither its own lock nor the project's
+/// (L-new-2).
+#[test]
+fn a_hub_stopped_mid_load_is_gone_when_its_pid_file_is() {
+    let (_a_tmp, a) = init_clove_dir();
+    let mut hub = TestHub::spawn_with(
+        None,
+        &[
+            ("CLOVED_DISABLE_WEB", "1"),
+            ("CLOVED_LOAD_DELAY_MS", "4000"),
+        ],
+    );
+    let loader = {
+        let (paths, a) = (hub.paths.clone(), a.clone());
+        std::thread::spawn(move || clove_ipc::DaemonClient::attach(&paths, &a, true).map(|_| ()))
+    };
+    // Wait until the load holds the project's lock (it then sits on it).
+    let project_lock_path = clove_ipc::lock_path(&a);
+    assert!(
+        support::eventually(Duration::from_secs(30), || {
+            clove_core::fs_safe::open_lock_file(&project_lock_path)
+                .is_ok_and(|f| f.try_lock().is_err())
+        }),
+        "the load never took the project's lock"
+    );
+    hub.signal(SIGTERM);
+    assert!(
+        support::eventually(Duration::from_secs(10), || !hub.paths.pid().exists()),
+        "the hub did not stop"
+    );
+    let exited = hub.wait_exit(Duration::from_millis(500));
+    let hub_lock = clove_core::fs_safe::open_lock_file(&hub.paths.lock()).unwrap();
+    let hub_lock_free = hub_lock.try_lock().is_ok();
+    let project_lock = clove_core::fs_safe::open_lock_file(&clove_ipc::lock_path(&a)).unwrap();
+    let project_lock_free = project_lock.try_lock().is_ok();
+    let _ = loader.join();
+    assert!(exited.is_some(), "the pid file went but the hub lives on");
+    assert!(hub_lock_free, "the hub lock is still held");
+    assert!(project_lock_free, "the project's lock is still held");
 }
