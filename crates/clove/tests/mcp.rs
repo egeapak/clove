@@ -816,6 +816,10 @@ fn auto_starts_daemon_and_heartbeats() {
     let hub = clove_ipc::HubPaths::at(
         camino::Utf8PathBuf::from_path_buf(runtime_dir(dir.path())).unwrap(),
     );
+    // This process reads the token too: from the same records as the hub.
+    clove_core::daemon_token::use_records_dir(
+        camino::Utf8PathBuf::from(TEST_CLOVE_HOME).join("daemon-tokens"),
+    );
     let mut client = DaemonClient::probe_at(&hub, &clove_dir).expect("daemon alive");
     let first = client.status().unwrap().ping_count;
     assert!(first >= 1, "startup ensure + probe should have pinged");
