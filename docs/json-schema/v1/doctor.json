@@ -74,7 +74,8 @@
             "DAEMON_VERSION_SKEW",
             "DAEMON_LEGACY",
             "DAEMON_UNRESPONSIVE",
-            "DAEMON_TOKEN_TRACKED"
+            "DAEMON_TOKEN_TRACKED",
+            "DAEMON_CLOVE_HOME_MISMATCH"
           ]
         },
         "item": {

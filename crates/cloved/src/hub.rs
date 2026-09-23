@@ -599,6 +599,9 @@ impl Hub {
                 .and_then(Option::as_ref)
                 .map(|site| site.addr.to_string()),
             projects,
+            token_records: clove_core::daemon_token::records_dir()
+                .ok()
+                .map(|dir| clove_ipc::absolute(&dir).into_string()),
         }
     }
 

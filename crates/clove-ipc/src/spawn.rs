@@ -182,6 +182,13 @@ fn hub_command(bin: &Path, hub: &HubPaths) -> std::process::Command {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(stderr);
+    // The hub works from its runtime directory: a relative clove home would
+    // name another place there, and every token check would fail.
+    if let Some(home) = std::env::var_os("CLOVE_HOME").filter(|home| !home.is_empty()) {
+        if let Ok(home) = std::path::absolute(&home) {
+            cmd.env("CLOVE_HOME", home);
+        }
+    }
     cmd
 }
 

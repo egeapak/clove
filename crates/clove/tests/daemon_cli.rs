@@ -791,6 +791,80 @@ fn the_daemon_log_is_not_followed_and_is_rotated() {
         .success();
 }
 
+/// A client whose clove home is not the daemon's has every call refused
+/// (the daemon checks tokens against its own records) and silently falls
+/// back. `clove daemon status` and `clove doctor` say so instead.
+#[test]
+fn a_clove_home_other_than_the_daemons_is_reported() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let run = Run::new();
+    init(dir, &run.path);
+    clove(dir, &run.path)
+        .args(["daemon", "start"])
+        .assert()
+        .success();
+    let other_home = tempfile::tempdir().unwrap();
+    let elsewhere = |args: &[&str]| {
+        let out = clove(dir, &run.path)
+            .env("CLOVE_HOME", other_home.path())
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        json(&out.stdout)
+    };
+    let status = elsewhere(&["daemon", "status", "-f", "json"]);
+    let warnings = status["data"]["warnings"].to_string();
+    assert!(
+        warnings.contains("CLOVE_HOME") && warnings.contains(TEST_CLOVE_HOME.trim_end_matches('/')),
+        "status did not report the mismatch: {status}"
+    );
+    let doctor = elsewhere(&["doctor", "-f", "json"]);
+    assert!(
+        doctor["data"]["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["code"] == "DAEMON_CLOVE_HOME_MISMATCH"),
+        "doctor did not report the mismatch: {doctor}"
+    );
+    // The same home: nothing to report.
+    let same = daemon_status(dir, &run.path);
+    assert_eq!(same["data"]["warnings"], serde_json::json!([]), "{same}");
+    clove(dir, &run.path)
+        .args(["daemon", "stop", "--all"])
+        .assert()
+        .success();
+}
+
+/// A relative `CLOVE_HOME` names the same place for the daemon a client
+/// starts as for the client — the daemon works from its runtime directory —
+/// so the client's calls are not all refused.
+#[test]
+fn a_relative_clove_home_means_the_same_to_the_daemon() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let run = Run::new();
+    init(dir, &run.path);
+    let relative = |args: &[&str]| {
+        clove(dir, &run.path)
+            .env("CLOVE_HOME", "home")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    assert!(relative(&["daemon", "start"]).status.success());
+    let status = json(&relative(&["daemon", "status", "-f", "json"]).stdout);
+    assert_eq!(status["data"]["running"], true, "{status}");
+    assert_eq!(
+        status["data"]["warnings"],
+        serde_json::json!([]),
+        "{status}"
+    );
+    assert!(relative(&["daemon", "stop", "--all"]).status.success());
+}
+
 /// Reads never write: with a hub running, `clove ls` creates no token and
 /// touches no `.gitignore` — and a committed `.clove` symlink (`.clove -> ~`,
 /// say) gets no token work at all, so nothing lands in the link's target.

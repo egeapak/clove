@@ -55,6 +55,21 @@ pub fn run(
                 report.issues.push(issue);
             }
         }
+        let hub_status = clove_ipc::HubClient::connect(&hub)
+            .ok()
+            .and_then(|mut client| client.status().ok());
+        if let Some(message) = hub_status
+            .as_ref()
+            .and_then(crate::cmd::daemon::clove_home_mismatch)
+        {
+            report.issues.push(DoctorIssue {
+                severity: Severity::Warning,
+                code: "DAEMON_CLOVE_HOME_MISMATCH",
+                item: None,
+                message,
+                fixable: false,
+            });
+        }
     }
     if let Some(issue) = tracked_token_issue(daemon_dir(ctx)) {
         report.issues.push(issue);

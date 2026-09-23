@@ -331,19 +331,24 @@ fn status(
     clove_dir: &Utf8Path,
     format: OutputFormat,
 ) -> Result<ExitCode, CloveError> {
+    let hub_status = HubClient::connect(hub)
+        .ok()
+        .and_then(|mut c| c.status().ok());
+    let warnings: Vec<String> = hub_status
+        .as_ref()
+        .and_then(clove_home_mismatch)
+        .into_iter()
+        .collect();
     // With a hub there to ask, a token this client cannot use is the answer:
-    // "not serving" would be wrong.
+    // "not serving" would be wrong — unless the warning explains it.
     if hub.footprint_present() {
         match clove_ipc::project(clove_dir, false) {
             // No token: never loaded, so not served.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(token_err(&e)),
-            Ok(_) => {}
+            Err(e) if warnings.is_empty() => return Err(token_err(&e)),
+            Err(_) | Ok(_) => {}
         }
     }
-    let hub_status = HubClient::connect(hub)
-        .ok()
-        .and_then(|mut c| c.status().ok());
     let project = match DaemonClient::probe_at(hub, clove_dir) {
         Some(mut client) => Some(
             client
@@ -358,6 +363,7 @@ fn status(
             "pid": h.pid,
             "uptime_s": h.uptime_s,
             "web_addr": h.web_addr,
+            "token_records": h.token_records,
             "projects": h.projects.iter().map(|p| json!({
                 "clove_dir": p.clove_dir,
                 "items_indexed": p.status.items_indexed,
@@ -373,6 +379,7 @@ fn status(
         "running": project.is_some(),
         "hub": hub_json,
         "log": log.as_ref().map(|log| log.as_str()),
+        "warnings": warnings,
     });
     if let Some(s) = &project {
         let fields = json!({
@@ -437,9 +444,34 @@ fn status(
             if let Some(log) = &log {
                 outln!("daemon log {log}");
             }
+            for warning in &warnings {
+                eprintln!("warning: {warning}");
+            }
         }
     }
     Ok(ExitCode::Success)
+}
+
+/// Why this clove cannot use the hub, when the hub checks project tokens
+/// against other records than this clove keeps — a different `CLOVE_HOME`:
+/// the hub then refuses every call of this clove's (`BAD_TOKEN`), which falls
+/// back to the files without a word.
+pub(crate) fn clove_home_mismatch(hub_status: &clove_ipc::HubStatus) -> Option<String> {
+    let theirs = camino::Utf8PathBuf::from(hub_status.token_records.as_deref()?);
+    let ours = clove_ipc::absolute(&clove_core::daemon_token::records_dir().ok()?);
+    let same = theirs == ours
+        || matches!(
+            (theirs.canonicalize_utf8(), ours.canonicalize_utf8()),
+            (Ok(a), Ok(b)) if a == b
+        );
+    (!same).then(|| {
+        format!(
+            "the daemon checks project tokens against {theirs}, but this clove keeps them \
+             in {ours} (its CLOVE_HOME differs from the daemon's): the daemon refuses its \
+             calls, and it reads the files instead; use the daemon's CLOVE_HOME, or \
+             restart the daemon with this one (`clove daemon stop --all`)"
+        )
+    })
 }
 
 /// Emit a small success envelope (`json`) or a one-line message (`human`).

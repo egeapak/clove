@@ -226,6 +226,11 @@ pub struct HubStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web_addr: Option<String>,
     pub projects: Vec<ProjectInfo>,
+    /// The directory the hub checks project tokens' records in
+    /// (`<clove home>/daemon-tokens`). A client with another one has every
+    /// call refused, so it compares.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_records: Option<String>,
 }
 
 /// One loaded project.
