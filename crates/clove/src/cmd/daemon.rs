@@ -58,17 +58,13 @@ fn start(
     match clove_ipc::ensure_daemon_at(hub, clove_dir) {
         Ok(_) => {}
         Err(ClientError::Refused { message, .. }) => {
-            let legacy = clove_ipc::legacy_daemon_pid(clove_dir)
-                .map(|pid| {
-                    format!(
-                        " (a clove 0.1.0 daemon, pid {pid}, serves it; \
-                         `clove daemon stop` stops it)"
-                    )
-                })
-                .unwrap_or_default();
-            return Err(daemon_err(&format!(
-                "the daemon cannot serve this project: {message}{legacy}"
-            )));
+            return Err(daemon_err(&match clove_ipc::legacy_daemon_pid(clove_dir) {
+                Some(pid) => format!(
+                    "a clove 0.1.0 daemon (pid {pid}) already serves this project; \
+                     `clove daemon stop` stops it, then start again"
+                ),
+                None => format!("the daemon cannot serve this project: {message}"),
+            }));
         }
         Err(ClientError::Connect(e) | ClientError::Name(e)) => {
             return Err(daemon_err(&format!("could not start the daemon: {e}")));
