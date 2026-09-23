@@ -39,6 +39,11 @@ use crate::{legacy_sock_path, pid_path, PROTOCOL_VERSION};
 /// Liveness/connect timeout (DESIGN §8.3: "Attempt connect with 50ms timeout").
 pub const CONNECT_TIMEOUT: Duration = Duration::from_millis(50);
 
+/// How long a hub that did accept the connection gets to answer the handshake
+/// and a probing `attach`. A dead socket fails at connect, within
+/// [`CONNECT_TIMEOUT`]; this only bounds a live hub under load.
+pub const ANSWER_TIMEOUT: Duration = Duration::from_millis(500);
+
 /// How long a call that loads the project may take: the hub opens (and may
 /// rebuild) its index and sweeps it before answering.
 pub const LOAD_TIMEOUT: Duration = Duration::from_secs(10);
@@ -214,7 +219,7 @@ impl DaemonClient {
 
     /// Connect to the hub and confirm it serves `clove_dir`, loading the
     /// project first when `load` is set (bounded by [`LOAD_TIMEOUT`] then, by
-    /// [`CONNECT_TIMEOUT`] otherwise). Every later call carries the same
+    /// [`ANSWER_TIMEOUT`] otherwise). Every later call carries the same
     /// `load`, so a client that loaded its project reloads it after an idle
     /// eviction, and a probing client never does.
     pub fn attach(
@@ -228,7 +233,7 @@ impl DaemonClient {
             client,
             project: project(clove_dir, load),
         };
-        this.check(if load { LOAD_TIMEOUT } else { CONNECT_TIMEOUT })?;
+        this.check(if load { LOAD_TIMEOUT } else { ANSWER_TIMEOUT })?;
         Ok(this)
     }
 
@@ -259,7 +264,7 @@ impl DaemonClient {
         let budget = if self.project.load {
             LOAD_TIMEOUT
         } else {
-            CONNECT_TIMEOUT.max(Duration::from_secs(1))
+            Duration::from_secs(1)
         };
         self.check(budget)
     }
@@ -469,7 +474,7 @@ impl HubClient {
 }
 
 /// Connect to the hub, check that it runs as this user, and complete the
-/// version handshake within [`CONNECT_TIMEOUT`]-sized budgets.
+/// version handshake within [`CONNECT_TIMEOUT`] and [`ANSWER_TIMEOUT`].
 fn connect(hub: &HubPaths) -> Result<(Runtime, CloveRpcClient), ClientError> {
     let name = hub.socket_name().map_err(ClientError::Name)?;
     // A current-thread runtime: the client is synchronous (every call is a
@@ -494,7 +499,7 @@ fn connect(hub: &HubPaths) -> Result<(Runtime, CloveRpcClient), ClientError> {
             )));
         }
         let mut framed = frame(stream);
-        let welcome = timeout(CONNECT_TIMEOUT.max(Duration::from_millis(500)), async {
+        let welcome = timeout(ANSWER_TIMEOUT, async {
             send_frame(&mut framed, &Hello::current()).await?;
             recv_frame::<Welcome>(&mut framed).await
         })
