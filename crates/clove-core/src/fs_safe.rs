@@ -85,7 +85,10 @@ fn dirs_below<'a>(root: &Utf8Path, dir: &'a Utf8Path) -> io::Result<Vec<&'a Utf8
 fn symlinked_dir(path: &Utf8Path) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
-        format!("refusing to use {path}: it is a symlink, not a directory"),
+        format!(
+            "refusing to use {path}: it is a symlink, not a directory \
+             (replace the link with the directory it points to)"
+        ),
     )
 }
 
