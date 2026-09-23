@@ -24,6 +24,7 @@ clove-index.workspace = true
 clove-engine.workspace = true
 axum.workspace = true
 tower-http.workspace = true
+tower.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

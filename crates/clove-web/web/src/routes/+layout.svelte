@@ -7,6 +7,9 @@
   import { theme } from '$lib/theme.svelte';
   import { store, startLive } from '$lib/store.svelte';
   import ThemeSwitcher from '$lib/components/ThemeSwitcher.svelte';
+  import ProjectSwitcher from '$lib/components/ProjectSwitcher.svelte';
+  import { api } from '$lib/api';
+  import { projectSlug } from '$lib/urls';
   import Toasts from '$lib/components/Toasts.svelte';
   import NewItemModal from '$lib/components/NewItemModal.svelte';
 
@@ -105,6 +108,7 @@
     >
     clove
   </a>
+  <ProjectSwitcher current={projectSlug(base)} load={api.projects} />
   <nav class="tabs" aria-label="Views">
     {#each tabs as t (t.href)}
       <a class="tab" class:active={isActive(t.href)} href="{base}/{t.href}">{t.label}</a>

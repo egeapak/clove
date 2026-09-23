@@ -11,6 +11,7 @@ mod assets;
 mod dto;
 mod error;
 mod events;
+mod hub;
 mod read;
 mod watch;
 mod write;
@@ -32,6 +33,7 @@ use tower_http::compression::{CompressionLayer, CompressionLevel};
 
 pub use error::ApiError;
 pub use events::Event;
+pub use hub::{HubWeb, ProjectEntry};
 
 /// Maximum accepted request-body size (matches the item body cap, DESIGN §4).
 const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
@@ -67,6 +69,9 @@ pub struct AppState {
     seq: Arc<AtomicU64>,
     /// Optional per-request hook (the daemon uses it to reset idle-shutdown).
     heartbeat: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// The SPA entry page rewritten for a hub prefix ([`AppState::with_base_path`]);
+    /// `None` serves the embedded page as built (root base).
+    index_page: Option<Arc<Vec<u8>>>,
 }
 
 impl AppState {
@@ -120,6 +125,7 @@ impl AppState {
             engine,
             seq: Arc::new(AtomicU64::new(0)),
             heartbeat: None,
+            index_page: None,
         }
     }
 
@@ -151,6 +157,18 @@ impl AppState {
     pub fn with_heartbeat(mut self, hook: Arc<dyn Fn() + Send + Sync>) -> Self {
         self.heartbeat = Some(hook);
         self
+    }
+
+    /// Serve the SPA under `base` (e.g. `/p/clove`) instead of the root — the
+    /// daemon hub mounts each project's router under its own prefix.
+    pub fn with_base_path(mut self, base: &str) -> Self {
+        self.index_page = assets::index_for_base(base).map(Arc::new);
+        self
+    }
+
+    /// The rewritten SPA entry page, when this state serves under a prefix.
+    pub(crate) fn index_page(&self) -> Option<&[u8]> {
+        self.index_page.as_deref().map(Vec::as_slice)
     }
 
     /// Invoke the heartbeat hook, if any.
@@ -190,7 +208,7 @@ pub(crate) fn host_is_local(host: &str) -> bool {
 /// `127.0.0.1:<port>` under an attacker-controlled name; validating `Host` does.
 /// An absent `Host` (HTTP/2 uses `:authority`; some non-browser clients) is
 /// allowed — browsers always send a `Host`, which is the rebinding vector.
-async fn host_guard(
+pub(crate) async fn host_guard(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {

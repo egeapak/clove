@@ -13,9 +13,12 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::sync::OnceLock;
 
+use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use rust_embed::RustEmbed;
+
+use crate::AppState;
 
 #[derive(RustEmbed)]
 #[folder = "dist-gz/"]
@@ -68,6 +71,31 @@ pub fn warm() {
     let _ = table();
 }
 
+/// The SPA entry page rewritten to run under `base` (e.g. `/p/clove`), or
+/// `None` when the build has no entry page.
+///
+/// SvelteKit's fallback page boots from an inline
+/// `__sveltekit_<hash> = { base: "" }` and reads its runtime base from that
+/// global, so setting it there moves every `{base}` link, the router, and the
+/// lazily-loaded chunks under the prefix. The page's own absolute `/_app/`
+/// preloads move with it. A page without the global (the Node-free
+/// placeholder) is returned unchanged.
+pub fn index_for_base(base: &str) -> Option<Vec<u8>> {
+    let raw = String::from_utf8_lossy(&table().get("index.html")?.raw).into_owned();
+    Some(rewrite_base(&raw, base).into_bytes())
+}
+
+fn rewrite_base(page: &str, base: &str) -> String {
+    let Some(global) = page.find("__sveltekit_") else {
+        return page.to_owned();
+    };
+    let quoted = serde_json::to_string(base).unwrap_or_else(|_| "\"\"".to_owned());
+    let (head, tail) = page.split_at(global);
+    let tail = tail.replacen(r#"base: """#, &format!("base: {quoted}"), 1);
+    let assets = format!("\"{base}/_app/");
+    format!("{head}{tail}").replace("\"/_app/", &assets)
+}
+
 fn gunzip(gz: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     let _ = flate2::read::GzDecoder::new(gz).read_to_end(&mut out);
@@ -84,7 +112,11 @@ fn cache_for(path: &str) -> &'static str {
 }
 
 /// Static + SPA-fallback handler (registered as the router fallback).
-pub async fn static_handler(headers: HeaderMap, uri: Uri) -> Response {
+pub async fn static_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
     let path = uri.path().trim_start_matches('/');
 
     // Anything under /api that reached the fallback is a genuine 404.
@@ -94,7 +126,23 @@ pub async fn static_handler(headers: HeaderMap, uri: Uri) -> Response {
 
     let map = table();
     let candidate = if path.is_empty() { "index.html" } else { path };
-    let asset = map.get(candidate).or_else(|| map.get("index.html")); // SPA fallback
+    let asset = map.get(candidate);
+
+    // The SPA entry page. Under a hub prefix it is the rewritten copy, which
+    // is never cached: the prefix is per-project, the build is not.
+    if asset.is_none() || candidate == "index.html" {
+        if let Some(page) = state.index_page() {
+            return (
+                [
+                    (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                    (header::CACHE_CONTROL, "no-cache"),
+                ],
+                page.to_vec(),
+            )
+                .into_response();
+        }
+    }
+    let asset = asset.or_else(|| map.get("index.html")); // SPA fallback
 
     let Some(asset) = asset else {
         return (StatusCode::NOT_FOUND, "index.html missing from build").into_response();
@@ -138,4 +186,38 @@ fn accepts_gzip(headers: &HeaderMap) -> bool {
         let not_disabled = !it.any(|p| p.trim().replace(' ', "") == "q=0");
         (token == "gzip" || token == "x-gzip") && not_disabled
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rewrite_base;
+
+    const PAGE: &str = r#"<link href="/_app/immutable/entry/start.js" rel="modulepreload">
+<script>
+  __sveltekit_abc123 = {
+    base: ""
+  };
+  import("/_app/immutable/entry/app.js");
+</script>"#;
+
+    #[test]
+    fn rewrite_sets_the_runtime_base_and_prefixes_assets() {
+        let out = rewrite_base(PAGE, "/p/clove");
+        assert!(out.contains(r#"base: "/p/clove""#), "{out}");
+        assert!(out.contains(r#"href="/p/clove/_app/immutable/entry/start.js""#));
+        assert!(out.contains(r#"import("/p/clove/_app/immutable/entry/app.js")"#));
+        assert!(!out.contains(r#""/_app/"#));
+    }
+
+    #[test]
+    fn rewrite_leaves_a_page_without_the_global_alone() {
+        let placeholder = "<html><body>clove</body></html>";
+        assert_eq!(rewrite_base(placeholder, "/p/clove"), placeholder);
+    }
+
+    #[test]
+    fn rewrite_escapes_the_base_as_a_js_string() {
+        let out = rewrite_base(PAGE, r#"/p/a"b"#);
+        assert!(out.contains(r#"base: "/p/a\"b""#), "{out}");
+    }
 }

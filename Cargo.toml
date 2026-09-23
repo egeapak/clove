@@ -110,6 +110,7 @@ tokio-serde = { version = "0.9", features = ["json"] }   # JSON codec for the ta
 # form/matched-path/original-uri/tower-log features (keep json+query+http1+tokio).
 axum = { version = "0.7", default-features = false, features = ["http1", "json", "query", "tokio", "ws"] }
 tower-http = { version = "0.6", features = ["compression-gzip"] }  # gzip-only response compression for the dynamic API (no brotli/zstd C deps in the binary)
+tower = { version = "0.5", default-features = false, features = ["util"] }  # `ServiceExt::oneshot` for the hub web front's per-project dispatch
 rust-embed = "8"                # embed the gzip-precompressed SPA assets into the binary
 mime_guess = "2"                # content-type for embedded static assets
 flate2 = "1"                    # gzip the embedded assets (build script) + decompress them once at startup (pure-Rust miniz_oxide; no C deps)

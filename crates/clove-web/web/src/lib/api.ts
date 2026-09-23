@@ -1,4 +1,5 @@
 import { browser, dev } from '$app/environment';
+import { base } from '$app/paths';
 import type {
   Item,
   Comment,
@@ -8,14 +9,16 @@ import type {
   StatsHistoryPoint,
   Envelope,
   ItemPage,
-  ListQuery
+  ListQuery,
+  Project
 } from './types';
 import type { PatchPayload } from './itemForm';
 import { MOCK_ITEMS, MOCK_COMMENTS, mockHistory } from './mock';
 import { applyFilters, sortItems } from './filter';
 import { queryString } from './query';
+import { apiBase, PROJECTS_URL } from './urls';
 
-const BASE = '/api/v1';
+const BASE = apiBase(base);
 
 /** Stand-in author for mock-mode comment authorship (real server assigns it). */
 const MOCK_META_USER = 'you';
@@ -43,7 +46,14 @@ async function reqEnvelope<T>(
   path: string,
   init?: RequestInit
 ): Promise<{ data: T; meta: Record<string, unknown> }> {
-  const res = await fetch(BASE + path, {
+  return reqUrl<T>(BASE + path, init);
+}
+
+async function reqUrl<T>(
+  url: string,
+  init?: RequestInit
+): Promise<{ data: T; meta: Record<string, unknown> }> {
+  const res = await fetch(url, {
     ...init,
     headers: {
       ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
@@ -158,6 +168,20 @@ export const api = {
       () => req<Meta>('/meta'),
       () => mockMeta()
     );
+  },
+
+  /**
+   * The projects the daemon hub serves. Empty when the app is not served by a
+   * hub (standalone `clove serve` has no such endpoint) or in mock mode.
+   */
+  async projects(): Promise<Project[]> {
+    if (mockMode) return [];
+    try {
+      const { data } = await reqUrl<{ projects: Project[] }>(PROJECTS_URL);
+      return data?.projects ?? [];
+    } catch {
+      return [];
+    }
   },
 
   async history(): Promise<StatsHistoryPoint[]> {
