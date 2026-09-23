@@ -186,6 +186,7 @@ impl Session {
     }
 
     /// Close stdin (the client hanging up) and return how the server exited.
+    #[cfg(unix)]
     fn hang_up(mut self) -> std::process::ExitStatus {
         drop(self.stdin);
         self.child.wait().unwrap()
