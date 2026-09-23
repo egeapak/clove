@@ -8,11 +8,11 @@
 //! Layered as: lifecycle/lock/signals, the hub (per-project slots, handshake),
 //! IPC server, file watcher, git auto-sync.
 
-use camino::Utf8PathBuf;
 use clap::{Parser, Subcommand};
 
 #[cfg(feature = "git-sync")]
 mod git_sync;
+mod github_remote;
 #[cfg(feature = "github-sync")]
 mod github_sync;
 mod graph_cache;
@@ -36,24 +36,15 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Run the daemon in the foreground. It serves every project a client
-    /// attaches to, from the per-user runtime directory (`CLOVE_RUNTIME_DIR`).
-    Run(RunArgs),
-}
-
-#[derive(Debug, clap::Args)]
-struct RunArgs {
-    /// Load this `.clove/` directory before reporting ready; exit 1 if it
-    /// cannot be served.
-    #[arg(long)]
-    clove_dir: Option<Utf8PathBuf>,
+    /// Run the daemon in the foreground, from the per-user runtime directory
+    /// (`CLOVE_RUNTIME_DIR`). It belongs to no project: every call names its
+    /// caller's own.
+    Run,
 }
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Run(args) => {
-            lifecycle::run(&clove_ipc::HubPaths::resolve(), args.clove_dir.as_deref())
-        }
+        Command::Run => lifecycle::run(&clove_ipc::HubPaths::resolve()),
     }
 }

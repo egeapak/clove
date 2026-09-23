@@ -83,7 +83,7 @@ pub enum SlotTask {
     Idle,
 }
 
-/// Resolve a client-supplied `.clove/` path to the hub's key for it, so
+/// Resolve a caller's (absolute) `.clove/` path to the hub's key for it, so
 /// `/tmp/x` and `/private/tmp/x`, or a symlinked checkout, name one slot.
 pub fn canonical_key(clove_dir: &str) -> Result<Utf8PathBuf, LoadError> {
     let path = std::fs::canonicalize(clove_dir)
@@ -102,18 +102,19 @@ pub fn open(clove_dir: &Utf8Path, cancel: CancellationToken) -> Result<Slot, Loa
             "{clove_dir} is not a clove store (no issues/ directory)"
         )));
     }
-    let lock = File::create(clove_ipc::lock_path(clove_dir)).map_err(|e| {
-        LoadError::failed(format!("creating {}: {e}", clove_ipc::lock_path(clove_dir)))
-    })?;
+    // Symlink-safe: the lock ships with the repository, and a planted link
+    // would otherwise have its target truncated.
+    let lock_path = clove_ipc::lock_path(clove_dir);
+    let lock = clove_core::fs_safe::open_lock_file(&lock_path)
+        .map_err(|e| LoadError::failed(format!("opening {lock_path}: {e}")))?;
     match lock.try_lock() {
         Ok(()) => {}
         Err(std::fs::TryLockError::WouldBlock) => {
             return Err(LoadError {
                 code: codes::PROJECT_LOCKED,
                 message: format!(
-                    "another daemon already serves {clove_dir} (a clove 0.1.0 daemon, \
-                     or a hub under another runtime directory); stop it to let this \
-                     hub serve the project"
+                    "another process holds {lock_path}: some other daemon is serving \
+                     this project; stop it to let this daemon serve it"
                 ),
             })
         }
@@ -253,6 +254,17 @@ impl Slot {
         #[cfg(feature = "github-sync")]
         {
             let (repo, interval_min) = self.settings.github_sync.clone();
+            // The config ships with the repository, so it may only name one of
+            // the project's own remotes (see `github_remote`).
+            let repo = repo.and_then(|spec| {
+                match crate::github_remote::check_sync_target(&self.repo_root, &spec) {
+                    Ok(repo) => Some(repo),
+                    Err(why) => {
+                        eprintln!("cloved: {}: not syncing with GitHub: {why}", self.clove_dir);
+                        None
+                    }
+                }
+            });
             let sync = crate::github_sync::github_sync_loop(
                 self.clove_dir.clone(),
                 repo,

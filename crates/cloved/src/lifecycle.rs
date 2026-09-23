@@ -3,16 +3,14 @@
 //!
 //! Ordering invariants:
 //! - The `hub.lock` advisory flock is taken first; a second hub fails fast.
-//! - `hub.pid` is written **only after** the socket is bound and any
-//!   `--clove-dir` project has loaded (swept), so a reader that sees a pid is
-//!   guaranteed a usable socket.
+//! - `hub.pid` is written **only after** the socket is bound, so a reader that
+//!   sees a pid is guaranteed a usable socket.
 //! - The shutdown-signal handler is installed **before** the pid is written, so a
 //!   SIGTERM racing the hub's readiness is caught (clean teardown) rather than
 //!   hitting the kernel default disposition (abrupt kill, stale socket/pid).
 //! - Shutdown tears every project down (each flushes its index), then removes the
 //!   socket and pid, then releases the lock (DESIGN §8.9).
 
-use std::fs::File;
 use std::io::Write;
 use std::time::Duration;
 
@@ -28,14 +26,23 @@ use crate::hub::Hub;
 const DEFAULT_GRACE: Duration = Duration::from_secs(60);
 
 /// Run the hub rooted at `paths` until a shutdown signal arrives or it has
-/// served nothing for its grace period, first loading `preload` if given.
-/// Blocks the calling thread (it owns the Tokio runtime). Exits the process
-/// with a non-zero code if another hub already holds the lock.
-pub fn run(paths: &HubPaths, preload: Option<&Utf8Path>) -> anyhow::Result<()> {
+/// served nothing for its grace period. Blocks the calling thread (it owns the
+/// Tokio runtime). Exits the process with a non-zero code if another hub
+/// already holds the lock.
+///
+/// The hub belongs to no project and to no client: it works from its own
+/// private runtime directory — never `/`, never the directory of whichever
+/// client happened to start it — so nothing it does can depend on a place
+/// someone else controls. A runtime directory that cannot be created or
+/// validated fails the start.
+pub fn run(paths: &HubPaths) -> anyhow::Result<()> {
     ensure_dir(paths).context("preparing the daemon runtime directory")?;
+    std::env::set_current_dir(paths.dir().as_std_path())
+        .with_context(|| format!("entering the runtime directory {}", paths.dir()))?;
 
     // 1. Single-instance advisory lock, held for the whole lifetime.
-    let lock = File::create(paths.lock()).with_context(|| format!("creating {}", paths.lock()))?;
+    let lock = clove_core::fs_safe::open_lock_file(&paths.lock())
+        .with_context(|| format!("opening {}", paths.lock()))?;
     match lock.try_lock() {
         Ok(()) => {}
         Err(std::fs::TryLockError::WouldBlock) => {
@@ -69,12 +76,6 @@ pub fn run(paths: &HubPaths, preload: Option<&Utf8Path>) -> anyhow::Result<()> {
 
         let hub = Hub::new(std::env::var_os("CLOVED_DISABLE_WEB").is_none(), grace());
 
-        if let Some(clove_dir) = preload {
-            hub.attach(clove_dir.as_str(), true)
-                .await
-                .map_err(|e| anyhow::anyhow!(e.message))?;
-        }
-
         // Register the shutdown-signal handler BEFORE advertising readiness (the
         // pid file): "pid present ⇒ ready to shut down cleanly" (DESIGN §8.9).
         let mut shutdown = ShutdownSignal::install(paths);
@@ -83,6 +84,7 @@ pub fn run(paths: &HubPaths, preload: Option<&Utf8Path>) -> anyhow::Result<()> {
         tokio::select! {
             _ = hub.accept_loop(listener) => {},
             _ = hub.idle_exit() => {},
+            _ = orphaned(paths) => {},
             _ = shutdown.recv() => {},
             _ = hub.shutdown().cancelled() => {},
         }
@@ -96,6 +98,23 @@ pub fn run(paths: &HubPaths, preload: Option<&Utf8Path>) -> anyhow::Result<()> {
     let _ = std::fs::remove_file(paths.pid());
     drop(runtime);
     result
+}
+
+/// Resolve once the hub's own files are gone — its runtime directory deleted
+/// from under it — leaving it unreachable: no client can find it, and nothing
+/// could ever stop it. It exits instead of lingering until idle.
+async fn orphaned(paths: &HubPaths) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        #[cfg(not(windows))]
+        let gone = !paths.pid().exists() || !paths.sock().exists();
+        #[cfg(windows)]
+        let gone = !paths.pid().exists();
+        if gone {
+            eprintln!("cloved: {} is gone; exiting", paths.dir());
+            return;
+        }
+    }
 }
 
 /// The hub's grace period with no project (`CLOVED_HUB_GRACE_MS` for tests).
@@ -112,16 +131,18 @@ fn ensure_dir(paths: &HubPaths) -> std::io::Result<()> {
     clove_ipc::ensure_private_dir(paths.dir())
 }
 
-/// On Windows, give the hub's pipe a protected DACL that admits only its owner
-/// (the default grants read access to Everyone), so no other local user can
-/// reach a channel that writes to every project. Unix gets the same from the
-/// socket's mode and the private runtime directory.
+/// On Windows, give the hub's pipe a protected DACL that admits only this
+/// user's SID (the default grants read access to Everyone), so no other local
+/// user can reach a channel that writes to every project. The SID is explicit
+/// rather than `OW`, which maps to Administrators under an elevated token.
+/// Unix gets the same from the socket's mode and the private runtime directory.
 #[cfg(windows)]
 fn owner_only(options: ListenerOptions<'_>) -> ListenerOptions<'_> {
     use interprocess::os::windows::local_socket::ListenerOptionsExt;
     use interprocess::os::windows::security_descriptor::SecurityDescriptor;
-    let owner_only = widestring::U16CString::from_str("D:P(A;;GA;;;OW)")
+    let owner_only = clove_ipc::win::current_user_sid()
         .ok()
+        .and_then(|sid| widestring::U16CString::from_str(format!("D:P(A;;GA;;;{sid})")).ok())
         .and_then(|sddl| SecurityDescriptor::deserialize(&sddl).ok());
     match owner_only {
         Some(sd) => options.security_descriptor(sd),
@@ -155,11 +176,7 @@ fn restrict_to_owner(_path: &Utf8Path, _mode: u32) {}
 /// the readiness signal, so it must never be seen empty or world-readable.
 fn write_pid(paths: &HubPaths) -> std::io::Result<()> {
     let staged = paths.dir().join("hub.pid.tmp");
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let mut file = options.open(&staged)?;
+    let mut file = clove_core::fs_safe::create_private_file(&staged)?;
     writeln!(file, "{}", std::process::id())?;
     file.flush()?;
     std::fs::rename(&staged, paths.pid())
@@ -216,7 +233,7 @@ struct ShutdownSignal {
 impl ShutdownSignal {
     fn install(paths: &HubPaths) -> Self {
         ShutdownSignal {
-            event: paths.event_name(),
+            event: paths.event_name().unwrap_or_default(),
         }
     }
 

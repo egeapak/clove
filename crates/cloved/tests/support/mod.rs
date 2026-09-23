@@ -7,7 +7,7 @@ use std::process::{Child, Command, ExitStatus};
 use std::time::{Duration, Instant};
 
 use camino::{Utf8Path, Utf8PathBuf};
-use clove_ipc::{ClientError, DaemonClient, HubClient, HubPaths};
+use clove_ipc::{ClientError, DaemonClient, Detached, HubClient, HubPaths};
 
 pub const SIGTERM: i32 = 15;
 pub const SIGKILL: i32 = 9;
@@ -45,23 +45,26 @@ pub struct TestHub {
 }
 
 impl TestHub {
-    /// A hub with no web listener, optionally preloading `clove_dir`.
+    /// A hub with no web listener, serving `clove_dir` if given (loaded
+    /// through an ordinary call — a hub is never started for a project).
     pub fn spawn(clove_dir: Option<&Utf8Path>) -> TestHub {
         TestHub::spawn_with(clove_dir, &[("CLOVED_DISABLE_WEB", "1")])
     }
 
-    /// A hub with the given environment, ready (its pid file written).
+    /// A hub with the given environment, ready (its pid file written), then
+    /// serving `clove_dir` if given.
     pub fn spawn_with(clove_dir: Option<&Utf8Path>, env: &[(&str, &str)]) -> TestHub {
         let (run, paths) = runtime_dir();
-        let child = command(&paths, clove_dir, env)
-            .spawn()
-            .expect("spawn cloved");
+        let child = command(&paths, env).spawn().expect("spawn cloved");
         let hub = TestHub {
             paths,
             child,
             _run: Some(run),
         };
         hub.wait_ready(Duration::from_secs(5));
+        if let Some(dir) = clove_dir {
+            hub.load(dir).expect("the hub serves the project");
+        }
         hub
     }
 
@@ -69,7 +72,7 @@ impl TestHub {
     /// and wait until it serves `clove_dir`. A leftover pid file cannot be the
     /// readiness signal here, so it waits on a real attach.
     pub fn restart(&self, clove_dir: &Utf8Path) -> TestHub {
-        let child = command(&self.paths, Some(clove_dir), &[("CLOVED_DISABLE_WEB", "1")])
+        let child = command(&self.paths, &[("CLOVED_DISABLE_WEB", "1")])
             .spawn()
             .expect("spawn cloved");
         let hub = TestHub {
@@ -78,9 +81,7 @@ impl TestHub {
             _run: None,
         };
         assert!(
-            eventually(Duration::from_secs(5), || {
-                DaemonClient::probe_at(&hub.paths, clove_dir).is_some()
-            }),
+            eventually(Duration::from_secs(5), || hub.load(clove_dir).is_ok()),
             "restarted hub serves the project"
         );
         hub
@@ -107,9 +108,14 @@ impl TestHub {
         DaemonClient::attach(&self.paths, clove_dir, true)
     }
 
-    /// The hub's control service.
+    /// The hub's status client.
     pub fn control(&self) -> HubClient {
         HubClient::connect(&self.paths).expect("hub control")
+    }
+
+    /// Stop serving `clove_dir`, which the hub must serve.
+    pub fn detach(&self, clove_dir: &Utf8Path) -> Detached {
+        self.client(clove_dir).detach().expect("detach")
     }
 
     /// The canonical `.clove/` directories the hub serves.
@@ -149,15 +155,13 @@ impl Drop for TestHub {
     }
 }
 
-/// The `cloved run` command for a hub rooted at `paths`.
-pub fn command(paths: &HubPaths, clove_dir: Option<&Utf8Path>, env: &[(&str, &str)]) -> Command {
+/// The `cloved run` command for a hub rooted at `paths` — no project: a hub
+/// belongs to none.
+pub fn command(paths: &HubPaths, env: &[(&str, &str)]) -> Command {
     let mut cmd = Command::new(cloved_bin());
     cmd.env("CLOVE_RUNTIME_DIR", paths.dir().as_str())
         .envs(env.iter().copied())
         .arg("run");
-    if let Some(dir) = clove_dir {
-        cmd.arg("--clove-dir").arg(dir.as_str());
-    }
     cmd
 }
 

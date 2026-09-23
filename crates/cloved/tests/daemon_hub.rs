@@ -174,12 +174,11 @@ fn detaching_one_project_keeps_the_others_and_the_last_stops_the_hub() {
     let (_a_tmp, a) = init_clove_dir();
     let (_b_tmp, b) = init_clove_dir();
     let mut hub = TestHub::spawn(None);
-    let mut alpha = hub.load(&a).unwrap();
+    hub.load(&a).unwrap();
     hub.load(&b).unwrap();
 
-    let detached = hub.control().detach(&a).unwrap();
+    let detached = hub.detach(&a);
     assert!(detached.detached && !detached.hub_exiting, "{detached:?}");
-    assert!(alpha.ping().is_err(), "alpha's connections are closed");
     assert!(DaemonClient::probe_at(&hub.paths, &a).is_none());
     assert!(
         std::fs::File::create(a.join("daemon.lock"))
@@ -190,7 +189,7 @@ fn detaching_one_project_keeps_the_others_and_the_last_stops_the_hub() {
     );
     hub.client(&b).ping().unwrap();
 
-    let last = hub.control().detach(&b).unwrap();
+    let last = hub.detach(&b);
     assert!(last.detached && last.hub_exiting, "{last:?}");
     assert!(
         hub.wait_exit(Duration::from_secs(5))
@@ -246,16 +245,9 @@ fn a_client_of_another_protocol_is_refused_with_proof_of_life() {
                 .await
                 .unwrap();
         let mut framed = frame(stream);
-        send_frame(
-            &mut framed,
-            &Hello::Attach {
-                protocol: 6,
-                clove_dir: a.to_string(),
-                load: false,
-            },
-        )
-        .await
-        .unwrap();
+        send_frame(&mut framed, &Hello::Clove { protocol: 6 })
+            .await
+            .unwrap();
         recv_frame::<Welcome>(&mut framed).await.unwrap()
     });
     match welcome {
@@ -325,11 +317,145 @@ fn every_project_is_reachable_on_the_one_web_port() {
     assert!(picker.contains(&alpha_url[format!("http://{addr}").len()..]));
 
     // Down to one project: the root leads straight into it.
-    hub.control().detach(&b).unwrap();
+    hub.detach(&b);
     let (status, location, _) = http_get(&addr, "/");
     assert_eq!(status, 307);
     assert_eq!(
         location.as_deref(),
         Some(&alpha_url[format!("http://{addr}").len()..])
     );
+}
+
+/// A cloned repository can plant `.clove/daemon.lock` as a symlink to a file
+/// the user cares about. Loading the project must never truncate the target.
+#[test]
+fn a_symlinked_project_lock_never_clobbers_its_target() {
+    let (_tmp, clove_dir) = init_clove_dir();
+    let victim_dir = tempfile::tempdir().unwrap();
+    let victim = victim_dir.path().join("precious.txt");
+    std::fs::write(&victim, "precious").unwrap();
+    std::os::unix::fs::symlink(&victim, clove_dir.join("daemon.lock")).unwrap();
+
+    let hub = TestHub::spawn(None);
+    let _ = hub.load(&clove_dir);
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious");
+}
+
+/// A hub nobody can reach any more — its runtime directory deleted from under
+/// it — exits instead of lingering for hours.
+#[test]
+fn a_hub_whose_runtime_directory_vanishes_exits() {
+    let (_tmp, clove_dir) = init_clove_dir();
+    let mut hub = TestHub::spawn(None);
+    hub.load(&clove_dir).unwrap();
+    std::fs::remove_dir_all(hub.paths.dir()).unwrap();
+    assert!(
+        hub.wait_exit(Duration::from_secs(10)).is_some(),
+        "an unreachable hub must exit"
+    );
+}
+
+/// A raw, handshaken connection to `hub`: the wire as any client sees it.
+fn raw_client(hub: &TestHub, rt: &tokio::runtime::Runtime) -> clove_ipc::CloveRpcClient {
+    rt.block_on(async {
+        use interprocess::local_socket::tokio::prelude::*;
+        let stream =
+            interprocess::local_socket::tokio::Stream::connect(hub.paths.socket_name().unwrap())
+                .await
+                .unwrap();
+        let mut framed = frame(stream);
+        send_frame(&mut framed, &Hello::current()).await.unwrap();
+        let welcome = recv_frame::<Welcome>(&mut framed).await.unwrap();
+        assert!(matches!(welcome, Some(Welcome::Ok { .. })), "{welcome:?}");
+        clove_ipc::CloveRpcClient::new(
+            tarpc::client::Config::default(),
+            clove_ipc::transport_from_framed(framed),
+        )
+        .spawn()
+    })
+}
+
+fn project(dir: &Utf8Path) -> clove_ipc::Project {
+    clove_ipc::Project {
+        clove_dir: canonical(dir),
+        load: true,
+    }
+}
+
+/// Nothing binds a connection to a project: each call names its own, so one
+/// connection can carry calls for several projects, and each is answered from
+/// the project it names.
+#[test]
+fn one_connection_carries_calls_for_two_projects() {
+    let (_ta, a) = init_clove_dir();
+    let (_tb, b) = init_clove_dir();
+    let hub = TestHub::spawn(None);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let client = raw_client(&hub, &rt);
+    let new = |dir: &Utf8Path, title: &str| {
+        rt.block_on(client.create(
+            tarpc::context::current(),
+            project(dir),
+            NewSpec {
+                title: title.to_owned(),
+                ..Default::default()
+            },
+        ))
+        .unwrap()
+        .unwrap();
+    };
+    new(&a, "for a");
+    new(&b, "for b");
+    let titles = |dir: &Utf8Path| -> Vec<String> {
+        rt.block_on(client.query(
+            tarpc::context::current(),
+            project(dir),
+            QueryRequest {
+                kind: QueryKind::List,
+                filters: Default::default(),
+                order: Default::default(),
+                offset: 0,
+                limit: None,
+            },
+        ))
+        .unwrap()
+        .unwrap()
+        .rows
+        .into_iter()
+        .map(|r| r.title)
+        .collect()
+    };
+    assert_eq!(titles(&a), vec!["for a"]);
+    assert_eq!(titles(&b), vec!["for b"]);
+}
+
+/// A call naming its project by a relative path is refused: relative to what?
+/// The hub's working directory is its own runtime directory, and belongs to no
+/// client.
+#[test]
+fn a_call_naming_a_relative_project_is_refused() {
+    let (_ta, a) = init_clove_dir();
+    let hub = TestHub::spawn(Some(&a));
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let client = raw_client(&hub, &rt);
+    for load in [false, true] {
+        let refused = rt
+            .block_on(client.status(
+                tarpc::context::current(),
+                clove_ipc::Project {
+                    clove_dir: ".clove".to_owned(),
+                    load,
+                },
+            ))
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(refused.code, codes::BAD_PROJECT, "{refused:?}");
+    }
+    assert_eq!(hub.projects(), vec![canonical(&a)]);
 }

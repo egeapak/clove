@@ -10,11 +10,21 @@ use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
-use assert_cmd::cargo::cargo_bin;
 use assert_cmd::prelude::*;
 
-fn cloved_built() -> bool {
-    cargo_bin("clove").with_file_name("cloved").exists()
+/// The `cloved` binary, built on demand so the daemon cases can never pass by
+/// skipping.
+fn cloved() -> &'static Path {
+    static BIN: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    BIN.get_or_init(|| {
+        escargot::CargoBuild::new()
+            .package("cloved")
+            .bin("cloved")
+            .run()
+            .expect("build cloved for the web-port tests")
+            .path()
+            .to_path_buf()
+    })
 }
 
 fn clove(dir: &Path) -> Command {
@@ -24,6 +34,7 @@ fn clove(dir: &Path) -> Command {
     cmd.env_remove("CLOVED_DISABLE_WEB");
     cmd.env("CLOVE_AUTHOR", "tester@example.com");
     cmd.env("CLOVE_RUNTIME_DIR", dir.join("run"));
+    cmd.env("CLOVED_PATH", cloved());
     cmd
 }
 
@@ -122,9 +133,6 @@ fn spawn_serve(dir: &Path, args: &[&str]) -> (Child, u16) {
 
 #[test]
 fn daemon_that_loses_the_web_port_serves_on_a_free_one() {
-    if !cloved_built() {
-        return;
-    }
     let held = TcpListener::bind("127.0.0.1:0").unwrap();
     let taken = held.local_addr().unwrap().port();
     let repo = repo_with_web_port(taken);
@@ -154,9 +162,6 @@ fn daemon_that_loses_the_web_port_serves_on_a_free_one() {
 
 #[test]
 fn daemon_web_ui_on_the_fallback_port_answers() {
-    if !cloved_built() {
-        return;
-    }
     let held = TcpListener::bind("127.0.0.1:0").unwrap();
     let repo = repo_with_web_port(held.local_addr().unwrap().port());
 
@@ -214,9 +219,6 @@ fn explicit_port_is_honored_not_swapped() {
 
 #[test]
 fn explicit_port_skips_the_daemon_hand_off() {
-    if !cloved_built() {
-        return;
-    }
     let held = TcpListener::bind("127.0.0.1:0").unwrap();
     let repo = repo_with_web_port(held.local_addr().unwrap().port());
     clove(repo.path())

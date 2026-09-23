@@ -20,19 +20,21 @@ pub mod protocol;
 pub mod service;
 pub mod spawn;
 pub mod transport;
+#[cfg(windows)]
+pub mod win;
 
 use camino::{Utf8Path, Utf8PathBuf};
 
 pub use client::{
-    cleanup_hub, cleanup_legacy, legacy_daemon_pid, ClientError, DaemonClient, DaemonHealth,
-    HubClient,
+    cleanup_hub, cleanup_legacy, legacy_daemon, ClientError, DaemonClient, DaemonHealth, HubClient,
+    LegacyDaemon,
 };
-pub use hub::{Detached, HubPaths, HubRpc, HubRpcClient, HubStatus, ProjectInfo};
+pub use hub::{Detached, HubPaths, HubStatus, ProjectInfo};
 pub use protocol::{
     GraphRequest, GraphResponse, LeanRow, QueryKind, QueryListResponse, QueryRequest, ReindexDone,
     StatusResponse, PROTOCOL_VERSION,
 };
-pub use service::{CloveRpc, CloveRpcClient, RpcError};
+pub use service::{CloveRpc, CloveRpcClient, Project, RpcError};
 pub use spawn::{cloved_path, ensure_daemon, ensure_daemon_at, spawn_hub};
 pub use transport::{build_transport, transport_from_framed};
 
@@ -69,18 +71,54 @@ pub const SUN_PATH_MAX: usize = 103;
 )))]
 pub const SUN_PATH_MAX: usize = 107;
 
-/// The per-user directory holding daemon sockets:
+/// The per-user directory holding the daemon's socket, pid, and lock:
 ///
-/// 1. `$CLOVE_RUNTIME_DIR`, verbatim — an explicit override (tests use it);
-/// 2. `$XDG_RUNTIME_DIR/clove`;
-/// 3. `$TMPDIR/clove-<uid>`, else `/tmp/clove-<uid>`.
+/// 1. `$CLOVE_RUNTIME_DIR` — an explicit override (tests use it);
+/// 2. Unix: `$XDG_RUNTIME_DIR/clove`, else `$TMPDIR/clove-<uid>`, else
+///    `/tmp/clove-<uid>`; Windows: `%LOCALAPPDATA%\clove\run` (a per-user
+///    profile directory), else `%USERPROFILE%\AppData\Local\clove\run`.
 ///
-/// Only the daemon creates it ([`ensure_runtime_dir`]); clients connect only if
-/// [`runtime_dir_is_private`] holds, so another user can't plant a socket there.
+/// Always absolute. Only the daemon creates it ([`ensure_runtime_dir`]);
+/// clients connect only if [`runtime_dir_is_private`] holds, so another user
+/// can't plant a socket there.
 pub fn runtime_dir() -> Utf8PathBuf {
-    resolve_runtime_dir(utf8_var, current_uid())
+    #[cfg(unix)]
+    let dir = resolve_runtime_dir(utf8_var, current_uid());
+    #[cfg(not(unix))]
+    let dir = resolve_windows_runtime_dir(utf8_var);
+    absolute(&dir)
 }
 
+#[cfg(not(unix))]
+fn resolve_windows_runtime_dir(var: impl Fn(&str) -> Option<Utf8PathBuf>) -> Utf8PathBuf {
+    if let Some(dir) = var("CLOVE_RUNTIME_DIR") {
+        return dir;
+    }
+    if let Some(dir) = var("LOCALAPPDATA") {
+        return dir.join("clove").join("run");
+    }
+    var("USERPROFILE")
+        .map(|home| home.join("AppData").join("Local").join("clove").join("run"))
+        .unwrap_or_else(|| Utf8PathBuf::from("clove-run"))
+}
+
+/// `path` made absolute against the current directory (unchanged when it
+/// already is, or when there is no usable current directory).
+pub fn absolute(path: &Utf8Path) -> Utf8PathBuf {
+    std::path::absolute(path)
+        .ok()
+        .and_then(|p| Utf8PathBuf::from_path_buf(p).ok())
+        .unwrap_or_else(|| path.to_owned())
+}
+
+/// Parse a pid file's content into a pid that is safe to signal: `kill(0)`
+/// and `kill(-1)` address whole process groups, and pid 1 is init.
+pub fn parse_pid(text: &str) -> Option<u32> {
+    let pid: u32 = text.trim().parse().ok()?;
+    (pid > 1 && pid <= i32::MAX as u32).then_some(pid)
+}
+
+#[cfg(unix)]
 fn resolve_runtime_dir(var: impl Fn(&str) -> Option<Utf8PathBuf>, uid: u32) -> Utf8PathBuf {
     if let Some(dir) = var("CLOVE_RUNTIME_DIR") {
         return dir;
@@ -102,7 +140,7 @@ pub fn ensure_runtime_dir() -> std::io::Result<Utf8PathBuf> {
 
 /// [`ensure_runtime_dir`] for an explicit directory (a [`HubPaths`] root).
 pub fn ensure_private_dir(dir: &Utf8Path) -> std::io::Result<()> {
-    if !dir.exists() {
+    if std::fs::symlink_metadata(dir).is_err() {
         create_private_dir(dir)?;
     }
     if !runtime_dir_is_private(dir) {
@@ -117,19 +155,21 @@ pub fn ensure_private_dir(dir: &Utf8Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Whether `dir` is a directory owned by the current user that no one else can
-/// write to — the precondition for trusting a socket inside it.
+/// Whether `dir` is a directory — itself, not a symlink to one — owned by the
+/// current user that no one else can write to: the precondition for trusting
+/// a socket inside it. Whoever controls a symlink controls where it points.
 #[cfg(unix)]
 pub fn runtime_dir_is_private(dir: &Utf8Path) -> bool {
     use std::os::unix::fs::MetadataExt;
-    std::fs::metadata(dir)
+    std::fs::symlink_metadata(dir)
         .is_ok_and(|m| m.is_dir() && m.uid() == current_uid() && m.mode() & 0o022 == 0)
 }
 
-/// Windows daemons use named pipes, not files in the runtime directory.
+/// On Windows the runtime directory lives in the user's profile, whose ACL
+/// already excludes other users; it must still be a real directory, not a link.
 #[cfg(not(unix))]
-pub fn runtime_dir_is_private(_dir: &Utf8Path) -> bool {
-    true
+pub fn runtime_dir_is_private(dir: &Utf8Path) -> bool {
+    std::fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir())
 }
 
 #[cfg(unix)]
@@ -147,17 +187,12 @@ fn create_private_dir(dir: &Utf8Path) -> std::io::Result<()> {
 }
 
 #[cfg(unix)]
-fn current_uid() -> u32 {
+pub(crate) fn current_uid() -> u32 {
     extern "C" {
         fn getuid() -> u32;
     }
     // SAFETY: getuid takes no arguments, cannot fail, and touches no memory.
     unsafe { getuid() }
-}
-
-#[cfg(not(unix))]
-fn current_uid() -> u32 {
-    0
 }
 
 /// An environment variable as a UTF-8 path, treated as absent when empty or not
@@ -257,6 +292,7 @@ mod tests {
         assert!(message.contains("CLOVE_RUNTIME_DIR"), "{message}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn runtime_dir_precedence() {
         let env = |pairs: &'static [(&'static str, &'static str)]| {
@@ -289,6 +325,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn over_long_socket_path_names_the_limit_and_the_fix() {
         let long = Utf8PathBuf::from(format!("/{}.sock", "x".repeat(SUN_PATH_MAX)));
@@ -318,5 +355,22 @@ mod tests {
         assert_eq!(repo_hash(a), repo_hash(a), "hash must be deterministic");
         assert_ne!(repo_hash(a), repo_hash(b), "distinct paths → distinct hash");
         assert_eq!(repo_hash(a).len(), 16);
+    }
+
+    /// A symlink is never a trusted runtime directory, even to a private one:
+    /// whoever controls the link controls where the socket is looked for.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_runtime_dir_is_not_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(runtime_dir_is_private(Utf8Path::from_path(&real).unwrap()));
+        assert!(!runtime_dir_is_private(Utf8Path::from_path(&link).unwrap()));
+        assert!(ensure_private_dir(Utf8Path::from_path(&link).unwrap()).is_err());
     }
 }

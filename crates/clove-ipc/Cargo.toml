@@ -28,6 +28,16 @@ tokio-serde.workspace = true
 futures.workspace = true      # Sink/Stream for the hub handshake frames
 interprocess = { workspace = true, features = ["tokio"] }
 
+# The hub pipe's owner check: both ends compare the peer's token user SID with
+# their own (a pipe name proves nothing on Windows).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 tempfile.workspace = true
 # Tests may exercise tokio surfaces beyond the trimmed release set; give them full.

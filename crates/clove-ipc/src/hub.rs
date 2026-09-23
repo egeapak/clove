@@ -1,12 +1,12 @@
-//! The hub handshake and control service (DESIGN §8.4).
+//! The hub: where it lives, and the version handshake that opens every
+//! connection (DESIGN §8.2/§8.4).
 //!
-//! One `cloved` serves every project of a user, so a connection has to say which
-//! project it is about before any [`crate::CloveRpc`] call can mean anything. The
-//! first length-delimited JSON frame on a connection is a [`Hello`]; the hub
-//! answers exactly one [`Welcome`]; after an `ok` welcome the *same* framed
-//! stream carries tarpc — [`crate::CloveRpc`] bound to the attached project, or
-//! [`HubRpc`] for a control connection. Binding the project per connection is
-//! what lets the sixteen `CloveRpc` methods stay exactly as they were.
+//! One `cloved` serves every project of a user and is tied to none of them.
+//! The first length-delimited JSON frame on a connection is a [`Hello`] naming
+//! only the client's protocol version; the hub answers exactly one [`Welcome`];
+//! after an `ok` the *same* framed stream carries tarpc ([`crate::CloveRpc`]),
+//! where every project-scoped call names its caller's own
+//! [`crate::service::Project`].
 
 use camino::{Utf8Path, Utf8PathBuf};
 use futures::{SinkExt, StreamExt};
@@ -16,7 +16,6 @@ use serde::{Deserialize, Serialize};
 use tarpc::tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 use crate::protocol::StatusResponse;
-use crate::service::RpcError;
 
 /// Where a hub lives: its socket, pid, and lock inside one per-user runtime
 /// directory (DESIGN §8.2). Two `HubPaths` over different directories are two
@@ -27,9 +26,13 @@ pub struct HubPaths {
 }
 
 impl HubPaths {
-    /// The hub rooted at `dir`.
+    /// The hub rooted at `dir`, made absolute against this process's working
+    /// directory — the hub itself runs from its runtime directory, so a
+    /// relative one would name a different place there.
     pub fn at(dir: impl Into<Utf8PathBuf>) -> HubPaths {
-        HubPaths { dir: dir.into() }
+        HubPaths {
+            dir: crate::absolute(&dir.into()),
+        }
     }
 
     /// The hub for this user: the one in [`crate::runtime_dir`].
@@ -42,7 +45,6 @@ impl HubPaths {
     /// limit. The error names the actual cause, where a failed spawn would only
     /// time out.
     pub fn preflight(&self) -> std::io::Result<()> {
-        #[cfg(not(windows))]
         crate::ensure_private_dir(&self.dir)?;
         self.socket_name().map(|_| ())
     }
@@ -59,6 +61,22 @@ impl HubPaths {
         #[cfg(not(windows))]
         {
             self.sock().exists() && crate::runtime_dir_is_private(&self.dir)
+        }
+    }
+
+    /// Whether a hub process holds this directory's lock — alive, whether
+    /// starting, serving, or on its way out. The socket answers for a hub only
+    /// once it is bound; the lock is taken first and dropped last.
+    pub fn running(&self) -> bool {
+        if !crate::runtime_dir_is_private(&self.dir) || !self.lock().exists() {
+            return false;
+        }
+        match clove_core::fs_safe::open_lock_file(&self.lock()) {
+            Ok(file) => matches!(
+                file.try_lock_shared(),
+                Err(std::fs::TryLockError::WouldBlock)
+            ),
+            Err(_) => false,
         }
     }
 
@@ -82,23 +100,21 @@ impl HubPaths {
         self.dir.join("hub.lock")
     }
 
-    /// The pid the hub advertised, if its pid file is readable.
+    /// The pid the hub advertised, if its pid file is readable and names a
+    /// process that could be signalled (never 0 or 1, never negative as an
+    /// `i32` — `kill(0)` and `kill(-1)` address process groups).
     pub fn read_pid(&self) -> Option<u32> {
-        std::fs::read_to_string(self.pid())
-            .ok()?
-            .trim()
-            .parse()
-            .ok()
+        crate::parse_pid(&std::fs::read_to_string(self.pid()).ok()?)
     }
 
     /// The local-socket name clients and the hub agree on: the socket file on
-    /// Unix, a pipe named after the runtime directory on Windows.
+    /// Unix, a per-user pipe on Windows.
     pub fn socket_name(&self) -> std::io::Result<interprocess::local_socket::Name<'static>> {
         use interprocess::local_socket::prelude::*;
         #[cfg(windows)]
         {
             use interprocess::local_socket::GenericNamespaced;
-            self.pipe_name().to_ns_name::<GenericNamespaced>()
+            self.pipe_name()?.to_ns_name::<GenericNamespaced>()
         }
         #[cfg(not(windows))]
         {
@@ -109,41 +125,49 @@ impl HubPaths {
         }
     }
 
-    /// The Windows pipe name. Keyed on the runtime directory, which is per user,
-    /// so two users (or two test hubs) never meet on one pipe.
+    /// The Windows pipe name: keyed on the user's SID and the runtime
+    /// directory, so no two users (or test hubs) ever meet on one pipe.
     #[cfg(windows)]
-    pub fn pipe_name(&self) -> String {
-        format!("clove-hub-{}", crate::repo_hash(&self.dir))
+    pub fn pipe_name(&self) -> std::io::Result<String> {
+        Ok(format!("clove-hub-{}", self.user_key()?))
     }
 
     /// The Windows named event `clove daemon stop --all` signals (DESIGN §8.9).
     #[cfg(windows)]
-    pub fn event_name(&self) -> String {
-        format!("clove-hub-shutdown-{}", crate::repo_hash(&self.dir))
+    pub fn event_name(&self) -> std::io::Result<String> {
+        Ok(format!("clove-hub-shutdown-{}", self.user_key()?))
+    }
+
+    #[cfg(windows)]
+    fn user_key(&self) -> std::io::Result<String> {
+        let sid = crate::win::current_user_sid()?;
+        Ok(crate::repo_hash(Utf8Path::new(&format!(
+            "{sid}|{}",
+            self.dir
+        ))))
     }
 }
 
-/// The first frame a client sends.
+/// The first frame a client sends: only its protocol version. The project each
+/// call is about travels with the call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "hello", rename_all = "snake_case")]
 pub enum Hello {
-    /// Serve [`crate::CloveRpc`] for the project at `clove_dir`.
-    Attach {
-        protocol: u32,
-        clove_dir: String,
-        /// Load the project if the hub is not serving it yet. A read probe sends
-        /// `false`: asking whether a daemon can answer must not start one.
-        load: bool,
-    },
-    /// Serve [`HubRpc`].
-    Control { protocol: u32 },
+    Clove { protocol: u32 },
 }
 
 impl Hello {
+    /// The hello this build sends.
+    pub fn current() -> Hello {
+        Hello::Clove {
+            protocol: crate::PROTOCOL_VERSION,
+        }
+    }
+
     /// The protocol version the client speaks.
     pub fn protocol(&self) -> u32 {
         match self {
-            Hello::Attach { protocol, .. } | Hello::Control { protocol } => *protocol,
+            Hello::Clove { protocol } => *protocol,
         }
     }
 }
@@ -162,11 +186,15 @@ pub enum Welcome {
     },
 }
 
-/// The `code`s a [`Welcome::Err`] carries.
+/// The `code`s a [`Welcome::Err`] or a per-call [`crate::RpcError`] carries.
 pub mod codes {
     /// The client's protocol version is not the hub's. Still proof of life:
     /// a hub answered, it just cannot be used by this client.
     pub const PROTOCOL_MISMATCH: &str = "PROTOCOL_MISMATCH";
+    /// The first frame was not a `Hello`.
+    pub const BAD_HELLO: &str = "BAD_HELLO";
+    /// A call's project path is not absolute.
+    pub const BAD_PROJECT: &str = "BAD_PROJECT";
     /// `load: false` and the hub is not serving that project.
     pub const NOT_LOADED: &str = "NOT_LOADED";
     /// Another daemon holds the project's `daemon.lock` — a pre-hub daemon, or a
@@ -174,25 +202,11 @@ pub mod codes {
     pub const PROJECT_LOCKED: &str = "PROJECT_LOCKED";
     /// The project could not be loaded (unreadable index, missing directory…).
     pub const LOAD_FAILED: &str = "LOAD_FAILED";
-    /// The first frame was not a `Hello`.
-    pub const BAD_HELLO: &str = "BAD_HELLO";
-    /// The hub is shutting down.
+    /// The hub has decided to exit; start a new one once it is gone.
     pub const SHUTTING_DOWN: &str = "SHUTTING_DOWN";
 }
 
-/// The control service a [`Hello::Control`] connection speaks.
-#[tarpc::service]
-pub trait HubRpc {
-    /// Liveness: returns [`crate::PROTOCOL_VERSION`].
-    async fn ping() -> u32;
-    /// The hub and every project it serves.
-    async fn hub_status() -> HubStatus;
-    /// Stop serving the project at `clove_dir`. When it was the last one the
-    /// hub exits right after replying.
-    async fn detach(clove_dir: String) -> Result<Detached, RpcError>;
-}
-
-/// The reply to [`HubRpc::hub_status`].
+/// The reply to `hub_status`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HubStatus {
     pub pid: u32,
@@ -208,11 +222,11 @@ pub struct HubStatus {
 pub struct ProjectInfo {
     /// The canonical `.clove/` directory the project is keyed on.
     pub clove_dir: String,
-    /// The project's own status — the same payload `CloveRpc::status` returns.
+    /// The project's own status — the same payload `status` returns.
     pub status: StatusResponse,
 }
 
-/// The reply to [`HubRpc::detach`].
+/// The reply to `detach`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Detached {
     /// Whether the project was being served.
@@ -246,28 +260,39 @@ pub async fn recv_frame<T: DeserializeOwned>(framed: &mut HubFramed) -> std::io:
     }
 }
 
+/// Whether the process at the other end of `stream` runs as this user. Checked
+/// by the client (is this really my hub?) and by the hub (is this one of my
+/// user's clients?): the runtime directory is private, but a check on the
+/// connection itself does not depend on that.
+pub fn peer_is_this_user(stream: &Stream) -> std::io::Result<bool> {
+    use interprocess::local_socket::traits::StreamCommon as _;
+    let creds = stream.peer_creds()?;
+    #[cfg(unix)]
+    {
+        Ok(creds.euid() == Some(crate::current_uid()))
+    }
+    #[cfg(windows)]
+    {
+        let pid = creds
+            .pid()
+            .ok_or_else(|| std::io::Error::other("the pipe peer has no process id"))?;
+        Ok(crate::win::process_user_sid(pid)? == crate::win::current_user_sid()?)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn hello_and_welcome_have_a_stable_wire_shape() {
-        let attach = Hello::Attach {
-            protocol: 7,
-            clove_dir: "/r/.clove".into(),
-            load: false,
-        };
         assert_eq!(
-            serde_json::to_value(&attach).unwrap(),
-            serde_json::json!({"hello":"attach","protocol":7,"clove_dir":"/r/.clove","load":false})
-        );
-        assert_eq!(
-            serde_json::to_value(Hello::Control { protocol: 7 }).unwrap(),
-            serde_json::json!({"hello":"control","protocol":7})
+            serde_json::to_value(Hello::Clove { protocol: 7 }).unwrap(),
+            serde_json::json!({"hello":"clove","protocol":7})
         );
         let refused = Welcome::Err {
             protocol: 7,
-            code: codes::NOT_LOADED.into(),
+            code: codes::PROTOCOL_MISMATCH.into(),
             message: "x".into(),
         };
         let wire = serde_json::to_string(&refused).unwrap();
@@ -280,5 +305,10 @@ mod tests {
     fn a_tarpc_request_is_not_a_hello() {
         let tarpc_frame = r#"{"Request":{"context":{},"id":0,"message":{"Ping":{}}}}"#;
         assert!(serde_json::from_str::<Hello>(tarpc_frame).is_err());
+    }
+
+    #[test]
+    fn a_relative_hub_dir_is_made_absolute() {
+        assert!(HubPaths::at("rel/run").dir().is_absolute());
     }
 }

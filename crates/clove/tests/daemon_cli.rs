@@ -1,18 +1,30 @@
 //! Phase 4 (T-D05/T-D07): `clove daemon start|stop|status` against the per-user
 //! hub, idempotent start, no-op stop, `stop --all`, and the `clove doctor`
-//! daemon-health check. Unix-only. Spawns the sibling `cloved` for the
-//! start/stop tests; skips those cleanly if it is not built (only outside
-//! `cargo test --workspace`). Every test's hub lives in its own temp runtime
-//! directory, never the user's.
+//! daemon-health check. Unix-only. Builds the sibling `cloved` on demand, so a
+//! daemon test can never pass by skipping. Every test's hub lives in its own
+//! temp runtime directory, never the user's.
 #![cfg(unix)]
 
+use std::io::{Read, Write};
+use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
-use assert_cmd::cargo::cargo_bin;
 use assert_cmd::Command;
 
-fn cloved_built() -> bool {
-    cargo_bin("clove").with_file_name("cloved").exists()
+/// The `cloved` binary, built on demand rather than hoped for in `target/`.
+fn cloved() -> &'static Path {
+    static BIN: OnceLock<PathBuf> = OnceLock::new();
+    BIN.get_or_init(|| {
+        escargot::CargoBuild::new()
+            .package("cloved")
+            .bin("cloved")
+            .run()
+            .expect("build cloved for the daemon CLI tests")
+            .path()
+            .to_path_buf()
+    })
 }
 
 /// `clove` in `dir`, talking to the hub rooted at `run`.
@@ -20,6 +32,7 @@ fn clove(dir: &Path, run: &Path) -> Command {
     let mut c = Command::cargo_bin("clove").unwrap();
     c.current_dir(dir)
         .env("CLOVE_RUNTIME_DIR", run)
+        .env("CLOVED_PATH", cloved())
         .env("CLOVED_DISABLE_WEB", "1");
     c
 }
@@ -169,10 +182,6 @@ fn stop_with_no_daemon_is_a_clean_noop() {
 
 #[test]
 fn start_status_stop_round_trip() {
-    if !cloved_built() {
-        eprintln!("skipping: cloved not built (run via `cargo test --workspace`)");
-        return;
-    }
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     let run = Run::new();
@@ -226,9 +235,6 @@ fn start_status_stop_round_trip() {
 /// in the per-user runtime directory, whatever the repository's depth.
 #[test]
 fn daemon_runs_for_a_repo_nested_past_the_socket_path_limit() {
-    if !cloved_built() {
-        return;
-    }
     let tmp = tempfile::tempdir().unwrap();
     let run = Run::new();
     let dir = tmp.path().join("nested-directory/".repeat(8));
@@ -262,10 +268,6 @@ fn daemon_runs_for_a_repo_nested_past_the_socket_path_limit() {
 /// stopping one does not touch the other.
 #[test]
 fn one_daemon_serves_every_project_independently() {
-    if !cloved_built() {
-        eprintln!("skipping: cloved not built (run via `cargo test --workspace`)");
-        return;
-    }
     let t1 = tempfile::tempdir().unwrap();
     let t2 = tempfile::tempdir().unwrap();
     let (d1, d2) = (t1.path(), t2.path());
@@ -332,9 +334,6 @@ fn one_daemon_serves_every_project_independently() {
 
 #[test]
 fn stop_all_stops_the_daemon_for_every_project() {
-    if !cloved_built() {
-        return;
-    }
     let t1 = tempfile::tempdir().unwrap();
     let t2 = tempfile::tempdir().unwrap();
     let (d1, d2) = (t1.path(), t2.path());
@@ -371,9 +370,6 @@ fn stop_all_stops_the_daemon_for_every_project() {
 /// it cannot serve the project, and reads keep working from the files.
 #[test]
 fn a_project_locked_by_an_older_daemon_falls_back_safely() {
-    if !cloved_built() {
-        return;
-    }
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     let run = Run::new();
@@ -391,7 +387,7 @@ fn a_project_locked_by_an_older_daemon_falls_back_safely() {
         .stderr
         .clone();
     let stderr = String::from_utf8_lossy(&out);
-    assert!(stderr.contains("another daemon"), "{stderr}");
+    assert!(stderr.contains("daemon.lock"), "{stderr}");
 
     let v = json(
         &clove(dir, &run.path)
@@ -410,10 +406,6 @@ fn a_project_locked_by_an_older_daemon_falls_back_safely() {
 /// share one `.clove/` share one slot.
 #[test]
 fn daemon_is_reachable_from_any_subdirectory() {
-    if !cloved_built() {
-        eprintln!("skipping: cloved not built (run via `cargo test --workspace`)");
-        return;
-    }
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     let run = Run::new();
@@ -444,4 +436,290 @@ fn daemon_is_reachable_from_any_subdirectory() {
         .args(["daemon", "stop"])
         .assert()
         .success();
+}
+
+fn titles(v: &serde_json::Value) -> Vec<String> {
+    v["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["title"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// A relative `--clove-dir` names the caller's own project — never whichever
+/// project the daemon's working directory happens to hold.
+#[test]
+fn a_relative_clove_dir_always_means_the_callers_own_project() {
+    let (ta, tb) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (a, b) = (ta.path(), tb.path());
+    let run = Run::new();
+    init(a, &run.path);
+    init(b, &run.path);
+    clove(a, &run.path)
+        .args(["new", "only-in-a"])
+        .assert()
+        .success();
+    clove(b, &run.path)
+        .args(["new", "only-in-b"])
+        .assert()
+        .success();
+    // Started from A, so a daemon that kept its spawner's cwd would sit in A.
+    clove(a, &run.path)
+        .args(["daemon", "start"])
+        .assert()
+        .success();
+
+    clove(b, &run.path)
+        .args(["--clove-dir", ".clove", "daemon", "start"])
+        .assert()
+        .success();
+    let v = json(
+        &clove(b, &run.path)
+            .args(["--clove-dir", ".clove", "ls", "-f", "json"])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    assert_eq!(titles(&v), vec!["only-in-b"], "{v}");
+
+    clove(b, &run.path)
+        .args(["--clove-dir", ".clove", "daemon", "stop"])
+        .assert()
+        .success();
+    assert_eq!(
+        daemon_status(a, &run.path)["data"]["running"],
+        serde_json::json!(true),
+        "stopping B must leave A served"
+    );
+}
+
+/// The environment of a process, as `KEY=VALUE` text.
+fn process_env(pid: u32) -> String {
+    if cfg!(target_os = "linux") {
+        std::fs::read(format!("/proc/{pid}/environ"))
+            .map(|raw| String::from_utf8_lossy(&raw).replace('\0', "\n"))
+            .unwrap_or_default()
+    } else {
+        let out = std::process::Command::new("ps")
+            .args(["eww", "-o", "command=", "-p", &pid.to_string()])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+}
+
+/// The working directory of a process.
+fn process_cwd(pid: u32) -> String {
+    if cfg!(target_os = "linux") {
+        std::fs::read_link(format!("/proc/{pid}/cwd"))
+            .map(|p| p.display().to_string())
+            .unwrap_or_default()
+    } else {
+        let out = std::process::Command::new("lsof")
+            .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .find_map(|l| l.strip_prefix('n').map(str::to_owned))
+            .unwrap_or_default()
+    }
+}
+
+fn process_command(pid: u32) -> String {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "command=", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+/// The spawned daemon belongs to no project and inherits nothing it does not
+/// need: no project argument, no spawner's cwd, no stray secrets.
+#[test]
+fn the_daemon_is_spawned_bare_with_a_minimal_environment() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let run = Run::new();
+    init(dir, &run.path);
+    clove(dir, &run.path)
+        .env("GITHUB_TOKEN", "ghp_marker_not_for_the_daemon")
+        .env("CLOVE_TEST_UNRELATED_VAR", "unrelated_marker")
+        .args(["daemon", "start"])
+        .assert()
+        .success();
+    let pid: u32 = std::fs::read_to_string(run.pid_file())
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+
+    let command = process_command(pid);
+    assert!(command.ends_with("cloved run"), "spawn args: {command}");
+    let env = process_env(pid);
+    assert!(!env.contains("ghp_marker_not_for_the_daemon"), "{env}");
+    assert!(!env.contains("unrelated_marker"), "{env}");
+    assert!(env.contains("CLOVE_RUNTIME_DIR="), "{env}");
+    // It works from its own private runtime directory: not `/`, and not the
+    // directory of the client that started it.
+    assert_eq!(
+        std::path::PathBuf::from(process_cwd(pid)),
+        run.path.canonicalize().unwrap()
+    );
+}
+
+/// A process that holds a socket open but never answers: a live, busy daemon.
+fn silent_listener(path: &Path) -> UnixListener {
+    UnixListener::bind(path).unwrap()
+}
+
+/// A clove 0.1.0 daemon that is alive but slow to answer must keep its files:
+/// only a daemon proven gone may be cleaned up.
+#[test]
+fn a_live_but_slow_old_daemon_keeps_its_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let run = Run::new();
+    init(dir, &run.path);
+    let clove_dir = dir.join(".clove");
+    let _busy = silent_listener(&clove_dir.join("daemon.sock"));
+    std::fs::write(clove_dir.join("daemon.pid"), b"999999").unwrap();
+
+    let _ = clove(dir, &run.path)
+        .args(["daemon", "stop"])
+        .output()
+        .unwrap();
+    assert!(
+        clove_dir.join("daemon.sock").exists(),
+        "stop kept the socket"
+    );
+    assert!(clove_dir.join("daemon.pid").exists(), "stop kept the pid");
+
+    let codes = doctor_codes(dir, &run.path);
+    assert!(codes.contains(&"DAEMON_LEGACY".to_owned()), "{codes:?}");
+    clove(dir, &run.path)
+        .args(["doctor", "--fix"])
+        .assert()
+        .success();
+    assert!(
+        clove_dir.join("daemon.sock").exists(),
+        "doctor --fix kept the socket"
+    );
+    assert!(
+        clove_dir.join("daemon.pid").exists(),
+        "doctor --fix kept the pid"
+    );
+}
+
+/// A stand-in hub in `run` that answers every hello with `reply` (a JSON
+/// `Welcome`), framed the way tarpc's length-delimited codec frames it.
+fn fake_hub(run: &Path, reply: &'static str) -> std::thread::JoinHandle<()> {
+    clove_ipc::ensure_private_dir(camino::Utf8Path::from_path(run).unwrap()).unwrap();
+    let listener = UnixListener::bind(run.join("hub.sock")).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut held = Vec::new();
+        while Instant::now() < deadline {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    let mut len = [0u8; 4];
+                    if stream.read_exact(&mut len).is_ok() {
+                        let mut hello = vec![0u8; u32::from_be_bytes(len) as usize];
+                        let _ = stream.read_exact(&mut hello);
+                        let _ = stream.write_all(&(reply.len() as u32).to_be_bytes());
+                        let _ = stream.write_all(reply.as_bytes());
+                    }
+                    held.push(stream);
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+    })
+}
+
+/// A per-project `stop` against a daemon this client cannot talk to must say
+/// so — and how to stop it — rather than claim no daemon is running.
+#[test]
+fn stopping_a_project_on_an_incompatible_daemon_says_how() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let run = Run::new();
+    init(dir, &run.path);
+    let _hub = fake_hub(
+        &run.path,
+        r#"{"welcome":"err","protocol":99,"code":"PROTOCOL_MISMATCH","message":"client protocol 7 != daemon protocol 99"}"#,
+    );
+
+    let out = clove(dir, &run.path)
+        .args(["daemon", "stop"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(7), "{stderr}");
+    assert!(stderr.contains("stop --all"), "{stderr}");
+    assert!(run.path.join("hub.sock").exists());
+}
+
+/// `clove serve` racing a daemon that is still starting (it holds the lock but
+/// has not bound its socket yet) waits for it and hands off, instead of starting
+/// a second, standalone server.
+#[test]
+fn serve_waits_for_a_daemon_that_is_still_starting() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let run = Run::new();
+    init(dir, &run.path);
+    clove_ipc::ensure_private_dir(camino::Utf8Path::from_path(&run.path).unwrap()).unwrap();
+    let starting = std::fs::File::create(run.path.join("hub.lock")).unwrap();
+    starting.try_lock().unwrap();
+
+    let mut serve = std::process::Command::new(assert_cmd::cargo::cargo_bin("clove"))
+        .current_dir(dir)
+        .env("CLOVE_RUNTIME_DIR", &run.path)
+        .env("CLOVED_PATH", cloved())
+        .env("CLOVED_WEB_PORT", "0")
+        .arg("serve")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    drop(starting);
+    let mut hub = std::process::Command::new(cloved())
+        .env("CLOVE_RUNTIME_DIR", &run.path)
+        .env("CLOVED_WEB_PORT", "0")
+        .arg("run")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = serve.try_wait().unwrap() {
+            break Some(status);
+        }
+        if Instant::now() > deadline {
+            let _ = serve.kill();
+            let _ = serve.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let mut stderr = String::new();
+    serve
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    let _ = hub.kill();
+    let _ = hub.wait();
+    assert!(
+        status.is_some_and(|s| s.success()) && stderr.contains("served by the running daemon"),
+        "serve must hand off to the starting daemon: {status:?} {stderr}"
+    );
 }

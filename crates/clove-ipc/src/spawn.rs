@@ -8,13 +8,16 @@ use std::time::{Duration, Instant};
 
 use camino::Utf8Path;
 
-use crate::client::ClientError;
-use crate::hub::HubPaths;
+use crate::client::{cleanup_stale_hub, ClientError};
+use crate::hub::{codes, HubPaths};
 use crate::DaemonClient;
 
-/// How long [`ensure_daemon`] waits for a freshly-spawned hub to become ready
-/// (its pid file appears only after the socket is bound).
-const READY_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long [`ensure_daemon`] keeps trying to reach a serving hub — spawning
+/// one, or waiting out one that is exiting — before giving up.
+const READY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long to wait before spawning again when no hub has come up.
+const RESPAWN_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Locate the `cloved` binary next to the running executable (the install layout,
 /// and the cargo target dir in tests). `CLOVED_PATH` overrides it (tests / unusual
@@ -50,43 +53,93 @@ pub fn cloved_path() -> std::io::Result<PathBuf> {
 /// once ready — use [`ensure_daemon`] to wait for readiness).
 pub fn spawn_hub(hub: &HubPaths) -> std::io::Result<()> {
     let bin = cloved_path()?;
+    // The hub runs from its runtime directory, which must exist and be private
+    // before anything is spawned into it.
+    hub.preflight()?;
     spawn_detached(&bin, hub)
 }
 
-/// A client attached to `clove_dir` on the user's hub, loading the project —
-/// and starting the hub — if needed.
+/// A client for `clove_dir` on the user's hub, loading the project — and
+/// starting the hub — if needed.
 pub fn ensure_daemon(clove_dir: &Utf8Path) -> Option<DaemonClient> {
     ensure_daemon_at(&HubPaths::resolve(), clove_dir).ok()
 }
 
 /// [`ensure_daemon`] against an explicit hub, reporting why it failed. Callers
 /// fall back to direct file access on an error, so this never has to succeed.
+///
+/// The hub's lock, not its socket, says whether one is alive: a hub takes the
+/// lock before it binds and releases it after it has unbound, so a hub that is
+/// starting or on its way out holds it while its socket says nothing useful. A
+/// hub that has decided to exit refuses new projects (`SHUTTING_DOWN`); this
+/// waits for it to go and then starts another.
 pub fn ensure_daemon_at(hub: &HubPaths, clove_dir: &Utf8Path) -> Result<DaemonClient, ClientError> {
-    if hub.footprint_present() {
-        match DaemonClient::attach(hub, clove_dir, true) {
-            // No listener behind the footprint: a crashed hub. Start another.
-            Err(ClientError::Connect(_)) => {}
-            // Attached — or a live hub that refused this project (locked by an
-            // older daemon, unloadable). Spawning cannot fix either.
-            other => return other,
-        }
-    }
-    // A hub that cannot bind would only surface as the readiness timeout.
-    hub.preflight().map_err(ClientError::Connect)?;
-    spawn_hub(hub).map_err(ClientError::Connect)?;
-    let start = Instant::now();
-    while start.elapsed() < READY_TIMEOUT {
-        if hub.pid().exists() {
+    let deadline = Instant::now() + READY_TIMEOUT;
+    let mut last_spawn: Option<Instant> = None;
+    let mut last_error = ClientError::Timeout;
+    loop {
+        if hub.footprint_present() {
             match DaemonClient::attach(hub, clove_dir, true) {
-                // Readiness races a concurrent spawner's hub: the loser exits and
-                // the winner's socket may not be there yet. Keep waiting.
-                Err(ClientError::Connect(_)) => {}
-                other => return other,
+                Ok(client) => return Ok(client),
+                Err(e) if e.refusal_code() == Some(codes::SHUTTING_DOWN) => last_error = e,
+                // Refused before a socket is bound, or after it is unbound; or
+                // cut off by a hub on its way out.
+                Err(e @ (ClientError::Connect(_) | ClientError::Transport(_))) => last_error = e,
+                // Alive and answering, but not for this project (locked by an
+                // older daemon, unloadable, another protocol): spawning cannot
+                // fix that.
+                Err(other) => return Err(other),
             }
         }
-        std::thread::sleep(Duration::from_millis(50));
+        if !hub.running() && last_spawn.is_none_or(|t| t.elapsed() >= RESPAWN_INTERVAL) {
+            // No process holds the lock: whatever is on disk is a corpse.
+            cleanup_stale_hub(hub);
+            spawn_hub(hub).map_err(ClientError::Connect)?;
+            last_spawn = Some(Instant::now());
+        }
+        if Instant::now() >= deadline {
+            return Err(match last_error {
+                ClientError::Connect(_) => ClientError::Timeout,
+                other => other,
+            });
+        }
+        std::thread::sleep(Duration::from_millis(25));
     }
-    Err(ClientError::Timeout)
+}
+
+/// The variables a spawned hub keeps from its spawner. The hub serves every
+/// project of the user and belongs to none of them, so it must not inherit one
+/// client's shell — its secrets (`GITHUB_TOKEN`), its locale quirks, its
+/// working directory. What it keeps is what it needs to find its runtime
+/// directory, run tools, and honour the test knobs.
+fn keep_var(name: &str) -> bool {
+    #[cfg(windows)]
+    let name = name.to_ascii_uppercase();
+    #[cfg(windows)]
+    let name = name.as_str();
+    const KEEP: &[&str] = &[
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "TMPDIR",
+        "XDG_RUNTIME_DIR",
+        "XDG_DATA_HOME",
+        "CLOVE_HOME",
+        "CLOVE_GITHUB_API_URL",
+        "CLOVE_GITHUB_RETRY_MS",
+        "LANG",
+        // Windows.
+        "SYSTEMROOT",
+        "WINDIR",
+        "LOCALAPPDATA",
+        "APPDATA",
+        "USERPROFILE",
+        "TEMP",
+        "TMP",
+        "PATHEXT",
+    ];
+    KEEP.contains(&name) || name.starts_with("LC_") || name.starts_with("CLOVED_")
 }
 
 /// Spawn `cloved run` detached from this process and terminal. The runtime
@@ -94,14 +147,8 @@ pub fn ensure_daemon_at(hub: &HubPaths, clove_dir: &Utf8Path) -> Result<DaemonCl
 #[cfg(unix)]
 fn spawn_detached(bin: &Path, hub: &HubPaths) -> std::io::Result<()> {
     use std::os::unix::process::CommandExt;
-    use std::process::{Command, Stdio};
 
-    let mut cmd = Command::new(bin);
-    cmd.arg("run")
-        .env("CLOVE_RUNTIME_DIR", hub.dir().as_str())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+    let mut cmd = hub_command(bin, hub);
     // New session leader → detached from the controlling terminal. The parent
     // exits after readiness, so the daemon reparents to init.
     unsafe {
@@ -116,6 +163,23 @@ fn spawn_detached(bin: &Path, hub: &HubPaths) -> std::io::Result<()> {
     cmd.spawn().map(|_child| ())
 }
 
+/// `cloved run` — no project, the scrubbed environment, and the runtime
+/// directory as both its working directory and `CLOVE_RUNTIME_DIR`, so the hub
+/// binds where this client looks and inherits nothing of the client's place.
+fn hub_command(bin: &Path, hub: &HubPaths) -> std::process::Command {
+    use std::process::{Command, Stdio};
+    let mut cmd = Command::new(bin);
+    cmd.arg("run")
+        .current_dir(hub.dir().as_std_path())
+        .env_clear()
+        .envs(std::env::vars_os().filter(|(k, _)| k.to_str().is_some_and(keep_var)))
+        .env("CLOVE_RUNTIME_DIR", hub.dir().as_str())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    cmd
+}
+
 #[cfg(unix)]
 extern "C" {
     #[link_name = "setsid"]
@@ -125,16 +189,30 @@ extern "C" {
 #[cfg(windows)]
 fn spawn_detached(bin: &Path, hub: &HubPaths) -> std::io::Result<()> {
     use std::os::windows::process::CommandExt;
-    use std::process::{Command, Stdio};
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    Command::new(bin)
-        .arg("run")
-        .env("CLOVE_RUNTIME_DIR", hub.dir().as_str())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
+    let mut cmd = hub_command(bin, hub);
+    cmd.creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
         .spawn()
         .map(|_child| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::keep_var;
+
+    #[test]
+    fn the_hub_keeps_only_what_it_needs_from_its_spawner() {
+        for kept in ["PATH", "HOME", "CLOVED_WEB_PORT", "LC_ALL"] {
+            assert!(keep_var(kept), "{kept}");
+        }
+        for dropped in [
+            "GITHUB_TOKEN",
+            "AWS_SECRET_ACCESS_KEY",
+            "PWD",
+            "CLOVE_FORMAT",
+        ] {
+            assert!(!keep_var(dropped), "{dropped}");
+        }
+    }
 }

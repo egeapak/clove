@@ -1,11 +1,10 @@
-//! IPC server: the daemon's implementation of the `clove-ipc` tarpc service
-//! (DESIGN §8.4).
+//! One project's half of the daemon's `clove-ipc` tarpc service (DESIGN §8.4).
 //!
-//! `PING`/`STATUS` answer from daemon state; `QUERY` runs the lean `clove_index`
-//! list (freshening first, like the CLI's index path) and returns rows the client
-//! shapes itself; `GRAPH` serves the cached graph; `REINDEX`
-//! rebuilds and reopens the index. The transport (tarpc over a local socket) is
-//! wired in `lifecycle::accept_loop`.
+//! `STATUS` answers from the project's state; `QUERY` runs the lean
+//! `clove_index` list (freshening first, like the CLI's index path) and returns
+//! rows the client shapes itself; `GRAPH` serves the cached graph; `REINDEX`
+//! rebuilds and reopens the index. The hub (`crate::hub`) resolves each call's
+//! project and hands it to that project's [`Dispatcher`].
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -16,12 +15,11 @@ use clove_core::view::Order;
 use clove_core::ItemStore;
 use clove_index::{Filter, Index, ItemListRow, PostFilter, QueryMode};
 use clove_ipc::{
-    CloveRpc, GraphRequest, GraphResponse, LeanRow, QueryKind, QueryListResponse, QueryRequest,
-    ReindexDone, RpcError, StatusResponse, PROTOCOL_VERSION,
+    GraphRequest, GraphResponse, LeanRow, QueryKind, QueryListResponse, QueryRequest, ReindexDone,
+    RpcError, StatusResponse,
 };
 use clove_types::{CloveError, CloveId, ItemType, NewSpec};
 use serde_json::Value;
-use tarpc::context::Context;
 
 use crate::graph_cache::GraphCache;
 use crate::state::DaemonState;
@@ -47,23 +45,17 @@ pub struct Dispatcher {
     pub default_type: ItemType,
 }
 
-impl CloveRpc for Dispatcher {
-    async fn ping(self, _: Context) -> u32 {
-        // A ping is a heartbeat: count it and reset the idle-shutdown window.
-        if let Ok(mut state) = self.state.lock() {
-            state.record_ping();
-        }
-        PROTOCOL_VERSION
-    }
-
-    async fn change_generation(self, _: Context) -> u64 {
+/// The project-scoped half of the RPC service, for one project. The hub
+/// resolves each call's project to its slot and hands the call here.
+impl Dispatcher {
+    pub async fn change_generation(self) -> u64 {
         // Cheap lock-free read; also a heartbeat so an active MCP notify-poll
         // keeps the daemon's idle-shutdown window reset (like `ping`).
         self.touch();
         self.graph.change_generation()
     }
 
-    async fn status(self, _: Context) -> StatusResponse {
+    pub async fn status(self) -> StatusResponse {
         self.touch();
         match self.state.lock() {
             Ok(state) => state.snapshot(),
@@ -81,22 +73,22 @@ impl CloveRpc for Dispatcher {
         }
     }
 
-    async fn query(self, _: Context, req: QueryRequest) -> Result<QueryListResponse, RpcError> {
+    pub async fn query(self, req: QueryRequest) -> Result<QueryListResponse, RpcError> {
         self.touch();
         self.blocking(move |this| this.handle_query(req)).await
     }
 
-    async fn graph(self, _: Context, req: GraphRequest) -> Result<GraphResponse, RpcError> {
+    pub async fn graph(self, req: GraphRequest) -> Result<GraphResponse, RpcError> {
         self.touch();
         self.blocking(move |this| this.handle_graph(req)).await
     }
 
-    async fn reindex(self, _: Context) -> Result<ReindexDone, RpcError> {
+    pub async fn reindex(self) -> Result<ReindexDone, RpcError> {
         self.touch();
         self.blocking(|this| this.handle_reindex()).await
     }
 
-    async fn create(self, _: Context, spec: NewSpec) -> Result<Value, RpcError> {
+    pub async fn create(self, spec: NewSpec) -> Result<Value, RpcError> {
         self.touch();
         self.blocking(move |this| {
             let out = clove_core::ops::create(
@@ -113,9 +105,8 @@ impl CloveRpc for Dispatcher {
         .await
     }
 
-    async fn set_status(
+    pub async fn set_status(
         self,
-        _: Context,
         id: String,
         status: clove_types::ItemStatus,
     ) -> Result<Value, RpcError> {
@@ -130,12 +121,7 @@ impl CloveRpc for Dispatcher {
         .await
     }
 
-    async fn edit(
-        self,
-        _: Context,
-        id: String,
-        assignments: Vec<String>,
-    ) -> Result<Value, RpcError> {
+    pub async fn edit(self, id: String, assignments: Vec<String>) -> Result<Value, RpcError> {
         self.touch();
         let cid = CloveId::new(&id).map_err(rpc_err)?;
         self.blocking(move |this| {
@@ -147,9 +133,8 @@ impl CloveRpc for Dispatcher {
         .await
     }
 
-    async fn apply_edit(
+    pub async fn apply_edit(
         self,
-        _: Context,
         id: String,
         req: clove_types::EditRequest,
     ) -> Result<Value, RpcError> {
@@ -163,9 +148,8 @@ impl CloveRpc for Dispatcher {
         .await
     }
 
-    async fn add_comment(
+    pub async fn add_comment(
         self,
-        _: Context,
         id: String,
         author: String,
         body: String,
@@ -181,7 +165,7 @@ impl CloveRpc for Dispatcher {
         .await
     }
 
-    async fn dep_add(self, _: Context, id: String, dep_id: String) -> Result<Value, RpcError> {
+    pub async fn dep_add(self, id: String, dep_id: String) -> Result<Value, RpcError> {
         self.touch();
         let cid = CloveId::new(&id).map_err(rpc_err)?;
         let dep = CloveId::new(&dep_id).map_err(rpc_err)?;
@@ -193,7 +177,7 @@ impl CloveRpc for Dispatcher {
         .await
     }
 
-    async fn dep_remove(self, _: Context, id: String, dep_id: String) -> Result<Value, RpcError> {
+    pub async fn dep_remove(self, id: String, dep_id: String) -> Result<Value, RpcError> {
         self.touch();
         let cid = CloveId::new(&id).map_err(rpc_err)?;
         let dep = CloveId::new(&dep_id).map_err(rpc_err)?;
@@ -206,12 +190,7 @@ impl CloveRpc for Dispatcher {
         .await
     }
 
-    async fn set_parent(
-        self,
-        _: Context,
-        id: String,
-        parent: Option<String>,
-    ) -> Result<Value, RpcError> {
+    pub async fn set_parent(self, id: String, parent: Option<String>) -> Result<Value, RpcError> {
         self.touch();
         let cid = CloveId::new(&id).map_err(rpc_err)?;
         let parent = match parent {
@@ -227,14 +206,14 @@ impl CloveRpc for Dispatcher {
         .await
     }
 
-    async fn show(self, _: Context, id: String) -> Result<Value, RpcError> {
+    pub async fn show(self, id: String) -> Result<Value, RpcError> {
         self.touch();
         let cid = CloveId::new(&id).map_err(rpc_err)?;
         self.blocking(move |this| clove_core::ops::show(&this.store(), &cid).map_err(rpc_err))
             .await
     }
 
-    async fn stats(self, _: Context, top: u32, include_epics: bool) -> Result<Value, RpcError> {
+    pub async fn stats(self, top: u32, include_epics: bool) -> Result<Value, RpcError> {
         self.touch();
         self.blocking(move |this| {
             clove_core::ops::stats(&this.store(), top as usize, include_epics, now())

@@ -8,7 +8,7 @@ mod support;
 
 use std::time::Duration;
 
-use support::{command, init_clove_dir, runtime_dir, TestHub, SIGKILL, SIGTERM};
+use support::{command, init_clove_dir, TestHub, SIGKILL, SIGTERM};
 
 #[test]
 fn hub_pid_appears_only_after_socket_is_bound() {
@@ -47,7 +47,7 @@ fn second_hub_refuses_to_start() {
     let first = TestHub::spawn(Some(&clove_dir));
 
     // A second hub in the same runtime directory must fail fast (lock held).
-    let second = command(&first.paths, None, &[("CLOVED_DISABLE_WEB", "1")])
+    let second = command(&first.paths, &[("CLOVED_DISABLE_WEB", "1")])
         .output()
         .expect("run second cloved");
     assert!(
@@ -63,27 +63,20 @@ fn second_hub_refuses_to_start() {
 }
 
 /// A second hub under *another* runtime directory cannot take a project the
-/// first already serves: the project's `daemon.lock` decides, and `--clove-dir`
-/// makes that fatal.
+/// first already serves: the project's `daemon.lock` decides.
 #[test]
-fn a_served_project_cannot_be_preloaded_by_another_hub() {
+fn a_served_project_cannot_be_loaded_by_another_hub() {
     let (_tmp, clove_dir) = init_clove_dir();
     let first = TestHub::spawn(Some(&clove_dir));
-
-    let (_run, other) = runtime_dir();
-    let second = command(&other, Some(&clove_dir), &[("CLOVED_DISABLE_WEB", "1")])
-        .output()
-        .expect("run second cloved");
-    assert!(
-        !second.status.success(),
-        "preload of a locked project fails"
-    );
-    assert!(
-        String::from_utf8_lossy(&second.stderr).contains("another daemon"),
-        "stderr={}",
-        String::from_utf8_lossy(&second.stderr)
-    );
-    assert!(!other.pid().exists(), "the failed hub never reported ready");
+    let second = TestHub::spawn(None);
+    match second.load(&clove_dir) {
+        Err(clove_ipc::ClientError::Refused { code, message }) => {
+            assert_eq!(code, clove_ipc::hub::codes::PROJECT_LOCKED);
+            assert!(message.contains("daemon.lock"), "{message}");
+        }
+        Err(other) => panic!("expected PROJECT_LOCKED, got {other}"),
+        Ok(_) => panic!("the second hub served a locked project"),
+    }
     first.client(&clove_dir);
 }
 

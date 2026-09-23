@@ -166,6 +166,9 @@ fn daemon_dir(ctx: &Ctx) -> &camino::Utf8Path {
 ///   e.g. an old `cloved` still running after a `clove` upgrade) → a **non**-
 ///   fixable `DAEMON_VERSION_SKEW`: deleting a live process's socket/pid would be
 ///   wrong, so we advise a restart instead.
+/// - `Unresponsive` (something accepted but did not answer in time, or holds
+///   the hub lock without a socket yet) → a non-fixable `DAEMON_UNRESPONSIVE`:
+///   alive as far as anyone can tell, so its files stay.
 /// - `Absent`/`Healthy` → no finding (a live, healthy daemon is never touched).
 fn daemon_issue(health: clove_ipc::DaemonHealth) -> Option<DoctorIssue> {
     use clove_ipc::DaemonHealth;
@@ -190,30 +193,43 @@ fn daemon_issue(health: clove_ipc::DaemonHealth) -> Option<DoctorIssue> {
                 .to_owned(),
             fixable: false,
         }),
+        DaemonHealth::Unresponsive => Some(DoctorIssue {
+            severity: Severity::Warning,
+            code: "DAEMON_UNRESPONSIVE",
+            item: None,
+            message: "a daemon is running but did not answer in time (busy, or still \
+                      starting); if it stays that way, `clove daemon stop --all`"
+                .to_owned(),
+            fixable: false,
+        }),
     }
 }
 
 /// A clove 0.1.0 daemon's footprint in `.clove/`: a live one still serving the
-/// project (which keeps the hub from serving it) is a non-fixable
-/// `DAEMON_LEGACY`; leftover files with nothing behind them are a fixable
-/// `DAEMON_STALE_SOCKET`.
+/// project (which keeps the hub from serving it), or one that cannot be
+/// verified either way, is a non-fixable `DAEMON_LEGACY`; only files proven to
+/// have nothing behind them are a fixable `DAEMON_STALE_SOCKET`.
 fn legacy_daemon_issue(clove_dir: &camino::Utf8Path) -> Option<DoctorIssue> {
-    if !clove_ipc::legacy_sock_path(clove_dir).exists() && !clove_ipc::pid_path(clove_dir).exists()
-    {
-        return None;
-    }
-    Some(match clove_ipc::legacy_daemon_pid(clove_dir) {
-        Some(pid) => DoctorIssue {
-            severity: Severity::Warning,
-            code: "DAEMON_LEGACY",
-            item: None,
-            message: format!(
-                "a clove 0.1.0 daemon (pid {pid}) still serves this project, so the \
-                 current daemon cannot; run `clove daemon stop` to stop it"
-            ),
-            fixable: false,
-        },
-        None => DoctorIssue {
+    use clove_ipc::LegacyDaemon;
+    let legacy = |message: String| DoctorIssue {
+        severity: Severity::Warning,
+        code: "DAEMON_LEGACY",
+        item: None,
+        message,
+        fixable: false,
+    };
+    Some(match clove_ipc::legacy_daemon(clove_dir) {
+        LegacyDaemon::Absent => return None,
+        LegacyDaemon::Alive(pid) => legacy(format!(
+            "a clove 0.1.0 daemon (pid {pid}) still serves this project, so the \
+             current daemon cannot; run `clove daemon stop` to stop it"
+        )),
+        LegacyDaemon::Unknown(pid) => legacy(format!(
+            "a clove 0.1.0 daemon{} may still serve this project but could not be \
+             verified; its files in .clove/ are left in place",
+            pid.map(|p| format!(" (pid {p})")).unwrap_or_default()
+        )),
+        LegacyDaemon::Dead => DoctorIssue {
             severity: Severity::Warning,
             code: "DAEMON_STALE_SOCKET",
             item: None,

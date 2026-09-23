@@ -1,8 +1,6 @@
 //! Phase 2 (T-D03) end-to-end: `clove ls`/`ready`/`query` route through a running
 //! `cloved` and produce output identical (bar `_meta.source`) to the local path.
-//! Unix-only (drives real signals). Spawns the sibling `cloved` binary from the
-//! same target dir; skips cleanly if it is not built (only happens outside the
-//! `cargo test --workspace` gate).
+//! Unix-only (drives real signals). Builds the sibling `cloved` on demand.
 #![cfg(unix)]
 #![allow(clippy::zombie_processes)]
 
@@ -12,9 +10,16 @@ use std::time::{Duration, Instant};
 
 use assert_cmd::cargo::cargo_bin;
 
-fn cloved_bin() -> Option<PathBuf> {
-    let path = cargo_bin("clove").with_file_name("cloved");
-    path.exists().then_some(path)
+/// The `cloved` binary, built on demand so these tests can never pass by
+/// skipping.
+fn cloved_bin() -> PathBuf {
+    escargot::CargoBuild::new()
+        .package("cloved")
+        .bin("cloved")
+        .run()
+        .expect("build cloved for the daemon routing tests")
+        .path()
+        .to_path_buf()
 }
 
 fn clove() -> Command {
@@ -69,8 +74,6 @@ fn spawn_daemon(clove_dir: &std::path::Path, bin: &std::path::Path) -> Daemon {
         .env("CLOVE_RUNTIME_DIR", &run)
         .env("CLOVED_DISABLE_WEB", "1")
         .arg("run")
-        .arg("--clove-dir")
-        .arg(clove_dir)
         // Detach from cargo's captured pipes: a surviving daemon holding stdout
         // open is what turned a failed assertion into a hang.
         .stdout(std::process::Stdio::null())
@@ -81,7 +84,12 @@ fn spawn_daemon(clove_dir: &std::path::Path, bin: &std::path::Path) -> Daemon {
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(5) {
         if pid.exists() {
-            return Daemon(child);
+            let daemon = Daemon(child);
+            // A daemon is started bare; the project is loaded by an ordinary
+            // call, as `clove daemon start` makes it.
+            let loaded = run_in(clove_dir.parent().unwrap(), &["daemon", "start"]);
+            assert!(loaded.status.success(), "{loaded:?}");
+            return daemon;
         }
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -113,10 +121,7 @@ fn ids_and_source(out: &[u8]) -> (Vec<String>, String) {
 
 #[test]
 fn ls_ready_query_route_through_daemon_with_parity() {
-    let Some(bin) = cloved_bin() else {
-        eprintln!("skipping: cloved binary not built (run via `cargo test --workspace`)");
-        return;
-    };
+    let bin = cloved_bin();
 
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
@@ -165,10 +170,7 @@ fn new_id(out: &[u8]) -> String {
 
 #[test]
 fn tier1_tier2_commands_route_through_daemon_with_parity() {
-    let Some(bin) = cloved_bin() else {
-        eprintln!("skipping: cloved binary not built (run via `cargo test --workspace`)");
-        return;
-    };
+    let bin = cloved_bin();
 
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
@@ -261,10 +263,7 @@ fn sigkill(pid: u32) {
 /// socket on the way (DESIGN §8.3).
 #[test]
 fn routed_reads_fall_back_after_daemon_crash() {
-    let Some(bin) = cloved_bin() else {
-        eprintln!("skipping: cloved binary not built (run via `cargo test --workspace`)");
-        return;
-    };
+    let bin = cloved_bin();
 
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
@@ -332,10 +331,7 @@ fn routed_reads_fall_back_after_daemon_crash() {
 /// test could not see it.
 #[test]
 fn search_is_a_file_scan_even_with_a_live_daemon() {
-    let Some(bin) = cloved_bin() else {
-        eprintln!("skipping: cloved binary not built (run via `cargo test --workspace`)");
-        return;
-    };
+    let bin = cloved_bin();
 
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
@@ -407,10 +403,7 @@ fn search_is_a_file_scan_even_with_a_live_daemon() {
 /// implementations would have passed those with the daemon tier left on.
 #[test]
 fn no_index_bypasses_a_live_daemon() {
-    let Some(bin) = cloved_bin() else {
-        eprintln!("skipping: cloved binary not built (run via `cargo test --workspace`)");
-        return;
-    };
+    let bin = cloved_bin();
 
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();

@@ -158,6 +158,12 @@ impl Session {
         drop(self.stdin);
         let _ = self.child.wait();
     }
+
+    /// Close stdin (the client hanging up) and return how the server exited.
+    fn hang_up(mut self) -> std::process::ExitStatus {
+        drop(self.stdin);
+        self.child.wait().unwrap()
+    }
 }
 
 #[test]
@@ -1308,8 +1314,6 @@ fn read_tools_use_the_daemon_tier_and_agree_with_the_files() {
         .env("CLOVE_RUNTIME_DIR", runtime_dir(dir.path()))
         .env("CLOVED_DISABLE_WEB", "1")
         .arg("run")
-        .arg("--clove-dir")
-        .arg(dir.path().join(".clove"))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -1320,6 +1324,12 @@ fn read_tools_use_the_daemon_tier_and_agree_with_the_files() {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     assert!(pid.exists(), "daemon did not come up");
+    // The daemon is started bare; the project is loaded by an ordinary call.
+    clove(dir.path())
+        .args(["daemon", "start"])
+        .env("CLOVED_DISABLE_WEB", "1")
+        .assert()
+        .success();
 
     // A session WITHOUT the no-daemon opt-out: the engine may route to it.
     let mut s = Session::start_cmd(clove(dir.path()));
@@ -1572,4 +1582,79 @@ fn published_output_schemas_validate_the_tool_results() {
     );
 
     s.shutdown();
+}
+
+/// Build `cloved` for the daemon-backed tests below.
+#[cfg(unix)]
+fn cloved_bin() -> std::path::PathBuf {
+    escargot::CargoBuild::new()
+        .package("cloved")
+        .bin("cloved")
+        .run()
+        .expect("build cloved")
+        .path()
+        .to_path_buf()
+}
+
+/// A relative `--clove-dir` given to `clove mcp` means the caller's own
+/// project: its writes land there, even when the daemon was started from
+/// another project's directory.
+#[cfg(unix)]
+#[test]
+fn a_relative_clove_dir_writes_into_the_callers_project() {
+    let a = init_repo();
+    let b = init_repo();
+    let run = runtime_dir(a.path());
+    let _stop = StopDaemon(run.clone());
+    let cloved = cloved_bin();
+    clove(a.path())
+        .env("CLOVED_PATH", &cloved)
+        .env("CLOVED_DISABLE_WEB", "1")
+        .args(["daemon", "start"])
+        .assert()
+        .success();
+
+    let mut cmd = clove(b.path());
+    cmd.env("CLOVE_RUNTIME_DIR", &run)
+        .env("CLOVED_PATH", &cloved)
+        .env("CLOVED_DISABLE_WEB", "1")
+        .args(["--clove-dir", ".clove"]);
+    let mut s = Session::start_cmd(cmd);
+    let created = s.call(2, "clove_new", json!({ "title": "via a relative path" }));
+    let id = created["structuredContent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    s.shutdown();
+
+    let issues = |dir: &Path| {
+        std::fs::read_dir(dir.join(".clove/issues"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(issues(b.path()), vec![format!("{id}.md")]);
+    assert!(
+        issues(a.path()).is_empty(),
+        "nothing lands in A: {:?}",
+        issues(a.path())
+    );
+}
+
+/// A session that used the daemon ends cleanly when the client hangs up — the
+/// daemon client's runtime must not be dropped inside the server's.
+#[cfg(unix)]
+#[test]
+fn hanging_up_a_daemon_backed_session_exits_cleanly() {
+    let dir = init_repo();
+    let _stop = StopDaemon(runtime_dir(dir.path()));
+    let mut cmd = clove(dir.path());
+    cmd.env("CLOVED_PATH", cloved_bin())
+        .env("CLOVED_DISABLE_WEB", "1");
+    let mut s = Session::start_cmd(cmd);
+    let listed = s.call(2, "clove_list", json!({}));
+    assert_eq!(listed["structuredContent"]["source"], "daemon", "{listed}");
+    let status = s.hang_up();
+    assert!(status.success(), "clove mcp exited with {status}");
 }

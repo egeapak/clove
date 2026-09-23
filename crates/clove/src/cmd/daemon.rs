@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use camino::Utf8Path;
 use clove_core::OutputFormat;
-use clove_ipc::{ClientError, DaemonClient, HubClient, HubPaths};
+use clove_ipc::{ClientError, DaemonClient, HubClient, HubPaths, LegacyDaemon};
 use clove_types::CloveError;
 use serde_json::{json, Value};
 
@@ -58,23 +58,24 @@ fn start(
     match clove_ipc::ensure_daemon_at(hub, clove_dir) {
         Ok(_) => {}
         Err(ClientError::Refused { message, .. }) => {
-            return Err(daemon_err(&match clove_ipc::legacy_daemon_pid(clove_dir) {
-                Some(pid) => format!(
+            return Err(daemon_err(&match clove_ipc::legacy_daemon(clove_dir) {
+                LegacyDaemon::Alive(pid) => format!(
                     "a clove 0.1.0 daemon (pid {pid}) already serves this project; \
                      `clove daemon stop` stops it, then start again"
                 ),
-                None => format!("the daemon cannot serve this project: {message}"),
+                _ => format!("the daemon cannot serve this project: {message}"),
             }));
         }
         Err(ClientError::Connect(e) | ClientError::Name(e)) => {
             return Err(daemon_err(&format!("could not start the daemon: {e}")));
         }
-        Err(_) => {
+        Err(ClientError::Timeout) => {
             return Err(daemon_err(
-                "could not start the daemon (it did not become ready within 5s); \
-                 is `cloved` installed next to `clove`?",
+                "the daemon did not finish starting and loading this project within \
+                 10s (a large project's first load can take longer); try again",
             ));
         }
+        Err(e) => return Err(daemon_err(&format!("could not start the daemon: {e}"))),
     }
 
     let pid = hub.read_pid();
@@ -95,20 +96,32 @@ fn stop(
     clove_dir: &Utf8Path,
     format: OutputFormat,
 ) -> Result<ExitCode, CloveError> {
-    // A pre-hub daemon still running after an upgrade. `legacy_daemon_pid` only
-    // answers when a clove daemon really listens on the project's old socket,
-    // so the pid it left behind is safe to signal (D-daemon-6).
-    if let Some(pid) = clove_ipc::legacy_daemon_pid(clove_dir) {
-        signal_pid(pid)?;
-        wait_gone(&clove_ipc::pid_path(clove_dir))?;
-        return emit(
-            format,
-            json!({ "stopped": true, "legacy": true }),
-            &format!("stopped the clove 0.1.0 daemon (pid {pid})"),
-        );
+    // A pre-hub daemon still running after an upgrade. Only one that answered
+    // on the project's old socket is signalled (a stale pid can name an
+    // unrelated process, D-daemon-6), only proven corpses are removed, and
+    // anything in between is left exactly as it is.
+    match clove_ipc::legacy_daemon(clove_dir) {
+        LegacyDaemon::Alive(pid) => {
+            signal_pid(pid)?;
+            wait_gone(&clove_ipc::pid_path(clove_dir))?;
+            return emit(
+                format,
+                json!({ "stopped": true, "legacy": true }),
+                &format!("stopped the clove 0.1.0 daemon (pid {pid})"),
+            );
+        }
+        LegacyDaemon::Dead => clove_ipc::cleanup_legacy(clove_dir),
+        LegacyDaemon::Unknown(pid) => {
+            let pid = pid.map(|p| format!(" (pid {p})")).unwrap_or_default();
+            return Err(daemon_err(&format!(
+                "a clove 0.1.0 daemon{pid} may still be serving this project, but it \
+                 could not be verified (it did not answer, or its socket is not this \
+                 user's); its files in .clove/ were left in place — check the process \
+                 and stop it yourself"
+            )));
+        }
+        LegacyDaemon::Absent => {}
     }
-    // Anything left of one is a crashed daemon's corpse.
-    clove_ipc::cleanup_legacy(clove_dir);
 
     let not_running = || {
         emit(
@@ -117,12 +130,24 @@ fn stop(
             "no daemon serving this project",
         )
     };
-    let mut control = match HubClient::connect(hub) {
-        Ok(control) => control,
-        Err(_) => return not_running(),
+    if !hub.footprint_present() {
+        return not_running();
+    }
+    let mut client = match DaemonClient::attach(hub, clove_dir, false) {
+        Ok(client) => client,
+        Err(e) if e.refusal_code() == Some(clove_ipc::hub::codes::NOT_LOADED) => {
+            return not_running()
+        }
+        Err(ClientError::Connect(_)) if !hub.running() => return not_running(),
+        Err(e) => {
+            return Err(daemon_err(&format!(
+                "a daemon is running but this clove cannot talk to it ({e}); stop it \
+                 with `clove daemon stop --all`"
+            )))
+        }
     };
-    let detached = control
-        .detach(clove_dir)
+    let detached = client
+        .detach()
         .map_err(|e| daemon_err(&format!("detaching this project: {e}")))?;
     if !detached.detached {
         return not_running();
@@ -139,23 +164,31 @@ fn stop(
 
 /// Stop the hub — every project it serves.
 fn stop_hub(hub: &HubPaths, format: OutputFormat) -> Result<ExitCode, CloveError> {
-    let not_running = || {
-        emit(
-            format,
-            json!({ "stopped": false, "running": false }),
-            "no daemon running",
-        )
-    };
     // Signal only a hub that proves itself alive: a leftover `hub.pid` can name
     // an unrelated process after pid reuse (D-daemon-6). An answer of any
     // protocol version is proof enough — that is exactly the old hub an upgrade
-    // leaves behind.
-    match HubClient::connect(hub) {
-        Ok(_) | Err(ClientError::Refused { .. }) | Err(ClientError::Transport(_)) => {}
-        Err(_) => return not_running(),
+    // leaves behind — and so is a busy hub that did not answer in time, or one
+    // holding its lock while it starts.
+    let alive = match HubClient::connect(hub) {
+        Ok(_)
+        | Err(ClientError::Refused { .. })
+        | Err(ClientError::Transport(_))
+        | Err(ClientError::Timeout) => true,
+        Err(_) => hub.running(),
+    };
+    if !alive {
+        return emit(
+            format,
+            json!({ "stopped": false, "running": false }),
+            "no daemon running",
+        );
     }
     let Some(pid) = hub.read_pid() else {
-        return not_running();
+        return Err(daemon_err(&format!(
+            "a daemon holds {} but has no usable pid file; wait for it to finish \
+             starting and try again",
+            hub.dir()
+        )));
     };
     signal_hub(hub, pid)?;
     wait_gone(&hub.pid())?;
@@ -300,7 +333,9 @@ fn signal_hub(_hub: &HubPaths, pid: u32) -> Result<(), CloveError> {
 fn signal_hub(hub: &HubPaths, _pid: u32) -> Result<(), CloveError> {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{OpenEventW, SetEvent, EVENT_MODIFY_STATE};
-    let name = hub.event_name();
+    let name = hub
+        .event_name()
+        .map_err(|e| daemon_err(&format!("naming the shutdown event: {e}")))?;
     let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
     // SAFETY: open the hub's named shutdown event and signal it.
     unsafe {
@@ -317,8 +352,13 @@ fn signal_hub(hub: &HubPaths, _pid: u32) -> Result<(), CloveError> {
 /// SIGTERM a verified daemon pid.
 #[cfg(unix)]
 fn signal_pid(pid: u32) -> Result<(), CloveError> {
-    // SAFETY: kill(2) with a parsed pid and SIGTERM (15).
-    let rc = unsafe { libc_kill(pid as i32, 15) };
+    // `kill(0)`/`kill(-n)` signal whole process groups and pid 1 is init: only
+    // an ordinary pid is ever signalled.
+    let Some(pid) = signallable(pid) else {
+        return Err(daemon_err(&format!("refusing to signal pid {pid}")));
+    };
+    // SAFETY: kill(2) with a validated positive pid and SIGTERM (15).
+    let rc = unsafe { libc_kill(pid, 15) };
     if rc == -1 {
         let err = std::io::Error::last_os_error();
         // ESRCH (no such process): treat as already-stopped.
@@ -327,6 +367,12 @@ fn signal_pid(pid: u32) -> Result<(), CloveError> {
         }
     }
     Ok(())
+}
+
+/// `pid` as a `kill(2)` target, if it names one ordinary process.
+#[cfg(unix)]
+fn signallable(pid: u32) -> Option<i32> {
+    i32::try_from(pid).ok().filter(|&p| p > 1)
 }
 
 /// A clove 0.1.0 Windows daemon is never verified (see
@@ -353,6 +399,15 @@ mod tests {
     /// timeout, a shutdown timeout, a signal failure, and an RPC failure against
     /// a *live* daemon — none reproducible cheaply or deterministically in a
     /// test. This asserts the mapping; the call sites are covered by inspection.
+    #[cfg(unix)]
+    #[test]
+    fn only_ordinary_pids_are_signalled() {
+        assert_eq!(super::signallable(4242), Some(4242));
+        for pid in [0, 1, u32::MAX, i32::MAX as u32 + 1] {
+            assert_eq!(super::signallable(pid), None, "{pid}");
+        }
+    }
+
     #[test]
     fn daemon_failures_classify_as_exit_7() {
         let err = daemon_err("status query failed");

@@ -772,8 +772,6 @@ mod daemon {
             .env("CLOVE_RUNTIME_DIR", &run)
             .env("CLOVED_DISABLE_WEB", "1")
             .arg("run")
-            .arg("--clove-dir")
-            .arg(clove_dir)
             // A daemon holding cargo's captured stdout open turns a failed
             // assertion into a hang (see `daemon_routing.rs`).
             .stdout(std::process::Stdio::null())
@@ -785,6 +783,10 @@ mod daemon {
         let start = Instant::now();
         while start.elapsed() < Duration::from_secs(10) {
             if pid.exists() {
+                // A daemon is started bare; the project is loaded by an
+                // ordinary call, as `clove daemon start` makes it.
+                let loaded = run_in(clove_dir.parent().unwrap(), &["daemon", "start"]);
+                assert!(loaded.status.success(), "{loaded:?}");
                 return daemon;
             }
             std::thread::sleep(Duration::from_millis(20));

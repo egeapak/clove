@@ -28,7 +28,7 @@ pub fn run(
     // explicit `--port` the daemon isn't on is honored with a standalone server.
     if let Some(clove_dir) = ctx.issues_dir.parent() {
         let hub = HubPaths::resolve();
-        let client = if hub.footprint_present() {
+        let client = if hub.footprint_present() || wait_for_starting_hub(&hub) {
             DaemonClient::attach(&hub, clove_dir, true).ok()
         } else {
             None
@@ -139,6 +139,23 @@ pub fn run(
 /// The port of a `host:port` address as the daemon advertises it.
 fn port_of(addr: &str) -> Option<u16> {
     addr.parse::<SocketAddr>().ok().map(|addr| addr.port())
+}
+
+/// A daemon another client is starting holds its lock before it binds its
+/// socket. Give it a few seconds to come up rather than race it with a second,
+/// standalone server; `false` when no daemon is starting, or it never appears.
+fn wait_for_starting_hub(hub: &HubPaths) -> bool {
+    if !hub.running() {
+        return false;
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if hub.footprint_present() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    false
 }
 
 /// Best-effort browser launch (ignores failure).
