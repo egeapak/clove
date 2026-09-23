@@ -135,8 +135,15 @@ fn a_hub_stopped_mid_load_is_gone_when_its_pid_file_is() {
         let (paths, a) = (hub.paths.clone(), a.clone());
         std::thread::spawn(move || clove_ipc::DaemonClient::attach(&paths, &a, true).map(|_| ()))
     };
-    // The load holds the project's lock (and is delayed) by now.
-    std::thread::sleep(Duration::from_millis(500));
+    // Wait until the load holds the project's lock (it then sits on it).
+    let project_lock_path = clove_ipc::lock_path(&a);
+    assert!(
+        support::eventually(Duration::from_secs(30), || {
+            clove_core::fs_safe::open_lock_file(&project_lock_path)
+                .is_ok_and(|f| f.try_lock().is_err())
+        }),
+        "the load never took the project's lock"
+    );
     hub.signal(SIGTERM);
     assert!(
         support::eventually(Duration::from_secs(10), || !hub.paths.pid().exists()),

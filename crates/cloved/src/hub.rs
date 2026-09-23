@@ -1091,7 +1091,7 @@ mod tests {
         let holder = std::thread::spawn(move || {
             let _busy = index.lock().unwrap();
             held_tx.send(()).unwrap();
-            std::thread::sleep(Duration::from_millis(1500));
+            std::thread::sleep(Duration::from_millis(3000));
         });
         held.recv().unwrap();
         drop(slot);
@@ -1118,7 +1118,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_stop_during_a_load_wins() {
         let hub =
-            Hub::new(false, Duration::from_secs(60)).with_load_delay(Duration::from_millis(800));
+            Hub::new(false, Duration::from_secs(60)).with_load_delay(Duration::from_millis(2000));
         let (_b_tmp, b) = store();
         let (_a_tmp, a) = store();
         hub.attach(&call(&b, true), far()).await.unwrap(); // keeps the hub from exiting
@@ -1126,7 +1126,18 @@ mod tests {
             let (hub, a) = (hub.clone(), a.clone());
             tokio::spawn(async move { hub.attach(&call(&a, true), far()).await })
         };
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // In flight: A has an entry, and no slot yet.
+        let key = slot::canonical_key(a.as_str()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !hub
+            .table()
+            .slots
+            .get(&key)
+            .is_some_and(|e| e.slot.get().is_none())
+        {
+            assert!(Instant::now() < deadline, "the load never got under way");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
         let detached = hub.detach(&call(&a, false), far()).await.unwrap();
         assert!(
             detached.detached,

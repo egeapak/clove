@@ -148,7 +148,7 @@ fn wait_for_starting_hub(hub: &HubPaths) -> bool {
     if !hub.running() {
         return false;
     }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while std::time::Instant::now() < deadline {
         if hub.footprint_present() {
             return true;

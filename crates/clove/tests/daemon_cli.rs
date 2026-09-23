@@ -532,7 +532,7 @@ fn a_stop_while_the_start_is_still_loading_wins() {
         .env("CLOVE_RUNTIME_DIR", &run.path)
         .env("CLOVED_PATH", cloved())
         .env("CLOVED_DISABLE_WEB", "1")
-        .env("CLOVED_LOAD_DELAY_MS", "3000")
+        .env("CLOVED_LOAD_DELAY_MS", "6000")
         .args(["daemon", "start"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -896,9 +896,27 @@ fn serve_waits_for_a_daemon_that_is_still_starting() {
     let dir = tmp.path();
     let run = Run::new();
     init(dir, &run.path);
-    clove_ipc::ensure_private_dir(camino::Utf8Path::from_path(&run.path).unwrap()).unwrap();
-    let starting = std::fs::File::create(run.path.join("hub.lock")).unwrap();
-    starting.try_lock().unwrap();
+    // A hub that takes its lock and then takes its time to bind.
+    let mut hub = std::process::Command::new(cloved())
+        .env("CLOVE_HOME", TEST_CLOVE_HOME)
+        .env("CLOVE_RUNTIME_DIR", &run.path)
+        .env("CLOVED_WEB_PORT", "0")
+        .env("CLOVED_BIND_DELAY_MS", "2000")
+        .arg("run")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let hub_paths = clove_ipc::HubPaths::at(camino::Utf8Path::from_path(&run.path).unwrap());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !hub_paths.running() {
+        assert!(Instant::now() < deadline, "the hub never took its lock");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !hub_paths.footprint_present(),
+        "the hub bound before serve ran"
+    );
 
     let mut serve = std::process::Command::new(assert_cmd::cargo::cargo_bin("clove"))
         .current_dir(dir)
@@ -911,19 +929,8 @@ fn serve_waits_for_a_daemon_that_is_still_starting() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    std::thread::sleep(Duration::from_millis(300));
-    drop(starting);
-    let mut hub = std::process::Command::new(cloved())
-        .env("CLOVE_HOME", TEST_CLOVE_HOME)
-        .env("CLOVE_RUNTIME_DIR", &run.path)
-        .env("CLOVED_WEB_PORT", "0")
-        .arg("run")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(60);
     let status = loop {
         if let Some(status) = serve.try_wait().unwrap() {
             break Some(status);

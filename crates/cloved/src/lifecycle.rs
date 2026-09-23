@@ -58,6 +58,10 @@ pub fn run(paths: &HubPaths) -> anyhow::Result<()> {
         .build()
         .context("building tokio runtime")?;
 
+    // Test knob: a hub slow to bind, as on a loaded machine.
+    if let Some(delay) = env_ms("CLOVED_BIND_DELAY_MS") {
+        std::thread::sleep(delay);
+    }
     let result: anyhow::Result<()> = runtime.block_on(async {
         // A corpse socket from a crashed hub: safe to remove — we hold the lock.
         #[cfg(not(windows))]

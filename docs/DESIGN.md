@@ -1758,8 +1758,8 @@ A client spawns it with an emptied environment plus only: `PATH`, `HOME`,
 `XDG_CONFIG_HOME` and `GH_CONFIG_DIR` (where `gh auth token` finds a GitHub CLI
 config kept somewhere other than `~/.config/gh`), `LANG`/`LC_*`, the `CLOVED_*` knobs (`CLOVED_DISABLE_WEB`, `CLOVED_WEB_PORT`,
 `CLOVED_IDLE_SHUTDOWN_MS`, `CLOVED_HUB_GRACE_MS`, `CLOVED_STATS_SNAPSHOT_MS`,
-`CLOVED_GITHUB_SYNC_MS`, `CLOVED_LOAD_DELAY_MS` — a test stand-in for a large
-project's slow load, …), `CLOVE_GITHUB_API_URL`/`CLOVE_GITHUB_RETRY_MS` (test
+`CLOVED_GITHUB_SYNC_MS`, `CLOVED_LOAD_DELAY_MS`, `CLOVED_WATCH_ARM_DELAY_MS`, `CLOVED_BIND_DELAY_MS` — test stand-ins for a large
+project's slow load, a slow watch and a slow bind on a loaded machine, …), `CLOVE_GITHUB_API_URL`/`CLOVE_GITHUB_RETRY_MS` (test
 seams), `CLOVE_RUNTIME_DIR` (always set, absolute), and on Windows `SystemRoot`,
 `windir`, `LOCALAPPDATA`, `APPDATA`, `USERPROFILE`, `TEMP`/`TMP`, `PATHEXT`. Its
 working directory is its own private runtime directory (`<runtime>`, §8.2) —
@@ -1852,7 +1852,7 @@ the page and once for `clove serve`'s page; the project picker runs no script
 `X-Content-Type-Options: nosniff`.
 
 `clove serve` hands off to the hub whenever one is running — or starting (it
-holds `hub.lock`; `serve` waits up to five seconds for its socket): it has the hub
+holds `hub.lock`; `serve` waits up to ten seconds for its socket): it has the hub
 load this project and prints its `web_url`, rather than starting a second server.
 With no hub running it serves standalone, at the root, as before.
 
