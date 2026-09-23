@@ -79,7 +79,6 @@ impl TestHub {
         hub.wait_ready(Duration::from_secs(5));
         if let Some(dir) = clove_dir {
             hub.load(dir).expect("the hub serves the project");
-            hub.wait_watching(dir);
         }
         hub
     }
@@ -108,7 +107,9 @@ impl TestHub {
             _run: None,
         };
         assert!(
-            eventually(Duration::from_secs(5), || hub.load(clove_dir).is_ok()),
+            eventually(Duration::from_secs(5), || hub
+                .load_arming(clove_dir)
+                .is_ok()),
             "restarted hub serves the project"
         );
         hub.wait_watching(clove_dir);
@@ -131,8 +132,17 @@ impl TestHub {
         DaemonClient::probe_at(&self.paths, clove_dir).expect("hub serves the project")
     }
 
-    /// Attach to `clove_dir`, loading it.
+    /// Attach to `clove_dir`, loading it, and wait for its watcher to watch,
+    /// so the hub answers its reads.
     pub fn load(&self, clove_dir: &Utf8Path) -> Result<DaemonClient, ClientError> {
+        let client = self.load_arming(clove_dir)?;
+        self.wait_watching(clove_dir);
+        Ok(client)
+    }
+
+    /// Attach to `clove_dir`, loading it — back as soon as it is loaded, its
+    /// watcher possibly still arming.
+    pub fn load_arming(&self, clove_dir: &Utf8Path) -> Result<DaemonClient, ClientError> {
         DaemonClient::attach(&self.paths, clove_dir, true)
     }
 

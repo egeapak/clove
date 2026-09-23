@@ -174,7 +174,7 @@ fn an_item_written_right_after_the_load_is_indexed() {
         ],
     );
     let mut client = hub
-        .load(&repo.clove_dir)
+        .load_arming(&repo.clove_dir)
         .expect("the hub serves the project");
     repo.add_item("written as the load returned");
     let ok = wait_until(Duration::from_secs(20), || {
@@ -205,7 +205,7 @@ fn reads_wait_for_the_watcher_but_writes_do_not() {
         ],
     );
     let mut client = hub
-        .load(&repo.clove_dir)
+        .load_arming(&repo.clove_dir)
         .expect("the hub serves the project");
     assert_eq!(client.status().unwrap().watcher_state, "arming");
     match client.query_list(list_all()) {
