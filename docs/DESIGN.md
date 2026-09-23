@@ -101,8 +101,9 @@ embedders who require an older toolchain).
       comments/
         <rfc3339nano>-<author-slug>-<4char-random>.md
   index.db              # SQLite derived cache (also holds the durable `snapshots` history table) — .gitignore'd
-  daemon.sock           # clove 0.1.0's Unix socket; now in the runtime dir (§8.2) — .gitignore'd
-  daemon.pid            # PID file — .gitignore'd
+  daemon.sock           # clove 0.1.0's Unix socket; the daemon now lives in the runtime dir (§8.2) — .gitignore'd
+  daemon.pid            # clove 0.1.0's PID file — .gitignore'd
+  daemon.lock           # held by whichever daemon serves the project (§8.1) — .gitignore'd
   reindex.lock          # advisory lock during reindex — .gitignore'd
 ```
 
@@ -884,7 +885,7 @@ clove agent-doc [--format markdown|json] [--out FILE]
 clove agent-doc --check [--file PATH]       # verify embedded doc vs binary
 clove migrate [--yes] [--dry-run]
 clove doctor [--fix] [--strict] [--format json]
-clove daemon start|stop|status [--format json]
+clove daemon start|stop [--all]|status [--format json]
 clove completions <bash|zsh|fish|powershell>
 clove version [--format json]
 ```
@@ -1118,14 +1119,17 @@ divergence** (`INDEX_DIVERGENCE`, warning, counts/hashes via the staleness
 machinery). All three are fixable: `--fix` triggers a single `reindex` from the
 files (the source of truth) and re-checks. Skipped under `--no-index`.
 
-**M3 extension (daemon footprint):** `doctor` classifies the `daemon.sock`/
-`daemon.pid` footprint without mutating it. A **dead** footprint (files present,
-nothing answers, process gone) is a fixable `DAEMON_STALE_SOCKET` (`--fix` removes
-the corpse files, §8.3). A **live but protocol-incompatible** daemon — e.g. an old
+**M3 extension (daemon footprint):** `doctor` classifies two footprints without
+mutating them: the hub's `hub.sock`/`hub.pid` in the runtime directory and a clove
+0.1.0 daemon's `daemon.sock`/`daemon.pid` in `.clove/` (§8.2). A **dead** footprint
+(files present, nothing answers) is a fixable `DAEMON_STALE_SOCKET` (`--fix` removes
+the corpse files, §8.3). A **live but protocol-incompatible** hub — e.g. an old
 `cloved` still running after a `clove` upgrade bumped the IPC `PROTOCOL_VERSION` —
-is a **non-fixable** `DAEMON_VERSION_SKEW` (a restart is the remedy); crucially
-`--fix` must never delete a *running* process's socket/pid. A live, healthy daemon
-yields no finding.
+is a **non-fixable** `DAEMON_VERSION_SKEW` (`clove daemon stop --all` and a restart
+is the remedy), and a **live clove 0.1.0 daemon** still serving the project is a
+non-fixable `DAEMON_LEGACY` (`clove daemon stop` stops it); crucially `--fix` must
+never delete a *running* process's socket/pid. A live, healthy hub yields no
+finding.
 
 **Output:** one issue per finding: `{ severity, code, item: <id|path|null>,
 message, fixable }`, plus a summary `{ errors, warnings, fixed, checked }`. JSON
@@ -1395,52 +1399,112 @@ version.
 
 ### 8.1 Process Model
 
-- Single long-lived `cloved` process **per `.clove/` directory** (per project) —
-  never system-wide. The socket, pid, lock, and Windows pipe/event names are all
-  derived from the resolved `.clove/` path, so the daemon is keyed to the project,
-  not the cwd, and is reachable from any subdirectory of it.
-- `tokio::runtime::Builder::new_multi_thread()` with 2 worker threads (watcher + IPC).
-- **One daemon per repository, shared across all worktrees.** `clove` is a
+- **One long-lived `cloved` per user — the hub — serving every project that asks.**
+  Each loaded project is a *slot*: its own index handle, graph cache, file
+  watcher, snapshot and GitHub-sync loops, idle timer, and web mount. A slot is
+  keyed by the canonical `.clove/` path, so every spelling of a project (a
+  symlink, `/tmp` vs `/private/tmp`, any subdirectory) reaches the same one.
+- **Slots are supervised independently.** The first of a slot's tasks to end —
+  or panic — tears down *that slot only*: it flushes the index (§8.9), leaves the
+  web listener, closes its client connections (so they re-probe rather than talk
+  to an unloaded project), and releases its lock. The hub and every other slot
+  keep serving. A project that fails to load (no `issues/`, an index that cannot
+  be opened, a lock held elsewhere) fails that one attach.
+- **Each slot still takes `.clove/daemon.lock`,** so a project is served by at most
+  one daemon of any version: a clove 0.1.0 per-project daemon, or a hub under a
+  different runtime directory, makes the attach fail with `PROJECT_LOCKED` and the
+  client falls back to direct reads — the daemon is a cache, not the source of
+  truth.
+- `tokio::runtime::Builder::new_multi_thread()` with 2 worker threads for all
+  slots; every blocking step (loads, sweeps, queries, writes) runs on the
+  blocking pool, so one project's heavy query does not starve another's `ping`.
+- **One slot per repository, shared across all worktrees.** `clove` is a
   per-project tracker: work items belong to the *project*, not a branch, so **all
   git worktrees of a project share the main worktree's `.clove/`** (and thus one
-  index + one daemon). `find_repo_root` (clove-core `repo.rs`) resolves a linked
+  index + one slot). `find_repo_root` (clove-core `repo.rs`) resolves a linked
   worktree — even one with its own checked-out `.clove/` — to the main worktree's
-  `.clove/` via `git rev-parse --git-common-dir`; the daemon keys on that shared
-  path, and the per-directory `daemon.lock` makes it a singleton. The main worktree
-  stays subprocess-free (its `.git` is a directory); only linked worktrees pay the
-  one `git` call. A system-wide multiplexing daemon was evaluated and rejected for
-  v1 (no hot-path speedup; large lifecycle/security/blast-radius cost).
+  `.clove/` via `git rev-parse --git-common-dir`; the slot keys on that shared
+  path. The main worktree stays subprocess-free (its `.git` is a directory); only
+  linked worktrees pay the one `git` call.
+
+**Why one daemon per user (0.1.1).** Through 0.1.0 there was one `cloved` per
+`.clove/`, and a system-wide multiplexing daemon had been evaluated and rejected
+on the grounds that it bought no hot-path speed for real lifecycle, security and
+blast-radius cost. The speed argument still holds — the hub is not faster. What
+changed is that the per-project model's own costs turned out larger:
+
+1. **Web reachability.** Every project daemon competed for the one web port
+   (7373). One won; every other project's UI was unreachable — or, before #55,
+   silently another project's.
+2. **Process sprawl.** The MCP heartbeat keeps a project's daemon alive for the
+   session, and idle shutdown defaults to four hours, so an agent-heavy day left
+   one `cloved` per repository touched.
+3. **`sun_path`.** The socket lived at `<repo>/.clove/daemon.sock`, and a deep
+   repository path overflowed macOS's 104-byte `sockaddr_un` (#54).
+
+The costs the rejection named are handled rather than avoided: lifecycle by
+per-slot supervision and idle eviction, security by the owner-only runtime
+directory and socket (§8.2), blast radius by slot isolation — a hub crash drops
+every project's *acceleration*, never its data.
 
 ### 8.2 Socket / PID Layout
 
 | File | Purpose | Cleanup |
 |---|---|---|
-| `<runtime>/<repo-hash>.sock` (Unix) / `\\.\\pipe\\clove-<repo-hash>` (Windows) | IPC transport | daemon removes on clean shutdown |
-| `.clove/daemon.pid` | PID for `clove daemon stop` | daemon removes on clean shutdown |
-| `.clove/daemon.lock` | Prevents two daemons starting simultaneously | held by daemon process |
+| `<runtime>/hub.sock` (Unix) / `\\.\\pipe\\clove-hub-<runtime-hash>` (Windows) | IPC transport | hub removes on clean shutdown |
+| `<runtime>/hub.pid` | the hub's pid: readiness, and `clove daemon stop --all` | hub removes on clean shutdown |
+| `<runtime>/hub.lock` | one hub per runtime directory | held by the hub process |
+| `.clove/daemon.lock` | one daemon per project (a hub slot, or a 0.1.0 daemon) | held while the project is served |
 | `.clove/reindex.lock` | Prevents concurrent `clove reindex` | held for reindex duration |
 
-`.clove/.gitignore` (written by `clove init`) must contain all of the above, plus
-`index.db.tmp` (the temporary reindex file from §6.6). See §2.1 for the complete gitignore
+`<runtime>` is `$CLOVE_RUNTIME_DIR`, else `$XDG_RUNTIME_DIR/clove`, else
+`${TMPDIR:-/tmp}/clove-<uid>` — per user, and short, because a socket path is
+capped at 103 bytes on macOS/BSD (107 on Linux). The hub creates the directory
+`0700` and refuses one another user owns or can write to; clients only connect
+through a directory that passes the same check, so no other user can plant a
+socket that would receive this user's RPCs. The socket and pid file are `0600`.
+On Windows the pipe and shutdown-event names hash the runtime directory (per
+user, and separable in tests), and the pipe carries a protected owner-only DACL
+(`D:P(A;;GA;;;OW)`); `interprocess` creates the first instance with
+`FILE_FLAG_FIRST_PIPE_INSTANCE`, so a pre-existing pipe of that name fails the
+bind rather than being joined. **Every test sets `CLOVE_RUNTIME_DIR`** to a temp
+directory, so parallel tests never share a hub (or reach the user's).
+
+`.clove/daemon.sock` and `.clove/daemon.pid` are clove 0.1.0's per-project
+footprint: nothing writes them any more, but `clove daemon stop` recognizes a
+live 0.1.0 daemon there (§8.3) and `clove doctor` classifies them. `.clove/.gitignore`
+(written by `clove init`) keeps ignoring them. See §2.1 for the complete gitignore
 entry list.
 
-The Unix socket lives in a per-user runtime directory, not in `.clove/`: a socket path is
-capped at 103 bytes on macOS/BSD (107 on Linux), which a deeply nested repository exceeds.
-`<runtime>` is `$CLOVE_RUNTIME_DIR`, else `$XDG_RUNTIME_DIR/clove`, else
-`${TMPDIR:-/tmp}/clove-<uid>`; `<repo-hash>` hashes the canonical `.clove/` path. The daemon
-creates the directory `0700` and refuses one another user owns or can write to; clients
-only connect through a directory that passes the same check. `clove daemon start` checks
-the directory and the path length first and reports the cause instead of timing out.
+`clove daemon start` checks the directory and the socket-path length first and
+reports the cause instead of timing out. **The hub writes `hub.pid` only after
+binding the socket** (and, for `cloved run --clove-dir X`, after loading and
+sweeping X) — so a client never reads a pid without a usable socket. The pid is
+written aside and renamed into place, `0600` from the start.
 
-**Daemon writes `daemon.pid` only after binding the socket** — so the CLI never reads a PID
-without a usable socket.
+### 8.3 CLI Liveness Detection and Lifecycle
 
-### 8.3 CLI Liveness Detection
+1. Check for the hub socket (§8.2). If absent → fallback.
+2. Connect with a 50ms timeout and send the attach hello (§8.4) with
+   `load: false`. On `ECONNREFUSED` → delete the stale `hub.sock`/`hub.pid` →
+   fallback. On a timeout or any refusal (`NOT_LOADED`, `PROTOCOL_MISMATCH`, …) →
+   fallback **without** touching the files: the hub is alive, just not usable for
+   this project right now.
+3. On `ok` → proceed with IPC.
 
-1. Check for the socket (§8.2). If absent → fallback.
-2. Attempt connect with 50ms timeout. On `ECONNREFUSED` or timeout → delete stale
-   `daemon.sock` and `daemon.pid` → fallback.
-3. Send `PING` → on `PONG` → proceed with IPC.
+A read probe never loads a project: whether a daemon can answer must not decide
+to start serving. Loading is explicit — `clove daemon start` and the MCP
+server's auto-start go through `ensure_daemon`, which attaches with `load: true`
+and spawns `cloved run` (detached, with `CLOVE_RUNTIME_DIR` passed explicitly)
+only when no hub answers; `clove serve` loads the project into a hub that is
+already running (§8.10) but never starts one.
+
+| Command | Effect |
+|---|---|
+| `clove daemon start` | the hub serves this project (spawned if none runs) |
+| `clove daemon stop` | the hub stops serving this project; the hub exits if it was the last. A live clove 0.1.0 daemon on `.clove/daemon.sock` — one that answers `ping` in any protocol version — is SIGTERMed instead, which is the upgrade path |
+| `clove daemon stop --all` | stop the hub (SIGTERM / the named event), after it proves itself alive with a welcome of any protocol version — a stale `hub.pid` can name an unrelated process |
+| `clove daemon status` | this project's status plus the hub's pid, web address, and project list |
 
 Fallback: direct SQLite access (WAL shared flock) or file-scan.
 
@@ -1449,19 +1513,38 @@ Fallback: direct SQLite access (WAL shared flock) or file-scan.
 **Transport:** Unix domain socket (macOS/Linux) / Windows named pipe, via the `interprocess`
 crate's `LocalSocketListener` / `LocalSocketStream` abstraction.
 
-**Frame format:** 4-byte little-endian length prefix + UTF-8 JSON payload.
+**Frame format:** 4-byte length prefix + UTF-8 JSON payload; `tarpc` over that
+framing after the handshake.
 
-**v1 command set:**
+**Handshake.** One hub serves many projects, so the project is bound **per
+connection**. The first frame is a `Hello`; the hub answers exactly one
+`Welcome`; after an `ok` the *same* framed stream carries tarpc — `CloveRpc`
+bound to the attached project, or `HubRpc` for a control connection. Binding per
+connection is what keeps the `CloveRpc` method set unchanged.
+
 ```
-PING → PONG
-QUERY { filter, format, fields } → { ok, data, _meta }
-REINDEX → REINDEX_DONE { items_indexed, duration_ms, warnings }
-STATUS → { uptime_s, items_indexed, watcher_state, last_event_ms }
+client → {"hello":"attach","protocol":7,"clove_dir":"/r/.clove","load":false}
+hub    → {"welcome":"ok","protocol":7}                                  → CloveRpc
+       | {"welcome":"err","protocol":7,"code":"NOT_LOADED","message":…} → closed
+client → {"hello":"control","protocol":7}
+hub    → {"welcome":"ok","protocol":7}                                  → HubRpc
 ```
 
-**`PROTOCOL_VERSION`** (returned by `PING`) gates a mixed-version pair; the
-client fails a mismatch and falls back, which is safe because the daemon is a
-cache, not a source of truth. It is **6**:
+Refusal codes: `PROTOCOL_MISMATCH`, `NOT_LOADED`, `PROJECT_LOCKED`,
+`LOAD_FAILED`, `BAD_HELLO`, `SHUTTING_DOWN`. An attach counts as a `ping` for the
+project's telemetry and idle window. `HubRpc` is `ping`, `hub_status` (pid,
+uptime, web address, and each project's `STATUS`), and `detach(clove_dir)`, which
+returns once the slot's teardown has run and its lock is free.
+
+**`CloveRpc` (per project):** `ping`, `status`, `change_generation`, `query`,
+`graph`, `reindex`, and the write/read set `create`, `set_status`, `edit`,
+`apply_edit`, `add_comment`, `dep_add`, `dep_remove`, `set_parent`, `show`,
+`stats`. `STATUS` carries `web_addr` (the shared listener's `host:port`) and
+`web_url` (this project's `http://host:port/p/<slug>/`).
+
+**`PROTOCOL_VERSION`** gates a mixed-version pair; the client fails a mismatch
+and falls back, which is safe because the daemon is a cache, not a source of
+truth. It is **7**:
 
 | v | change |
 |---|---|
@@ -1469,6 +1552,12 @@ cache, not a source of truth. It is **6**:
 | 4 | `change_generation()` for MCP `resources/updated` push |
 | 5 | `QueryRequest`'s five scalar filter fields → one `filters: view::Filters`; `GraphRequest::Blocked` carries an `order` and drops the dead `include_warnings` |
 | 6 | `search` RPC and `SearchRequest` **removed** — search is a file scan on every surface (§7.8, read-path roadmap §6.1), so the daemon has nothing to answer with |
+| 7 | the hub: every connection opens with a `Hello` (above), `HubRpc` added, `STATUS.web_url` added |
+
+A v6 client never reaches the hub (it looks for `.clove/daemon.sock`); a v7
+client never reaches a 0.1.0 daemon (it looks in the runtime directory) except
+through `clove daemon stop`'s version-agnostic `ping`. A peer that does send a
+tarpc frame first gets `BAD_HELLO`.
 
 The v5 bump is worth spelling out because the codec is JSON and a v4 frame still
 *decodes*: its `"status": "open"` simply lands nowhere, and the daemon answers
@@ -1489,9 +1578,10 @@ and do not bump.
 
 ### 8.6 Startup Mtime Sweep
 
-Before advertising readiness (writing `daemon.pid`): query `file_mtimes`, scan directory,
-find changed files, re-parse and re-index. This covers files changed while daemon was stopped
-(e.g., `git pull`). Must complete before daemon marks itself ready.
+Before a project answers its first attach (and, for `cloved run --clove-dir`,
+before `hub.pid` is written): query `file_mtimes`, scan directory, find changed
+files, re-parse and re-index. This covers files changed while the project was not
+served (e.g., `git pull`). Must complete before the load reports ready.
 
 ### 8.7 Git Auto-Sync (Disabled by Default)
 
@@ -1517,36 +1607,78 @@ the git index update.
 [daemon]
 git_sync = false          # opt-in auto-commit
 watch_debounce_ms = 200   # per-file debounce window
-idle_shutdown_min = 240   # default 4h; 0 = never; N = self-terminate after N idle minutes
+idle_shutdown_min = 240   # default 4h; 0 = never; N = unload this project after N idle minutes
 stats_snapshot_min = 60   # auto-record a `clove stats` history point every N min; 0 = off
 ```
 
-**Idle self-shutdown defaults to 4 hours.** Every clove command (and watcher
-batch) is a heartbeat that resets the idle timer (`DaemonState::mark_event`), so
-an actively-used daemon never times out — it only self-terminates after this long
-with *no* clove activity at all, keeping process count bounded without a manual
-`clove daemon stop`. **There is no auto-restart yet:** after an idle shutdown the
-next read falls back to the local path until `clove daemon start` (a future MCP
-server would hold a session heartbeat to keep the daemon alive). Set `0` to keep a
-daemon running indefinitely; `CLOVED_IDLE_SHUTDOWN_MS` overrides it (sub-minute)
-for tests/CI.
+Each project's settings come from its own `.clove/config.toml` when the hub loads
+it. **Idle eviction is per project and defaults to 4 hours.** Every clove command
+against the project, web request, and watcher batch is a heartbeat that resets
+its timer (`DaemonState::mark_event`), so an actively-used project is never
+evicted — it is unloaded only after this long with *no* activity at all. The
+**hub exits once it has served no project for a grace period** (60 s;
+`CLOVED_HUB_GRACE_MS`), and at once when the last project is detached, keeping
+process count bounded without a manual `clove daemon stop`. After an eviction
+the next read falls back to the local path until something loads the project
+again; the MCP server's heartbeat re-ensures it for the session's duration. Set
+`0` to never evict; `CLOVED_IDLE_SHUTDOWN_MS` overrides it (sub-minute) for
+tests/CI.
+
+**The hub's environment is the spawning client's.** Whichever client first
+started the hub decides, for every project, `CLOVED_DISABLE_WEB`,
+`CLOVED_WEB_PORT`, `CLOVED_IDLE_SHUTDOWN_MS`, `CLOVED_HUB_GRACE_MS`,
+`CLOVED_STATS_SNAPSHOT_MS`, `CLOVED_GITHUB_SYNC_MS` — and `GITHUB_TOKEN`, which
+every project's periodic `clove sync github` child inherits. `clove daemon stop
+--all` and a restart picks up a new environment.
 
 ### 8.9 SIGTERM / Clean Shutdown
 
-**Unix (macOS/Linux):** Daemon catches SIGTERM via
-`tokio::signal::unix::signal(SignalKind::terminate())`.
+**Unix (macOS/Linux):** The hub catches SIGTERM/SIGINT via
+`tokio::signal::unix::signal`, installed before `hub.pid` is written.
 
-**Windows:** No SIGTERM. Use `tokio::signal::ctrl_c()` for interactive shutdown. For daemon
-stop from the CLI, use a named shutdown event: `CreateEventW` with a well-known name derived
-from the repo hash; `clove daemon stop` signals the event; the daemon's event-loop wakes,
+**Windows:** No SIGTERM. Use `tokio::signal::ctrl_c()` for interactive shutdown. For
+`clove daemon stop --all`, a named shutdown event: `CreateEventW` with a name derived
+from the runtime-directory hash; the CLI signals the event; the hub's event-loop wakes,
 runs the shutdown sequence, and exits.
 
-Shutdown sequence (all platforms):
-1. Flush pending debounce batches to index.
+Shutdown sequence (all platforms), per slot and then for the hub:
+1. Stop the slot's tasks (watcher, loops, idle timer) and close its connections.
 2. `PRAGMA wal_checkpoint(TRUNCATE)`.
-3. Close SQLite connection.
-4. Remove `daemon.sock` (Unix) / named-pipe handle (Windows) and `daemon.pid`.
+3. Release `.clove/daemon.lock`; unmount the project from the web listener.
+4. Once every slot is down: remove `hub.sock` (Unix) and `hub.pid`.
 5. Exit 0.
+
+A single slot's teardown (detach, idle eviction, a failed task) is steps 1–3.
+
+### 8.10 Web UI on the Hub
+
+The hub binds **one** loopback listener, when the first web-enabled project
+loads: `CLOVED_WEB_PORT`, else that project's `[web] port` (7373 by default) — a
+per-user daemon has no config of its own, and this keeps `[web] port` meaning
+what it says for the common single-project user. A taken port falls back to a
+free one (#55), which every project's `STATUS.web_addr`/`web_url` advertises.
+`CLOVED_DISABLE_WEB` turns it off; a project with `[web] enabled = false` is not
+mounted.
+
+| Path | Serves |
+|---|---|
+| `/p/<slug>/…` | that project's SPA and, under `/p/<slug>/api/v1/…`, its API — the ordinary per-project router with the prefix stripped |
+| `/api/v1/projects` | `{ projects: [{ slug, name, root, url }] }` |
+| `/` | with exactly one project, a redirect into it; otherwise a project picker |
+| any other path | with exactly one project, a redirect to the same path under it (old bookmarks and scripts keep working); otherwise 404 |
+
+The slug is the repository directory's name, slugified, so a bookmark survives a
+hub restart; a second loaded project with the same name gains a suffix from its
+path hash. The SPA is built once for the root: SvelteKit reads its runtime base
+from the `__sveltekit_<hash> = { base: "" }` global in the fallback `index.html`,
+so each project's router serves that page with `base: "/p/<slug>"` (and its
+`/_app/` asset URLs) rewritten; every `{base}` link, the API root, and the event
+socket URL derive from it. The top bar offers a project switcher when the hub
+serves more than one. The DNS-rebinding `Host` guard wraps the whole listener.
+
+`clove serve` hands off to the hub whenever one is running: it has the hub load
+this project and prints its `web_url`, rather than starting a second server. With
+no hub running it serves standalone, at the root, as before.
 
 ---
 

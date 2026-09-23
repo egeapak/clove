@@ -188,9 +188,11 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
 ## Daemon (optional)\n\
 \n\
 - `clove daemon start|stop|status` runs an optional background process that keeps\n\
-  the index hot (file-watch incremental indexing). It is never required — every\n\
-  command works identically without it; when it is running, reads are served from\n\
-  its hot index and report `_meta.source = \"daemon\"`.\n\
+  the index hot (file-watch incremental indexing). One daemon per user serves every\n\
+  project that starts it; `clove daemon stop` stops serving this project and\n\
+  `clove daemon stop --all` stops the daemon. It is never required — every\n\
+  command works identically without it; when it is serving the project, reads come\n\
+  from its hot index and report `_meta.source = \"daemon\"`.\n\
 - Opt-in `[daemon] git_sync = true` auto-commits clean item edits (never pushes).\n\
 - A running daemon auto-records `clove stats` history points on a timer\n\
   (`[daemon] stats_snapshot_min`, default 60; `0` disables) — replay with\n\

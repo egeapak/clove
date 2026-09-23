@@ -71,7 +71,8 @@
             "INDEX_DIVERGENCE",
             "INDEX_UNREADABLE",
             "DAEMON_STALE_SOCKET",
-            "DAEMON_VERSION_SKEW"
+            "DAEMON_VERSION_SKEW",
+            "DAEMON_LEGACY"
           ]
         },
         "item": {
