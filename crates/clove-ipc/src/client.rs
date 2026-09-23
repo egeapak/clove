@@ -209,8 +209,7 @@ impl DaemonClient {
                 DaemonHealth::Incompatible
             }
             // Could not connect at all (no listener / refused / stale socket):
-            // corpse files from a crashed hub. A timeout lands here too, which
-            // is why `doctor` re-checks before it deletes anything.
+            // corpse files from a crashed hub.
             Err(_) => DaemonHealth::Dead,
         }
     }
@@ -748,5 +747,59 @@ mod tests {
         std::fs::write(pid_path(&clove_dir), b"4242").unwrap();
         std::fs::write(legacy_sock_path(&clove_dir), b"").unwrap();
         assert_eq!(legacy_daemon_pid(&clove_dir), None);
+    }
+
+    /// A clove 0.1.0 daemon — protocol 6, `ping` as the first tarpc request, no
+    /// hello — is recognized from its `.clove/daemon.sock`, which is what lets
+    /// `clove daemon stop` signal it after an upgrade.
+    #[cfg(unix)]
+    #[test]
+    fn a_live_legacy_daemon_is_recognized() {
+        use futures::StreamExt;
+        use interprocess::local_socket::traits::tokio::Listener as _;
+        use interprocess::local_socket::{GenericFilePath, ListenerOptions, ToFsName};
+        use tarpc::server::{BaseChannel, Channel};
+
+        // Its request/response for `ping` have the same wire shape as
+        // `CloveRpc`'s, which is all a legacy daemon is asked.
+        #[tarpc::service]
+        trait LegacyDaemon {
+            async fn ping() -> u32;
+        }
+        #[derive(Clone)]
+        struct V6;
+        impl LegacyDaemon for V6 {
+            async fn ping(self, _: tarpc::context::Context) -> u32 {
+                6
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let clove_dir = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
+        std::fs::write(pid_path(&clove_dir), b"4242").unwrap();
+        let name = legacy_sock_path(&clove_dir)
+            .into_string()
+            .to_fs_name::<GenericFilePath>()
+            .unwrap();
+        let (bound_tx, bound_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                let listener = ListenerOptions::new().name(name).create_tokio().unwrap();
+                bound_tx.send(()).unwrap();
+                let stream = listener.accept().await.unwrap();
+                BaseChannel::with_defaults(crate::build_transport(stream))
+                    .execute(V6.serve())
+                    .for_each(|response| response)
+                    .await;
+            });
+        });
+        bound_rx.recv().unwrap();
+
+        assert_eq!(legacy_daemon_pid(&clove_dir), Some(4242));
+        server.join().unwrap();
     }
 }
