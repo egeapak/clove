@@ -1,6 +1,7 @@
 //! `clove version` (T-CLI13).
 
 use clove_core::OutputFormat;
+use clove_plugin::outln;
 use clove_types::model::CURRENT_SCHEMA_VERSION;
 use clove_types::CloveError;
 use serde_json::json;
@@ -23,7 +24,7 @@ pub fn run(format: OutputFormat) -> Result<(), CloveError> {
             print_json_success(data, json!({ "warnings": [] }));
         }
         OutputFormat::Human => {
-            println!("clove {version}");
+            outln!("clove {version}");
         }
     }
     Ok(())

@@ -281,3 +281,24 @@ fn plugin_list_reports_the_plugin() {
         .collect();
     assert!(names.contains(&"echo"), "echo should be listed: {names:?}");
 }
+
+#[test]
+fn plugin_output_to_a_closed_pipe_exits_quietly() {
+    let (plugin_dir, _echo) = install_echo();
+    let repo = init_repo("proj");
+    // Close the read end before the spawn so the plugin's envelope write hits
+    // EPIPE deterministically (`clove echo | head -0`).
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+
+    let out = clove(repo.path())
+        .env("CLOVE_PLUGIN_PATH", plugin_dir.path())
+        .args(["--format", "json", "echo", "hello"])
+        .stdout(writer)
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "status {:?}; stderr: {stderr}", out.status);
+    assert!(!stderr.contains("panicked"), "plugin panicked: {stderr}");
+}

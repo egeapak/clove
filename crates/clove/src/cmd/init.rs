@@ -3,6 +3,7 @@
 use camino::{Utf8Path, Utf8PathBuf};
 use clove_core::config::derive_prefix;
 use clove_core::{OutputFormat, GITIGNORE_ENTRIES};
+use clove_plugin::outln;
 use clove_types::CloveError;
 use serde_json::json;
 
@@ -61,9 +62,9 @@ pub fn run(
         ),
         OutputFormat::Human => {
             if !quiet {
-                println!("Initialized clove repository in {clove_dir}");
-                println!("run 'clove agent-doc' to generate an AGENTS.md snippet");
-                println!("run 'clove setup' to register clove's MCP server with Claude Code");
+                outln!("Initialized clove repository in {clove_dir}");
+                outln!("run 'clove agent-doc' to generate an AGENTS.md snippet");
+                outln!("run 'clove setup' to register clove's MCP server with Claude Code");
             }
         }
     }

@@ -5,6 +5,7 @@
 //! stdout regardless of warnings.
 
 use clove_core::OutputFormat;
+use clove_plugin::outln;
 use clove_types::CloveError;
 use serde_json::{json, Value};
 
@@ -41,7 +42,7 @@ pub fn print_json_success(data: Value, meta: Value) {
         "data": data,
         "_meta": meta,
     });
-    println!("{envelope}");
+    outln!("{envelope}");
 }
 
 /// Print a list result as one envelope whose `data` is an array.
@@ -54,7 +55,7 @@ pub fn print_json_list(items: Vec<Value>, meta: Value) {
 pub fn print_jsonl_items(items: &[Value]) {
     for item in items {
         let line = json!({ "v": ENVELOPE_VERSION, "ok": true, "data": item });
-        println!("{line}");
+        outln!("{line}");
     }
 }
 
@@ -73,7 +74,7 @@ pub fn emit_error(format: OutputFormat, error: &CloveError, quiet: bool) -> Exit
                     "exit": exit.code(),
                 },
             });
-            println!("{envelope}");
+            outln!("{envelope}");
         }
         OutputFormat::Human => {
             if !quiet {
@@ -125,7 +126,7 @@ pub fn emit_unknown_subcommand(
                     "exit": ExitCode::Usage.code(),
                 },
             });
-            println!("{envelope}");
+            outln!("{envelope}");
         }
         OutputFormat::Human => {
             if !quiet {

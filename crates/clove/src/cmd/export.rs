@@ -140,9 +140,12 @@ pub fn run(ctx: &Ctx, format: OutputFormat, args: ExportArgs) -> Result<ExitCode
         None => {
             let stdout = io::stdout();
             let mut handle = stdout.lock();
-            serialize(export_format, &shaped, &mut handle).map_err(|source| CloveError::Io {
-                path: Utf8Path::new("<stdout>").to_owned(),
-                source,
+            serialize(export_format, &shaped, &mut handle).map_err(|source| {
+                clove_plugin::stdout::exit_if_broken_pipe(&source);
+                CloveError::Io {
+                    path: Utf8Path::new("<stdout>").to_owned(),
+                    source,
+                }
             })?;
         }
     }

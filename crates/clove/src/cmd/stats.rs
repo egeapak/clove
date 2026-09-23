@@ -14,6 +14,7 @@
 use clove_core::{compute_stats, GraphStore, OutputFormat, StatsOptions, StatsReport};
 use clove_index::{Index, SCHEMA_VERSION};
 use clove_ipc::DaemonClient;
+use clove_plugin::outln;
 use clove_types::CloveError;
 use serde_json::{json, Map, Value};
 
@@ -83,7 +84,7 @@ fn show_history(ctx: &Ctx, format: OutputFormat, args: &StatsArgs) -> Result<(),
                 print_json_list(Vec::new(), json!({ "total": 0, "source": "index" }))
             }
             OutputFormat::Human => {
-                println!("no stats snapshots recorded yet (run `clove stats --snapshot`)")
+                outln!("no stats snapshots recorded yet (run `clove stats --snapshot`)")
             }
         }
         return Ok(());
@@ -126,14 +127,14 @@ fn show_history(ctx: &Ctx, format: OutputFormat, args: &StatsArgs) -> Result<(),
         }
         OutputFormat::Human => {
             if snapshots.is_empty() {
-                println!("no stats snapshots in range");
+                outln!("no stats snapshots in range");
             } else {
-                println!(
+                outln!(
                     "captured_at              total  open  in_prog  closed  ready  blocked  cycles"
                 );
                 for s in &snapshots {
                     let r = &s.report;
-                    println!(
+                    outln!(
                         "{:24} {:5}  {:4}  {:7}  {:6}  {:5}  {:7}  {:6}",
                         s.captured_at,
                         r.total,
@@ -216,13 +217,15 @@ fn report_value(report: &StatsReport, daemon: &Value, index: &Value) -> Value {
 
 /// Render the report as a sectioned human-readable summary.
 fn render_human(report: &StatsReport, daemon: &Value, index: &Value, snapshotted: bool) {
-    println!("clove stats — {} items\n", report.total);
+    outln!("clove stats — {} items\n", report.total);
 
-    println!(
+    outln!(
         "Status     open {}  in_progress {}  closed {}",
-        report.by_status.open, report.by_status.in_progress, report.by_status.closed
+        report.by_status.open,
+        report.by_status.in_progress,
+        report.by_status.closed
     );
-    println!(
+    outln!(
         "Type       bug {}  feature {}  chore {}  docs {}  epic {}",
         report.by_type.bug,
         report.by_type.feature,
@@ -230,7 +233,7 @@ fn render_human(report: &StatsReport, daemon: &Value, index: &Value, snapshotted
         report.by_type.docs,
         report.by_type.epic
     );
-    println!(
+    outln!(
         "Priority   p0 {}  p1 {}  p2 {}  p3 {}  p4 {}",
         report.by_priority[0],
         report.by_priority[1],
@@ -238,9 +241,13 @@ fn render_human(report: &StatsReport, daemon: &Value, index: &Value, snapshotted
         report.by_priority[3],
         report.by_priority[4]
     );
-    println!(
+    outln!(
         "Workflow   ready {}  blocked {}  excluded {}  dangling {}  cycles {}",
-        report.ready, report.blocked, report.excluded, report.dangling, report.cycles
+        report.ready,
+        report.blocked,
+        report.excluded,
+        report.dangling,
+        report.cycles
     );
 
     if !report.by_assignee.is_empty() || report.unassigned > 0 {
@@ -250,7 +257,7 @@ fn render_human(report: &StatsReport, daemon: &Value, index: &Value, snapshotted
             .map(|kc| format!("{} {}", kc.key, kc.count))
             .collect();
         parts.push(format!("unassigned {}", report.unassigned));
-        println!("Assignees  {}", parts.join("  "));
+        outln!("Assignees  {}", parts.join("  "));
     }
     if !report.by_label.is_empty() {
         let parts: Vec<String> = report
@@ -258,29 +265,39 @@ fn render_human(report: &StatsReport, daemon: &Value, index: &Value, snapshotted
             .iter()
             .map(|kc| format!("{} {}", kc.key, kc.count))
             .collect();
-        println!("Labels     {}", parts.join("  "));
+        outln!("Labels     {}", parts.join("  "));
     }
 
     let t = &report.throughput;
-    println!(
+    outln!(
         "Throughput created 7d {} / 30d {} / all {}    closed 7d {} / 30d {} / all {}",
-        t.created_7d, t.created_30d, t.created_total, t.closed_7d, t.closed_30d, t.closed_total
+        t.created_7d,
+        t.created_30d,
+        t.created_total,
+        t.closed_7d,
+        t.closed_30d,
+        t.closed_total
     );
 
     if !report.epics.is_empty() {
-        println!("\nEpics");
+        outln!("\nEpics");
         for e in &report.epics {
             let mark = if e.completable { " ✓" } else { "" };
-            println!(
+            outln!(
                 "  {:14} {:<24} {}/{}  {}%{}",
-                e.id, e.title, e.closed, e.total, e.pct, mark
+                e.id,
+                e.title,
+                e.closed,
+                e.total,
+                e.pct,
+                mark
             );
         }
     }
 
-    println!();
+    outln!();
     if daemon.get("running").and_then(Value::as_bool) == Some(true) {
-        println!(
+        outln!(
             "Daemon     running  uptime {}s  items {}  watcher {}",
             daemon.get("uptime_s").and_then(Value::as_u64).unwrap_or(0),
             daemon
@@ -293,7 +310,7 @@ fn render_human(report: &StatsReport, daemon: &Value, index: &Value, snapshotted
                 .unwrap_or("?"),
         );
     } else {
-        println!("Daemon     not running");
+        outln!("Daemon     not running");
     }
     if index.get("present").and_then(Value::as_bool) == Some(true) {
         let fresh = if index.get("stale").and_then(Value::as_bool) == Some(true) {
@@ -301,7 +318,7 @@ fn render_human(report: &StatsReport, daemon: &Value, index: &Value, snapshotted
         } else {
             "fresh"
         };
-        println!(
+        outln!(
             "Index      present  items {}  schema {}  {}",
             index
                 .get("items_indexed")
@@ -314,10 +331,10 @@ fn render_human(report: &StatsReport, daemon: &Value, index: &Value, snapshotted
             fresh,
         );
     } else {
-        println!("Index      not present");
+        outln!("Index      not present");
     }
 
     if snapshotted {
-        println!("\nsnapshot recorded to the index history (.clove/index.db)");
+        outln!("\nsnapshot recorded to the index history (.clove/index.db)");
     }
 }

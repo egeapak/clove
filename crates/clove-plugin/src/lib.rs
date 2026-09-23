@@ -17,12 +17,14 @@
 //! The envelope writer + `CloveError` classification live in [`envelope`] and
 //! reuse [`clove_types::error_code`], so a plugin reports the identical
 //! `code`/`exit` a built-in would for the same failure.
+#![deny(clippy::print_stdout)] // print via `outln!`/`out!` (see `clove_plugin::stdout`)
 
 #[cfg(feature = "clap")]
 mod clap_util;
 mod context;
 mod envelope;
 mod run;
+pub mod stdout;
 
 #[cfg(feature = "clap")]
 pub use clap_util::{clap_exit_code, parse_format};

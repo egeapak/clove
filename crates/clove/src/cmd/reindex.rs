@@ -2,6 +2,7 @@
 
 use clove_core::OutputFormat;
 use clove_ipc::DaemonClient;
+use clove_plugin::outln;
 use clove_types::CloveError;
 use serde_json::json;
 
@@ -43,9 +44,10 @@ pub fn run(ctx: &Ctx, format: OutputFormat, quiet: bool) -> Result<(), CloveErro
         ),
         OutputFormat::Human => {
             if !quiet {
-                println!(
+                outln!(
                     "indexed {} item(s) in {} ms",
-                    report.items_indexed, report.duration_ms
+                    report.items_indexed,
+                    report.duration_ms
                 );
                 for w in &report.warnings {
                     eprintln!("warning: {w}");

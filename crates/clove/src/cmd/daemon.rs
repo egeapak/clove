@@ -5,6 +5,7 @@
 //! spawns the sibling `cloved` binary detached and waits for its pid (readiness);
 //! `stop` signals it and waits for teardown; `status` queries it over IPC.
 
+use clove_plugin::outln;
 use std::time::{Duration, Instant};
 
 use camino::Utf8Path;
@@ -145,7 +146,7 @@ fn status(clove_dir: &Utf8Path, format: OutputFormat) -> Result<ExitCode, CloveE
                 .as_deref()
                 .map(|a| format!("  web http://{a}"))
                 .unwrap_or_default();
-            println!(
+            outln!(
                 "running  uptime {}s  items {}  watcher {}  batches {}  pings {}{web}",
                 status.uptime_s,
                 status.items_indexed,
@@ -166,7 +167,7 @@ fn emit(
 ) -> Result<ExitCode, CloveError> {
     match format {
         OutputFormat::Json | OutputFormat::Jsonl => print_json_success(data, json!({})),
-        OutputFormat::Human => println!("{human}"),
+        OutputFormat::Human => outln!("{human}"),
     }
     Ok(ExitCode::Success)
 }

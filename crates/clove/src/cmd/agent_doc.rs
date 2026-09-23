@@ -3,6 +3,7 @@
 //! can validate.
 
 use clove_core::OutputFormat;
+use clove_plugin::out;
 use clove_types::model::CURRENT_SCHEMA_VERSION;
 use clove_types::CloveError;
 use serde_json::json;
@@ -26,7 +27,7 @@ pub fn run(format: OutputFormat, args: AgentDocArgs) -> Result<(), CloveError> {
                 path: path.clone(),
                 source,
             })?,
-            None => print!("{doc}"),
+            None => out!("{doc}"),
         },
     }
     Ok(())

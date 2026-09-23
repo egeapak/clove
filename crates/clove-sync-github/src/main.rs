@@ -21,7 +21,9 @@
 //! (which renders *human* output by pretty-printing the data JSON), sync needs the
 //! host's bespoke human summary + conflict/remote-missing notes, so this `main`
 //! uses the lower-level [`emit_success`]/[`emit_error`] directly.
+#![deny(clippy::print_stdout)] // print via `outln!`/`out!` (see `clove_plugin::stdout`)
 
+use clove_plugin::outln;
 use std::process::ExitCode;
 
 use clap::Parser;
@@ -192,7 +194,7 @@ fn run(
             serde_json::to_value(&summary).unwrap_or_else(|_| json!({})),
         ),
         (OutputFormat::Human, Some(report)) => {
-            println!(
+            outln!(
                 "{}: pulled {} new / {} updated, pushed {} new / {} updated, comments +{}/-{}, {} in sync, {} conflicts",
                 applied_label(direction, &cli.target),
                 report.pulled_created,
@@ -208,7 +210,7 @@ fn run(
             print_remote_missing(&summary);
         }
         (OutputFormat::Human, None) => {
-            println!(
+            outln!(
                 "{}: pull {} new / {} updated, push {} new / {} updated, {} in sync, {} conflicts",
                 dry_run_label(direction, &cli.target),
                 summary.pull_create.len(),
@@ -250,9 +252,12 @@ fn dry_run_label(direction: clove_import::Direction, target: &str) -> String {
 /// Print the per-conflict resolution lines (human output).
 fn print_conflicts(summary: &clove_import::SyncSummary) {
     for conflict in &summary.conflicts {
-        println!(
+        outln!(
             "  conflict {} ({})  {} -> {}",
-            conflict.external_ref, conflict.clove_id, conflict.title, conflict.resolution
+            conflict.external_ref,
+            conflict.clove_id,
+            conflict.title,
+            conflict.resolution
         );
     }
 }

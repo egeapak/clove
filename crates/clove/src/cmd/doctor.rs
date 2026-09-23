@@ -2,6 +2,7 @@
 //! repairs, plus an index↔files divergence check when an index is present.
 
 use clove_core::{diagnose, doctor_fix, DoctorIssue, DoctorReport, OutputFormat, Severity};
+use clove_plugin::outln;
 use clove_types::CloveError;
 use serde_json::{json, Value};
 
@@ -219,11 +220,11 @@ fn emit_human(report: &DoctorReport, fixed: usize) {
             Severity::Warning => "warning",
         };
         match &issue.item {
-            Some(item) => println!("{prefix}: [{}] {} ({})", issue.code, issue.message, item),
-            None => println!("{prefix}: [{}] {}", issue.code, issue.message),
+            Some(item) => outln!("{prefix}: [{}] {} ({})", issue.code, issue.message, item),
+            None => outln!("{prefix}: [{}] {}", issue.code, issue.message),
         }
     }
-    println!(
+    outln!(
         "checked {}, {} error(s), {} warning(s), {} fixed",
         report.checked,
         report.errors(),

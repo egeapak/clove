@@ -4,6 +4,7 @@
 //! augment that object with computed fields (`body`, `comment_count`, `ready`,
 //! `blocked_by`) and may project it down to a `--fields` subset.
 
+use clove_plugin::outln;
 use std::collections::HashMap;
 
 use camino::Utf8Path;
@@ -73,7 +74,7 @@ pub fn print_item(format: OutputFormat, item: &Item, extra: Map<String, Value>) 
 /// A compact one-line human rendering of an item.
 pub fn print_human(item: &Item) {
     let fm = &item.frontmatter;
-    println!(
+    outln!(
         "{}  [{}] p{} {}  {}",
         fm.id.as_str(),
         fm.status.as_str(),

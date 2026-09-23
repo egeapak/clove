@@ -20,6 +20,7 @@
 use camino::Utf8PathBuf;
 use chrono::Utc;
 use clove_core::OutputFormat;
+use clove_plugin::outln;
 use clove_types::CloveError;
 use serde_json::{json, Value};
 
@@ -410,9 +411,9 @@ fn render_search(
                 // checked — the `Ok(None)`/`Err` distinction the whole read path
                 // preserves was being collapsed one line later, in prose.
                 if warning.is_some() {
-                    println!("could not check crates.io — no results");
+                    outln!("could not check crates.io — no results");
                 } else {
-                    println!("no published plugins matched");
+                    outln!("no published plugins matched");
                 }
             } else {
                 render_available_table(matches, installed);
@@ -587,9 +588,9 @@ fn render_human(
     }
 
     if show_sections {
-        println!("Installed");
+        outln!("Installed");
         if installed.is_empty() {
-            println!("  (none)");
+            outln!("  (none)");
         }
     }
     if !installed.is_empty() {
@@ -597,8 +598,8 @@ fn render_human(
     }
 
     if !available.is_empty() {
-        println!();
-        println!("Available");
+        outln!();
+        outln!("Available");
         render_available_table(available, installed);
     }
 }
@@ -650,14 +651,19 @@ fn render_installed_table(plugins: &[EnrichedPlugin], discovered: &[RegistryPlug
     let version_w = header_width("VERSION", rows.iter().map(|r| r.version.as_str()));
     let run_as_w = header_width("RUN AS", rows.iter().map(|r| r.run_as.as_str()));
 
-    println!(
+    outln!(
         "{pad}{:<name_w$}  {:<version_w$}  {:<run_as_w$}  ABOUT",
-        "NAME", "VERSION", "RUN AS"
+        "NAME",
+        "VERSION",
+        "RUN AS"
     );
     for row in &rows {
-        println!(
+        outln!(
             "{pad}{:<name_w$}  {:<version_w$}  {:<run_as_w$}  {}",
-            row.name, row.version, row.run_as, row.about
+            row.name,
+            row.version,
+            row.run_as,
+            row.about
         );
     }
 }
@@ -696,14 +702,19 @@ fn render_available_table(plugins: &[RegistryPlugin], installed: &[EnrichedPlugi
     let version_w = header_width("VERSION", rows.iter().map(|r| r.version.as_str()));
     let run_as_w = header_width("RUN AS", rows.iter().map(|r| r.run_as.as_str()));
 
-    println!(
+    outln!(
         "  {:<crate_w$}  {:<version_w$}  {:<run_as_w$}  ABOUT",
-        "CRATE", "VERSION", "RUN AS"
+        "CRATE",
+        "VERSION",
+        "RUN AS"
     );
     for row in &rows {
-        println!(
+        outln!(
             "  {:<crate_w$}  {:<version_w$}  {:<run_as_w$}  {}",
-            row.krate, row.version, row.run_as, row.about
+            row.krate,
+            row.version,
+            row.run_as,
+            row.about
         );
     }
 }

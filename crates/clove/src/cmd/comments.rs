@@ -1,6 +1,7 @@
 //! `clove comment` / `clove comments` (T-CLI12).
 
 use clove_core::{add_comment, OutputFormat};
+use clove_plugin::outln;
 use clove_types::CloveError;
 use serde_json::{json, Value};
 
@@ -86,7 +87,7 @@ pub fn add(
         ),
         OutputFormat::Human => {
             if !quiet {
-                println!("added comment to {}", id.as_str());
+                outln!("added comment to {}", id.as_str());
             }
         }
     }
@@ -137,18 +138,18 @@ pub fn list(
             if returned < total {
                 // The default cap must not truncate in silence: without this a
                 // capped thread reads as the whole thread.
-                println!(
+                outln!(
                     "showing {returned} of {total} comments \
                      (--limit 0 for all, --skip-newest N for older)\n"
                 );
             }
             for c in &items {
-                println!(
+                outln!(
                     "{}  {}",
                     c["timestamp"].as_str().unwrap_or_default(),
                     c["author"].as_str().unwrap_or_default()
                 );
-                println!("{}\n", c["body"].as_str().unwrap_or_default().trim_end());
+                outln!("{}\n", c["body"].as_str().unwrap_or_default().trim_end());
             }
         }
     }

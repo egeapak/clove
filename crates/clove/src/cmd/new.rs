@@ -7,6 +7,7 @@
 use chrono::Utc;
 use clove_core::ops::NewSpec;
 use clove_core::OutputFormat;
+use clove_plugin::outln;
 use clove_types::CloveError;
 use serde_json::json;
 
@@ -38,7 +39,7 @@ pub fn run(ctx: &Ctx, format: OutputFormat, args: NewArgs) -> Result<(), CloveEr
         OutputFormat::Json | OutputFormat::Jsonl => {
             print_json_success(value, json!({ "warnings": [] }))
         }
-        OutputFormat::Human => println!(
+        OutputFormat::Human => outln!(
             "{}  {}",
             value["id"].as_str().unwrap_or_default(),
             value["path"].as_str().unwrap_or_default()

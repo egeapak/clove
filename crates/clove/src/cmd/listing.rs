@@ -3,6 +3,7 @@
 
 use clove_core::OutputFormat;
 use clove_engine::{ListAnswer, Rows};
+use clove_plugin::outln;
 use serde_json::{json, Map, Value};
 
 use crate::item_json::{frontmatter_object, project};
@@ -179,7 +180,7 @@ pub fn emit(format: OutputFormat, objects: Vec<ListObject>, opts: ListOpts<'_>) 
             for obj in &page {
                 let s = |k: &str| obj.get(k).and_then(Value::as_str).unwrap_or("");
                 let priority = obj.get("priority").and_then(Value::as_u64).unwrap_or(0);
-                println!(
+                outln!(
                     "{}  [{}] p{} {}  {}",
                     s("id"),
                     s("status"),
