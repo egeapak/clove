@@ -73,7 +73,8 @@
             "DAEMON_STALE_SOCKET",
             "DAEMON_VERSION_SKEW",
             "DAEMON_LEGACY",
-            "DAEMON_UNRESPONSIVE"
+            "DAEMON_UNRESPONSIVE",
+            "DAEMON_TOKEN_TRACKED"
           ]
         },
         "item": {

@@ -12,12 +12,25 @@ use clove_ipc::{ClientError, DaemonClient, Detached, HubClient, HubPaths};
 pub const SIGTERM: i32 = 15;
 pub const SIGKILL: i32 = 9;
 
+/// The clove home every test process and hub uses: token records land here,
+/// never in the user's.
+pub const TEST_CLOVE_HOME: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/test-clove-home");
+
+/// Point this test process's token records at [`TEST_CLOVE_HOME`].
+pub fn isolate() {
+    clove_core::daemon_token::use_records_dir(
+        Utf8PathBuf::from(TEST_CLOVE_HOME).join("daemon-tokens"),
+    );
+}
+
 pub fn cloved_bin() -> Utf8PathBuf {
     Utf8PathBuf::from(env!("CARGO_BIN_EXE_cloved"))
 }
 
 /// A minimal `.clove/` (config + issues) good enough for the hub to load.
 pub fn init_clove_dir() -> (tempfile::TempDir, Utf8PathBuf) {
+    isolate();
     let dir = tempfile::tempdir().unwrap();
     let root = Utf8Path::from_path(dir.path()).unwrap().to_owned();
     let clove_dir = root.join(".clove");
@@ -32,6 +45,7 @@ pub fn init_clove_dir() -> (tempfile::TempDir, Utf8PathBuf) {
 
 /// A private runtime directory for one test's hub.
 pub fn runtime_dir() -> (tempfile::TempDir, HubPaths) {
+    isolate();
     let dir = tempfile::tempdir().unwrap();
     let path = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
     (dir, HubPaths::at(path))
@@ -160,6 +174,7 @@ impl Drop for TestHub {
 pub fn command(paths: &HubPaths, env: &[(&str, &str)]) -> Command {
     let mut cmd = Command::new(cloved_bin());
     cmd.env("CLOVE_RUNTIME_DIR", paths.dir().as_str())
+        .env("CLOVE_HOME", TEST_CLOVE_HOME)
         .envs(env.iter().copied())
         .arg("run");
     cmd

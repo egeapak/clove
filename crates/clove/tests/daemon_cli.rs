@@ -13,6 +13,9 @@ use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
 
+/// Token records for this test's processes go here, never the user's clove home.
+const TEST_CLOVE_HOME: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/test-clove-home");
+
 /// The `cloved` binary, built on demand rather than hoped for in `target/`.
 fn cloved() -> &'static Path {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
@@ -31,6 +34,7 @@ fn cloved() -> &'static Path {
 fn clove(dir: &Path, run: &Path) -> Command {
     let mut c = Command::cargo_bin("clove").unwrap();
     c.current_dir(dir)
+        .env("CLOVE_HOME", TEST_CLOVE_HOME)
         .env("CLOVE_RUNTIME_DIR", run)
         .env("CLOVED_PATH", cloved())
         .env("CLOVED_DISABLE_WEB", "1");
@@ -456,6 +460,166 @@ fn titles(v: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
+/// A daemon token that git already tracks (committed before `.gitignore`
+/// listed it) would be published by the next `git commit -a`: doctor says so
+/// and how to untrack it.
+#[test]
+fn doctor_flags_a_daemon_token_git_tracks() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let run = Run::new();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    };
+    git(&["init", "-q"]);
+    init(dir, &run.path);
+    std::fs::write(
+        dir.join(".clove/daemon.token"),
+        "0123456789abcdef0123456789abcdef\n",
+    )
+    .unwrap();
+    assert!(!doctor_codes(dir, &run.path).contains(&"DAEMON_TOKEN_TRACKED".to_owned()));
+    git(&["add", "-f", ".clove/daemon.token"]);
+    git(&["commit", "-q", "-m", "oops"]);
+    let out = clove(dir, &run.path)
+        .args(["doctor", "-f", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let issues = json(&out)["data"]["issues"].clone();
+    let tracked = issues
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["code"] == "DAEMON_TOKEN_TRACKED")
+        .unwrap_or_else(|| panic!("no DAEMON_TOKEN_TRACKED in {issues}"));
+    assert!(
+        tracked["message"]
+            .as_str()
+            .unwrap()
+            .contains("git rm --cached .clove/daemon.token"),
+        "{tracked}"
+    );
+}
+
+/// `clove daemon stop` while the project is still loading stops it: the stop
+/// reaches the hub even though a probe would find nothing loaded yet, and
+/// the load, when it completes, does not leave the project served (L-new-1).
+#[test]
+fn a_stop_while_the_start_is_still_loading_wins() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let run = Run::new();
+    init(dir, &run.path);
+    let mut start = std::process::Command::new(assert_cmd::cargo::cargo_bin("clove"))
+        .current_dir(dir)
+        .env("CLOVE_HOME", TEST_CLOVE_HOME)
+        .env("CLOVE_RUNTIME_DIR", &run.path)
+        .env("CLOVED_PATH", cloved())
+        .env("CLOVED_DISABLE_WEB", "1")
+        .env("CLOVED_LOAD_DELAY_MS", "3000")
+        .args(["daemon", "start"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    // The load is under way once the hub is up and the loader has its token.
+    let token = dir.join(".clove/daemon.token");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !(run.pid_file().exists() && token.exists()) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the start never got going"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let stop = clove(dir, &run.path)
+        .args(["daemon", "stop", "-f", "json"])
+        .output()
+        .unwrap();
+    let _ = start.wait();
+    let stopped = json(&stop.stdout);
+    assert_eq!(
+        stopped["data"]["stopped"],
+        serde_json::json!(true),
+        "{stopped}"
+    );
+    for _ in 0..2 {
+        assert_eq!(
+            daemon_status(dir, &run.path)["data"]["running"],
+            serde_json::json!(false),
+            "the project is served after its stop"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+    }
+}
+
+/// Reads never write: with a hub running, `clove ls` creates no token and
+/// touches no `.gitignore` — and a committed `.clove` symlink (`.clove -> ~`,
+/// say) gets no token work at all, so nothing lands in the link's target.
+#[test]
+fn a_read_never_writes_a_token_even_through_a_symlinked_store() {
+    use std::os::unix::fs::PermissionsExt;
+    let run = Run::new();
+    let (other_tmp, plain_tmp, target_tmp, repo_tmp) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
+    init(other_tmp.path(), &run.path);
+    clove(other_tmp.path(), &run.path)
+        .args(["daemon", "start"])
+        .assert()
+        .success();
+
+    init(plain_tmp.path(), &run.path);
+    clove(plain_tmp.path(), &run.path)
+        .args(["ls"])
+        .assert()
+        .success();
+    let plain_token = plain_tmp.path().join(".clove/daemon.token");
+
+    init(target_tmp.path(), &run.path);
+    let target = target_tmp.path().join(".clove");
+    let gitignore = target.join(".gitignore");
+    std::fs::write(&gitignore, "index.db\n").unwrap();
+    std::fs::set_permissions(&gitignore, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::os::unix::fs::symlink(&target, repo_tmp.path().join(".clove")).unwrap();
+    clove(repo_tmp.path(), &run.path)
+        .args(["ls"])
+        .assert()
+        .success();
+    clove(other_tmp.path(), &run.path)
+        .args(["daemon", "stop"])
+        .assert()
+        .success();
+
+    assert!(!plain_token.exists(), "a read created a token");
+    assert!(
+        !target.join("daemon.token").exists(),
+        "a token landed in the link's target"
+    );
+    assert_eq!(std::fs::read_to_string(&gitignore).unwrap(), "index.db\n");
+    let mode = std::fs::metadata(&gitignore).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o644);
+}
+
 /// A token the client can neither read nor replace (here: mode 000 in a
 /// read-only `.clove/`) is what `status` and `stop` report — naming the file —
 /// not a project the daemon "isn't serving" or a remedy that doesn't fit.
@@ -738,6 +902,7 @@ fn serve_waits_for_a_daemon_that_is_still_starting() {
 
     let mut serve = std::process::Command::new(assert_cmd::cargo::cargo_bin("clove"))
         .current_dir(dir)
+        .env("CLOVE_HOME", TEST_CLOVE_HOME)
         .env("CLOVE_RUNTIME_DIR", &run.path)
         .env("CLOVED_PATH", cloved())
         .env("CLOVED_WEB_PORT", "0")
@@ -749,6 +914,7 @@ fn serve_waits_for_a_daemon_that_is_still_starting() {
     std::thread::sleep(Duration::from_millis(300));
     drop(starting);
     let mut hub = std::process::Command::new(cloved())
+        .env("CLOVE_HOME", TEST_CLOVE_HOME)
         .env("CLOVE_RUNTIME_DIR", &run.path)
         .env("CLOVED_WEB_PORT", "0")
         .arg("run")

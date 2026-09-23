@@ -140,13 +140,20 @@ fn stop(
     if !hub.footprint_present() {
         return not_running();
     }
-    let mut client = match DaemonClient::attach(hub, clove_dir, false) {
-        Ok(client) => client,
-        Err(e) if e.refusal_code() == Some(clove_ipc::hub::codes::NOT_LOADED) => {
+    // Always ask the hub to stop the project, rather than probe first: a
+    // project still loading answers a probe as not loaded, yet is about to be
+    // served. The hub knows, and says whether it was serving (or loading) it.
+    let detached = match DaemonClient::detach_at(hub, clove_dir) {
+        Ok(detached) => detached,
+        Err(ClientError::Connect(_)) if !hub.running() => return not_running(),
+        // No token: no client ever loaded the project, so nothing serves it.
+        Err(ClientError::Token(e)) if e.kind() == std::io::ErrorKind::NotFound => {
             return not_running()
         }
-        Err(ClientError::Connect(_)) if !hub.running() => return not_running(),
         Err(ClientError::Token(e)) => return Err(token_err(&e)),
+        Err(e @ (ClientError::App(_) | ClientError::Transport(_))) => {
+            return Err(daemon_err(&format!("detaching this project: {e}")))
+        }
         Err(e) => {
             return Err(daemon_err(&format!(
                 "a daemon is running but this clove cannot talk to it ({e}); stop it \
@@ -154,9 +161,6 @@ fn stop(
             )))
         }
     };
-    let detached = client
-        .detach()
-        .map_err(|e| daemon_err(&format!("detaching this project: {e}")))?;
     if !detached.detached {
         return not_running();
     }
@@ -271,8 +275,11 @@ fn status(
     // With a hub there to ask, a token this client cannot use is the answer:
     // "not serving" would be wrong.
     if hub.footprint_present() {
-        if let Err(e) = clove_ipc::project(clove_dir, false) {
-            return Err(token_err(&e));
+        match clove_ipc::project(clove_dir, false) {
+            // No token: never loaded, so not served.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(token_err(&e)),
+            Ok(_) => {}
         }
     }
     let hub_status = HubClient::connect(hub)

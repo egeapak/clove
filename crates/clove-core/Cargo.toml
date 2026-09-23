@@ -29,6 +29,7 @@ chrono.workspace = true
 rayon.workspace = true
 fd-lock.workspace = true
 tempfile.workspace = true
+sha2.workspace = true            # daemon-token issue records
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true             # O_NOFOLLOW for files a cloned repo could plant as symlinks

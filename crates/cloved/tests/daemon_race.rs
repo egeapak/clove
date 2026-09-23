@@ -88,6 +88,8 @@ fn stopping_the_last_project_while_another_starts_never_strands_it() {
     // `ensure_daemon_at` spawns `cloved` from `CLOVED_PATH`; set before any
     // thread exists.
     std::env::set_var("CLOVED_PATH", support::cloved_bin());
+    // The hubs this test spawns inherit it: token records stay in the build.
+    std::env::set_var("CLOVE_HOME", support::TEST_CLOVE_HOME);
     std::env::set_var("CLOVED_DISABLE_WEB", "1");
     let (_ta, a) = init_clove_dir();
     let (_tb, b) = init_clove_dir();

@@ -54,6 +54,9 @@ pub fn run(
             }
         }
     }
+    if let Some(issue) = tracked_token_issue(daemon_dir(ctx)) {
+        report.issues.push(issue);
+    }
     if let Some(issue) = legacy_daemon_issue(daemon_dir(ctx)) {
         if args.fix && issue.fixable {
             clove_ipc::cleanup_legacy(daemon_dir(ctx));
@@ -205,6 +208,35 @@ fn daemon_issue(health: clove_ipc::DaemonHealth) -> Option<DoctorIssue> {
             fixable: false,
         }),
     }
+}
+
+/// A `.clove/daemon.token` that git tracks — committed before `.gitignore`
+/// listed it, so ignoring it now changes nothing: the next `git commit -a`
+/// would publish the live token. Asked of `git` itself; no git, or not a
+/// repository, and there is nothing to report.
+fn tracked_token_issue(clove_dir: &camino::Utf8Path) -> Option<DoctorIssue> {
+    let token = clove_core::daemon_token::token_path(clove_dir);
+    std::fs::symlink_metadata(&token).ok()?;
+    let repo_root = clove_dir.parent()?;
+    let tracked = std::process::Command::new("git")
+        .current_dir(repo_root)
+        .args(["ls-files", "--error-unmatch", "--"])
+        .arg(token.strip_prefix(repo_root).ok()?.as_str())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .ok()?
+        .success();
+    tracked.then(|| DoctorIssue {
+        severity: Severity::Warning,
+        code: "DAEMON_TOKEN_TRACKED",
+        item: None,
+        message: "git tracks .clove/daemon.token, so a commit can publish the project's \
+                  daemon token; untrack it with `git rm --cached .clove/daemon.token` \
+                  (it stays ignored from then on)"
+            .to_owned(),
+        fixable: false,
+    })
 }
 
 /// A clove 0.1.0 daemon's footprint in `.clove/`: a live one still serving the

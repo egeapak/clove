@@ -10,6 +10,9 @@ use std::time::{Duration, Instant};
 
 use assert_cmd::cargo::cargo_bin;
 
+/// Token records for this test's processes go here, never the user's clove home.
+const TEST_CLOVE_HOME: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/test-clove-home");
+
 /// The `cloved` binary, built on demand so these tests can never pass by
 /// skipping.
 fn cloved_bin() -> PathBuf {
@@ -29,6 +32,7 @@ fn clove() -> Command {
 fn run_in(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
     clove()
         .current_dir(dir)
+        .env("CLOVE_HOME", TEST_CLOVE_HOME)
         .env("CLOVE_RUNTIME_DIR", runtime_dir(dir))
         .args(args)
         .output()
@@ -71,6 +75,7 @@ impl Drop for Daemon {
 fn spawn_daemon(clove_dir: &std::path::Path, bin: &std::path::Path) -> Daemon {
     let run = runtime_dir(clove_dir.parent().unwrap());
     let child = Command::new(bin)
+        .env("CLOVE_HOME", TEST_CLOVE_HOME)
         .env("CLOVE_RUNTIME_DIR", &run)
         .env("CLOVED_DISABLE_WEB", "1")
         .arg("run")

@@ -905,6 +905,10 @@ mod tests {
     use super::*;
 
     fn store() -> (tempfile::TempDir, Utf8PathBuf) {
+        clove_core::daemon_token::use_records_dir(Utf8PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../target/test-clove-home/daemon-tokens"
+        )));
         let dir = tempfile::tempdir().unwrap();
         let clove_dir = Utf8PathBuf::from_path_buf(dir.path().join(".clove")).unwrap();
         std::fs::create_dir_all(clove_dir.join("issues")).unwrap();

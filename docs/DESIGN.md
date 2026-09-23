@@ -1133,7 +1133,10 @@ never delete a *running* process's socket/pid. A hub that accepts
 but does not answer in time — or holds its lock without a socket yet — is a
 non-fixable `DAEMON_UNRESPONSIVE`, never `Dead`; a 0.1.0 daemon that cannot be
 verified either way is `DAEMON_LEGACY`. A live, healthy hub yields no
-finding.
+finding. A `.clove/daemon.token` that git tracks (committed before the
+`.gitignore` entry existed, so ignoring it changes nothing) is a non-fixable
+`DAEMON_TOKEN_TRACKED` warning suggesting `git rm --cached .clove/daemon.token`;
+it is asked of `git` itself and skipped without git or outside a repository.
 
 **Output:** one issue per finding: `{ severity, code, item: <id|path|null>,
 message, fixable }`, plus a summary `{ errors, warnings, fixed, checked }`. JSON
@@ -1613,27 +1616,44 @@ project.
 
 **The project token scopes automated clients per project.** Each project has a
 random secret in `.clove/daemon.token` — 256 bits from the OS RNG, hex-encoded,
-created by the first client that needs it (`O_EXCL` temp file, `0600`, linked
-into place without replacing anything) and git-ignored, so it stays with the
-clone; a client that creates it also adds `daemon.token` to a `.clove/.gitignore`
-written by an older clove (through the symlink-safe write). **Only a token this
-user's clove made is trusted:** a regular file — never a symlink — and on Unix
-owned by the user with mode `0600`. Anything else, such as a token committed to
-the repository (a checkout writes it `0644`), is refused by the hub and replaced
-by the client with a fresh one, renamed over it. On Windows only the file type
-is checked: there is no mode, and a checkout is owned by the user anyway. A
-token the client can neither read nor replace makes `clove daemon status` and
-`stop` fail naming the file. Every project-scoped
-call carries it, and the hub refuses a call whose token is not the one in the
-named project's `.clove/` (`BAD_TOKEN`) before loading anything; the client
-then falls back like after any refusal. So a client confined to repository A —
-an agent sandbox, a CI job — can read A's token but not B's, and can act through
-the shared hub on A only. The hub reads the file again on every call — a few
-dozen bytes — so whatever it holds now is what counts, however it was rewritten. **It is a gate for automation, not a security boundary
-against the local user**, who can read every token they own; hub-wide calls
-(`ping`, `hub_status`, and `clove daemon stop --all`, which signals the hub's
-pid) need no token, and the web UI is not token-gated — it stays loopback-only,
-behind the `Host`/`Origin` guards (§8.10), and may list every project.
+`0600`, git-ignored, so it stays with the clone. Every project-scoped call
+carries it, and the hub refuses a call whose token is not the one in the named
+project's `.clove/` (`BAD_TOKEN`) before loading anything; the client then falls
+back like after any refusal. So a client confined to repository A — an agent
+sandbox, a CI job — can read A's token but not B's, and can act through the
+shared hub on A only. The hub reads the file again on every call — a few dozen
+bytes — so whatever it holds now is what counts, however it was rewritten.
+
+- **Only a token this user's clove issued for this project is trusted:** a
+  regular file — never a symlink — on Unix owned by the user with mode `0600`,
+  *and* recorded when clove made it: a per-user record under the clove home
+  (`<clove home>/daemon-tokens/<hash of the project path>/<hash of the token>`,
+  `0700`/`0600`, never the runtime directory, which temp cleaners empty). A token
+  that arrived any other way — committed to the repository, or restored from an
+  archive with its `0600` intact, or on Windows where there is no mode — has no
+  record, so the hub refuses it and a loading client replaces it. A lost record
+  only means a fresh token.
+- **Only a loading client writes.** `clove daemon start`, the MCP server's
+  auto-start and `clove serve` (calls with `load: true`) create a missing token,
+  replace an untrusted one, and add `daemon.token` to a `.clove/.gitignore`
+  written by an older clove (keeping the file's mode). Creating or replacing
+  happens under a per-project lock in the records directory, the new token
+  recorded before it is linked into place without clobbering anything, so
+  concurrent clients agree on one token. A read (`load: false`) uses the token
+  that is there or none — it never writes, and a missing or untrusted token
+  simply means no daemon for that read.
+- **A `.clove` that is itself a symlink** — a clone can commit `.clove -> ~` —
+  or whose `issues/` is not a real directory gets no token work at all: the
+  project goes without the daemon, and nothing is written in the link's target.
+- A token the client can neither read nor replace makes `clove daemon status`
+  and `stop` fail naming the file; `clove doctor` flags one that git tracks
+  (`DAEMON_TOKEN_TRACKED`).
+
+**It is a gate for automation, not a security boundary against the local
+user**, who can read every token they own; hub-wide calls (`ping`,
+`hub_status`, and `clove daemon stop --all`, which signals the hub's pid) need
+no token, and the web UI is not token-gated — it stays loopback-only, behind
+the `Host`/`Origin` guards (§8.10), and may list every project.
 
 **`CloveRpc`:** hub-level `ping` and `hub_status` (pid, uptime, web address, and
 each project's `STATUS`); per project `attach` (is it served — loading it when

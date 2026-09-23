@@ -6,14 +6,22 @@
 //! and on no other. It gates automation; it is not a security boundary
 //! against the local user, who can read every token they own.
 //!
-//! Only a token this user's clove made is trusted: a regular file (never a
-//! symlink), and on Unix owned by this user with mode `0600`. Anything else —
-//! a token committed to the repository, which a checkout writes `0644`, say —
-//! is replaced with a fresh one rather than used.
+//! Only a token this user's clove issued for this project is trusted: a
+//! regular file (never a symlink) — on Unix owned by the user with mode `0600`
+//! — whose value clove recorded when it made it, in a per-user record under
+//! the clove home ([`crate::home`]). A token that arrived any other way — one
+//! committed to the repository, restored from an archive with its modes — has
+//! no record, and is replaced by a client that loads the project. A lost
+//! record only means a fresh token.
+//!
+//! Reading never writes: only [`read_or_create`], for a client that loads the
+//! project, creates or replaces the token or touches `.clove/.gitignore`.
 
 use std::io::{self, Read as _, Write as _};
+use std::sync::OnceLock;
 
 use camino::{Utf8Path, Utf8PathBuf};
+use sha2::{Digest as _, Sha256};
 
 /// The token's file name inside `.clove/`.
 pub const TOKEN_FILE: &str = "daemon.token";
@@ -29,19 +37,119 @@ pub fn token_path(clove_dir: &Utf8Path) -> Utf8PathBuf {
     clove_dir.join(TOKEN_FILE)
 }
 
+static RECORDS_DIR: OnceLock<Utf8PathBuf> = OnceLock::new();
+
+/// Keep this process's token records in `dir` rather than under the clove
+/// home — for tests, which must not touch the user's. The first call wins.
+pub fn use_records_dir(dir: Utf8PathBuf) {
+    let _ = RECORDS_DIR.set(dir);
+}
+
+/// Where clove records the tokens it issued: `<clove home>/daemon-tokens`.
+pub fn records_dir() -> io::Result<Utf8PathBuf> {
+    match RECORDS_DIR.get() {
+        Some(dir) => Ok(dir.clone()),
+        None => Ok(crate::home::clove_home()?.join("daemon-tokens")),
+    }
+}
+
+fn hex_sha256(text: &str) -> String {
+    Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// The record of `token` as issued for the project at `clove_dir`: a file
+/// named by the token's hash in a directory named by the project path's.
+fn record_path(clove_dir: &Utf8Path, token: &str) -> io::Result<Utf8PathBuf> {
+    Ok(records_dir()?
+        .join(hex_sha256(clove_dir.as_str()))
+        .join(hex_sha256(token)))
+}
+
+fn issued(clove_dir: &Utf8Path, token: &str) -> bool {
+    record_path(clove_dir, token)
+        .and_then(std::fs::symlink_metadata)
+        .is_ok_and(|meta| meta.is_file())
+}
+
+/// Record `token` as issued for `clove_dir` (`0700` directories, a `0600`
+/// empty file, nothing followed through a symlink).
+fn record(clove_dir: &Utf8Path, token: &str) -> io::Result<()> {
+    let entry = record_path(clove_dir, token)?;
+    let project = entry.parent().unwrap_or(&entry).to_owned();
+    create_private_dir(&project)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    crate::fs_safe::no_follow(&mut options, &entry)?;
+    match options.open(&entry) {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Drop the records of the project's earlier tokens.
+fn forget_others(clove_dir: &Utf8Path, token: &str) {
+    let Ok(entry) = record_path(clove_dir, token) else {
+        return;
+    };
+    let Some(project) = entry.parent() else {
+        return;
+    };
+    for stale in std::fs::read_dir(project).into_iter().flatten().flatten() {
+        if stale.file_name().to_str() != entry.file_name() {
+            let _ = std::fs::remove_file(stale.path());
+        }
+    }
+}
+
+/// An exclusive lock on making the project's token, kept in the records
+/// directory (never the repository): creating or replacing a token happens
+/// one client at a time, so concurrent clients agree on one.
+fn issue_lock(clove_dir: &Utf8Path) -> io::Result<std::fs::File> {
+    let records = records_dir()?;
+    create_private_dir(&records)?;
+    let lock = crate::fs_safe::open_lock_file(
+        &records.join(format!("{}.lock", hex_sha256(clove_dir.as_str()))),
+    )?;
+    lock.lock()?;
+    Ok(lock)
+}
+
+fn create_private_dir(dir: &Utf8Path) -> io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(dir)?;
+    let meta = std::fs::symlink_metadata(dir)?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{dir} is not a directory"),
+        ));
+    }
+    Ok(())
+}
+
 /// What sits at a project's token path.
 enum Found {
     Missing,
     Trusted(String),
-    /// Something this clove did not make, and why it is not trusted.
+    /// Something this clove did not issue, and why it is not trusted.
     Untrusted(String),
 }
 
-/// Read the project's token. Refuses one that is missing or not trusted (see
-/// the module docs); every error names the file.
+/// Read the project's token (`clove_dir` canonical). Refuses one that is
+/// missing or not trusted (see the module docs); every error names the file.
+/// Writes nothing.
 pub fn read(clove_dir: &Utf8Path) -> io::Result<String> {
     let path = token_path(clove_dir);
-    match inspect(&path)? {
+    match inspect(clove_dir, &path)? {
         Found::Trusted(token) => Ok(token),
         Found::Missing => Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -54,20 +162,35 @@ pub fn read(clove_dir: &Utf8Path) -> io::Result<String> {
     }
 }
 
-/// Read the project's token, creating it if the project has none and
-/// replacing one that is not trusted. A token it writes also gets
-/// `daemon.token` into `.clove/.gitignore` if an older clove's list lacks it,
-/// so the secret never lands in a commit.
+/// Read the project's token (`clove_dir` canonical), creating it if the
+/// project has none and replacing one that is not trusted — for a client that
+/// loads the project, never a read. It also puts `daemon.token` into a
+/// `.clove/.gitignore` that lacks it (one written by an older clove), so the
+/// secret never lands in a commit.
 ///
-/// A fresh token is written to a private temp file and moved into place —
-/// linked without replacing anything when there was none, so a concurrent
-/// reader never sees a partial token and two creators agree on the winner's.
+/// A fresh token is written to a private temp file and linked into place
+/// without replacing anything, so a concurrent reader never sees a partial
+/// token and concurrent creators — or replacers — agree on the winner's.
 pub fn read_or_create(clove_dir: &Utf8Path) -> io::Result<String> {
     let path = token_path(clove_dir);
-    let token = match inspect(&path)? {
-        Found::Trusted(token) => return Ok(token),
-        Found::Missing => create(clove_dir, &path, false)?,
-        Found::Untrusted(_) => create(clove_dir, &path, true)?,
+    let token = match inspect(clove_dir, &path)? {
+        Found::Trusted(token) => token,
+        Found::Missing | Found::Untrusted(_) => {
+            let _issuing = issue_lock(clove_dir).map_err(with_path(&path, "creating"))?;
+            // Another client may have made it while this one waited.
+            match inspect(clove_dir, &path)? {
+                Found::Trusted(token) => token,
+                Found::Missing => create(clove_dir, &path)?,
+                Found::Untrusted(_) => {
+                    match std::fs::remove_file(&path) {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                        Err(e) => return Err(with_path(&path, "replacing")(e)),
+                    }
+                    create(clove_dir, &path)?
+                }
+            }
+        }
     };
     // Best effort: the token works either way.
     let _ = ensure_gitignored(clove_dir);
@@ -79,7 +202,7 @@ fn with_path<'a>(path: &'a Utf8Path, action: &str) -> impl FnOnce(io::Error) -> 
     move |e| io::Error::new(e.kind(), format!("{action} {path}: {e}"))
 }
 
-fn inspect(path: &Utf8Path) -> io::Result<Found> {
+fn inspect(clove_dir: &Utf8Path, path: &Utf8Path) -> io::Result<Found> {
     let meta = match std::fs::symlink_metadata(path) {
         Ok(meta) => meta,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Found::Missing),
@@ -100,16 +223,22 @@ fn inspect(path: &Utf8Path) -> io::Result<Found> {
     let mut text = String::new();
     file.read_to_string(&mut text)
         .map_err(with_path(path, "reading"))?;
-    let token = text.trim();
+    let token = text.trim().to_ascii_lowercase();
     if token.len() < MIN_HEX_LEN || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Ok(Found::Untrusted("it does not hold a token".to_owned()));
     }
-    Ok(Found::Trusted(token.to_ascii_lowercase()))
+    if !issued(clove_dir, &token) {
+        return Ok(Found::Untrusted(
+            "clove has no record of issuing it for this project".to_owned(),
+        ));
+    }
+    Ok(Found::Trusted(token))
 }
 
 /// Why a token file with this metadata is not trusted, if it is not. On
-/// Windows only the file type is checked: there is no mode, and a checkout
-/// would be owned by the user anyway.
+/// Windows only the file type is checked here (there is no mode, and a
+/// checkout would be owned by the user anyway); the issue record is what
+/// catches a token that arrived with the repository.
 fn untrusted(meta: &std::fs::Metadata) -> Option<String> {
     if meta.file_type().is_symlink() {
         return Some("it is a symlink".to_owned());
@@ -135,47 +264,47 @@ fn untrusted(meta: &std::fs::Metadata) -> Option<String> {
     None
 }
 
-/// Write a fresh token at `path`: linked into place if there was none, or —
-/// `replace` — renamed over what is there (which replaces a symlink rather
-/// than following it).
-fn create(clove_dir: &Utf8Path, path: &Utf8Path, replace: bool) -> io::Result<String> {
-    let action = if replace { "replacing" } else { "creating" };
+/// Write a fresh token at `path`, recorded as issued, and linked into place
+/// without replacing anything: should something else get there first, that is
+/// used if it can be trusted. Called under [`issue_lock`].
+fn create(clove_dir: &Utf8Path, path: &Utf8Path) -> io::Result<String> {
     let mut bytes = [0u8; TOKEN_BYTES];
     getrandom::getrandom(&mut bytes).map_err(|e| io::Error::other(e.to_string()))?;
     let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
     let mut staged = tempfile::Builder::new()
         .prefix(".daemon.token.")
         .tempfile_in(clove_dir.as_std_path())
-        .map_err(with_path(path, action))?;
+        .map_err(with_path(path, "creating"))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         staged
             .as_file()
             .set_permissions(std::fs::Permissions::from_mode(0o600))
-            .map_err(with_path(path, action))?;
+            .map_err(with_path(path, "creating"))?;
     }
-    writeln!(staged, "{token}").map_err(with_path(path, action))?;
+    writeln!(staged, "{token}").map_err(with_path(path, "creating"))?;
     staged
         .as_file()
         .sync_all()
-        .map_err(with_path(path, action))?;
-    if replace {
-        staged
-            .persist(path.as_std_path())
-            .map_err(|e| with_path(path, action)(e.error))?;
-        return Ok(token);
-    }
+        .map_err(with_path(path, "creating"))?;
+    // Recorded before it appears, so no reader ever sees it unrecorded.
+    record(clove_dir, &token).map_err(with_path(path, "recording"))?;
     match staged.persist_noclobber(path.as_std_path()) {
-        Ok(_) => Ok(token),
-        // Another client created it first: use theirs, if it can be trusted.
-        Err(e) if e.error.kind() == io::ErrorKind::AlreadyExists => read(path_parent(path)),
-        Err(e) => Err(with_path(path, action)(e.error)),
+        Ok(_) => {
+            forget_others(clove_dir, &token);
+            Ok(token)
+        }
+        Err(e) if e.error.kind() == io::ErrorKind::AlreadyExists => match inspect(clove_dir, path)?
+        {
+            Found::Trusted(theirs) => Ok(theirs),
+            _ => Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("creating {path}: something else was put there meanwhile"),
+            )),
+        },
+        Err(e) => Err(with_path(path, "creating")(e.error)),
     }
-}
-
-fn path_parent(path: &Utf8Path) -> &Utf8Path {
-    path.parent().unwrap_or(path)
 }
 
 /// Add `daemon.token` to `.clove/.gitignore` when it is not there (a list
@@ -209,9 +338,23 @@ pub fn matches(expected: &str, presented: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// Records for these tests go in the build's target directory, never the
+    /// user's clove home.
+    fn isolate() {
+        use_records_dir(Utf8PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../target/test-clove-home/daemon-tokens"
+        )));
+    }
+
     fn clove_dir() -> (tempfile::TempDir, Utf8PathBuf) {
+        isolate();
         let tmp = tempfile::tempdir().unwrap();
-        let dir = Utf8Path::from_path(tmp.path()).unwrap().join(".clove");
+        let dir = Utf8Path::from_path(tmp.path())
+            .unwrap()
+            .canonicalize_utf8()
+            .unwrap()
+            .join(".clove");
         std::fs::create_dir_all(&dir).unwrap();
         (tmp, dir)
     }
@@ -219,6 +362,7 @@ mod tests {
     #[cfg(unix)]
     fn write_with_mode(path: &Utf8Path, text: &str, mode: u32) {
         use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::remove_file(path);
         std::fs::write(path, text).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
     }
@@ -254,20 +398,32 @@ mod tests {
         assert_ne!(read_or_create(&a).unwrap(), read_or_create(&b).unwrap());
     }
 
-    /// A checkout writes a committed token `0644`: it is never trusted, and
-    /// the client replaces it with a fresh private one.
+    /// Reading never writes: a missing token stays missing.
+    #[test]
+    fn reading_creates_nothing() {
+        let (_tmp, dir) = clove_dir();
+        assert!(read(&dir).is_err());
+        assert!(!token_path(&dir).exists());
+        assert!(!dir.join(".gitignore").exists());
+    }
+
+    /// A token clove did not issue here — committed to the repository, or
+    /// restored from an archive with a trusted-looking `0600` — is never
+    /// trusted, and a loading client replaces it.
     #[cfg(unix)]
     #[test]
-    fn a_committed_token_is_replaced_not_trusted() {
+    fn a_token_clove_did_not_issue_is_replaced_not_trusted() {
         let (_tmp, dir) = clove_dir();
         let path = token_path(&dir);
-        write_with_mode(&path, SOME_TOKEN, 0o644);
-        let refused = read(&dir).unwrap_err().to_string();
-        assert!(refused.contains("daemon.token"), "{refused}");
-        let fresh = read_or_create(&dir).unwrap();
-        assert_ne!(fresh, SOME_TOKEN);
-        assert_eq!(mode(&path), 0o600);
-        assert_eq!(read(&dir).unwrap(), fresh);
+        for committed_mode in [0o644, 0o600] {
+            write_with_mode(&path, SOME_TOKEN, committed_mode);
+            let refused = read(&dir).unwrap_err().to_string();
+            assert!(refused.contains("daemon.token"), "{refused}");
+            let fresh = read_or_create(&dir).unwrap();
+            assert_ne!(fresh, SOME_TOKEN);
+            assert_eq!(mode(&path), 0o600);
+            assert_eq!(read(&dir).unwrap(), fresh);
+        }
     }
 
     #[cfg(unix)]
@@ -319,25 +475,54 @@ mod tests {
         }
     }
 
-    /// A repository initialized by a clove that predates the token has a
-    /// `.gitignore` without it: creating the token adds the line, keeping the
-    /// rest.
+    /// Many clients replacing one untrusted token at once all end up with the
+    /// same trusted token — none falls back.
+    #[cfg(unix)]
     #[test]
-    fn creating_a_token_git_ignores_it() {
+    fn concurrent_replacers_agree_on_one_token() {
+        let (_tmp, dir) = clove_dir();
+        write_with_mode(&token_path(&dir), SOME_TOKEN, 0o644);
+        let handles: Vec<_> = (0..16)
+            .map(|_| {
+                let dir = dir.clone();
+                std::thread::spawn(move || read_or_create(&dir))
+            })
+            .collect();
+        let tokens: Vec<String> = handles
+            .into_iter()
+            .map(|h| h.join().unwrap().expect("no client falls back"))
+            .collect();
+        let first = &tokens[0];
+        assert!(tokens.iter().all(|t| t == first), "{tokens:?}");
+        assert_eq!(&read(&dir).unwrap(), first);
+    }
+
+    /// A repository initialized by a clove that predates the token has a
+    /// `.gitignore` without it: a loading client adds the line — also when the
+    /// token already exists — keeping the rest and the file's mode.
+    #[cfg(unix)]
+    #[test]
+    fn loading_git_ignores_the_token() {
         let (_tmp, dir) = clove_dir();
         let gitignore = dir.join(".gitignore");
-        std::fs::write(&gitignore, "index.db\nsync/").unwrap();
+        write_with_mode(&gitignore, "index.db\nsync/", 0o644);
         read_or_create(&dir).unwrap();
         assert_eq!(
             std::fs::read_to_string(&gitignore).unwrap(),
             "index.db\nsync/\ndaemon.token\n"
         );
-        read_or_create(&dir).unwrap();
-        std::fs::remove_file(token_path(&dir)).unwrap();
+        assert_eq!(mode(&gitignore), 0o644);
+        // A token from an earlier build, with the entry missing.
+        write_with_mode(&gitignore, "index.db\n", 0o644);
         read_or_create(&dir).unwrap();
         assert_eq!(
             std::fs::read_to_string(&gitignore).unwrap(),
-            "index.db\nsync/\ndaemon.token\n",
+            "index.db\ndaemon.token\n"
+        );
+        read_or_create(&dir).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&gitignore).unwrap(),
+            "index.db\ndaemon.token\n",
             "the entry is added once"
         );
     }

@@ -167,16 +167,48 @@ pub enum DaemonHealth {
 
 /// The caller's own project, as every call names it: its path, absolute (made
 /// so against *this* process's working directory, which the hub does not
-/// share) and canonical where it resolves, and its daemon token — created
-/// here on first need.
+/// share) and canonical where it resolves, and its daemon token.
+///
+/// Only a call that loads the project (`clove daemon start`, the MCP server,
+/// `clove serve`) creates or replaces the token; a read uses the token that is
+/// there, or none — reads never write. A `.clove` that is itself a symlink (a
+/// clone can commit `.clove -> ~`), or whose `issues/` is not a real
+/// directory, gets no token work at all: the project goes without the daemon.
 pub fn project(clove_dir: &Utf8Path, load: bool) -> std::io::Result<Project> {
-    let clove_dir = absolute_project_dir(clove_dir);
-    let token = clove_core::daemon_token::read_or_create(&clove_dir)?;
+    let given = crate::absolute(clove_dir);
+    refuse_linked_store(&given)?;
+    let clove_dir = absolute_project_dir(&given);
+    let token = if load {
+        clove_core::daemon_token::read_or_create(&clove_dir)?
+    } else {
+        clove_core::daemon_token::read(&clove_dir)?
+    };
     Ok(Project {
         clove_dir: clove_dir.into_string(),
         load,
         token,
     })
+}
+
+/// Fail for a store whose `.clove` is a symlink or whose `issues/` is not a
+/// real directory, before anything is canonicalized away.
+fn refuse_linked_store(clove_dir: &Utf8Path) -> std::io::Result<()> {
+    let refuse = |why: String| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{why}; the daemon is not used for this project"),
+        )
+    };
+    let store = std::fs::symlink_metadata(clove_dir)?;
+    if store.file_type().is_symlink() {
+        return Err(refuse(format!("{clove_dir} is a symlink")));
+    }
+    let issues = clove_dir.join("issues");
+    match std::fs::symlink_metadata(&issues) {
+        Ok(meta) if meta.is_dir() => Ok(()),
+        Ok(_) => Err(refuse(format!("{issues} is not a directory"))),
+        Err(e) => Err(refuse(format!("{issues}: {e}"))),
+    }
 }
 
 fn absolute_project_dir(clove_dir: &Utf8Path) -> Utf8PathBuf {
@@ -252,6 +284,19 @@ impl DaemonClient {
         };
         this.check(if load { LOAD_TIMEOUT } else { ANSWER_TIMEOUT })?;
         Ok(this)
+    }
+
+    /// Stop serving `clove_dir` on `hub` — also a project still loading, which
+    /// a probe cannot see (it answers `NOT_LOADED` until the load completes).
+    pub fn detach_at(hub: &HubPaths, clove_dir: &Utf8Path) -> Result<Detached, ClientError> {
+        let (rt, client) = connect(hub)?;
+        let project = project(clove_dir, false).map_err(ClientError::Token)?;
+        let mut this = DaemonClient {
+            rt: Some(rt),
+            client,
+            project,
+        };
+        this.detach()
     }
 
     /// The hub's health, without touching the filesystem (unlike
@@ -756,8 +801,17 @@ mod tests {
         assert_eq!(serde_json::from_str::<RpcError>(&wire).unwrap(), current);
     }
 
+    /// Token records for these tests go in the build, never the user's home.
+    fn isolate() {
+        clove_core::daemon_token::use_records_dir(Utf8PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../target/test-clove-home/daemon-tokens"
+        )));
+    }
+
     /// A private temp dir to root a test hub in (tempdirs are 0700 on Unix).
     fn hub_dir() -> (tempfile::TempDir, HubPaths) {
+        isolate();
         let dir = tempfile::tempdir().unwrap();
         let path = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
         (dir, HubPaths::at(path))
@@ -800,20 +854,43 @@ mod tests {
         assert!(named.starts_with(cwd.canonicalize_utf8().unwrap()) || named.starts_with(&cwd));
     }
 
-    /// A project with no token yet gets one on first use; the call carries it.
-    #[test]
-    fn a_project_without_a_token_gets_one() {
+    /// A store as `clove init` leaves it, in a canonical temp dir.
+    fn store() -> (tempfile::TempDir, Utf8PathBuf) {
+        isolate();
         let tmp = tempfile::tempdir().unwrap();
-        let clove_dir = Utf8PathBuf::from_path_buf(tmp.path().join(".clove")).unwrap();
-        std::fs::create_dir_all(&clove_dir).unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().canonicalize().unwrap()).unwrap();
+        let clove_dir = root.join(".clove");
+        std::fs::create_dir_all(clove_dir.join("issues")).unwrap();
+        (tmp, clove_dir)
+    }
+
+    /// Only a call that loads the project makes its token; a read writes
+    /// nothing and has no token to send.
+    #[test]
+    fn only_a_load_makes_the_token() {
+        let (_tmp, clove_dir) = store();
         let token_file = clove_core::daemon_token::token_path(&clove_dir);
-        assert!(!token_file.exists());
-        let named = project(&clove_dir, false).unwrap();
+        assert!(project(&clove_dir, false).is_err());
+        assert!(!token_file.exists(), "a read created a token");
+        let loading = project(&clove_dir, true).unwrap();
         assert!(token_file.exists(), "no token file was created");
-        assert_eq!(
-            named.token,
-            clove_core::daemon_token::read(&clove_dir).unwrap()
-        );
+        assert_eq!(project(&clove_dir, false).unwrap().token, loading.token);
+    }
+
+    /// A `.clove` that is itself a symlink gets no token work: reading and
+    /// loading both refuse it, and nothing lands in the link's target.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_store_gets_no_token() {
+        let (tmp, target) = store();
+        let repo = Utf8PathBuf::from_path_buf(tmp.path().join("repo")).unwrap();
+        std::fs::create_dir(&repo).unwrap();
+        std::os::unix::fs::symlink(&target, repo.join(".clove")).unwrap();
+        for load in [false, true] {
+            let refused = project(&repo.join(".clove"), load).unwrap_err().to_string();
+            assert!(refused.contains("symlink"), "{refused}");
+        }
+        assert!(!clove_core::daemon_token::token_path(&target).exists());
     }
 
     /// A token the client can neither use nor replace is never sent: the call
@@ -822,9 +899,7 @@ mod tests {
     #[test]
     fn an_unusable_token_is_not_sent() {
         use std::os::unix::fs::PermissionsExt;
-        let tmp = tempfile::tempdir().unwrap();
-        let clove_dir = Utf8PathBuf::from_path_buf(tmp.path().join(".clove")).unwrap();
-        std::fs::create_dir_all(&clove_dir).unwrap();
+        let (_tmp, clove_dir) = store();
         let token = clove_core::daemon_token::token_path(&clove_dir);
         std::fs::write(&token, "0123456789abcdef0123456789abcdef\n").unwrap();
         std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o644)).unwrap();
@@ -834,7 +909,7 @@ mod tests {
             protocol: PROTOCOL_VERSION,
         };
         let _hub = fake_hub(&hub, Some(welcome), Duration::from_secs(2));
-        let refused = DaemonClient::attach(&hub, &clove_dir, false).err();
+        let refused = DaemonClient::attach(&hub, &clove_dir, true).err();
         std::fs::set_permissions(&clove_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
         match refused {
             Some(ClientError::Token(e)) => assert!(e.to_string().contains("daemon.token"), "{e}"),

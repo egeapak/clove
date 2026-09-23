@@ -24,6 +24,7 @@ fn clove() -> Command {
 fn run_in(dir: &Path, args: &[&str]) -> std::process::Output {
     clove()
         .current_dir(dir)
+        .env("CLOVE_HOME", TEST_CLOVE_HOME)
         .env("CLOVE_RUNTIME_DIR", runtime_dir(dir))
         .args(args)
         .output()
@@ -426,11 +427,16 @@ fn search_defaults_to_relevance_and_an_explicit_sort_replaces_it() {
     }
 }
 
+#[cfg(unix)]
+/// Token records for this test's processes go here, never the user's clove home.
+const TEST_CLOVE_HOME: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/test-clove-home");
+
 /// The third path: a live `cloved`. The sort rides `QueryRequest.order`, so a
 /// dropped wire field shows up here as `rank` order for every request.
 #[cfg(unix)]
 mod daemon {
     use super::*;
+
     use std::path::PathBuf;
     use std::process::Child;
     use std::time::{Duration, Instant};
@@ -472,6 +478,7 @@ mod daemon {
     fn spawn_daemon(clove_dir: &Path, bin: &Path) -> Daemon {
         let run = runtime_dir(clove_dir.parent().unwrap());
         let child = Command::new(bin)
+            .env("CLOVE_HOME", TEST_CLOVE_HOME)
             .env("CLOVE_RUNTIME_DIR", &run)
             .env("CLOVED_DISABLE_WEB", "1")
             .arg("run")

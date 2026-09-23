@@ -48,26 +48,12 @@ pub fn home_dir(field: &str) -> Result<Utf8PathBuf, CloveError> {
 ///
 /// Deliberately never `~/.clove` — see the module docs.
 pub fn clove_home() -> Result<Utf8PathBuf, CloveError> {
-    if let Some(raw) = non_empty_var("CLOVE_HOME") {
-        return to_utf8(raw, "CLOVE_HOME");
-    }
-    if let Some(raw) = non_empty_var("XDG_DATA_HOME") {
-        return Ok(to_utf8(raw, "XDG_DATA_HOME")?.join("clove"));
-    }
-    #[cfg(windows)]
-    {
-        if let Some(raw) = non_empty_var("APPDATA") {
-            return Ok(to_utf8(raw, "APPDATA")?.join("clove"));
-        }
-        Ok(home_dir("CLOVE_HOME")?.join("clove"))
-    }
-    #[cfg(not(windows))]
-    {
-        Ok(home_dir("CLOVE_HOME")?
-            .join(".local")
-            .join("share")
-            .join("clove"))
-    }
+    // One resolver for the CLI and the daemon, which records the tokens it
+    // issued there.
+    clove_core::home::clove_home().map_err(|e| CloveError::InvalidField {
+        field: "CLOVE_HOME".to_owned(),
+        reason: e.to_string(),
+    })
 }
 
 /// The directory installed plugin binaries land in (`cargo install --root
@@ -77,21 +63,6 @@ pub fn bin_dir() -> Option<Utf8PathBuf> {
     // want to *search* the directory — an unresolvable home simply contributes
     // no search entry.
     clove_home().ok().map(|home| home.join("bin"))
-}
-
-/// An environment variable, treated as absent when empty. An empty `$CLOVE_HOME`
-/// must not resolve the root to `""` (which would join to a relative path).
-fn non_empty_var(name: &str) -> Option<std::ffi::OsString> {
-    std::env::var_os(name).filter(|value| !value.is_empty())
-}
-
-fn to_utf8(raw: std::ffi::OsString, field: &str) -> Result<Utf8PathBuf, CloveError> {
-    Utf8PathBuf::from_path_buf(std::path::PathBuf::from(raw)).map_err(|path| {
-        CloveError::InvalidField {
-            field: field.to_owned(),
-            reason: format!("path is not valid UTF-8: {}", path.display()),
-        }
-    })
 }
 
 /// True when `path` is the `.clove` directory name that repository discovery

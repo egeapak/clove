@@ -15,13 +15,17 @@ use assert_cmd::prelude::*;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
+/// Token records for this test's processes go here, never the user's clove home.
+const TEST_CLOVE_HOME: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/test-clove-home");
+
 fn clove(dir: &Path) -> Command {
     let mut cmd = Command::cargo_bin("clove").unwrap();
     cmd.current_dir(dir);
     cmd.env_remove("CLOVE_FORMAT");
     cmd.env("CLOVE_AUTHOR", "tester@example.com");
     // Any daemon a test starts lives in the test repo's own runtime directory.
-    cmd.env("CLOVE_RUNTIME_DIR", runtime_dir(dir));
+    cmd.env("CLOVE_HOME", TEST_CLOVE_HOME)
+        .env("CLOVE_RUNTIME_DIR", runtime_dir(dir));
     cmd
 }
 
@@ -1311,6 +1315,7 @@ fn read_tools_use_the_daemon_tier_and_agree_with_the_files() {
         .run()
         .expect("build cloved");
     let mut daemon = std::process::Command::new(cloved.path())
+        .env("CLOVE_HOME", TEST_CLOVE_HOME)
         .env("CLOVE_RUNTIME_DIR", runtime_dir(dir.path()))
         .env("CLOVED_DISABLE_WEB", "1")
         .arg("run")
@@ -1615,7 +1620,8 @@ fn a_relative_clove_dir_writes_into_the_callers_project() {
         .success();
 
     let mut cmd = clove(b.path());
-    cmd.env("CLOVE_RUNTIME_DIR", &run)
+    cmd.env("CLOVE_HOME", TEST_CLOVE_HOME)
+        .env("CLOVE_RUNTIME_DIR", &run)
         .env("CLOVED_PATH", &cloved)
         .env("CLOVED_DISABLE_WEB", "1")
         .args(["--clove-dir", ".clove"]);
