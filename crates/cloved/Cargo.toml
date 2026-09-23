@@ -64,6 +64,8 @@ windows-sys = { version = "0.59", features = [
     # gets this feature by unification, but the windows-gnu target does not, so
     # declare it explicitly (see crates/cloved/src/lifecycle.rs).
     "Win32_Security",
+    # The shutdown event's owner-only security descriptor, from SDDL.
+    "Win32_Security_Authorization",
     "Win32_System_Threading",
 ] }
 

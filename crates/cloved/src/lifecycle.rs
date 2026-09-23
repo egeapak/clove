@@ -255,7 +255,9 @@ impl ShutdownSignal {
 /// Windows has no SIGTERM: wait on Ctrl-C (interactive) or the named shutdown
 /// event that `clove daemon stop --all` signals (DESIGN §8.9). The event is
 /// created at install, before the pid file advertises readiness; a hub that
-/// cannot create it would be one nothing can stop, so it does not start.
+/// cannot create it would be one nothing can stop, so it does not start. It
+/// is created owner-only, and one that already exists is refused: another
+/// process that made it first could signal it — stopping this hub — at will.
 #[cfg(windows)]
 struct ShutdownSignal {
     event: NamedEvent,
@@ -282,17 +284,61 @@ impl Drop for NamedEvent {
 #[cfg(windows)]
 impl ShutdownSignal {
     fn install(paths: &HubPaths) -> std::io::Result<Self> {
+        use windows_sys::Win32::Foundation::{
+            CloseHandle, GetLastError, LocalFree, ERROR_ALREADY_EXISTS,
+        };
+        use windows_sys::Win32::Security::Authorization::{
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+        };
+        use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
         use windows_sys::Win32::System::Threading::CreateEventW;
+
         let name = paths.event_name()?;
         if name.is_empty() {
             return Err(std::io::Error::other("the shutdown event has no name"));
         }
-        let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-        // SAFETY: default security, manual reset, initially unsignaled, and a
-        // valid NUL-terminated UTF-16 name.
-        let handle = unsafe { CreateEventW(std::ptr::null(), 1, 0, wide.as_ptr()) };
-        if handle.is_null() {
+        let wide = |text: &str| -> Vec<u16> { text.encode_utf16().chain(Some(0)).collect() };
+        let sid = clove_ipc::win::current_user_sid()?;
+        let sddl = wide(&format!("O:{sid}D:P(A;;GA;;;{sid})"));
+        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        // SAFETY: a valid NUL-terminated SDDL string; the descriptor is
+        // LocalAlloc'd by the API and freed below.
+        let built = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                std::ptr::null_mut(),
+            )
+        };
+        if built == 0 {
             return Err(std::io::Error::last_os_error());
+        }
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor,
+            bInheritHandle: 0,
+        };
+        let name = wide(&name);
+        // SAFETY: owner-only security, manual reset, initially unsignaled, and
+        // a valid NUL-terminated UTF-16 name. GetLastError is read at once.
+        let (handle, existed) = unsafe {
+            let handle = CreateEventW(&attributes, 1, 0, name.as_ptr());
+            (handle, GetLastError() == ERROR_ALREADY_EXISTS)
+        };
+        let error = std::io::Error::last_os_error();
+        // SAFETY: allocated by ConvertStringSecurityDescriptorToSecurityDescriptorW.
+        unsafe { LocalFree(descriptor) };
+        if handle.is_null() {
+            return Err(error);
+        }
+        if existed {
+            // SAFETY: a handle this call opened.
+            unsafe { CloseHandle(handle) };
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "the shutdown event already exists: some other process created it",
+            ));
         }
         Ok(ShutdownSignal {
             event: NamedEvent(handle),

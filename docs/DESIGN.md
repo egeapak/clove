@@ -1772,8 +1772,11 @@ and is not gated.)
 `clove daemon stop --all`, a named shutdown event: `CreateEventW` with a name derived
 from the user's SID and the runtime directory, created at startup before `hub.pid`
 is written — a hub that cannot create it (or name it) does not start, since
-nothing could stop it; the CLI signals the event; the hub's event-loop wakes,
-runs the shutdown sequence, and exits.
+nothing could stop it. It is created with the same owner-only descriptor as the
+pipe (`O:<SID>D:P(A;;GA;;;<SID>)`), and one that **already exists** is refused
+(`ERROR_ALREADY_EXISTS`): whoever made it first could signal it at will. The
+CLI signals the event; the hub's event-loop wakes, runs the shutdown sequence,
+and exits.
 
 Shutdown sequence (all platforms), per slot and then for the hub:
 1. Stop the slot's tasks (watcher, loops, idle timer); close its web sockets.
