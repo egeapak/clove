@@ -100,10 +100,10 @@ fn one_project_failing_to_load_leaves_the_others_serving() {
     let (_a_tmp, a) = init_clove_dir();
     let hub = TestHub::spawn(Some(&a));
 
-    // Not a clove store at all.
+    // Not a clove store at all: the client does not even ask.
     let bare = tempfile::tempdir().unwrap();
     let bare = Utf8PathBuf::from_path_buf(bare.path().to_path_buf()).unwrap();
-    assert_eq!(refusal_code(hub.load(&bare)), codes::LOAD_FAILED);
+    assert!(matches!(hub.load(&bare), Err(ClientError::Token(_))));
 
     // A store whose index cannot be opened.
     let (_c_tmp, c) = init_clove_dir();
@@ -222,9 +222,10 @@ fn concurrent_loads_of_one_project_share_one_slot() {
 fn every_spelling_of_a_project_reaches_one_slot() {
     let (tmp, a) = init_clove_dir();
     let hub = TestHub::spawn(Some(&a));
+    // The repository reached through a symlink (the `.clove` in it is real).
     let link = tmp.path().join("alias");
-    std::os::unix::fs::symlink(a.as_std_path(), &link).unwrap();
-    let alias = Utf8PathBuf::from_path_buf(link).unwrap();
+    std::os::unix::fs::symlink(a.parent().unwrap().as_std_path(), &link).unwrap();
+    let alias = Utf8PathBuf::from_path_buf(link).unwrap().join(".clove");
     hub.client(&alias).ping().unwrap();
     hub.load(&alias).unwrap();
     assert_eq!(hub.projects(), vec![canonical(&a)]);
