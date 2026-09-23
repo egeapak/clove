@@ -25,7 +25,7 @@ exclude = ["fuzz"]
 
 [workspace.package]
 edition = "2021"
-version = "0.1.0"
+version = "0.1.1"
 license = "MIT OR Apache-2.0"
 authors = ["Ege Apak"]
 repository = "https://github.com/egeapak/clove"
@@ -121,16 +121,16 @@ base64 = "0.22"                 # CSP hash encoding
 
 # Internal crates (explicit version keeps them off cargo-deny's wildcard list
 # and is required for publishing clove-core to crates.io — PRD §13).
-clove-types = { path = "crates/clove-types", version = "0.1.0" }
-clove-core = { path = "crates/clove-core", version = "0.1.0" }
-clove-index = { path = "crates/clove-index", version = "0.1.0" }
-clove-import = { path = "crates/clove-import", version = "0.1.0", default-features = false }
-clove-ipc = { path = "crates/clove-ipc", version = "0.1.0" }
-clove-engine = { path = "crates/clove-engine", version = "0.1.0" }
-clove-mcp = { path = "crates/clove-mcp", version = "0.1.0" }
-clove-tui = { path = "crates/clove-tui", version = "0.1.0" }
-clove-web = { path = "crates/clove-web", version = "0.1.0" }
-clove-plugin = { path = "crates/clove-plugin", version = "0.1.0" }
+clove-types = { path = "crates/clove-types", version = "0.1.1" }
+clove-core = { path = "crates/clove-core", version = "0.1.1" }
+clove-index = { path = "crates/clove-index", version = "0.1.1" }
+clove-import = { path = "crates/clove-import", version = "0.1.1", default-features = false }
+clove-ipc = { path = "crates/clove-ipc", version = "0.1.1" }
+clove-engine = { path = "crates/clove-engine", version = "0.1.1" }
+clove-mcp = { path = "crates/clove-mcp", version = "0.1.1" }
+clove-tui = { path = "crates/clove-tui", version = "0.1.1" }
+clove-web = { path = "crates/clove-web", version = "0.1.1" }
+clove-plugin = { path = "crates/clove-plugin", version = "0.1.1" }
 
 # Debug-build size controls. `target/` was 2.5 GB for a plain `cargo build
 # --workspace`, nearly all of it DWARF. Line tables keep `RUST_BACKTRACE` frames

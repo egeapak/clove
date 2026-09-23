@@ -4,6 +4,40 @@ All notable changes to clove are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-09-24
+
+### Added
+
+- One per-user daemon serves every project, over one socket and one web port (`/p/<slug>/`, with a project picker)
+- A per-project `.clove/daemon.token` scopes automated daemon calls (CLI, MCP) to their own project
+- `clove daemon stop --all`; `clove daemon status` lists each served project and its file-watcher state
+- The daemon logs to `hub.log` in its runtime directory
+- `clove doctor` reports a clove 0.1.0 daemon, an unresponsive daemon, a git-tracked daemon token, and a clove-home mismatch
+
+### Changed
+
+- The daemon socket lives in a per-user runtime directory (`$CLOVE_RUNTIME_DIR`, `$XDG_RUNTIME_DIR/clove`, or `$TMPDIR/clove-<uid>`), not in `.clove/`
+- `clove daemon stop` stops serving this project; the daemon exits once it serves none
+- The daemon runs from its runtime directory with a minimal environment; its GitHub sync takes the token from `gh auth token`
+- `clove serve` defaults to the configured `[web] port` and falls back to a free port; an explicit `--port` is always honored
+- Daemon IPC protocol 8: clove 0.1.0 clients and daemons fall back to direct file access
+
+### Fixed
+
+- `clove … | head` exits quietly instead of aborting on a closed pipe
+- The daemon runs in repositories nested deeper than the platform's socket-path limit
+- `clove serve` in a second project no longer fails on the shared port or blames `[web] enabled = false`
+- `clove sync github` names comment directions: `comments 0 pulled / 6 pushed`
+- `clove daemon stop` and `clove doctor --fix` no longer delete a live but slow daemon's socket and pid files
+- `clove mcp` no longer panics on exit
+
+### Security
+
+- Files under `.clove/` are never written through a planted symlink (daemon lock, index, sync state, `doctor --fix`, `init`)
+- Daemon-side GitHub sync only targets one of the project's own git remotes
+- Daemon clients and the daemon verify each other's user; the Windows pipe and shutdown event are owner-only
+- The web UI's event socket requires a same-port origin; pages carry a hash-pinned CSP and every response `nosniff`
+
 ## [0.1.0] - 2026-09-16
 
 The first public release: milestones M0–M4, plus the unified read path
