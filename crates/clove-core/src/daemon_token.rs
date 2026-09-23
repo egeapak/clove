@@ -12,7 +12,9 @@
 //! the clove home ([`crate::home`]). A token that arrived any other way — one
 //! committed to the repository, restored from an archive with its modes — has
 //! no record, and is replaced by a client that loads the project. A lost
-//! record only means a fresh token.
+//! record only means a fresh token. Records count only in directories that are
+//! private — real directories this user owns that no one else can write to —
+//! checked on every read as well as when a record is made.
 //!
 //! Reading never writes: only [`read_or_create`], for a client that loads the
 //! project, creates or replaces the token or touches `.clove/.gitignore`.
@@ -60,18 +62,59 @@ fn hex_sha256(text: &str) -> String {
         .collect()
 }
 
-/// The record of `token` as issued for the project at `clove_dir`: a file
-/// named by the token's hash in a directory named by the project path's.
-fn record_path(clove_dir: &Utf8Path, token: &str) -> io::Result<Utf8PathBuf> {
-    Ok(records_dir()?
-        .join(hex_sha256(clove_dir.as_str()))
-        .join(hex_sha256(token)))
+/// The directory of the project's records, named by the project path's hash.
+fn project_records(clove_dir: &Utf8Path) -> io::Result<Utf8PathBuf> {
+    Ok(records_dir()?.join(hex_sha256(clove_dir.as_str())))
 }
 
+/// The record of `token` as issued for the project at `clove_dir`: a file
+/// named by the token's hash in the project's records directory.
+fn record_path(clove_dir: &Utf8Path, token: &str) -> io::Result<Utf8PathBuf> {
+    Ok(project_records(clove_dir)?.join(hex_sha256(token)))
+}
+
+/// Whether clove recorded issuing `token` for `clove_dir` — in a records
+/// directory, and a project directory in it, that are both private: a record
+/// anyone else could have put there vouches for nothing.
 fn issued(clove_dir: &Utf8Path, token: &str) -> bool {
-    record_path(clove_dir, token)
-        .and_then(std::fs::symlink_metadata)
-        .is_ok_and(|meta| meta.is_file())
+    let Ok(entry) = record_path(clove_dir, token) else {
+        return false;
+    };
+    let project = entry.parent().unwrap_or(&entry);
+    let records = project.parent().unwrap_or(project);
+    is_private_dir(records)
+        && is_private_dir(project)
+        && std::fs::symlink_metadata(&entry).is_ok_and(|meta| meta.is_file())
+}
+
+/// Whether `dir` is a directory — itself, not a symlink to one — that on
+/// Unix this user owns and no one else can write to: the daemon runtime
+/// directory's rule, applied to the token records.
+fn is_private_dir(dir: &Utf8Path) -> bool {
+    let Ok(meta) = std::fs::symlink_metadata(dir) else {
+        return false;
+    };
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        meta.uid() == current_uid() && meta.mode() & 0o022 == 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+#[cfg(unix)]
+fn current_uid() -> u32 {
+    extern "C" {
+        fn getuid() -> u32;
+    }
+    // SAFETY: getuid takes no arguments, cannot fail, and touches no memory.
+    unsafe { getuid() }
 }
 
 /// Record `token` as issued for `clove_dir` (`0700` directories, a `0600`
@@ -126,11 +169,13 @@ fn create_private_dir(dir: &Utf8Path) -> io::Result<()> {
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
     builder.create(dir)?;
-    let meta = std::fs::symlink_metadata(dir)?;
-    if meta.file_type().is_symlink() || !meta.is_dir() {
+    if !is_private_dir(dir) {
         return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("{dir} is not a directory"),
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "{dir} must be a directory (not a symlink) owned by the current user \
+                 that no one else can write to"
+            ),
         ));
     }
     Ok(())
@@ -177,6 +222,11 @@ pub fn read_or_create(clove_dir: &Utf8Path) -> io::Result<String> {
         Found::Trusted(token) => token,
         Found::Missing | Found::Untrusted(_) => {
             let _issuing = issue_lock(clove_dir).map_err(with_path(&path, "creating"))?;
+            // Where the new token would be recorded must be usable before the
+            // one there now is removed.
+            project_records(clove_dir)
+                .and_then(|dir| create_private_dir(&dir))
+                .map_err(with_path(&path, "recording"))?;
             // Another client may have made it while this one waited.
             match inspect(clove_dir, &path)? {
                 Found::Trusted(token) => token,
@@ -249,12 +299,7 @@ fn untrusted(meta: &std::fs::Metadata) -> Option<String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        extern "C" {
-            fn getuid() -> u32;
-        }
-        // SAFETY: getuid takes no arguments, cannot fail, and touches no memory.
-        let me = unsafe { getuid() };
-        if meta.uid() != me {
+        if meta.uid() != current_uid() {
             return Some(format!("it is owned by uid {}", meta.uid()));
         }
         if meta.mode() & 0o777 != 0o600 {
