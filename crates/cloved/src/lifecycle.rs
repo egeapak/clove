@@ -91,10 +91,16 @@ pub fn run(paths: &HubPaths) -> anyhow::Result<()> {
         Ok(())
     });
 
+    // Every served project is torn down by now. What may remain is a load
+    // still running on the blocking pool (a large project's open, holding its
+    // lock): dropping the runtime would wait for it while `hub.pid` says the
+    // hub is gone. Abandon it instead — the process exits right after, which
+    // releases its locks — and remove the files only then, so "stopped" is
+    // true when a client sees them go.
+    runtime.shutdown_background();
     #[cfg(not(windows))]
     let _ = std::fs::remove_file(paths.sock());
     let _ = std::fs::remove_file(paths.pid());
-    drop(runtime);
     result
 }
 

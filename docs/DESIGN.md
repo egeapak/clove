@@ -1779,7 +1779,11 @@ Shutdown sequence (all platforms), per slot and then for the hub:
 1. Stop the slot's tasks (watcher, loops, idle timer); close its web sockets.
 2. `PRAGMA wal_checkpoint(TRUNCATE)`.
 3. Release `.clove/daemon.lock`; unmount the project from the web listener.
-4. Once every slot is down: remove `hub.sock` (Unix) and `hub.pid`.
+4. Once every slot is down: abandon any load still running (a large
+   project's open, holding its lock) rather than wait for it — the process
+   exit that follows releases it — then remove `hub.sock` (Unix) and
+   `hub.pid`, so a client that sees them gone (`clove daemon stop --all`)
+   is right that the hub is gone.
 5. Exit 0.
 
 A single slot's teardown (detach, idle eviction, a failed task) is steps 1–3.

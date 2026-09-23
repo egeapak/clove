@@ -116,3 +116,39 @@ fn an_idle_hub_exits_after_its_projects_idle_out() {
     assert!(!hub.paths.pid().exists(), "pid removed on idle shutdown");
     assert!(!hub.paths.sock().exists(), "socket removed");
 }
+
+/// Stopping the hub while a project is still loading: once the hub's pid
+/// file is gone — which is when `clove daemon stop --all` reports it stopped —
+/// the hub has exited and holds neither its own lock nor the project's
+/// (L-new-2).
+#[test]
+fn a_hub_stopped_mid_load_is_gone_when_its_pid_file_is() {
+    let (_a_tmp, a) = init_clove_dir();
+    let mut hub = TestHub::spawn_with(
+        None,
+        &[
+            ("CLOVED_DISABLE_WEB", "1"),
+            ("CLOVED_LOAD_DELAY_MS", "4000"),
+        ],
+    );
+    let loader = {
+        let (paths, a) = (hub.paths.clone(), a.clone());
+        std::thread::spawn(move || clove_ipc::DaemonClient::attach(&paths, &a, true).map(|_| ()))
+    };
+    // The load holds the project's lock (and is delayed) by now.
+    std::thread::sleep(Duration::from_millis(500));
+    hub.signal(SIGTERM);
+    assert!(
+        support::eventually(Duration::from_secs(10), || !hub.paths.pid().exists()),
+        "the hub did not stop"
+    );
+    let exited = hub.wait_exit(Duration::from_millis(500));
+    let hub_lock = clove_core::fs_safe::open_lock_file(&hub.paths.lock()).unwrap();
+    let hub_lock_free = hub_lock.try_lock().is_ok();
+    let project_lock = clove_core::fs_safe::open_lock_file(&clove_ipc::lock_path(&a)).unwrap();
+    let project_lock_free = project_lock.try_lock().is_ok();
+    let _ = loader.join();
+    assert!(exited.is_some(), "the pid file went but the hub lives on");
+    assert!(hub_lock_free, "the hub lock is still held");
+    assert!(project_lock_free, "the project's lock is still held");
+}
