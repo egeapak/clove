@@ -28,6 +28,61 @@ fn wait_gone(hub: &clove_ipc::HubPaths) {
     }
 }
 
+/// Clients poll a hub's lock to learn whether one is alive; a hub starting at
+/// that instant must not mistake the poll for another hub and give up (N1).
+#[test]
+fn a_liveness_poll_never_makes_a_starting_hub_give_up() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let (_run, hub) = runtime_dir();
+    let _kill = KillHub(hub.clone());
+    let polling = Arc::new(AtomicBool::new(true));
+    let pollers: Vec<_> = (0..4)
+        .map(|_| {
+            let (hub, polling) = (hub.clone(), polling.clone());
+            std::thread::spawn(move || {
+                while polling.load(Ordering::Relaxed) {
+                    let _ = hub.running();
+                }
+            })
+        })
+        .collect();
+
+    let mut gave_up = Vec::new();
+    for round in 0..25 {
+        let mut child = support::command(&hub, &[("CLOVED_DISABLE_WEB", "1")])
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn cloved");
+        let start = Instant::now();
+        let exited = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break Some(status);
+            }
+            if hub.pid().exists() || start.elapsed() > Duration::from_secs(10) {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        if let Some(status) = exited {
+            let mut stderr = String::new();
+            use std::io::Read as _;
+            let _ = child.stderr.take().unwrap().read_to_string(&mut stderr);
+            gave_up.push(format!("round {round}: {status}: {}", stderr.trim()));
+            continue;
+        }
+        support::send_signal(child.id(), support::SIGTERM);
+        let _ = child.wait();
+        wait_gone(&hub);
+    }
+    polling.store(false, Ordering::Relaxed);
+    for poller in pollers {
+        let _ = poller.join();
+    }
+    assert!(gave_up.is_empty(), "{}", gave_up.join("\n"));
+}
+
 #[test]
 fn stopping_the_last_project_while_another_starts_never_strands_it() {
     // `ensure_daemon_at` spawns `cloved` from `CLOVED_PATH`; set before any

@@ -2,7 +2,9 @@
 //! pid-after-ready, signal-driven shutdown, and clean teardown.
 //!
 //! Ordering invariants:
-//! - The `hub.lock` advisory flock is taken first; a second hub fails fast.
+//! - The `hub.lock` advisory flock is taken first; a second hub gives up once
+//!   the lock has stayed taken for a second (a client's liveness poll holds it
+//!   only for an instant).
 //! - `hub.pid` is written **only after** the socket is bound, so a reader that
 //!   sees a pid is guaranteed a usable socket.
 //! - The shutdown-signal handler is installed **before** the pid is written, so a
@@ -43,15 +45,9 @@ pub fn run(paths: &HubPaths) -> anyhow::Result<()> {
     // 1. Single-instance advisory lock, held for the whole lifetime.
     let lock = clove_core::fs_safe::open_lock_file(&paths.lock())
         .with_context(|| format!("opening {}", paths.lock()))?;
-    match lock.try_lock() {
-        Ok(()) => {}
-        Err(std::fs::TryLockError::WouldBlock) => {
-            eprintln!("cloved: a daemon is already running in {}", paths.dir());
-            std::process::exit(1);
-        }
-        Err(std::fs::TryLockError::Error(e)) => {
-            return Err(e).with_context(|| format!("locking {}", paths.lock()));
-        }
+    if !take_hub_lock(&lock).with_context(|| format!("locking {}", paths.lock()))? {
+        eprintln!("cloved: a daemon is already running in {}", paths.dir());
+        std::process::exit(1);
     }
 
     // 2. Tokio runtime — 2 workers, per DESIGN §8.1. Every project's blocking
@@ -98,6 +94,28 @@ pub fn run(paths: &HubPaths) -> anyhow::Result<()> {
     let _ = std::fs::remove_file(paths.pid());
     drop(runtime);
     result
+}
+
+/// Take the hub lock exclusively; `false` when another hub holds it.
+///
+/// Clients learn whether a hub is alive by briefly taking the same lock shared
+/// ([`HubPaths::running`]), so one refusal may be a poll in flight rather than
+/// a hub. Only a lock that stays taken for about a second means a hub.
+fn take_hub_lock(lock: &std::fs::File) -> std::io::Result<bool> {
+    const PATIENCE: Duration = Duration::from_secs(1);
+    let start = std::time::Instant::now();
+    let mut backoff = Duration::from_millis(1);
+    loop {
+        match lock.try_lock() {
+            Ok(()) => return Ok(true),
+            Err(std::fs::TryLockError::WouldBlock) if start.elapsed() < PATIENCE => {
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(Duration::from_millis(50));
+            }
+            Err(std::fs::TryLockError::WouldBlock) => return Ok(false),
+            Err(std::fs::TryLockError::Error(e)) => return Err(e),
+        }
+    }
 }
 
 /// Resolve once the hub's own files are gone — its runtime directory deleted
