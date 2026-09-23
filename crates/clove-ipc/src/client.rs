@@ -526,10 +526,18 @@ fn connect(hub: &HubPaths) -> Result<(Runtime, CloveRpcClient), ClientError> {
     Ok((rt, client))
 }
 
-/// Remove a crashed hub's socket and pid (best effort) — only once a connect
-/// was refused and no process holds the hub lock, so a live hub's files are
-/// never touched (DESIGN §8.3).
+/// Remove a crashed hub's socket and pid (best effort) — only while holding
+/// the hub lock exclusively, so a live hub's files are never touched: a hub
+/// takes that lock before it binds and keeps it until it has unbound, even if
+/// it came up after the caller decided the footprint was dead (DESIGN §8.3).
+/// When the lock is not free, nothing is removed.
 pub(crate) fn cleanup_stale_hub(hub: &HubPaths) {
+    let Ok(lock) = clove_core::fs_safe::open_lock_file(&hub.lock()) else {
+        return;
+    };
+    if lock.try_lock().is_err() {
+        return;
+    }
     #[cfg(not(windows))]
     let _ = std::fs::remove_file(hub.sock());
     let _ = std::fs::remove_file(hub.pid());
@@ -736,6 +744,25 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
         (dir, HubPaths::at(path))
+    }
+
+    /// A hub that bound between a client's failed connect and its cleanup
+    /// holds the hub lock: its files must survive that cleanup (N2).
+    #[test]
+    fn cleanup_never_removes_the_files_of_a_hub_holding_the_lock() {
+        let (_tmp, hub) = hub_dir();
+        std::fs::write(hub.sock(), "").unwrap();
+        std::fs::write(hub.pid(), "4242\n").unwrap();
+        let held = clove_core::fs_safe::open_lock_file(&hub.lock()).unwrap();
+        held.try_lock().unwrap();
+
+        cleanup_stale_hub(&hub);
+        assert!(hub.pid().exists(), "a live hub's pid file was removed");
+        assert!(hub.sock().exists(), "a live hub's socket was removed");
+
+        held.unlock().unwrap();
+        cleanup_stale_hub(&hub);
+        assert!(!hub.pid().exists());
     }
 
     #[test]
