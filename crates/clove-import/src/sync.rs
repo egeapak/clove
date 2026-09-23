@@ -248,7 +248,9 @@ impl SyncState {
         }
     }
 
-    /// The on-disk path for a repo's sync state under `repo_root`.
+    /// The on-disk path for a repo's sync state under `repo_root`
+    /// (`<repo_root>/.clove/sync/github/<owner>__<repo>.json`; see
+    /// [`store_root`]).
     ///
     /// `owner/repo` is flattened to `owner__repo.json` so it is a single,
     /// filesystem-safe file name (a `/` would otherwise be a subdirectory).
@@ -271,7 +273,7 @@ impl SyncState {
     pub fn load(path: &Utf8Path, repo: &str) -> Self {
         let planted = path
             .parent()
-            .is_some_and(|dir| clove_core::fs_safe::check_dirs(dir).is_err());
+            .is_some_and(|dir| clove_core::fs_safe::check_dirs(store_root(path), dir).is_err());
         if planted {
             return SyncState::new(repo);
         }
@@ -287,20 +289,22 @@ impl SyncState {
     /// there as a symlink is written through.
     pub fn save(&self, path: &Utf8Path) -> Result<(), ImportError> {
         if let Some(parent) = path.parent() {
-            clove_core::fs_safe::create_dirs(parent).map_err(|source| ImportError::Source {
-                path: parent.to_owned(),
-                message: format!("failed to create sync-state dir: {source}"),
+            clove_core::fs_safe::create_dirs(store_root(path), parent).map_err(|source| {
+                ImportError::Source {
+                    path: parent.to_owned(),
+                    message: format!("failed to create sync-state dir: {source}"),
+                }
             })?;
         }
         let json = serde_json::to_string_pretty(self).map_err(|err| ImportError::Record {
             message: format!("failed to serialize sync state: {err}"),
         })?;
-        clove_core::fs_safe::write_atomic(path, json.as_bytes()).map_err(|source| {
-            ImportError::Source {
+        clove_core::fs_safe::write_atomic(store_root(path), path, json.as_bytes()).map_err(
+            |source| ImportError::Source {
                 path: path.to_owned(),
                 message: format!("failed to write sync state: {source}"),
-            }
-        })
+            },
+        )
     }
 
     /// Record the fingerprint for `external_ref`, preserving any existing comment
@@ -327,6 +331,15 @@ impl SyncState {
             entry.gh_content_hash = Some(hash);
         }
     }
+}
+
+/// The store's `.clove/` for a sync-state (or lock) path from
+/// [`SyncState::path_for`]: three levels up, past `github/` and `sync/`.
+pub fn store_root(state_path: &Utf8Path) -> &Utf8Path {
+    state_path
+        .ancestors()
+        .nth(3)
+        .unwrap_or_else(|| state_path.parent().unwrap_or(state_path))
 }
 
 /// A remote issue to be created as a brand-new local item (pull).

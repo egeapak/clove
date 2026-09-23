@@ -435,7 +435,8 @@ fn repair_gitignore(store: &ItemStore, missing: &[String]) -> Result<(), CloveEr
         contents.push_str(entry);
         contents.push('\n');
     }
-    crate::fs_safe::write_atomic(&path, contents.as_bytes())
+    let root = path.parent().unwrap_or(&path).to_owned();
+    crate::fs_safe::write_atomic(&root, &path, contents.as_bytes())
         .map_err(|source| CloveError::Io { path, source })
 }
 

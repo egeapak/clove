@@ -174,7 +174,8 @@ fn open_sync_lock(
 ) -> Result<fd_lock::RwLock<std::fs::File>, ImportError> {
     let lock_path = state_path.with_extension("lock");
     if let Some(parent) = lock_path.parent() {
-        clove_core::fs_safe::create_dirs(parent).map_err(|source| ImportError::Source {
+        let root = crate::sync::store_root(&lock_path);
+        clove_core::fs_safe::create_dirs(root, parent).map_err(|source| ImportError::Source {
             path: parent.to_owned(),
             message: format!("failed to create sync dir: {source}"),
         })?;

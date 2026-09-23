@@ -196,7 +196,7 @@ fn ensure_gitignored(clove_dir: &Utf8Path) -> io::Result<()> {
     }
     contents.push_str(TOKEN_FILE);
     contents.push('\n');
-    crate::fs_safe::write_atomic(&gitignore, contents.as_bytes())
+    crate::fs_safe::write_atomic(clove_dir, &gitignore, contents.as_bytes())
 }
 
 /// Compare two tokens without an early exit on the first differing byte.

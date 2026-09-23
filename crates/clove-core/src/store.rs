@@ -497,7 +497,8 @@ impl ItemStore {
     /// A symlinked `issues/` would serve (and receive) another directory's files
     /// as this project's.
     fn check_issues_dir(&self) -> Result<(), CloveError> {
-        crate::fs_safe::check_dirs(&self.issues_dir).map_err(|source| CloveError::Io {
+        let root = self.repo_root.join(".clove");
+        crate::fs_safe::check_dirs(&root, &self.issues_dir).map_err(|source| CloveError::Io {
             path: self.issues_dir.clone(),
             source,
         })

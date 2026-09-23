@@ -103,7 +103,7 @@ pub fn open(clove_dir: &Utf8Path, cancel: CancellationToken) -> Result<Slot, Loa
     let issues_dir = clove_dir.join("issues");
     // A symlinked issues/ would be served as "loaded" while every read and
     // write of it is refused (clove_core::fs_safe).
-    clove_core::fs_safe::check_dirs(&issues_dir)
+    clove_core::fs_safe::check_dirs(clove_dir, &issues_dir)
         .map_err(|e| LoadError::failed(format!("{clove_dir}: {e}")))?;
     if !issues_dir.is_dir() {
         return Err(LoadError::failed(format!(
