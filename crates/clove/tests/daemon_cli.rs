@@ -538,10 +538,11 @@ fn a_stop_while_the_start_is_still_loading_wins() {
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
-    // The load is under way once the hub is up and the loader has its token.
-    let token = dir.join(".clove/daemon.token");
+    // The hub has the load once it opens the index (inside the load, before
+    // the delay); the token alone is written before the request is even sent.
+    let index = dir.join(".clove/index.db");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while !(run.pid_file().exists() && token.exists()) {
+    while !(run.pid_file().exists() && index.exists()) {
         assert!(
             std::time::Instant::now() < deadline,
             "the start never got going"
