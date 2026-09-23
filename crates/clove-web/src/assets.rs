@@ -80,9 +80,66 @@ pub fn warm() {
 /// lazily-loaded chunks under the prefix. The page's own absolute `/_app/`
 /// preloads move with it. A page without the global (the Node-free
 /// placeholder) is returned unchanged.
-pub fn index_for_base(base: &str) -> Option<Vec<u8>> {
+pub(crate) fn index_for_base(base: &str) -> Option<IndexPage> {
     let raw = String::from_utf8_lossy(&table().get("index.html")?.raw).into_owned();
-    Some(rewrite_base(&raw, base).into_bytes())
+    Some(IndexPage::new(rewrite_base(&raw, base)))
+}
+
+/// The entry page as built, for `clove serve` (root base).
+fn standalone_index() -> Option<&'static IndexPage> {
+    static PAGE: OnceLock<Option<IndexPage>> = OnceLock::new();
+    PAGE.get_or_init(|| {
+        let raw = &table().get("index.html")?.raw;
+        Some(IndexPage::new(String::from_utf8_lossy(raw).into_owned()))
+    })
+    .as_ref()
+}
+
+/// The SPA entry page as served under one base, with the `script-src` sources
+/// that let exactly its own inline scripts run. The hub rewrites the boot
+/// script per base, so each base has its own hashes.
+pub(crate) struct IndexPage {
+    html: Vec<u8>,
+    script_src: String,
+}
+
+impl IndexPage {
+    fn new(html: String) -> Self {
+        let mut script_src = "'self'".to_owned();
+        for hash in inline_script_hashes(&html) {
+            script_src.push(' ');
+            script_src.push_str(&hash);
+        }
+        Self {
+            html: html.into_bytes(),
+            script_src,
+        }
+    }
+}
+
+/// `'sha256-…'` for the body of every inline `<script>` in `page`.
+fn inline_script_hashes(page: &str) -> Vec<String> {
+    use base64::Engine as _;
+    use sha2::Digest as _;
+    let mut hashes = Vec::new();
+    let mut rest = page;
+    while let Some(start) = rest.find("<script") {
+        let Some(tag_len) = rest[start..].find('>') else {
+            break;
+        };
+        let body_start = start + tag_len + 1;
+        let Some(body_len) = rest[body_start..].find("</script>") else {
+            break;
+        };
+        let body_end = body_start + body_len;
+        if !rest[start..body_start].contains("src=") {
+            let digest = sha2::Sha256::digest(&rest.as_bytes()[body_start..body_end]);
+            let encoded = base64::engine::general_purpose::STANDARD.encode(digest);
+            hashes.push(format!("'sha256-{encoded}'"));
+        }
+        rest = &rest[body_end..];
+    }
+    hashes
 }
 
 fn rewrite_base(page: &str, base: &str) -> String {
@@ -128,18 +185,24 @@ pub async fn static_handler(
     let candidate = if path.is_empty() { "index.html" } else { path };
     let asset = map.get(candidate);
 
-    let csp = content_security_policy(&headers);
-    // The SPA entry page. Under a hub prefix it is the rewritten copy, which
-    // is never cached: the prefix is per-project, the build is not.
+    // The SPA entry page: under a hub prefix the rewritten copy, else the page
+    // as built. Never cached — the prefix is per-project, the build is not.
     if asset.is_none() || candidate == "index.html" {
-        if let Some(page) = state.index_page() {
+        let page = match state.index_page() {
+            Some(page) => Some(page),
+            None => standalone_index(),
+        };
+        if let Some(page) = page {
             return (
                 [
                     (header::CONTENT_TYPE, "text/html; charset=utf-8".to_owned()),
                     (header::CACHE_CONTROL, "no-cache".to_owned()),
-                    (header::CONTENT_SECURITY_POLICY, csp),
+                    (
+                        header::CONTENT_SECURITY_POLICY,
+                        content_security_policy(&headers, &page.script_src),
+                    ),
                 ],
-                page.to_vec(),
+                page.html.clone(),
             )
                 .into_response();
         }
@@ -151,7 +214,7 @@ pub async fn static_handler(
     };
     let mut response = serve_asset(&headers, asset);
     if asset.mime.starts_with("text/html") {
-        if let Ok(value) = csp.parse() {
+        if let Ok(value) = content_security_policy(&headers, "'self'").parse() {
             response
                 .headers_mut()
                 .insert(header::CONTENT_SECURITY_POLICY, value);
@@ -161,10 +224,10 @@ pub async fn static_handler(
 }
 
 /// The Content-Security-Policy for an HTML page served to a request with
-/// these headers: everything from this origin only (inline scripts and styles
-/// included — SvelteKit boots from an inline script whose base the hub
-/// rewrites per project), and the live-update socket on this same host.
-pub(crate) fn content_security_policy(headers: &HeaderMap) -> String {
+/// these headers: everything from this origin only, scripts limited to
+/// `script_src` (the page's own inline scripts go by hash), and the
+/// live-update socket on this same host. Inline styles stay allowed.
+pub(crate) fn content_security_policy(headers: &HeaderMap, script_src: &str) -> String {
     let socket = headers
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
@@ -172,7 +235,7 @@ pub(crate) fn content_security_policy(headers: &HeaderMap) -> String {
         .map(|host| format!(" ws://{host}"))
         .unwrap_or_default();
     format!(
-        "default-src 'self'; script-src 'self' 'unsafe-inline'; \
+        "default-src 'self'; script-src {script_src}; \
          style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; \
          connect-src 'self'{socket}; object-src 'none'; base-uri 'self'; \
          form-action 'self'; frame-ancestors 'none'"

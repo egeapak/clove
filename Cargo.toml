@@ -116,6 +116,8 @@ rust-embed = "8"                # embed the gzip-precompressed SPA assets into t
 mime_guess = "2"                # content-type for embedded static assets
 flate2 = "1"                    # gzip the embedded assets (build script) + decompress them once at startup (pure-Rust miniz_oxide; no C deps)
 futures-util = "0.3"            # WS stream/sink helpers for axum::extract::ws
+sha2 = "0.10"                   # CSP hashes of the SPA's inline scripts
+base64 = "0.22"                 # CSP hash encoding
 
 # Internal crates (explicit version keeps them off cargo-deny's wildcard list
 # and is required for publishing clove-core to crates.io — PRD §13).

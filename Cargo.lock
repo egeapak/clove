@@ -817,6 +817,7 @@ name = "clove-web"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64",
  "camino",
  "chrono",
  "clove-core",
@@ -830,6 +831,7 @@ dependencies = [
  "rust-embed",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "tower",

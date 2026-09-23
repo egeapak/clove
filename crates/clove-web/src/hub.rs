@@ -21,7 +21,7 @@ use serde_json::json;
 use tower::ServiceExt;
 
 use crate::error::{ok_data, ApiError};
-use crate::{build_router, host_guard, AppState};
+use crate::{build_router, host_guard, nosniff, AppState};
 
 /// The hub's table of mounted projects. Cheap to clone; clones share the table.
 #[derive(Clone, Default)]
@@ -32,9 +32,8 @@ pub struct HubWeb {
 #[derive(Default)]
 struct Registry {
     mounted: BTreeMap<String, Mounted>,
-    /// Every slug ever handed out, by the repository it went to. A slug never
-    /// moves to another repository for the life of the hub: a tab left open on
-    /// `/p/<slug>/` must never start writing into a different project.
+    /// Every slug handed out, by the repository it went to — to catch the
+    /// (astronomically unlikely) short-hash collision between two paths.
     assigned: HashMap<Utf8PathBuf, String>,
 }
 
@@ -63,20 +62,21 @@ impl HubWeb {
         Self::default()
     }
 
-    /// Mount the project rooted at `root` and return its slug. Its file
-    /// watcher (live updates) runs until the project is unmounted.
+    /// Mount the project rooted at `root` (its canonical path) and return its
+    /// slug. Its file watcher (live updates) runs until the project is
+    /// unmounted.
     ///
-    /// The slug is the repo directory's name, so bookmarks survive a hub
-    /// restart; when that name was already given to another repository during
-    /// this hub's life it gains a suffix derived from the path. A repository
-    /// keeps its slug across unmount and remount.
+    /// The slug is `<name>-<hash of the path>`: a function of the repository
+    /// alone, never of what else is loaded or in which order. So it survives
+    /// unmount and a hub restart, and a tab left open on one repository's URL
+    /// can never reach another repository that later loads under the same name.
     pub fn mount(&self, root: &Utf8Path, state: AppState) -> String {
         let name = root.file_name().unwrap_or("project").to_owned();
         let mut registry = self.projects.write().unwrap_or_else(|e| e.into_inner());
         let slug = match registry.assigned.get(root) {
             Some(slug) => slug.clone(),
             None => {
-                let slug = unique_slug(&registry.assigned, &name, root);
+                let slug = slug_for(&registry.assigned, &name, root);
                 registry.assigned.insert(root.to_owned(), slug.clone());
                 slug
             }
@@ -136,6 +136,7 @@ impl HubWeb {
             .route("/api/v1/projects", get(list_projects))
             .fallback(dispatch)
             .layer(axum::middleware::from_fn(host_guard))
+            .layer(axum::middleware::from_fn(nosniff))
             .with_state(self.clone())
     }
 
@@ -175,7 +176,7 @@ async fn root_page(State(hub): State<HubWeb>, headers: HeaderMap) -> Response {
     (
         [(
             header::CONTENT_SECURITY_POLICY,
-            crate::assets::content_security_policy(&headers),
+            crate::assets::content_security_policy(&headers, "'none'"),
         )],
         Html(picker_html(&hub.projects())),
     )
@@ -229,20 +230,16 @@ fn not_found(message: &str) -> Response {
     .into_response()
 }
 
-fn unique_slug(assigned: &HashMap<Utf8PathBuf, String>, name: &str, root: &Utf8Path) -> String {
-    let taken = |slug: &str| assigned.values().any(|s| s == slug);
-    let base = slugify(name);
-    if !taken(&base) {
-        return base;
-    }
+/// `<name>-<first 8 hex of the path hash>`; the full hash should those 8
+/// collide with another path's.
+fn slug_for(assigned: &HashMap<Utf8PathBuf, String>, name: &str, root: &Utf8Path) -> String {
     let hash = path_hash(root);
-    let mut candidate = format!("{base}-{}", &hash[..6]);
-    let mut n = 2;
-    while taken(&candidate) {
-        candidate = format!("{base}-{}-{n}", &hash[..6]);
-        n += 1;
+    let short = format!("{}-{}", slugify(name), &hash[..8]);
+    if assigned.values().any(|slug| *slug == short) {
+        format!("{}-{hash}", slugify(name))
+    } else {
+        short
     }
-    candidate
 }
 
 /// Lower-case ASCII alphanumerics and single dashes — safe in a URL path
@@ -264,7 +261,7 @@ fn slugify(name: &str) -> String {
     }
 }
 
-/// FNV-1a over the path: a stable collision suffix across hub restarts.
+/// FNV-1a over the path: the same on every hub, run after run.
 fn path_hash(path: &Utf8Path) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in path.as_str().as_bytes() {

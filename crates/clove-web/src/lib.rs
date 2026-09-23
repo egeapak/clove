@@ -71,7 +71,7 @@ pub struct AppState {
     heartbeat: Option<Arc<dyn Fn() + Send + Sync>>,
     /// The SPA entry page rewritten for a hub prefix ([`AppState::with_base_path`]);
     /// `None` serves the embedded page as built (root base).
-    index_page: Option<Arc<Vec<u8>>>,
+    index_page: Option<Arc<assets::IndexPage>>,
     /// Flipped to `true` when the project is unmounted from the hub: open event
     /// sockets close rather than keep a tab listening to a project nobody
     /// serves any more.
@@ -185,8 +185,8 @@ impl AppState {
     }
 
     /// The rewritten SPA entry page, when this state serves under a prefix.
-    pub(crate) fn index_page(&self) -> Option<&[u8]> {
-        self.index_page.as_deref().map(Vec::as_slice)
+    pub(crate) fn index_page(&self) -> Option<&assets::IndexPage> {
+        self.index_page.as_deref()
     }
 
     /// Invoke the heartbeat hook, if any.
@@ -242,6 +242,20 @@ pub(crate) async fn host_guard(
     next.run(request).await
 }
 
+/// Middleware marking every response `X-Content-Type-Options: nosniff`, so a
+/// browser never reinterprets JSON or an error body as something runnable.
+pub(crate) async fn nosniff(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        header::HeaderValue::from_static("nosniff"),
+    );
+    response
+}
+
 /// Middleware that fires the per-request heartbeat hook before handling.
 async fn heartbeat_layer(
     axum::extract::State(state): axum::extract::State<AppState>,
@@ -290,6 +304,7 @@ pub fn build_router(state: AppState) -> Router {
         // DNS-rebinding guard: reject any request (API + WS + assets) whose Host
         // header isn't loopback. Outermost so it runs before everything else.
         .layer(axum::middleware::from_fn(host_guard))
+        .layer(axum::middleware::from_fn(nosniff))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         // gzip-only compression for the *dynamic* API responses (e.g. /items at
         // 10k items). Static SPA assets are already served pre-gzipped from
