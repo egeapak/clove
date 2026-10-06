@@ -7,6 +7,7 @@
   import TypeIcon from '$lib/components/TypeIcon.svelte';
   import ShortId from '$lib/components/ShortId.svelte';
   import { shortId, typeIcon } from '$lib/glyphs';
+  import { dailyHistory, lastDays } from '$lib/history';
 
   let history = $state<StatsHistoryPoint[]>([]);
   let range = $state<'30' | '90' | 'all'>('90');
@@ -121,9 +122,9 @@
   const svgH = $derived(rows.length * ROW_H);
 
   // ---- throughput ----
+  const daily = $derived(dailyHistory(history));
   const tput = $derived.by(() => {
-    const days = range === 'all' ? history.length : Number(range);
-    const pts = history.slice(-days);
+    const pts = range === 'all' ? daily : lastDays(daily, Number(range), new Date().toISOString().slice(0, 10));
     const maxV = Math.max(1, ...pts.map((p) => Math.max(p.created, p.closed)));
     return { pts, maxV };
   });
