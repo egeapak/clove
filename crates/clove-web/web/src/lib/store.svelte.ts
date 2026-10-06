@@ -32,6 +32,14 @@ class Store {
    *  distinct error/retry panel instead of the empty state. Cleared on success. */
   loadError = $state<string | null>(null);
 
+  /**
+   * Bumped whenever the live channel says the store may have changed (each
+   * `batch`, and each (re)connect, which may have missed some). The window is
+   * refetched here; a view holding data outside it — the detail route's item,
+   * comments and dep tree — reads this to refetch its own.
+   */
+  liveRev = $state(0);
+
   /** Match count for the current query **before** its window (`_meta.total`). */
   total = $state(0);
   /** The window the server actually applied (`_meta.offset`/`_meta.limit`). */
@@ -76,11 +84,18 @@ class Store {
   }
 
   upsert(item: Item) {
-    // Out-of-order guard: drop a stale server event for a non-pending item.
-    // Live per-id events no longer arrive, so this only guards the rare case of
-    // two concurrent reads racing; it must never drop an item for a pending id.
+    // A pending id is never dropped or overwritten: its in-flight optimistic
+    // edits are rebased on the server value, as replaceAll does.
+    const entry = this.pending.get(item.id);
+    if (entry) {
+      entry.base = item;
+      this.recompute(item.id);
+      return;
+    }
+    // Out-of-order guard: two reads of the same item racing (e.g. live
+    // refetches of the detail route) must not let the older one win.
     const cur = this.items.get(item.id);
-    if (cur && !this.pending.has(item.id) && cur.updated > item.updated) return;
+    if (cur && cur.updated > item.updated) return;
     const next = new Map(this.items);
     next.set(item.id, item);
     this.items = next;
@@ -294,9 +309,7 @@ function connect() {
   ws.onopen = () => {
     backoff = 500;
     store.conn = 'live';
-    void store.refetch().catch((e) => {
-      store.loadError = e instanceof Error ? e.message : 'load failed';
-    }); // resync on (re)connect
+    resync(); // on (re)connect
   };
 
   ws.onmessage = (ev) => {
@@ -316,11 +329,7 @@ function connect() {
         // future gap detection.
         const seq = frame.data?.seq;
         lastSeq = seq ?? lastSeq;
-        // Mirror the onopen resync: surface a failed refetch as a loadError
-        // instead of an unhandled rejection + stale data under a 'live' badge.
-        void store.refetch().catch((e) => {
-          store.loadError = e instanceof Error ? e.message : 'load failed';
-        });
+        resync();
         break;
       }
     }
@@ -335,6 +344,15 @@ function connect() {
       ws?.close();
     } catch {}
   };
+}
+
+function resync() {
+  store.liveRev += 1;
+  // Surface a failed refetch as a loadError instead of an unhandled rejection
+  // + stale data under a 'live' badge.
+  void store.refetch().catch((e) => {
+    store.loadError = e instanceof Error ? e.message : 'load failed';
+  });
 }
 
 function clearReconnect() {

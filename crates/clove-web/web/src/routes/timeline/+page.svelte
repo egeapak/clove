@@ -3,9 +3,11 @@
   import { store, retryLoad } from '$lib/store.svelte';
   import { api } from '$lib/api';
   import { goto } from '$app/navigation';
+  import { base } from '$app/paths';
   import TypeIcon from '$lib/components/TypeIcon.svelte';
   import ShortId from '$lib/components/ShortId.svelte';
   import { shortId, typeIcon } from '$lib/glyphs';
+  import { dailyHistory, lastDays } from '$lib/history';
 
   let history = $state<StatsHistoryPoint[]>([]);
   let range = $state<'30' | '90' | 'all'>('90');
@@ -120,9 +122,9 @@
   const svgH = $derived(rows.length * ROW_H);
 
   // ---- throughput ----
+  const daily = $derived(dailyHistory(history));
   const tput = $derived.by(() => {
-    const days = range === 'all' ? history.length : Number(range);
-    const pts = history.slice(-days);
+    const pts = range === 'all' ? daily : lastDays(daily, Number(range), new Date().toISOString().slice(0, 10));
     const maxV = Math.max(1, ...pts.map((p) => Math.max(p.created, p.closed)));
     return { pts, maxV };
   });
@@ -190,7 +192,7 @@
           class="bar {barClass(it)}"
           class:blocked={isBlocked(it)}
           style={barStyle(it)}
-          onclick={() => goto(`../items/${it.id}`)}
+          onclick={() => goto(`${base}/items/${it.id}`)}
           title="{it.type} · {it.title}{isBlocked(it) ? ' · blocked' : ''}"
           aria-label="{shortId(it.id)} {it.type} {it.title}{isBlocked(it) ? ' (blocked)' : ''}"
         >

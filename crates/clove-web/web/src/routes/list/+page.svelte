@@ -3,6 +3,7 @@
   import { store, retryLoad } from '$lib/store.svelte';
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
+  import { base } from '$app/paths';
   import StatusGlyph from '$lib/components/StatusGlyph.svelte';
   import PriorityGlyph from '$lib/components/PriorityGlyph.svelte';
   import TypeIcon from '$lib/components/TypeIcon.svelte';
@@ -161,7 +162,7 @@
       cursor = Math.max(cursor - 1, 0);
     } else if (e.key === 'Enter') {
       const it = rows[cursor];
-      if (it) goto(`../items/${it.id}`);
+      if (it) goto(`${base}/items/${it.id}`);
     }
   }
 
@@ -331,7 +332,7 @@
           {@const item = rows[i]}
           <tr
             class:cursor={i === cursor}
-            onclick={() => goto(`../items/${item.id}`)}
+            onclick={() => goto(`${base}/items/${item.id}`)}
             onmouseenter={() => (cursor = i)}
           >
             <td><StatusGlyph status={item.status} /></td>
