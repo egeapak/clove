@@ -3,6 +3,7 @@
   import { store } from '$lib/store.svelte';
   import { externalRef, hasSyncTarget, syncTargetLabel } from '$lib/sync';
   import { tooltip } from '$lib/tooltip';
+  import GitHubMark from './GitHubMark.svelte';
 
   let {
     item,
@@ -31,13 +32,16 @@
       use:tooltip={`Open ${ref.label}`}
       onclick={(e) => e.stopPropagation()}
     >
+      {#if ref.github}<GitHubMark />{/if}
       {compact ? ref.short : ref.label}
       <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"
         ><path d="M7 17 17 7M9 7h8v8" /></svg
       >
     </a>
   {:else}
-    <span class="xref mono plain" use:tooltip={ref.label}>{compact ? ref.short : ref.label}</span>
+    <span class="xref mono plain" use:tooltip={ref.label}
+      >{#if ref.github}<GitHubMark />{/if}{compact ? ref.short : ref.label}</span
+    >
   {/if}
 {:else if unsynced}
   <span class="unsynced mono" use:tooltip={`Not synced to ${syncTargetLabel(store.meta)}`}>

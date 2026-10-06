@@ -17,6 +17,8 @@
   import ExternalRef from '$lib/components/ExternalRef.svelte';
   import RelatedItem from '$lib/components/RelatedItem.svelte';
   import { shortId, shortDate, relativeTime, priorityLabel, statusLabel } from '$lib/glyphs';
+  import { rememberRelated } from '$lib/related.svelte';
+  import { tooltip } from '$lib/tooltip';
 
   let { data } = $props();
   const id = $derived(data.id);
@@ -46,6 +48,11 @@
     };
   }
 
+  // Items whose parent is this one, from `GET /items?parent=`.
+  let children = $state<string[]>([]);
+  let showAllChildren = $state(false);
+  const CHILDREN_SHOWN = 12;
+
   // `blocked_by` holds the open and the dangling hard deps; the rest of `deps`
   // are closed and only informative.
   const relationships = $derived.by(() => {
@@ -53,6 +60,7 @@
     const blocking = new Set(item.blocked_by);
     const groups = [
       { kind: 'part of', ids: item.parent ? [item.parent] : [], warn: false },
+      { kind: 'children', ids: children, warn: false },
       { kind: 'blocked by', ids: item.blocked_by, warn: true },
       { kind: 'depends on', ids: item.deps.filter((d) => !blocking.has(d)), warn: false },
       { kind: 'relates to', ids: item.relates, warn: false },
@@ -85,6 +93,7 @@
   let itemLoad = 0;
   let deptreeLoad = 0;
   let commentsLoad = 0;
+  let childrenLoad = 0;
 
   function loadItem(curId: string, live: boolean) {
     const token = ++itemLoad;
@@ -125,12 +134,33 @@
       });
   }
 
-  // load full item (body etc) + deptree when id changes
+  function loadChildren(curId: string) {
+    const token = ++childrenLoad;
+    api
+      .items({ parent: curId, limit: 0 })
+      .then((page) => {
+        if (token !== childrenLoad || curId !== id) return;
+        // Checked here too: a server without the `parent` filter answers with
+        // every item rather than refusing.
+        const kids = page.items.filter((i) => i.parent === curId);
+        rememberRelated(kids);
+        children = kids.map((i) => i.id);
+      })
+      .catch((e) => {
+        if (token === childrenLoad && curId === id) children = [];
+        console.warn('[clove] failed to load children', curId, e);
+      });
+  }
+
+  // load full item (body etc), deptree and children when id changes
   $effect(() => {
     const curId = id;
     full = null;
+    children = [];
+    showAllChildren = false;
     loadItem(curId, false);
     loadDeptree(curId);
+    loadChildren(curId);
   });
 
   // load comments only when the Comments tab is opened
@@ -154,6 +184,7 @@
     untrack(() => {
       loadItem(id, true);
       loadDeptree(id);
+      loadChildren(id);
       if (commentsFor === id) loadComments(id);
     });
   });
@@ -284,7 +315,7 @@
   <div class="screen panel detail">
     <div class="detail-main">
       <div class="dhead">
-        <span class="id mono">{shortId(item.id)}</span>
+        <span class="id mono" use:tooltip={item.id}>{shortId(item.id)}</span>
         <TypeIcon type={item.type} label />
         <span class="tag status"><StatusGlyph status={item.status} /> {statusLabel(item.status)}</span>
         <PriorityGlyph priority={item.priority} label />
@@ -328,7 +359,7 @@
               <Avatar name={c.author} />
               <div class="body">
                 <div class="meta"><b>{c.author}</b> · {relativeTime(c.timestamp)}</div>
-                <div class="text">{c.body}</div>
+                <div class="text"><Markdown source={c.body} /></div>
               </div>
             </div>
           {/each}
@@ -383,9 +414,17 @@
       <div class="side-block">
         <div class="side-label">Relationships</div>
         {#each relationships as group (group.kind)}
+          {@const capped = group.kind === 'children' && !showAllChildren && group.ids.length > CHILDREN_SHOWN}
           <div class="rel-group">
-            <div class="rel-kind" class:warn={group.warn}>{group.kind}</div>
-            {#each group.ids as rid (rid)}<div class="rel-row"><RelatedItem id={rid} /></div>{/each}
+            <div class="rel-kind" class:warn={group.warn}>
+              {group.kind}{#if group.kind === 'children'}<span class="rel-count mono">{group.ids.length}</span>{/if}
+            </div>
+            {#each capped ? group.ids.slice(0, CHILDREN_SHOWN) : group.ids as rid (rid)}<div class="rel-row"><RelatedItem id={rid} /></div>{/each}
+            {#if capped}
+              <button class="rel-more" onclick={() => (showAllChildren = true)}>
+                Show all {group.ids.length}
+              </button>
+            {/if}
           </div>
         {:else}
           <div class="side-row dim">None</div>
@@ -424,14 +463,16 @@
   .screen {
     overflow: hidden;
   }
-  /* Fill the viewport below the top bar (57px), the layout's 16px top padding
-     and a 20px bottom margin, which replaces its taller page padding here. */
+  /* The layout's shell is a viewport-tall column and `main` its growing
+     child; as a column too, it lets the panel take exactly the height left. */
   .detail {
     display: grid;
     grid-template-columns: minmax(0, 1fr) 300px;
-    min-height: calc(100dvh - 93px);
+    flex: 1;
   }
   :global(main.page:has(> .detail)) {
+    display: flex;
+    flex-direction: column;
     padding-bottom: 20px;
   }
   .rel-group + .rel-group {
@@ -444,6 +485,22 @@
   }
   .rel-kind.warn {
     color: var(--red);
+  }
+  .rel-count {
+    margin-left: 6px;
+    padding: 0 6px;
+    border-radius: var(--radius-pill);
+    border: 1px solid var(--border);
+    background: var(--surface-inset);
+    font-size: 10px;
+  }
+  .rel-more {
+    margin-top: 2px;
+    padding: 2px 0;
+    background: none;
+    border: none;
+    color: var(--accent);
+    font-size: 11px;
   }
   .rel-row {
     display: flex;
@@ -577,6 +634,7 @@
   }
   .comment .body {
     flex: 1;
+    min-width: 0;
   }
   .comment .meta {
     font-size: 12px;
@@ -587,9 +645,7 @@
     color: var(--text);
   }
   .comment .text {
-    color: var(--text-muted);
     font-size: 13px;
-    white-space: pre-wrap;
   }
   .addbox {
     display: flex;

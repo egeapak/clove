@@ -36,6 +36,7 @@ export function matchesTab(item: Item, tab: string | undefined): boolean {
 export function applyFilters(items: Item[], q: ListQuery): Item[] {
   let out = items.filter((i) => matchesTab(i, q.mode));
   if (q.synced !== undefined) out = out.filter((i) => isSynced(i) === q.synced);
+  if (q.parent) out = out.filter((i) => i.parent === q.parent);
   if (q.status) out = out.filter((i) => i.status === q.status);
   if (q.assignee) out = out.filter((i) => (i.assignee ?? '') === q.assignee);
   if (q.type?.length) out = out.filter((i) => q.type!.includes(i.type));

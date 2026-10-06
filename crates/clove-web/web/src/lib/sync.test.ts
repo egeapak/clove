@@ -38,7 +38,8 @@ describe('external refs', () => {
     expect(externalRef({ external_ref: 'gh-67', source_system: 'github' }, meta([TARGET]))).toEqual({
       label: 'GitHub #67',
       short: 'GH#67',
-      href: 'https://github.com/egeapak/clove/issues/67'
+      href: 'https://github.com/egeapak/clove/issues/67',
+      github: true
     });
   });
 
@@ -52,7 +53,8 @@ describe('external refs', () => {
     expect(externalRef({ external_ref: 'tk:x-1', source_system: 'tk' }, null)).toEqual({
       label: 'tk tk:x-1',
       short: 'tk:x-1',
-      href: null
+      href: null,
+      github: false
     });
   });
 

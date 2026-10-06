@@ -5,25 +5,41 @@
   import { tooltip } from '$lib/tooltip';
   import StatusGlyph from './StatusGlyph.svelte';
 
-  let { id }: { id: string } = $props();
+  let {
+    id,
+    link = true,
+    compact = false
+  }: {
+    id: string;
+    /** False inside another link (a board card), where a nested <a> is invalid. */
+    link?: boolean;
+    /** Title only, for tight spots; the id moves to the tooltip. */
+    compact?: boolean;
+  } = $props();
 
   $effect(() => ensureRelated(id));
 
   const info = $derived(related(id));
   const title = $derived(info ? info.title : info === null ? 'missing item' : '');
+  const label = $derived(`${shortId(id)}${title ? ' ' + title : ''}`);
+  const tip = $derived(title ? `${id} · ${title}` : id);
 </script>
 
-<a
-  class="rel"
-  class:missing={info === null}
-  href="{base}/items/{id}"
-  aria-label="{shortId(id)}{title ? ' ' + title : ''}"
-  use:tooltip={title ? `${id} · ${title}` : id}
->
+{#snippet body()}
   {#if info}<StatusGlyph status={info.status} />{/if}
-  <span class="rid mono">{shortId(id)}</span>
+  {#if !compact || !title}<span class="rid mono">{shortId(id)}</span>{/if}
   {#if title}<span class="rtitle">{title}</span>{/if}
-</a>
+{/snippet}
+
+{#if link}
+  <a class="rel" class:missing={info === null} class:compact href="{base}/items/{id}" aria-label={label} use:tooltip={tip}>
+    {@render body()}
+  </a>
+{:else}
+  <span class="rel" class:missing={info === null} class:compact role="img" aria-label={label} use:tooltip={tip}>
+    {@render body()}
+  </span>
+{/if}
 
 <style>
   .rel {
@@ -35,12 +51,15 @@
     color: var(--text-muted);
     text-decoration: none;
   }
-  .rel:hover {
+  a.rel:hover {
     color: var(--text);
     text-decoration: none;
   }
-  .rel:hover .rtitle {
+  a.rel:hover .rtitle {
     text-decoration: underline;
+  }
+  .rel.compact {
+    gap: 4px;
   }
   .rid {
     flex: none;

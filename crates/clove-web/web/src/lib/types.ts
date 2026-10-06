@@ -124,6 +124,8 @@ export interface ListQuery {
   mode?: 'list' | 'ready' | 'blocked';
   /** `true`: only items linked to a sync target's issue; `false`: only those not. */
   synced?: boolean;
+  /** Only the direct children of this item id. */
+  parent?: string;
   /**
    * Window, sent to the server. `0` means **unlimited** (the API contract on
    * every surface), and so does an absent value — the web API's default is

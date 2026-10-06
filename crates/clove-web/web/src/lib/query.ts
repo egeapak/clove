@@ -79,6 +79,7 @@ export function buildParams(query: ListQuery): URLSearchParams {
   if (query.dir) p.set('dir', query.dir);
   if (query.mode && query.mode !== 'list') p.set('mode', query.mode);
   if (query.synced !== undefined) p.set('synced', String(query.synced));
+  if (query.parent) p.set('parent', query.parent);
   // Multi-select filters go as a single comma-joined value (server CSV contract);
   // labels never contain commas (parseLabels splits on them), so this is lossless.
   if (query.type?.length) p.set('type', query.type.join(','));

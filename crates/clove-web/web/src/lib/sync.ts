@@ -10,6 +10,8 @@ export interface ExternalRef {
   short: string;
   /** The issue URL, when the project's sync target is known. */
   href: string | null;
+  /** A GitHub issue, shown with the GitHub mark. */
+  github: boolean;
 }
 
 /** The GitHub issue number in a `gh-<n>` ref, or null. */
@@ -49,9 +51,10 @@ export function externalRef(item: Pick<Item, 'external_ref' | 'source_system'>, 
     return {
       label: `GitHub #${number}`,
       short: `GH#${number}`,
-      href: targets.length === 1 ? `${targets[0].issue_url}${number}` : null
+      href: targets.length === 1 ? `${targets[0].issue_url}${number}` : null,
+      github: true
     };
   }
   const system = item.source_system ? `${item.source_system} ` : '';
-  return { label: `${system}${ref}`, short: ref, href: null };
+  return { label: `${system}${ref}`, short: ref, href: null, github: false };
 }

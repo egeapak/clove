@@ -2,7 +2,7 @@
 // views that show relationships. The store holds only the current query's
 // window, so an id outside it is fetched once and remembered here.
 import { SvelteMap } from 'svelte/reactivity';
-import type { Status } from './types';
+import type { Item, Status } from './types';
 import { api } from './api';
 import { store } from './store.svelte';
 
@@ -31,6 +31,11 @@ export function ensureRelated(id: string): void {
     .then((it) => fetched.set(id, { title: it.title, status: it.status }))
     .catch(() => fetched.set(id, null))
     .finally(() => inFlight.delete(id));
+}
+
+/** Record items fetched by another query, so their references need no fetch. */
+export function rememberRelated(items: Item[]): void {
+  for (const it of items) fetched.set(it.id, { title: it.title, status: it.status });
 }
 
 /** Test hook: forget everything fetched. */
