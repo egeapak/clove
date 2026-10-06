@@ -3,6 +3,7 @@
   import { store, retryLoad } from '$lib/store.svelte';
   import { api } from '$lib/api';
   import { goto } from '$app/navigation';
+  import { base } from '$app/paths';
   import TypeIcon from '$lib/components/TypeIcon.svelte';
   import ShortId from '$lib/components/ShortId.svelte';
   import { shortId, typeIcon } from '$lib/glyphs';
@@ -190,7 +191,7 @@
           class="bar {barClass(it)}"
           class:blocked={isBlocked(it)}
           style={barStyle(it)}
-          onclick={() => goto(`../items/${it.id}`)}
+          onclick={() => goto(`${base}/items/${it.id}`)}
           title="{it.type} · {it.title}{isBlocked(it) ? ' · blocked' : ''}"
           aria-label="{shortId(it.id)} {it.type} {it.title}{isBlocked(it) ? ' (blocked)' : ''}"
         >

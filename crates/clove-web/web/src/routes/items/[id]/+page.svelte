@@ -5,6 +5,7 @@
   import { toasts } from '$lib/toast.svelte';
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
+  import { base } from '$app/paths';
   import StatusGlyph from '$lib/components/StatusGlyph.svelte';
   import PriorityGlyph from '$lib/components/PriorityGlyph.svelte';
   import TypeIcon from '$lib/components/TypeIcon.svelte';
@@ -200,7 +201,7 @@
       store.remove(id);
       toasts.push('Item deleted');
       // Rely on the WS batch → refetch for any cascaded changes.
-      goto('../list');
+      goto(`${base}/list`);
     } catch (e) {
       if (e instanceof ApiError && e.code === 'HAS_DEPENDENTS') {
         toasts.error('Other items depend on this. Use force-delete to remove anyway.');
