@@ -2,12 +2,12 @@
   import type { Item, StatsHistoryPoint } from '$lib/types';
   import { store, retryLoad } from '$lib/store.svelte';
   import { api } from '$lib/api';
-  import { goto } from '$app/navigation';
   import { base } from '$app/paths';
   import TypeIcon from '$lib/components/TypeIcon.svelte';
   import ShortId from '$lib/components/ShortId.svelte';
   import { shortId, typeIcon } from '$lib/glyphs';
   import { dailyHistory, lastDays } from '$lib/history';
+  import { tooltip } from '$lib/tooltip';
 
   let history = $state<StatsHistoryPoint[]>([]);
   let range = $state<'30' | '90' | 'all'>('90');
@@ -153,10 +153,10 @@
 
   <div class="tl-labels">
     {#each rows as it (it.id)}
-      <div class="rowlabel" class:epic={it.type === 'epic'}>
+      <a class="rowlabel" class:epic={it.type === 'epic'} href="{base}/items/{it.id}">
         <TypeIcon type={it.type} /> <ShortId id={it.id} />
         <span class="rl-title">{it.title}</span>
-      </div>
+      </a>
     {/each}
   </div>
 
@@ -188,17 +188,17 @@
     </svg>
     {#each rows as it, ri (it.id)}
       <div class="track" style="top:{ri * ROW_H}px">
-        <button
+        <a
           class="bar {barClass(it)}"
           class:blocked={isBlocked(it)}
           style={barStyle(it)}
-          onclick={() => goto(`${base}/items/${it.id}`)}
-          title="{it.type} · {it.title}{isBlocked(it) ? ' · blocked' : ''}"
+          href="{base}/items/{it.id}"
+          use:tooltip={`${it.type} · ${it.title}${isBlocked(it) ? ' · blocked' : ''}`}
           aria-label="{shortId(it.id)} {it.type} {it.title}{isBlocked(it) ? ' (blocked)' : ''}"
         >
           <span class="bar-type" aria-hidden="true">{typeIcon(it.type)}</span>
           {shortId(it.id)}{#if isBlocked(it)} ·blocked{/if}
-        </button>
+        </a>
       </div>
     {/each}
   </div>
@@ -294,6 +294,12 @@
     border-bottom: 1px solid var(--border);
     font-size: 12px;
     color: var(--text-muted);
+    text-decoration: none;
+  }
+  .rowlabel:hover {
+    background: var(--surface-hover);
+    color: var(--text);
+    text-decoration: none;
   }
   .rowlabel.epic {
     background: color-mix(in srgb, var(--type-epic) 8%, transparent);
@@ -346,6 +352,11 @@
     overflow: hidden;
     border: none;
     z-index: 2;
+    text-decoration: none;
+  }
+  .bar:hover {
+    text-decoration: none;
+    filter: brightness(1.1);
   }
   .bar.epic {
     background: var(--type-epic);

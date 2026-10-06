@@ -81,12 +81,14 @@ describe('navigation under the hub prefix', () => {
     expect(landedOn(from)).toBe(`/p/demo/items/${ID}`);
   });
 
-  it('opens a timeline bar inside the project', async () => {
-    const from = 'http://localhost/p/demo/timeline';
-    at(from);
-    render(TimelinePage);
-    await fireEvent.click(await screen.findByRole('button', { name: /Row/ }));
-    expect(landedOn(from)).toBe(`/p/demo/items/${ID}`);
+  it('links a timeline bar and its row label inside the project', async () => {
+    at('http://localhost/p/demo/timeline');
+    const { container } = render(TimelinePage);
+    await screen.findByRole('link', { name: /bug Row/ });
+    const bar = container.querySelector('a.bar')!;
+    const label = container.querySelector('a.rowlabel')!;
+    expect(bar.getAttribute('href')).toBe(`/p/demo/items/${ID}`);
+    expect(label.getAttribute('href')).toBe(`/p/demo/items/${ID}`);
   });
 
   it('returns to the project list after deleting an item', async () => {

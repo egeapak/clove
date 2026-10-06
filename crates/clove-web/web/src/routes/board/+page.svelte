@@ -7,6 +7,8 @@
   import Card from '$lib/components/Card.svelte';
   import StatusGlyph from '$lib/components/StatusGlyph.svelte';
   import { Virtual } from '$lib/virtual.svelte';
+  import { tooltip } from '$lib/tooltip';
+  import { shortId } from '$lib/glyphs';
 
   // A board renders every item, grouped into columns, so it asks for the whole
   // store explicitly: `limit: 0` (unlimited on every clove surface). The API
@@ -125,10 +127,15 @@
 
   // Move a card's status one column left/right. Reachable via the focusable
   // ‹/› buttons on each card (keyboard + pointer); no hidden move-mode chord.
+  const MOVES = [-1, 1] as const;
+
+  function moveTarget(item: Item, dir: 1 | -1): { key: Status; label: string } {
+    const idx = COLS.findIndex((c) => c.key === item.status);
+    return COLS[(idx + dir + COLS.length) % COLS.length];
+  }
+
   async function move(item: Item, dir: 1 | -1) {
-    const order: Status[] = ['open', 'in_progress', 'closed'];
-    const idx = order.indexOf(item.status);
-    const next = order[(idx + dir + order.length) % order.length];
+    const next = moveTarget(item, dir).key;
     const edit = store.optimistic(item.id, { status: next });
     try {
       edit.settle(await api.patch(item.id, { status: next }));
@@ -190,8 +197,15 @@
               >
                 <Card {item} ondragstart={(e) => onDragStart(e, item.id)} />
                 <div class="kbd-move">
-                  <button class="btn sm" aria-label="move {item.id} left" onclick={() => move(item, -1)}>‹</button>
-                  <button class="btn sm" aria-label="move {item.id} right" onclick={() => move(item, 1)}>›</button>
+                  {#each MOVES as dir (dir)}
+                    {@const target = moveTarget(item, dir)}
+                    <button
+                      class="btn sm"
+                      aria-label="Move {shortId(item.id)} to {target.label}"
+                      use:tooltip={`Move to ${target.label}`}
+                      onclick={() => move(item, dir)}>{dir < 0 ? '‹' : '›'}</button
+                    >
+                  {/each}
                 </div>
               </div>
             {/each}
