@@ -19,6 +19,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Web UI: an item page refreshes on live changes however it was opened, including body and comments
 - MCP comments resolve their author from git config and `$USER` like the CLI, instead of `unknown`
 - TUI short ids keep leading zeros
+- Web UI: an item's type shows once — one badge, named in the detail header and on hover
 
 ## [0.1.1] - 2026-10-06
 

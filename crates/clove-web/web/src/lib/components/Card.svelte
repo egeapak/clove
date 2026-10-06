@@ -30,9 +30,6 @@
     {#each item.labels.slice(0, 2) as l (l)}
       <LabelChip label={l} />
     {/each}
-    {#if item.type === 'epic'}
-      <span class="dim mono note">epic</span>
-    {/if}
     <BlockedBadge blockedBy={item.blocked_by} />
     {#if item.deps.length && !item.blocked_by.length}
       <span class="dim mono note">→ deps {item.deps.map(shortId).join(', ')}</span>

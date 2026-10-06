@@ -268,8 +268,7 @@
     <div class="detail-main">
       <div class="dhead">
         <span class="id mono">{shortId(item.id)}</span>
-        <TypeIcon type={item.type} />
-        <span class="tag" style="color:{`var(--type-${item.type})`};border-color:{`var(--type-${item.type})`}">{item.type}</span>
+        <TypeIcon type={item.type} label />
         <span class="tag status"><StatusGlyph status={item.status} /> {statusLabel(item.status)}</span>
         <PriorityGlyph priority={item.priority} label />
         <a class="edit-link" href="{item.id}/edit">Edit</a>
