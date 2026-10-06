@@ -163,6 +163,14 @@ fn bool_param(params: &HashMap<String, String>, key: &str) -> Result<bool, ApiEr
     }
 }
 
+/// `?synced=`: absent or empty is "either"; otherwise strict, as [`bool_param`].
+fn synced_param(params: &HashMap<String, String>) -> Result<Option<bool>, ApiError> {
+    match params.get("synced").map(String::as_str) {
+        None | Some("") => Ok(None),
+        Some(_) => bool_param(params, "synced").map(Some),
+    }
+}
+
 /// The requested `?fields=`/`?compact=`.
 fn shape_of(params: &HashMap<String, String>) -> Result<Shape, ApiError> {
     let fields = match csv(params, "fields") {
@@ -297,6 +305,7 @@ pub async fn list_items(
     let filters = filters_of(&params)?;
     let shape = shape_of(&params)?;
     let window = page_window(&params)?;
+    let synced = synced_param(&params)?;
     // Strict, like every other parameter on this endpoint. `?mode=redy` used to
     // fall through to the unfiltered list with a 200 — and `mode` is not echoed
     // in `_meta`, so a client could not tell a typo from a server that does not
@@ -314,8 +323,17 @@ pub async fn list_items(
         }
     };
 
+    // `?synced=` is the web's own filter, not a `Filters` field: what counts as
+    // synced depends on the project's sync targets, which only the web reads.
+    // The engine therefore answers unwindowed and the window is applied here,
+    // after the filter, so `total` and the page agree (as the board does).
     let engine = state.engine.clone();
-    let (f, w) = (filters.clone(), window);
+    let f = filters.clone();
+    let w = if synced.is_some() {
+        clove_core::view::Page::unlimited()
+    } else {
+        window
+    };
     let answer = blocking(move || {
         // Full frontmatter: this API renders every field plus the graph terms,
         // which no lean row carries.
@@ -329,8 +347,21 @@ pub async fn list_items(
     .await?;
 
     let source = answer.source.as_str();
-    let total = answer.total;
-    let page = values_of(answer, &state)?;
+    let (page, total) = match synced {
+        None => {
+            let total = answer.total;
+            (values_of(answer, &state)?, total)
+        }
+        Some(want) => {
+            let matching: Vec<Value> = values_of(answer, &state)?
+                .into_iter()
+                .filter(|v| {
+                    crate::sync::is_synced(v.get("external_ref").and_then(Value::as_str)) == want
+                })
+                .collect();
+            window.apply(matching)
+        }
+    };
     // `returned` counts rows, so it is taken before shaping — a projection
     // changes each row's keys, never how many rows came back.
     let returned = page.len();
@@ -346,6 +377,7 @@ pub async fn list_items(
             "sort": order.field.as_str(),
             "dir": order.dir_str(),
             "filters": serde_json::to_value(&filters).unwrap_or(Value::Null),
+            "synced": synced,
             "source": source,
         }),
     ))
@@ -734,6 +766,7 @@ pub async fn get_meta(State(state): State<AppState>) -> ApiResult {
         "labels": labels.into_iter().collect::<Vec<_>>(),
         "assignees": assignees.into_iter().collect::<Vec<_>>(),
         "daemon": { "running": state.daemon_running, "web_addr": Value::Null },
+        "sync": crate::sync::targets(&state.clove_dir()),
         "source": state.source,
     });
     Ok(ok_data(data))

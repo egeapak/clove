@@ -13,6 +13,7 @@ mod error;
 mod events;
 mod hub;
 mod read;
+mod sync;
 mod watch;
 mod write;
 
@@ -148,12 +149,7 @@ impl AppState {
             deep,
             auto_refresh: self.engine.tiers().auto_refresh,
         };
-        let clove_dir = self
-            .issues_dir
-            .parent()
-            .map(Utf8PathBuf::from)
-            .unwrap_or_else(|| self.issues_dir.clone());
-        self.engine = clove_engine::Engine::new(self.store.clone(), clove_dir, tiers);
+        self.engine = clove_engine::Engine::new(self.store.clone(), self.clove_dir(), tiers);
         self
     }
 
@@ -180,6 +176,14 @@ impl AppState {
     /// built for another mount of the same project.
     pub(crate) fn is_same_mount(&self, other: &AppState) -> bool {
         Arc::ptr_eq(&self.closing, &other.closing)
+    }
+
+    /// The store's `.clove/` directory.
+    pub(crate) fn clove_dir(&self) -> Utf8PathBuf {
+        self.issues_dir
+            .parent()
+            .map(Utf8PathBuf::from)
+            .unwrap_or_else(|| self.issues_dir.clone())
     }
 
     /// Resolves once [`AppState::close`] has been called.
