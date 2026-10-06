@@ -6,7 +6,7 @@ expression: rendered
 │  All 7  │  Ready 4  │  Blocked 1                         │
 └──────────────────────────────────────────────────────────┘
 ┌ Items (7) ───────────────────────────────────────────────┐
-│ ○ B #2HZ6C3PW ↑ Investigate flaky CI ●                   │
+│ ○ B #0HZ6C3PW ↑ Investigate flaky CI ●                   │
 │▌◐ F #9QX4D1B7 ! Build REST API ●                         │
 │ ○ F #5RB9NC2V • Frontend dashboard ●                     │
 │ ○ F #K2M8ZP5R • Write integration tests ✗                │
