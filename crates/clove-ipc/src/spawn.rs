@@ -222,6 +222,7 @@ fn spawn_detached(bin: &Path, hub: &HubPaths) -> std::io::Result<()> {
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let mut cmd = hub_command(bin, hub);
+    crate::win::stop_inheriting_stdio();
     cmd.creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
         .spawn()
         .map(|_child| ())

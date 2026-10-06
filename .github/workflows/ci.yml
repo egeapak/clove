@@ -106,6 +106,9 @@ jobs:
   daemon-windows:
     name: daemon (windows)
     runs-on: windows-latest
+    # A hang (a detached hub holding a pipe the smoke script reads) must fail
+    # fast, not run to the 6-hour default.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
