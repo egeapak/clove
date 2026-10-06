@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.1.2] - 2026-10-06
 
+### Added
+
+- Web UI: synced items show their external id (`GitHub #67`, linked); with a sync target, unsynced items are marked and the list can filter by sync state
+- Web UI: relationships show the related item's title; timeline rows and bars open the item; board move buttons name their target column
+
 ### Changed
 
 - Timestamps are written with millisecond precision (`2026-10-06T18:08:37.123Z`); whole-second values still read as the same instant; upgrade the plugins (`clove-sync-github`) together with clove, or the next sync re-pushes each item once
@@ -20,6 +25,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - MCP comments resolve their author from git config and `$USER` like the CLI, instead of `unknown`
 - TUI short ids keep leading zeros
 - Web UI: an item's type shows once — its full name where there is room, otherwise its letter with a themed tooltip
+- Web UI: the list title column fills the table; detail and edit pages use the full height/width; Markdown bodies render task lists, tables and long code properly
 
 ## [0.1.1] - 2026-10-06
 
