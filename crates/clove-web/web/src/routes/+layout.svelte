@@ -12,6 +12,7 @@
   import { projectSlug } from '$lib/urls';
   import Toasts from '$lib/components/Toasts.svelte';
   import NewItemModal from '$lib/components/NewItemModal.svelte';
+  import { tooltip } from '$lib/tooltip';
 
   let { children } = $props();
 
@@ -31,6 +32,8 @@
   ];
 
   const path = $derived($page.url.pathname);
+  // The tabular views use the whole window; reading views keep a measure.
+  const fullWidth = $derived(/\/(list|timeline|board)\/?$/.test(path));
   function isActive(href: string): boolean {
     return path.includes('/' + href) || (href === 'board' && (path === '/' || path.endsWith('/')));
   }
@@ -99,6 +102,7 @@
 
 <svelte:window on:keydown={onKey} />
 
+<div class="shell">
 <div class="topbar">
   <a class="logo" href="{base}/board">
     <svg class="leaf" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"
@@ -122,22 +126,23 @@
     <span class="kbd">/</span>
   </form>
   <div class="spacer"></div>
-  <div class="live" title="connection: {connLabel}">
+  <div class="live" role="status" aria-label="connection: {connLabel}" use:tooltip={`connection: ${connLabel}`}>
     <span class="dot {store.conn}"></span>
-    {connLabel}
+    <span class="live-label">{connLabel}</span>
   </div>
   <ThemeSwitcher />
-  <button class="btn primary" onclick={() => (showNew = true)}>
+  <button class="btn primary new" aria-label="New item" onclick={() => (showNew = true)}>
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"
       ><path d="M12 5v14M5 12h14" /></svg
     >
-    New item
+    <span class="new-label">New item</span>
   </button>
 </div>
 
-<main class="page">
+<main class="page" class:full={fullWidth}>
   {@render children()}
 </main>
+</div>
 
 <Toasts />
 {#if showNew}
@@ -145,6 +150,13 @@
 {/if}
 
 <style>
+  /* A column the height of the viewport, so a page can fill what the top bar
+     leaves with `flex: 1` instead of subtracting a measured header height. */
+  .shell {
+    display: flex;
+    flex-direction: column;
+    min-height: 100dvh;
+  }
   .topbar {
     display: flex;
     align-items: center;
@@ -240,9 +252,14 @@
     background: var(--red);
   }
   .page {
+    flex: 1;
+    width: 100%;
     max-width: 1440px;
     margin: 0 auto;
     padding: 16px 20px 64px;
+  }
+  .page.full {
+    max-width: none;
   }
   @media (max-width: 720px) {
     .topbar {
@@ -253,6 +270,22 @@
       order: 5;
       max-width: none;
       flex-basis: 100%;
+    }
+  }
+  @media (max-width: 560px) {
+    .topbar {
+      padding: 8px 12px;
+      gap: 8px;
+    }
+    .live-label,
+    .new-label {
+      display: none;
+    }
+    .new {
+      padding: 7px 9px;
+    }
+    .tab {
+      padding: 5px 9px;
     }
   }
 </style>

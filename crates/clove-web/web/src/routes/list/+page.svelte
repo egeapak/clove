@@ -17,6 +17,7 @@
   import { parseQuery, parsePage } from '$lib/query';
   import { defaultDir } from '$lib/filter';
   import { Virtual } from '$lib/virtual.svelte';
+  import { tooltip } from '$lib/tooltip';
 
   // Fallbacks when /meta isn't available yet.
   const TYPES_FALLBACK: ItemType[] = ['bug', 'feature', 'chore', 'docs', 'epic'];
@@ -258,7 +259,7 @@
         class:on={fTypes.includes(t)}
         aria-label="Filter by type {t}"
         aria-pressed={fTypes.includes(t)}
-        title="type: {t}"
+        use:tooltip={`type: ${t}`}
         onclick={() => toggleMulti('type', t)}
       >
         <TypeIcon type={t} />
@@ -272,7 +273,7 @@
         class:on={fPrios.includes(p)}
         aria-label="Filter by {priorityLabel(p)}"
         aria-pressed={fPrios.includes(p)}
-        title={priorityLabel(p)}
+        use:tooltip={priorityLabel(p)}
         onclick={() => toggleMulti('priority', String(p))}
       >
         <PriorityGlyph priority={p} />
@@ -325,22 +326,36 @@
   </div>
 {:else}
   <div class="table-wrap panel" bind:this={scrollEl}>
+    <!-- Fixed layout: column widths come from the <colgroup> alone, never from
+         the rows the virtualizer happens to have mounted, so scrolling cannot
+         shift them. The title column takes what the others leave. -->
     <table>
+      <colgroup>
+        <col style="width:36px" />
+        <col style="width:104px" />
+        <col style="width:52px" />
+        <col style="width:60px" />
+        <col class="title-col" />
+        {#if showSync}<col style="width:104px" />{/if}
+        <col style="width:150px" />
+        <col style="width:220px" />
+        <col style="width:110px" />
+      </colgroup>
       <thead>
         <tr>
-          <th style="width:34px"></th>
-          <th class="sortable" style="width:60px" aria-sort={ariaSort('id')}>
+          <th><span class="sr-only">Status</span></th>
+          <th class="sortable" aria-sort={ariaSort('id')}>
             <button type="button" class="th-btn" onclick={() => cycleSort('id')} onkeydown={(e) => onThKey(e, 'id')}>ID <span class="sort">{sortArrow('id')}</span></button>
           </th>
-          <th style="width:42px">Type</th>
-          <th class="sortable" style="width:52px" aria-sort={ariaSort('priority')}>
+          <th>Type</th>
+          <th class="sortable" aria-sort={ariaSort('priority')}>
             <button type="button" class="th-btn" onclick={() => cycleSort('priority')} onkeydown={(e) => onThKey(e, 'priority')}>Pri <span class="sort">{sortArrow('priority')}</span></button>
           </th>
-          <th class="title-col">Title</th>
-          {#if showSync}<th style="width:96px">Sync</th>{/if}
-          <th style="width:130px">Assignee</th>
-          <th style="width:220px">Labels</th>
-          <th class="sortable" style="width:110px" aria-sort={ariaSort('updated')}>
+          <th>Title</th>
+          {#if showSync}<th>Sync</th>{/if}
+          <th>Assignee</th>
+          <th>Labels</th>
+          <th class="sortable" aria-sort={ariaSort('updated')}>
             <button type="button" class="th-btn" onclick={() => cycleSort('updated')} onkeydown={(e) => onThKey(e, 'updated')}>Updated <span class="sort">{sortArrow('updated')}</span></button>
           </th>
         </tr>
@@ -356,12 +371,12 @@
             onmouseenter={() => (cursor = i)}
           >
             <td><StatusGlyph status={item.status} /></td>
-            <td><ShortId id={item.id} /></td>
+            <td><ShortId id={item.id} title={item.title} /></td>
             <td><TypeIcon type={item.type} /></td>
             <td><PriorityGlyph priority={item.priority} /></td>
             <td class="title">
               <div class="title-in">
-                <span class="title-text">{item.title}</span>
+                <span class="title-text" use:tooltip={{ content: item.title, whenTruncated: true }}>{item.title}</span>
                 {#if item.blocked_by.length}<BlockedBadge blockedBy={item.blocked_by} />{/if}
               </div>
             </td>
@@ -524,9 +539,21 @@
   .ltab.active .n {
     color: var(--accent);
   }
+  /* The table scrolls inside the window rather than the page: the shell is
+     pinned to the viewport and the table takes the height the rest leaves. */
+  :global(.shell:has(> main > .table-wrap)) {
+    height: 100dvh;
+  }
+  :global(main.page:has(> .table-wrap)) {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    padding-bottom: 12px;
+  }
   .table-wrap {
     overflow: auto;
-    max-height: calc(100vh - 220px);
+    flex: 1 1 auto;
+    min-height: 240px;
   }
   .loaderr {
     text-align: center;
@@ -566,6 +593,8 @@
   }
   table {
     width: 100%;
+    min-width: 880px;
+    table-layout: fixed;
     border-collapse: collapse;
     font-size: 13px;
   }
@@ -595,6 +624,8 @@
     border-bottom: 1px solid var(--border);
     vertical-align: middle;
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   tbody tr {
     cursor: pointer;
@@ -606,16 +637,9 @@
   tbody tr.cursor td:first-child {
     box-shadow: inset 2px 0 0 var(--accent);
   }
-  /* The title column takes whatever the fixed-width columns leave: `width:
-     100%` claims the remainder and `max-width: 0` lets the text ellipsize
-     instead of widening the table. The cell stays a table-cell — a flex `td`
-     drops out of the row box, which cut the row's border and hover short. */
-  th.title-col,
+  /* The cell stays a table-cell — a flex `td` drops out of the row box, which
+     cut the row's border and hover short; the flex layout lives inside it. */
   td.title {
-    width: 100%;
-  }
-  td.title {
-    max-width: 0;
     color: var(--text);
     font-weight: 500;
   }
@@ -638,13 +662,19 @@
     color: var(--text-dim);
   }
   .assignee {
-    display: inline-flex;
+    display: flex;
     align-items: center;
     gap: 6px;
+    min-width: 0;
+  }
+  .assignee .muted {
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .lblrow {
-    display: inline-flex;
+    display: flex;
     gap: 4px;
+    overflow: hidden;
   }
   .empty {
     text-align: center;
