@@ -88,6 +88,7 @@ class Store {
     // edits are rebased on the server value, as replaceAll does.
     const entry = this.pending.get(item.id);
     if (entry) {
+      if (entry.base.updated > item.updated) return;
       entry.base = item;
       this.recompute(item.id);
       return;

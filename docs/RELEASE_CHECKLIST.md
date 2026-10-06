@@ -91,7 +91,9 @@ empty or a real GitHub user.
 - [ ] Both sides at once: comment on the issue on GitHub; locally close it and add a
       comment → sync pushes the close and the local comment, pulls the remote comment.
 - [ ] Reopen on GitHub → sync pulls `open`; close locally → sync pushes `CLOSED`
-      (do this **within the same second** of the pull too — the same-second case).
+      (the same-second case is covered by
+      `sync::tests::local_edit_in_the_same_second_as_the_last_pull_is_pushed`; by hand,
+      run the close immediately after the sync in one command line).
 - [ ] Sync again and `--dry-run`: `0 new / 0 updated`, everything in sync, no
       duplicated comments on the issue.
 - [ ] A transient "local item links gh-N but the GitHub issue was not found" right

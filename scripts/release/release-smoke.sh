@@ -57,7 +57,7 @@ check "ls from files (no index yet or index)" bash -c "clove -f json ls | jq -e 
 check "reindex then ls from index" bash -c "clove reindex >/dev/null && clove -f json ls | jq -e '._meta.source == \"index\"'"
 check "ls --no-index from files" bash -c "clove -f json ls --no-index | jq -e '._meta.source == \"files\"'"
 check "doctor" clove doctor
-check "stats" bash -c "clove -f json stats | jq -e '.data.total == 2 or .data.counts.total == 2 or (.data|tostring|test(\"2\"))'"
+check "stats total" bash -c "clove -f json stats | jq -e '.data.total == 2'"
 check "export json round-trips via import" bash -c "clove export json > '$work/x.json' && mkdir -p '$work/q' && cd '$work/q' && clove init --prefix smk >/dev/null && clove import json '$work/x.json' >/dev/null && clove -f json ls | jq -e '.data | length == 2'"
 check "agent-doc" bash -c "clove agent-doc | grep -qi clove"
 check "plugin list sees the bundled plugins" bash -c "clove plugin list | grep -q sync-github"
@@ -85,14 +85,14 @@ kill "$serve_pid" 2>/dev/null
 wait "$serve_pid" 2>/dev/null
 serve_pid=
 
-# 0.1.1 daemon footprint.
+# Daemon footprint.
 check "daemon start" clove daemon start
 check "daemon.token is 0600" bash -c "[ \"\$(stat -c %a .clove/daemon.token 2>/dev/null || stat -f %Lp .clove/daemon.token)\" = 600 ]"
 check "daemon.token is git-ignored" git check-ignore -q .clove/daemon.token
 check "hub.log in runtime dir" test -s "$CLOVE_RUNTIME_DIR/hub.log"
 check "ls served by daemon" bash -c "for _ in \$(seq 1 100); do clove -f json ls | jq -e '._meta.source == \"daemon\"' >/dev/null && exit 0; sleep 0.2; done; exit 1"
 check "daemon stop --all" clove daemon stop --all
-check "nothing written to the real home" test ! -e "$HOME/.local/share/clove"
+check "CLOVE_HOME honored (nothing under HOME)" test ! -e "$HOME/.local/share/clove"
 
 echo "release smoke: $pass passed, $failed failed"
 [ "$failed" = 0 ]

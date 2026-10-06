@@ -419,7 +419,7 @@ every future release.
 - **Bad version already published?** `cargo yank --version 0.1.2 clove-cli`
   (repeat per crate). Yanking prevents *new* dependents from selecting it but
   does **not** delete it — existing `Cargo.lock`s still resolve. There is no
-  un-publish; fix forward with `0.1.2`.
+  un-publish; fix forward with `0.1.3`.
 - **Wrong tag?** Delete and re-push before the CI finishes, or cut a new tag:
   `git tag -d v0.1.2 && git push origin :refs/tags/v0.1.2`.
 

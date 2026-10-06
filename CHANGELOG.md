@@ -8,7 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- Timestamps are written with millisecond precision (`2026-10-06T18:08:37.123Z`); whole-second values still read as the same instant
+- Timestamps are written with millisecond precision (`2026-10-06T18:08:37.123Z`); whole-second values still read as the same instant; upgrade the plugins (`clove-sync-github`) together with clove, or the next sync re-pushes each item once
 
 ### Fixed
 

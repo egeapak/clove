@@ -97,6 +97,14 @@ describe('store optimistic concurrency', () => {
     expect(store.items.get('proj-1')!.status).toBe('in_progress'); // A survives
   });
 
+  it('a stale read landing while an edit is pending does not rewind the base', () => {
+    store.upsert(item({ id: 'proj-1', title: 'newer', updated: '2020-01-01T00:00:02.000Z' }));
+    const edit = store.optimistic('proj-1', { priority: 0 });
+    store.upsert(item({ id: 'proj-1', title: 'older', updated: '2020-01-01T00:00:01.000Z' }));
+    edit.rollback();
+    expect(store.items.get('proj-1')!.title).toBe('newer');
+  });
+
   it('rollback of the only edit restores the pre-edit snapshot', () => {
     const edit = store.optimistic('proj-1', { status: 'closed' });
     expect(store.items.get('proj-1')!.status).toBe('closed');

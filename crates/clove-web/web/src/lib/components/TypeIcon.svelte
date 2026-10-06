@@ -31,8 +31,9 @@
   }
   .ty.labelled {
     width: auto;
+    height: auto;
     gap: 6px;
-    padding: 0 6px;
+    padding: 2px 8px;
   }
   .name {
     font-weight: 500;
