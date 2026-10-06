@@ -273,12 +273,16 @@ fn print_remote_missing(summary: &clove_import::SyncSummary) {
     }
 }
 
-/// Map a `clove-import` error onto a `CloveError` for exit-code classification
-/// (identical to the host's `cmd/sync.rs::sync_err`).
+/// Map a `clove-import` error onto a `CloveError` for exit-code classification.
+/// A GitHub API failure keeps exit 5 (`IO_ERROR`) but is not rendered as a
+/// filesystem error at a fake `<github>` path.
 fn sync_err(err: clove_import::ImportError) -> CloveError {
     use clove_import::ImportError;
     match err {
         ImportError::Core(core) => core,
+        github @ ImportError::GitHub { .. } => CloveError::External {
+            message: github.to_string(),
+        },
         ImportError::Source { path, message } => CloveError::Io {
             path,
             source: std::io::Error::other(message),

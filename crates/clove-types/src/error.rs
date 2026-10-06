@@ -148,6 +148,13 @@ pub enum CloveError {
     #[error("registry error: {message}")]
     Registry { message: String },
 
+    /// An external service (e.g. the GitHub API) failed or refused a request.
+    /// `message` is complete on its own — it names the service, the operation,
+    /// and the reason. Classified as `IO_ERROR` (exit 5) with the other
+    /// environment failures.
+    #[error("{message}")]
+    External { message: String },
+
     /// A failure the daemon reported over IPC, carrying the classification it
     /// already computed.
     ///
@@ -209,7 +216,7 @@ pub fn error_code(error: &CloveError) -> (&'static str, u8) {
         | CloveError::ScanFailed { .. } => ("PARSE_ERROR", 4),
 
         CloveError::NoRepo { .. } => ("NO_REPO", 5),
-        CloveError::Io { .. } => ("IO_ERROR", 5),
+        CloveError::Io { .. } | CloveError::External { .. } => ("IO_ERROR", 5),
         CloveError::NotYetImplemented { .. } => ("NOT_YET_IMPLEMENTED", 1),
         CloveError::Registry { .. } => ("REGISTRY_ERROR", 5),
 
@@ -342,6 +349,9 @@ mod tests {
             CloveError::Registry {
                 message: "m".into(),
             },
+            CloveError::External {
+                message: "m".into(),
+            },
             CloveError::Remote {
                 code: "IO_ERROR".into(),
                 exit: 5,
@@ -384,6 +394,7 @@ mod tests {
             | CloveError::Io { .. }
             | CloveError::NotYetImplemented { .. }
             | CloveError::Registry { .. }
+            | CloveError::External { .. }
             | CloveError::Remote { .. }
             | CloveError::UnsupportedCapability { .. } => {}
         }

@@ -480,25 +480,29 @@ pub(crate) mod net {
     /// a local deterministic mock server instead of github.com.
     pub(crate) fn build_client() -> Result<Octocrab, ImportError> {
         install_crypto_provider();
-        let token = resolve_github_token().ok_or_else(|| ImportError::Source {
-            path: camino::Utf8PathBuf::from("<github>"),
-            message: "no GitHub token: set GITHUB_TOKEN or authenticate the gh CLI \
-                      (`gh auth login`); a token is required to reach the GitHub API"
-                .to_owned(),
+        let setup_err = |reason: String| ImportError::GitHub {
+            operation: "client setup".to_owned(),
+            reason,
+        };
+        let token = resolve_github_token().ok_or_else(|| {
+            setup_err(
+                "no GitHub token: set GITHUB_TOKEN or authenticate the gh CLI \
+                 (`gh auth login`); a token is required to reach the GitHub API"
+                    .to_owned(),
+            )
         })?;
         let mut builder = Octocrab::builder().personal_token(token);
         if let Some(base) = api_base_override() {
-            builder = builder
-                .base_uri(base.clone())
-                .map_err(|err| ImportError::Source {
-                    path: camino::Utf8PathBuf::from("<github>"),
-                    message: format!("invalid GitHub API base `{base}`: {err}"),
-                })?;
+            builder = builder.base_uri(base.clone()).map_err(|err| {
+                setup_err(format!(
+                    "invalid GitHub API base `{base}`: {}",
+                    describe_octocrab_error(&err)
+                ))
+            })?;
         }
-        builder.build().map_err(|err| ImportError::Source {
-            path: camino::Utf8PathBuf::from("<github>"),
-            message: format!("failed to build GitHub client: {err}"),
-        })
+        builder
+            .build()
+            .map_err(|err| setup_err(describe_octocrab_error(&err)))
     }
 
     /// The API base-URI override, if any (`CLOVE_GITHUB_API_URL`, then
@@ -535,6 +539,7 @@ pub(crate) mod net {
         owner: &str,
         repo: &str,
     ) -> Result<Vec<GitHubIssue>, ImportError> {
+        let operation = format!("issue list fetch from {owner}/{repo}");
         let first = crab
             .issues(owner, repo)
             .list()
@@ -542,15 +547,168 @@ pub(crate) mod net {
             .per_page(100)
             .send()
             .await
-            .map_err(net_err)?;
-        let all = crab.all_pages(first).await.map_err(net_err)?;
+            .map_err(|err| net_err(&operation, &err))?;
+        let all = crab
+            .all_pages(first)
+            .await
+            .map_err(|err| net_err(&operation, &err))?;
         all.iter().map(to_intermediate).collect()
     }
 
-    pub(crate) fn net_err(err: octocrab::Error) -> ImportError {
-        ImportError::Source {
-            path: camino::Utf8PathBuf::from("<github>"),
-            message: format!("github api error: {err}"),
+    /// Wrap a failed octocrab call as [`ImportError::GitHub`]. `operation` names
+    /// the call and the clove item / GitHub issue it was for.
+    pub(crate) fn net_err(operation: &str, err: &octocrab::Error) -> ImportError {
+        ImportError::GitHub {
+            operation: operation.to_owned(),
+            reason: describe_octocrab_error(err),
+        }
+    }
+
+    /// Why an octocrab call failed, in one line.
+    ///
+    /// octocrab's own `Display` for an API rejection is the bare word `GitHub`
+    /// (and several other variants print only their name), so the reason is
+    /// rendered from the inner [`octocrab::GitHubError`] or the source chain.
+    pub(crate) fn describe_octocrab_error(err: &octocrab::Error) -> String {
+        if let octocrab::Error::GitHub { source, .. } = err {
+            return describe_github_rejection(
+                source.status_code.as_u16(),
+                source.status_code.canonical_reason(),
+                &source.message,
+                source.errors.as_deref().unwrap_or_default(),
+                source.documentation_url.as_deref(),
+            );
+        }
+        let mut text = err.to_string();
+        let mut cause = std::error::Error::source(err);
+        while let Some(inner) = cause {
+            let inner_text = inner.to_string();
+            if !text.contains(&inner_text) {
+                text.push_str(": ");
+                text.push_str(&inner_text);
+            }
+            cause = inner.source();
+        }
+        text
+    }
+
+    /// Render a GitHub API error response: the HTTP status, GitHub's message,
+    /// each validation error (`field: code`, plus the offending value or
+    /// GitHub's per-error message), and the documentation link.
+    pub(crate) fn describe_github_rejection(
+        status: u16,
+        status_reason: Option<&str>,
+        message: &str,
+        errors: &[serde_json::Value],
+        documentation_url: Option<&str>,
+    ) -> String {
+        let mut text = format!("HTTP {status}");
+        if let Some(status_reason) = status_reason {
+            text.push(' ');
+            text.push_str(status_reason);
+        }
+        let message = message.trim();
+        if !message.is_empty() {
+            text.push_str(": ");
+            text.push_str(message);
+        }
+        let details: Vec<String> = errors.iter().map(describe_validation_error).collect();
+        if !details.is_empty() {
+            text.push_str(&format!(" ({})", details.join("; ")));
+        }
+        if let Some(url) = documentation_url.filter(|url| !url.is_empty()) {
+            text.push_str(&format!(" [see {url}]"));
+        }
+        text
+    }
+
+    /// One entry of a GitHub error response's `errors` array. GitHub sends
+    /// objects (`resource`/`field`/`code`, optionally `value`/`message`) and,
+    /// for some endpoints, plain strings.
+    fn describe_validation_error(entry: &serde_json::Value) -> String {
+        let Some(fields) = entry.as_object() else {
+            return entry
+                .as_str()
+                .map_or_else(|| entry.to_string(), str::to_owned);
+        };
+        let text_of = |key: &str| {
+            fields
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .filter(|text| !text.is_empty())
+        };
+        let mut parts: Vec<String> = Vec::new();
+        match (text_of("field").or(text_of("resource")), text_of("code")) {
+            (Some(field), Some(code)) => parts.push(format!("{field}: {code}")),
+            (Some(only), None) | (None, Some(only)) => parts.push(only.to_owned()),
+            (None, None) => {}
+        }
+        if let Some(value) = fields.get("value").filter(|value| !value.is_null()) {
+            parts.push(format!("value {value}"));
+        }
+        if let Some(message) = text_of("message") {
+            parts.push(message.to_owned());
+        }
+        if parts.is_empty() {
+            entry.to_string()
+        } else {
+            parts.join(", ")
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::describe_github_rejection;
+        use serde_json::json;
+
+        #[test]
+        fn a_validation_failure_names_status_message_field_and_value() {
+            let errors = [json!({
+                "value": "dogfood-tui",
+                "resource": "Issue",
+                "field": "assignees",
+                "code": "invalid"
+            })];
+            assert_eq!(
+                describe_github_rejection(
+                    422,
+                    Some("Unprocessable Entity"),
+                    "Validation Failed",
+                    &errors,
+                    Some("https://docs.github.com/rest/issues/issues#update-an-issue"),
+                ),
+                "HTTP 422 Unprocessable Entity: Validation Failed \
+                 (assignees: invalid, value \"dogfood-tui\") \
+                 [see https://docs.github.com/rest/issues/issues#update-an-issue]"
+            );
+        }
+
+        #[test]
+        fn custom_string_and_unrecognized_error_entries_are_all_rendered() {
+            let errors = [
+                json!({ "resource": "Issue", "code": "custom", "field": "title",
+                        "message": "title is too long" }),
+                json!("labels must be strings"),
+                json!({ "resource": "Label" }),
+                json!({ "unexpected": 1 }),
+            ];
+            assert_eq!(
+                describe_github_rejection(422, None, "Validation Failed", &errors, None),
+                "HTTP 422: Validation Failed (title: custom, title is too long; \
+                 labels must be strings; Label; {\"unexpected\":1})"
+            );
+        }
+
+        #[test]
+        fn a_bare_rejection_keeps_status_and_message() {
+            assert_eq!(
+                describe_github_rejection(404, Some("Not Found"), "Not Found", &[], None),
+                "HTTP 404 Not Found: Not Found"
+            );
+            assert_eq!(
+                describe_github_rejection(500, Some("Internal Server Error"), " ", &[], None),
+                "HTTP 500 Internal Server Error"
+            );
         }
     }
 }
