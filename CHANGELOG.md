@@ -4,6 +4,22 @@ All notable changes to clove are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] - 2026-10-06
+
+### Changed
+
+- Timestamps are written with millisecond precision (`2026-10-06T18:08:37.123Z`); whole-second values still read as the same instant
+
+### Fixed
+
+- `clove sync github` pushes a local edit made in the same second as the last pull
+- `clove sync github` errors state GitHub's reason (status, message, field) and the item and operation that failed
+- Web UI: List and Timeline open items under the daemon's `/p/<slug>/` mount instead of 404ing
+- Web UI: the Timeline throughput chart groups hourly snapshots by day
+- Web UI: an item page refreshes on live changes however it was opened, including body and comments
+- MCP comments resolve their author from git config and `$USER` like the CLI, instead of `unknown`
+- TUI short ids keep leading zeros
+
 ## [0.1.1] - 2026-10-06
 
 ### Added
