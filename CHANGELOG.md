@@ -10,10 +10,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Web UI: synced items show their external id (`GitHub #67`, linked); with a sync target, unsynced items are marked and the list can filter by sync state
 - Web UI: relationships show the related item's title; timeline rows and bars open the item; board move buttons name their target column
+- `--synced`/`--unsynced` and `--parent ID` list filters (CLI `ls`/`ready`/`blocked`, `query` JSON, MCP, web `?synced=`/`?parent=`), answered by every read tier
+- Web UI: an item's children on its detail page; comments render as Markdown; GitHub ids carry the GitHub mark; the timeline scrolls horizontally and marks closed items
 
 ### Changed
 
 - Timestamps are written with millisecond precision (`2026-10-06T18:08:37.123Z`); whole-second values still read as the same instant; upgrade the plugins (`clove-sync-github`) together with clove, or the next sync re-pushes each item once
+- Daemon IPC protocol 9 (filters gained `synced`/`parent`): a 0.1.1 daemon is not used until restarted on 0.1.2; reads fall back to the index and files
 
 ### Fixed
 
@@ -26,6 +29,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - TUI short ids keep leading zeros
 - Web UI: an item's type shows once — its full name where there is room, otherwise its letter with a themed tooltip
 - Web UI: the list title column fills the table; detail and edit pages use the full height/width; Markdown bodies render task lists, tables and long code properly
+- Web UI: the board's columns scroll inside the window instead of the page; a timeline row highlights its label and bar together on hover
 
 ## [0.1.1] - 2026-10-06
 

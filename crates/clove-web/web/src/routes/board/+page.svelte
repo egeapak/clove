@@ -253,12 +253,25 @@
     font-size: 11px;
     margin-left: auto;
   }
+  /* The columns scroll inside the window rather than the page, as the list does. */
+  :global(.shell:has(> main > .board)) {
+    height: 100dvh;
+  }
+  :global(main.page:has(> .board)) {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    padding-bottom: 12px;
+  }
   .board {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
     gap: 14px;
+    flex: 1 1 auto;
+    min-height: 0;
   }
   .col {
+    min-height: 0;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
@@ -291,10 +304,10 @@
   }
   .col-body {
     padding: 10px;
-    min-height: 120px;
     /* scroll viewport for the virtualizer */
     overflow-y: auto;
-    max-height: calc(100vh - 200px);
+    flex: 1 1 auto;
+    min-height: 0;
   }
   /* sizer holds the full virtual height; cards are absolutely placed within */
   .col-sizer {
@@ -329,8 +342,16 @@
     font-size: 12px;
   }
   @media (max-width: 900px) {
+    /* Stacked columns: the page scrolls again and each column is capped. */
+    :global(.shell:has(> main > .board)) {
+      height: auto;
+    }
     .board {
       grid-template-columns: 1fr;
+    }
+    .col-body {
+      min-height: 120px;
+      max-height: 60vh;
     }
   }
 </style>

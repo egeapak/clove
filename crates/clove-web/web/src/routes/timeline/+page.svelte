@@ -13,6 +13,8 @@
 
   let history = $state<StatsHistoryPoint[]>([]);
   let range = $state<'30' | '90' | 'all'>('90');
+  // The row under the pointer: its label and its track highlight together.
+  let hovered = $state<string | null>(null);
 
   $effect(() => {
     api.history().then((h) => (history = h)).catch(() => (history = []));
@@ -183,7 +185,16 @@
 
   <div class="tl-labels">
     {#each rows as it (it.id)}
-      <a class="rowlabel" class:closed={it.status === 'closed'} class:epic={it.type === 'epic'} href="{base}/items/{it.id}" use:tooltip={`${it.id} · ${it.title}`}>
+      <a
+        class="rowlabel"
+        class:closed={it.status === 'closed'}
+        class:epic={it.type === 'epic'}
+        class:hl={hovered === it.id}
+        href="{base}/items/{it.id}"
+        use:tooltip={`${it.id} · ${it.title}`}
+        onmouseenter={() => (hovered = it.id)}
+        onmouseleave={() => (hovered = null)}
+      >
         <StatusGlyph status={it.status} /><TypeIcon type={it.type} /> <ShortId id={it.id} title={it.title} />
         <span class="rl-title">{it.title}</span>
       </a>
@@ -217,7 +228,14 @@
       {/each}
     </svg>
     {#each rows as it, ri (it.id)}
-      <div class="track" style="top:{ri * ROW_H}px">
+      <div
+        class="track"
+        class:hl={hovered === it.id}
+        style="top:{ri * ROW_H}px"
+        role="presentation"
+        onmouseenter={() => (hovered = it.id)}
+        onmouseleave={() => (hovered = null)}
+      >
         <a
           class="bar {barClass(it)}"
           class:blocked={isBlocked(it)}
@@ -341,7 +359,8 @@
     color: var(--text-muted);
     text-decoration: none;
   }
-  .rowlabel:hover {
+  .rowlabel:hover,
+  .rowlabel.hl {
     background: var(--surface-hover);
     color: var(--text);
     text-decoration: none;
@@ -381,6 +400,9 @@
     right: 0;
     height: 38px;
     border-bottom: 1px solid var(--border);
+  }
+  .track.hl {
+    background: var(--surface-hover);
   }
   .bar {
     position: absolute;

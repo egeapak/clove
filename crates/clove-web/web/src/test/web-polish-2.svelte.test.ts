@@ -287,6 +287,32 @@ describe('timeline', () => {
   });
 });
 
+describe('timeline hover', () => {
+  it('highlights the whole row — label and track — from either side', async () => {
+    at('http://localhost/timeline');
+    await serve([
+      item({ id: 'proj-0000000A', title: 'First', created: '2026-01-01T00:00:00Z' }),
+      item({ id: 'proj-0000000B', title: 'Second', created: '2026-01-02T00:00:00Z' })
+    ]);
+    const { container } = render(TimelinePage);
+    await screen.findByText('Second');
+    const labels = [...container.querySelectorAll('a.rowlabel')];
+    const tracks = [...container.querySelectorAll('.track')];
+    const lit = () => ({
+      labels: labels.map((l) => l.classList.contains('hl')),
+      tracks: tracks.map((t) => t.classList.contains('hl'))
+    });
+
+    await fireEvent.mouseEnter(tracks[1].querySelector('a.bar')!.parentElement!);
+    expect(lit()).toEqual({ labels: [false, true], tracks: [false, true] });
+    await fireEvent.mouseLeave(tracks[1]);
+    await fireEvent.mouseEnter(labels[0]);
+    expect(lit()).toEqual({ labels: [true, false], tracks: [true, false] });
+    await fireEvent.mouseLeave(labels[0]);
+    expect(lit()).toEqual({ labels: [false, false], tracks: [false, false] });
+  });
+});
+
 describe('timeline status', () => {
   it('sets closed work apart: a muted bar and the closed glyph, in the status colours', async () => {
     at('http://localhost/timeline');
