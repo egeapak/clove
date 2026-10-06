@@ -864,10 +864,12 @@ clove dep tree <id> [--depth N] [--full] [--flat] [--format json]
 clove dep cycle [--fail-on-cycle] [--format json]
 clove ready [--status S ...] [--type T ...] [--label L ...]
             [--assignee A] [--priority N ...] [--q TEXT]
+            [--synced | --unsynced] [--parent ID]
             [--sort FIELD] [--desc] [--limit N] [--offset N]
             [--format json] [--fields F,...] [--compact]
             # --status/--type/--priority repeat as "any of"; --label repeats as
-            # "all of"; --q is a substring over id/title/labels (never the body)
+            # "all of"; --q is a substring over id/title/labels (never the body);
+            # --synced/--unsynced: has / lacks an external_ref; --parent: children of ID
 clove blocked [same filters] [--sort FIELD] [--desc] [--limit N] [--offset N]
               [--format json] [--fields F,...] [--compact]
 clove ls [same filters] [--sort FIELD] [--desc] [--limit N] [--offset N]
@@ -1018,7 +1020,8 @@ That splits the two kinds of command:
     "dir": "asc",
     "filters": {
       "status": ["open"], "type": [], "priority": [],
-      "labels": ["area:core"], "assignee": null, "q": null
+      "labels": ["area:core"], "assignee": null, "q": null,
+      "synced": null, "parent": null
     },
     "warnings": []
   }
@@ -1307,8 +1310,10 @@ wrong sequence. That triple comparison is pinned by
 `crates/clove/tests/sort_order.rs`.
 
 **Filtering** is one type as well, `clove_core::view::Filters`, spelled
-`--status/--type/--label/--priority/--assignee/--q` on the CLI, the same names
-on the MCP read tools, `?status=…` (csv) on the web API, and carried whole on
+`--status/--type/--label/--priority/--assignee/--q/--synced|--unsynced/--parent`
+on the CLI, the same names on the MCP read tools and in `clove query`'s JSON
+(`synced` a bool there), `?status=…` (csv), `?synced=true|false` and
+`?parent=<id>` on the web API, and carried whole on
 `clove_ipc::QueryRequest.filters` for the daemon. The semantics are **any-of
 within a field, all-of across fields**, with `labels` the exception:
 
@@ -1320,6 +1325,8 @@ within a field, all-of across fields**, with `labels` the exception:
 | `label` | canonical `key:value` (§2.2) | **all** of |
 | `assignee` | exact string | equals |
 | `q` | free text | case-insensitive substring over **id, title, and labels** — never the body |
+| `synced` | bool (`--synced` / `--unsynced`) | `true`: a non-empty `external_ref` (any provider); `false`: none |
+| `parent` | item id | the item's `parent` equals it — the direct children of one item |
 
 An **empty set does not constrain**, so a request with no filters matches
 everything and a single value is just the one-element case. Each surface spells
@@ -1625,9 +1632,9 @@ protocol version; the hub answers exactly one `Welcome`; after an `ok` the
 *same* framed stream carries tarpc. Nothing binds a connection to a project.
 
 ```
-client → {"hello":"clove","protocol":8}
-hub    → {"welcome":"ok","protocol":8}                                          → CloveRpc
-       | {"welcome":"err","protocol":8,"code":"PROTOCOL_MISMATCH","message":…} → closed
+client → {"hello":"clove","protocol":9}
+hub    → {"welcome":"ok","protocol":9}                                          → CloveRpc
+       | {"welcome":"err","protocol":9,"code":"PROTOCOL_MISMATCH","message":…} → closed
 ```
 
 **Every project-scoped call names its project**, as a `Project { clove_dir, load,
@@ -1711,7 +1718,7 @@ on the refusal like on any daemon error.
 
 **`PROTOCOL_VERSION`** gates a mixed-version pair; the client fails a mismatch
 and falls back, which is safe because the daemon is a cache, not a source of
-truth. It is **8**:
+truth. It is **9**:
 
 | v | change |
 |---|---|
@@ -1721,6 +1728,7 @@ truth. It is **8**:
 | 6 | `search` RPC and `SearchRequest` **removed** — search is a file scan on every surface (§7.8, read-path roadmap §6.1), so the daemon has nothing to answer with |
 | 7 | the hub: every connection opens with a version `Hello`; every project-scoped call carries a `Project` (path, `load`); `hub_status`, `attach`, `detach` added; `STATUS.web_url` added |
 | 8 | `Project` carries the project token, and refuses unknown fields; `Detached` reports a teardown still under way. A v7 hub would drop a v8 client's token on the floor, so the two meet at the handshake instead |
+| 9 | `view::Filters` gains `synced` and `parent` (§7.8). A v8 daemon drops them as unknown keys and answers as if neither was set, so a v9 client must not reach one: the hub refuses the hello and the client answers from the index or the files |
 
 A v6 client never reaches the hub (it looks for `.clove/daemon.sock`); a hub
 client never reaches a 0.1.0 daemon (it looks in the runtime directory) except

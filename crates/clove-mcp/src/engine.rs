@@ -441,7 +441,7 @@ fn dir_of(desc: Option<bool>) -> Option<&'static str> {
 
 impl FilterArgs {
     fn to_filters(&self) -> Result<Filters, String> {
-        Filters::parse_multi(
+        let mut filters = Filters::parse_multi(
             &OneOrMany::values(&self.status),
             &OneOrMany::values(&self.item_type),
             &OneOrMany::values(&self.label),
@@ -449,7 +449,10 @@ impl FilterArgs {
             &Priorities::values(&self.priority),
             self.q.as_deref(),
         )
-        .map_err(stringify_core)
+        .map_err(stringify_core)?;
+        filters.synced = self.synced;
+        filters.parent = Filters::parse_parent(self.parent.as_deref()).map_err(stringify_core)?;
+        Ok(filters)
     }
 
     /// The requested ordering, through the same parser the CLI and web use.

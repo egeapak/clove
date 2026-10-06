@@ -225,8 +225,8 @@ fn load(state: &AppState) -> Result<(Vec<ItemFrontmatter>, GraphContext), ApiErr
     Ok((frontmatters, ctx))
 }
 
-/// The requested `?status=`/`?type=`/`?priority=`/`?label=`/`?assignee=`/`?q=`,
-/// through the shared contract.
+/// The requested `?status=`/`?type=`/`?priority=`/`?label=`/`?assignee=`/`?q=`/
+/// `?synced=`/`?parent=`, through the shared contract.
 ///
 /// This endpoint had the *only* multi-value filter implementation in the project
 /// — a private predicate here comparing raw strings — while the CLI and MCP took
@@ -252,15 +252,17 @@ fn filters_of(params: &HashMap<String, String>) -> Result<clove_core::view::Filt
             .filter(|s| !s.is_empty())
             .map(String::as_str)
     };
-    clove_core::view::Filters::parse_multi(
+    let mut filters = clove_core::view::Filters::parse_multi(
         &csv(params, "status"),
         &csv(params, "type"),
         &csv(params, "label"),
         present("assignee"),
         &csv(params, "priority"),
         present("q"),
-    )
-    .map_err(ApiError::from)
+    )?;
+    filters.synced = synced_param(params)?;
+    filters.parent = clove_core::view::Filters::parse_parent(present("parent"))?;
+    Ok(filters)
 }
 
 /// The requested `?sort=`/`?dir=`, through the shared contract.
@@ -305,7 +307,6 @@ pub async fn list_items(
     let filters = filters_of(&params)?;
     let shape = shape_of(&params)?;
     let window = page_window(&params)?;
-    let synced = synced_param(&params)?;
     // Strict, like every other parameter on this endpoint. `?mode=redy` used to
     // fall through to the unfiltered list with a 200 — and `mode` is not echoed
     // in `_meta`, so a client could not tell a typo from a server that does not
@@ -323,17 +324,8 @@ pub async fn list_items(
         }
     };
 
-    // `?synced=` is the web's own filter, not a `Filters` field: what counts as
-    // synced depends on the project's sync targets, which only the web reads.
-    // The engine therefore answers unwindowed and the window is applied here,
-    // after the filter, so `total` and the page agree (as the board does).
     let engine = state.engine.clone();
-    let f = filters.clone();
-    let w = if synced.is_some() {
-        clove_core::view::Page::unlimited()
-    } else {
-        window
-    };
+    let (f, w) = (filters.clone(), window);
     let answer = blocking(move || {
         // Full frontmatter: this API renders every field plus the graph terms,
         // which no lean row carries.
@@ -347,21 +339,8 @@ pub async fn list_items(
     .await?;
 
     let source = answer.source.as_str();
-    let (page, total) = match synced {
-        None => {
-            let total = answer.total;
-            (values_of(answer, &state)?, total)
-        }
-        Some(want) => {
-            let matching: Vec<Value> = values_of(answer, &state)?
-                .into_iter()
-                .filter(|v| {
-                    crate::sync::is_synced(v.get("external_ref").and_then(Value::as_str)) == want
-                })
-                .collect();
-            window.apply(matching)
-        }
-    };
+    let total = answer.total;
+    let page = values_of(answer, &state)?;
     // `returned` counts rows, so it is taken before shaping — a projection
     // changes each row's keys, never how many rows came back.
     let returned = page.len();
@@ -377,7 +356,6 @@ pub async fn list_items(
             "sort": order.field.as_str(),
             "dir": order.dir_str(),
             "filters": serde_json::to_value(&filters).unwrap_or(Value::Null),
-            "synced": synced,
             "source": source,
         }),
     ))

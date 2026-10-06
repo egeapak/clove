@@ -240,8 +240,9 @@ fn a_client_of_another_protocol_is_refused_with_proof_of_life() {
         .build()
         .unwrap();
     // 6: before the hub. 7: the hub before calls carried a project token — its
-    // calls would reach this hub without one.
-    for protocol in [6, 7] {
+    // calls would reach this hub without one. 8: clove 0.1.1, whose filters
+    // lack `synced`/`parent`.
+    for protocol in [6, 7, 8] {
         let welcome = rt.block_on(async {
             use interprocess::local_socket::tokio::prelude::*;
             let stream = interprocess::local_socket::tokio::Stream::connect(

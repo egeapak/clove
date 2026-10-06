@@ -1210,7 +1210,7 @@ async fn a_malformed_number_is_a_validation_error() {
 
 /// `/meta` names the project's sync targets (read from the state `clove sync
 /// github` writes) so the SPA can link `gh-<n>` refs, and `?synced=` filters
-/// the list on them with the window applied after the filter.
+/// the list on whether an item carries an external ref, inside the window.
 #[tokio::test]
 async fn meta_lists_sync_targets_and_the_list_filters_on_synced() {
     let (tmp, state, main_id, dep_id) = fixture();
@@ -1262,7 +1262,7 @@ async fn meta_lists_sync_targets_and_the_list_filters_on_synced() {
     let (ids, meta) = page(&body);
     assert_eq!(ids, vec![main_id.clone()], "{body}");
     assert_eq!(meta["total"], 1);
-    assert_eq!(meta["synced"], false);
+    assert_eq!(meta["filters"]["synced"], false);
 
     let (_, body) = get(addr, "/api/v1/items?synced=true").await;
     let (ids, _) = page(&body);
@@ -1271,11 +1271,12 @@ async fn meta_lists_sync_targets_and_the_list_filters_on_synced() {
     assert_eq!(v["data"][0]["external_ref"], "gh-67");
     assert_eq!(v["data"][0]["source_system"], "github");
 
-    // Unfiltered, both come back and `_meta.synced` says no filter applied.
+    // Unfiltered, both come back and `_meta.filters.synced` says no filter
+    // applied.
     let (_, body) = get(addr, "/api/v1/items").await;
     let (ids, meta) = page(&body);
     assert_eq!(ids.len(), 2);
-    assert!(meta["synced"].is_null());
+    assert!(meta["filters"]["synced"].is_null());
 
     // One unsynced item: page two is empty, and the total still counts it.
     let (_, body) = get(addr, "/api/v1/items?synced=false&limit=1&offset=1").await;
@@ -1293,4 +1294,98 @@ async fn meta_has_no_sync_targets_without_sync_state() {
     let (_, body) = get(addr, "/api/v1/meta").await;
     let meta: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(meta["data"]["sync"], serde_json::json!([]));
+}
+
+/// `?parent=` lists an item's children through the shared filter set — on
+/// every mode, combined with `?synced=`, and windowed by the engine like any
+/// other filter. Any external ref counts as synced, not only a GitHub one.
+#[tokio::test]
+async fn the_list_filters_on_parent() {
+    let (_tmp, state, main_id, dep_id) = fixture();
+    let main = clove_types::CloveId::new(&main_id).unwrap();
+    let child = |title: &str| {
+        state
+            .store
+            .create(
+                "proj",
+                NewItem {
+                    title: title.to_owned(),
+                    item_type: ItemType::Chore,
+                    priority: Priority(2),
+                    labels: vec![],
+                    deps: vec![],
+                    parent: Some(main.clone()),
+                    assignee: None,
+                    body: String::new(),
+                },
+                chrono::Utc::now(),
+            )
+            .unwrap()
+    };
+    let plain = child("Plain child").frontmatter.id.to_string();
+    let mut imported = child("Imported child");
+    imported.frontmatter.source_system = Some("tk".to_owned());
+    imported.frontmatter.external_ref = Some("tk:abc-1".to_owned());
+    state.store.update(&imported, chrono::Utc::now()).unwrap();
+    let imported = imported.frontmatter.id.to_string();
+
+    let app = build_router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let page = |body: &str| -> (Vec<String>, serde_json::Value) {
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        let mut ids: Vec<String> = v["data"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{body}"))
+            .iter()
+            .map(|i| i["id"].as_str().unwrap().to_owned())
+            .collect();
+        ids.sort();
+        (ids, v["_meta"].clone())
+    };
+    let mut children = vec![plain.clone(), imported.clone()];
+    children.sort();
+
+    for mode in ["", "&mode=ready"] {
+        let (_, body) = get(addr, &format!("/api/v1/items?parent={main_id}{mode}")).await;
+        let (ids, meta) = page(&body);
+        assert_eq!(ids, children, "{mode}: {body}");
+        assert_eq!(meta["total"], 2, "{mode}");
+        assert_eq!(meta["filters"]["parent"], main_id.as_str(), "{mode}");
+    }
+
+    let (_, body) = get(addr, &format!("/api/v1/items?parent={dep_id}")).await;
+    let (ids, meta) = page(&body);
+    assert!(ids.is_empty(), "{body}");
+    assert_eq!(meta["total"], 0);
+
+    let (_, body) = get(addr, &format!("/api/v1/items?parent={main_id}&synced=true")).await;
+    assert_eq!(page(&body).0, vec![imported.clone()], "{body}");
+    let (_, body) = get(
+        addr,
+        &format!("/api/v1/items?parent={main_id}&synced=false"),
+    )
+    .await;
+    assert_eq!(page(&body).0, vec![plain.clone()], "{body}");
+
+    let (_, body) = get(
+        addr,
+        &format!("/api/v1/items?parent={main_id}&sort=id&limit=1&offset=1"),
+    )
+    .await;
+    let (ids, meta) = page(&body);
+    assert_eq!(ids, vec![children[1].clone()], "{body}");
+    assert_eq!(meta["total"], 2, "total is the pre-window count");
+    assert_eq!(meta["returned"], 1);
+
+    // Empty is unconstrained, like every other filter parameter.
+    let (_, body) = get(addr, "/api/v1/items?parent=").await;
+    assert_eq!(page(&body).1["total"], 4, "{body}");
+
+    for bad in ["?parent=not-an-id", "?parent=proj-aaaaaaaa"] {
+        let (status, body) = get(addr, &format!("/api/v1/items{bad}")).await;
+        assert!(status.contains("422"), "{bad}: {status} {body}");
+    }
 }

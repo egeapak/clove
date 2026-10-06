@@ -88,6 +88,15 @@ pub const ITEM_PAGE_JSON: &str = r##"{
         "q": {
           "description": "Case-insensitive substring over id/title/labels (NOT bodies — that is clove_search).",
           "type": ["string", "null"]
+        },
+        "synced": {
+          "description": "true: only items with a non-empty `external_ref` (any provider); false: only items without one; null: no constraint.",
+          "type": ["boolean", "null"]
+        },
+        "parent": {
+          "description": "Only the direct children of this item id; null: no constraint.",
+          "type": ["string", "null"],
+          "pattern": "^[a-z][a-z0-9]{0,7}-[0-9A-Z]{8}$"
         }
       },
       "additionalProperties": false

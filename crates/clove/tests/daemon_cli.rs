@@ -1317,3 +1317,67 @@ fn serve_waits_for_a_daemon_that_is_still_starting() {
         "serve must hand off to the starting daemon: {status:?} {stderr}"
     );
 }
+
+/// A clove 0.1.1 hub speaks protocol 8, whose `Filters` has no `synced` or
+/// `parent`: it would decode a newer client's query and silently drop both.
+/// The handshake must keep the two apart — whether the old hub refuses the
+/// hello (what it does) or claims protocol 8 — so the filters are answered by
+/// the local tiers, with the right rows and no error.
+#[test]
+fn a_protocol_8_hub_leaves_the_synced_and_parent_filters_to_the_local_tiers() {
+    for reply in [
+        r#"{"welcome":"err","protocol":8,"code":"PROTOCOL_MISMATCH","message":"client protocol 9 != daemon protocol 8"}"#,
+        r#"{"welcome":"ok","protocol":8}"#,
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let run = Run::new();
+        init(dir, &run.path);
+        let new_id = |args: &[&str]| -> String {
+            let out = clove(dir, &run.path)
+                .args(["new", "-f", "json"])
+                .args(args)
+                .assert()
+                .success()
+                .get_output()
+                .stdout
+                .clone();
+            json(&out)["data"]["id"].as_str().unwrap().to_owned()
+        };
+        let parent = new_id(&["parent"]);
+        let child = new_id(&["child", "--parent", &parent]);
+        let file = dir.join(".clove/issues").join(format!("{child}.md"));
+        let text = std::fs::read_to_string(&file).unwrap();
+        let (front, body) = text[4..].split_once("\n---\n").unwrap();
+        std::fs::write(
+            &file,
+            format!("---\n{front}\nexternal_ref: gh-7\n---\n{body}"),
+        )
+        .unwrap();
+
+        let _hub = fake_hub(&run.path, reply);
+        for (args, want) in [
+            (vec!["--synced"], vec![child.clone()]),
+            (vec!["--unsynced"], vec![parent.clone()]),
+            (vec!["--parent", parent.as_str()], vec![child.clone()]),
+        ] {
+            let out = clove(dir, &run.path)
+                .args(["ls", "-f", "json"])
+                .args(&args)
+                .assert()
+                .success()
+                .get_output()
+                .stdout
+                .clone();
+            let page = json(&out);
+            let ids: Vec<String> = page["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|i| i["id"].as_str().unwrap().to_owned())
+                .collect();
+            assert_ne!(page["_meta"]["source"], "daemon", "{reply} {args:?}");
+            assert_eq!(ids, want, "{reply} {args:?}: {page}");
+        }
+    }
+}
