@@ -1,5 +1,6 @@
 <script lang="ts">
   import { initials } from '$lib/glyphs';
+  import { tooltip } from '$lib/tooltip';
   let { name }: { name: string | null } = $props();
 
   // Deterministic hue from name so avatars are stable & distinct.
@@ -17,7 +18,7 @@
   style="background:{bg}"
   role="img"
   aria-label={name ? `assignee ${name}` : 'unassigned'}
-  title={name ?? 'unassigned'}
+  use:tooltip={name ?? 'unassigned'}
 >
   {initials(name)}
 </span>

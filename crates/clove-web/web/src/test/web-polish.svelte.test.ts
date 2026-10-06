@@ -134,8 +134,8 @@ describe('board move buttons', () => {
     render(BoardPage);
     const left = await screen.findByRole('button', { name: 'Move #0000000A to Open' });
     const right = screen.getByRole('button', { name: 'Move #0000000A to Closed' });
-    expect(await hoverText(left)).toBe('Move to Open');
-    expect(await hoverText(right)).toBe('Move to Closed');
+    expect(await hoverText(left)).toBe('Move to ○ Open');
+    expect(await hoverText(right)).toBe('Move to ● Closed');
     expect(left.hasAttribute('title')).toBe(false);
   });
 });

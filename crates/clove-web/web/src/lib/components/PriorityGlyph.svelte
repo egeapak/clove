@@ -1,5 +1,6 @@
 <script lang="ts">
   import { priorityGlyph, priorityLabel, priorityColorVar } from '$lib/glyphs';
+  import { tooltip } from '$lib/tooltip';
   let { priority, label = false }: { priority: number; label?: boolean } = $props();
 </script>
 
@@ -8,7 +9,7 @@
   style="color:{priorityColorVar(priority)}"
   role="img"
   aria-label={priorityLabel(priority)}
-  title={priorityLabel(priority)}
+  use:tooltip={priorityLabel(priority)}
 >
   {priorityGlyph(priority)}{#if label}&nbsp;p{priority}{/if}
 </span>

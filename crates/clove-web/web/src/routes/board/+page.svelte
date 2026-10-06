@@ -7,8 +7,8 @@
   import Card from '$lib/components/Card.svelte';
   import StatusGlyph from '$lib/components/StatusGlyph.svelte';
   import { Virtual } from '$lib/virtual.svelte';
-  import { tooltip } from '$lib/tooltip';
-  import { shortId } from '$lib/glyphs';
+  import { tooltip, type TooltipContent } from '$lib/tooltip';
+  import { shortId, statusGlyph, statusColorVar } from '$lib/glyphs';
 
   // A board renders every item, grouped into columns, so it asks for the whole
   // store explicitly: `limit: 0` (unlimited on every clove surface). The API
@@ -134,6 +134,12 @@
     return COLS[(idx + dir + COLS.length) % COLS.length];
   }
 
+  /** "Move to ◐ In Progress", the target in its column header's glyph and colour. */
+  function moveTip(target: { key: Status; label: string }): TooltipContent {
+    const color = statusColorVar(target.key);
+    return ['Move to ', { text: statusGlyph(target.key), color }, ' ', { text: target.label, color, bold: true }];
+  }
+
   async function move(item: Item, dir: 1 | -1) {
     const next = moveTarget(item, dir).key;
     const edit = store.optimistic(item.id, { status: next });
@@ -202,7 +208,7 @@
                     <button
                       class="btn sm"
                       aria-label="Move {shortId(item.id)} to {target.label}"
-                      use:tooltip={`Move to ${target.label}`}
+                      use:tooltip={moveTip(target)}
                       onclick={() => move(item, dir)}>{dir < 0 ? '‹' : '›'}</button
                     >
                   {/each}

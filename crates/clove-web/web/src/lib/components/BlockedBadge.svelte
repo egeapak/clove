@@ -1,10 +1,22 @@
 <script lang="ts">
   import { shortId } from '$lib/glyphs';
+  import { related, ensureRelated } from '$lib/related.svelte';
+  import { tooltip, type TooltipSpan } from '$lib/tooltip';
   let { blockedBy }: { blockedBy: string[] } = $props();
+
+  $effect(() => blockedBy.forEach(ensureRelated));
+
+  const tip = $derived(
+    blockedBy.flatMap((id, i): Array<string | TooltipSpan> => {
+      const info = related(id);
+      const title = info ? info.title : info === null ? 'missing item' : '';
+      return [i ? '\n' : 'Blocked by\n', { text: id, color: 'var(--accent)' }, title ? ` · ${title}` : ''];
+    })
+  );
 </script>
 
 {#if blockedBy.length}
-  <span class="blocked mono" role="status" aria-label="blocked by {blockedBy.map(shortId).join(', ')}">
+  <span class="blocked mono" role="status" aria-label="blocked by {blockedBy.map(shortId).join(', ')}" use:tooltip={tip}>
     <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
       <rect x="5" y="11" width="14" height="9" rx="2" /><path d="M8 11V8a4 4 0 0 1 8 0v3" />
     </svg>

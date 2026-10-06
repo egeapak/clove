@@ -1,12 +1,14 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import type { Project } from '$lib/types';
+  import { tooltip } from '$lib/tooltip';
 
   // `current` is the hub slug this app is served under, or null when served
   // standalone (then there is nothing to switch between and nothing is fetched).
   let { current, load }: { current: string | null; load: () => Promise<Project[]> } = $props();
 
   let projects = $state<Project[]>([]);
+  const root = $derived(projects.find((p) => p.slug === current)?.root ?? '');
 
   onMount(() => {
     if (current === null) return;
@@ -24,9 +26,9 @@
 {#if projects.length > 1}
   <label class="switch">
     <span class="sr">Project</span>
-    <select aria-label="Project" value={current} onchange={change}>
+    <select aria-label="Project" value={current} onchange={change} use:tooltip={root}>
       {#each projects as p (p.slug)}
-        <option value={p.slug} title={p.root}>{p.name}</option>
+        <option value={p.slug}>{p.name}</option>
       {/each}
     </select>
   </label>

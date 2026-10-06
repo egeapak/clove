@@ -1,9 +1,10 @@
 <script lang="ts">
   import { shortId } from '$lib/glyphs';
-  let { id }: { id: string } = $props();
+  import { tooltip } from '$lib/tooltip';
+  let { id, title }: { id: string; title?: string } = $props();
 </script>
 
-<span class="id mono">{shortId(id)}</span>
+<span class="id mono" use:tooltip={title ? `${id} · ${title}` : id}>{shortId(id)}</span>
 
 <style>
   .id {

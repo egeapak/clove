@@ -136,11 +136,13 @@ select {
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--text);
-  background: var(--surface-3);
+  /* Opaque even in the translucent themes: it floats over arbitrary content. */
+  background: linear-gradient(var(--surface-3), var(--surface-3)), var(--surface-app);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
   box-shadow: var(--shadow-pop);
   /* Item titles can be long: wrap them rather than run off the viewport. */
   max-width: min(480px, calc(100vw - 12px));
   overflow-wrap: anywhere;
+  white-space: pre-line;
 }
