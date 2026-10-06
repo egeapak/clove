@@ -354,7 +354,9 @@ After the tag push:
 1. Watch the run: `gh run watch` (or the Actions tab).
 2. Confirm the GitHub Release for `v0.1.1` has all platform archives + `.sha256`
    files attached.
-3. Edit the Release notes (changelog / highlights) and publish it.
+3. Run the manual release checklist, [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md),
+   against the draft's binaries; resolve or explicitly accept every finding.
+4. Edit the Release notes (changelog / highlights) and publish it.
 
 ---
 

@@ -132,6 +132,20 @@ cargo clippy --all-targets -- -D warnings      # or scope with -p <crate>
 cargo test --workspace
 ```
 
+## Release checklist (manual, before every release)
+
+`docs/RELEASE_CHECKLIST.md` is the end-to-end checklist run against the **draft
+Release's binaries** before publishing: packaged-binary smoke on every platform
+(`scripts/release/release-smoke.sh` + `scripts/ci/daemon-smoke.sh`), the upgrade
+from the previous release, real two-way GitHub sync with this repo, web (browser),
+TUI (tmux), MCP, and CLI coverage. `docs/RELEASE.md` §6 points to it.
+
+It is a **release checklist, not a test replacement**: anything automatable
+belongs in the test suites, and every bug it finds gets a regression test with
+its fix. **Keep it current** — when a change adds a user-visible surface or
+behaviour, or a checklist run finds a class of problem no step would have caught,
+add or update the step in the same change.
+
 ## TUI render snapshots (insta, run in CI)
 
 `crates/clove-tui/src/snapshot.rs` renders the UI to a `ratatui` `TestBackend`
