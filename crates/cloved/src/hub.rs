@@ -5,7 +5,9 @@
 //! project-scoped call names its caller's own project; the hub resolves it to
 //! a slot per call, loading it when the call allows. A slot is evicted when it
 //! idles out, detached on request, and unloaded — alone — when any of its tasks
-//! ends or panics. The hub exits once it has served nothing for a grace period.
+//! ends (or panics, in an unwinding build: release is `panic = "abort"`, so
+//! there a panic ends the hub). The hub exits once it has served nothing for a
+//! grace period.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -429,8 +431,8 @@ impl Hub {
     }
 
     /// Run until the slot is cancelled or one of its tasks ends, then tear down
-    /// that slot only. A panic in one project's watcher is that project's
-    /// problem; every other slot keeps serving.
+    /// that slot only. In an unwinding build a panic in one project's watcher is
+    /// that project's problem; every other slot keeps serving.
     async fn supervise(self, slot: Arc<Slot>, mut tasks: JoinSet<SlotTask>) {
         let ended = tokio::select! {
             _ = slot.cancel.cancelled() => None,

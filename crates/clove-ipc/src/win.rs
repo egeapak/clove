@@ -8,7 +8,9 @@
 use std::io;
 use std::os::windows::io::{AsRawHandle as _, BorrowedHandle};
 
-use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, HANDLE};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, LocalFree, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+};
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, GetSecurityInfo, SE_KERNEL_OBJECT,
 };
@@ -20,6 +22,27 @@ use windows_sys::Win32::System::Pipes::ImpersonateNamedPipeClient;
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentThread, OpenProcessToken, OpenThreadToken,
 };
+
+/// Keep this process's stdin, stdout and stderr out of the children it
+/// spawns. Windows hands a child *every* inheritable handle, not only the
+/// three it is given: a hub that inherits the pipe its spawner's caller reads
+/// from holds that pipe open for its whole life, so the caller
+/// (`$(clove daemon start)`, an MCP host) never sees end-of-file. A child
+/// given `Stdio::inherit` is unaffected — std duplicates the handle for it.
+pub fn stop_inheriting_stdio() {
+    let stdio = [
+        std::io::stdin().as_raw_handle(),
+        std::io::stdout().as_raw_handle(),
+        std::io::stderr().as_raw_handle(),
+    ];
+    for handle in stdio {
+        if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
+            // SAFETY: a standard handle of this process; only its inherit flag
+            // changes. Best effort: a handle that refuses keeps its flag.
+            unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) };
+        }
+    }
+}
 
 /// The current user's SID, as a string (`S-1-5-21-…`).
 pub fn current_user_sid() -> io::Result<String> {

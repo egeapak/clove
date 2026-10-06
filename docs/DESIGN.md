@@ -1425,6 +1425,14 @@ version.
   web listener, and releases its lock. The hub and every other slot keep
   serving. A project that fails to load (no `issues/`, an index that cannot be
   opened or is a symlink, a lock held elsewhere) fails that one call.
+- **A panic in a release build stops the whole hub.** Release binaries are built
+  with `panic = "abort"`, so the per-slot teardown above covers a task that
+  *ends*; a task that *panics* only gets it in unwinding builds (debug, tests).
+  An aborted hub is replaced, not repaired: its lock is an OS file lock that
+  dies with it, so the corpse socket and pid file block nothing. An MCP
+  session's heartbeat starts a fresh hub within one interval (30s),
+  `clove daemon start` starts one at once, and reads fall back to the index
+  and files in between — the daemon is a cache, so nothing is lost.
 - **Each slot still takes `.clove/daemon.lock`,** so a project is served by at most
   one daemon of any version: a clove 0.1.0 per-project daemon, or a hub under a
   different runtime directory, makes the call fail with `PROJECT_LOCKED` and the

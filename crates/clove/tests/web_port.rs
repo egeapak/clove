@@ -247,3 +247,95 @@ fn explicit_port_skips_the_daemon_hand_off() {
     );
     assert!(serves, "port {port} does not serve this repo");
 }
+
+/// The daemon serves on loopback IPv4 only, so a `--host` other than its own
+/// address cannot be handed off: the user gets a standalone server on the
+/// address they named, not the daemon's URL.
+#[test]
+fn explicit_host_skips_the_daemon_hand_off() {
+    let held = TcpListener::bind("127.0.0.1:0").unwrap();
+    let repo = repo_with_web_port(held.local_addr().unwrap().port());
+    clove(repo.path())
+        .args(["daemon", "start"])
+        .assert()
+        .success();
+
+    let mut child = clove(repo.path())
+        .args(["serve", "--host", "::1"])
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stderr = BufReader::new(child.stderr.take().unwrap());
+    let mut text = String::new();
+    let mut line = String::new();
+    while stderr.read_line(&mut line).unwrap_or(0) > 0 {
+        text.push_str(&line);
+        if line.contains("http://") {
+            break;
+        }
+        line.clear();
+    }
+    let port = text
+        .find("http://[::1]:")
+        .map(|at| &text[at + "http://[::1]:".len()..])
+        .and_then(|rest| {
+            rest.chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse::<u16>()
+                .ok()
+        });
+    let serves = port.is_some_and(|port| {
+        let mut stream = TcpStream::connect(("::1", port)).unwrap();
+        stream
+            .write_all(b"GET /api/v1/items HTTP/1.1\r\nHost: [::1]\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response.starts_with("HTTP/1.1 200") && response.contains(&title(repo.path()))
+    });
+    let _ = child.kill();
+    let _ = child.wait();
+    clove(repo.path())
+        .args(["daemon", "stop"])
+        .assert()
+        .success();
+
+    assert!(
+        !text.contains("served by the running daemon"),
+        "handed --host ::1 off to the daemon's loopback URL: {text}"
+    );
+    assert!(
+        serves,
+        "no standalone server on [::1] serves this repo: {text}"
+    );
+}
+
+/// A `--host` is validated whether or not a daemon runs: a bad address, or a
+/// non-loopback one without `--allow-non-loopback`, fails instead of being
+/// silently swapped for the daemon's URL.
+#[test]
+fn a_bad_host_fails_even_with_a_daemon_running() {
+    let held = TcpListener::bind("127.0.0.1:0").unwrap();
+    let repo = repo_with_web_port(held.local_addr().unwrap().port());
+    clove(repo.path())
+        .args(["daemon", "start"])
+        .assert()
+        .success();
+
+    let outputs = [
+        ["serve", "--host", "not-an-ip"],
+        ["serve", "--host", "0.0.0.0"],
+    ]
+    .map(|args| clove(repo.path()).args(args).output().unwrap());
+    clove(repo.path())
+        .args(["daemon", "stop"])
+        .assert()
+        .success();
+
+    for out in outputs {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "accepted a bad --host: {stderr}");
+        assert!(stderr.contains("host"), "{stderr}");
+    }
+}

@@ -115,7 +115,10 @@ supervised task set (file watcher, snapshot loop, github-sync loop, idle
 watchdog). A slot supervisor `select!`s the slot's cancel token against its
 `JoinSet`: the first task to end — normally or by panic — tears **only that
 slot** down (checkpoint WAL, drop the web route, close its connections, release
-`daemon.lock`). The hub and every other slot keep running.
+`daemon.lock`). The hub and every other slot keep running. (A panic gets this
+only in unwinding builds: release is `panic = "abort"`, so there a panic ends
+the hub, and the next MCP heartbeat or `clove daemon start` starts a new one —
+DESIGN §8.)
 
 Loads are serialized **per project** (a `OnceCell` per key) so two clients
 attaching the same project at once do not both try the lock. A load that fails
