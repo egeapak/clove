@@ -262,7 +262,46 @@ mod tests {
             .conn()
             .query_row("SELECT created_at FROM items", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(created, "2026-06-02T10:00:00+00:00", "no stored fraction");
+        assert_eq!(
+            created, "2026-06-02T10:00:00.904+00:00",
+            "fraction truncated to the canonical milliseconds"
+        );
+    }
+
+    /// The columns compare as TEXT. A whole-second value (all an older clove
+    /// wrote) renders with no fraction and a millisecond one with exactly three
+    /// digits, so mixed rows must still sort by instant without a rebuild.
+    #[test]
+    fn whole_second_and_millisecond_rows_sort_by_instant() {
+        let (_d, mut index) = index();
+        for (id, created) in [
+            ("proj-AAAA1111", "2026-06-02T10:00:00.500Z"),
+            ("proj-BBBB2222", "2026-06-02T10:00:00Z"),
+            ("proj-CCCC3333", "2026-06-02T10:00:01Z"),
+            ("proj-DDDD4444", "2026-06-02T10:00:00.050Z"),
+        ] {
+            let mut it = item(id, "t", "b");
+            it.frontmatter.created = created.parse().unwrap();
+            index.upsert_item(&it).unwrap();
+        }
+        let mut stmt = index
+            .conn()
+            .prepare("SELECT id FROM items ORDER BY created_at")
+            .unwrap();
+        let ids: Vec<String> = stmt
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "proj-BBBB2222",
+                "proj-DDDD4444",
+                "proj-AAAA1111",
+                "proj-CCCC3333"
+            ]
+        );
     }
 
     /// Bulk upserts stay internally consistent: one `items` row and one

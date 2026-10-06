@@ -11,40 +11,45 @@
 //!   instant looks like a local edit and pushes a no-op PATCH;
 //! - `clove stats --history` orders snapshots by `captured_at` as a string.
 //!
-//! So there is exactly one spelling clove ever *writes* — RFC 3339, UTC, whole
-//! seconds, `Z` suffix ([`canonical_rfc3339`]) — and every read accepts any
-//! parseable spelling and normalizes it ([`parse_rfc3339`],
+//! So there is exactly one spelling clove ever *writes* — RFC 3339, UTC,
+//! millisecond precision, `Z` suffix ([`canonical_rfc3339`]) — and every read
+//! accepts any parseable spelling and normalizes it ([`parse_rfc3339`],
 //! [`canonicalize_rfc3339`]). Normalizing on read is what makes this a
 //! no-flag-day change: an existing store is not migrated, it is simply re-spelled
 //! the next time each item is written.
 //!
-//! Whole seconds is the precision the frontmatter writer has always rendered, so
-//! this is not a new lossy step for item files — it is the same truncation
-//! ([`truncate_to_seconds`]) applied at every boundary rather than only at the
-//! last one.
+//! The precision is milliseconds, not whole seconds, because the sync's
+//! `updated > last-synced` test cannot see an edit made in the same second as
+//! the write it is compared against. Whole-second values written by an older
+//! clove read back as the same instant with a zero fraction.
 
 use chrono::{DateTime, SecondsFormat, Utc};
 
-/// Truncate a timestamp to whole seconds — the canonical on-disk precision
-/// (the frontmatter writer renders RFC 3339 with seconds precision).
+/// Truncate a timestamp to whole milliseconds — the canonical on-disk precision.
 ///
-/// Every place that *stamps* a timestamp destined for frontmatter
-/// (`ItemStore::create`/`update`, [`crate::set_status`]) truncates through this
-/// one helper, so the in-memory value a mutation returns is byte-identical to
+/// The single source of that precision: every place that *stamps* a timestamp
+/// destined for frontmatter (`ItemStore::create`/`update`,
+/// [`crate::set_status`]) truncates through this helper, and
+/// [`canonical_rfc3339`]/[`parse_rfc3339`] render and read at the same
+/// resolution, so the in-memory value a mutation returns is byte-identical to
 /// what a re-read parses back from disk.
-pub fn truncate_to_seconds(ts: DateTime<Utc>) -> DateTime<Utc> {
+pub fn truncate_to_millis(ts: DateTime<Utc>) -> DateTime<Utc> {
     use chrono::Timelike;
-    ts.with_nanosecond(0)
-        .expect("zero nanoseconds is always valid")
+    let millis_as_nanos = ts.nanosecond() / NANOS_PER_MILLI * NANOS_PER_MILLI;
+    ts.with_nanosecond(millis_as_nanos)
+        .expect("truncating the fraction keeps it in range")
 }
 
-/// Render `ts` in the single spelling clove writes: RFC 3339, UTC, whole
-/// seconds, `Z` suffix (`2026-06-02T10:00:00Z`).
+const NANOS_PER_MILLI: u32 = 1_000_000;
+
+/// Render `ts` in the single spelling clove writes: RFC 3339, UTC, millisecond
+/// precision, `Z` suffix (`2026-06-02T10:00:00.123Z`; a whole second renders
+/// `.000`).
 ///
-/// Note this *renders* at second precision; it does not require the caller to
-/// have truncated first.
+/// Note this *renders* at millisecond precision; it does not require the caller
+/// to have truncated first.
 pub fn canonical_rfc3339(ts: DateTime<Utc>) -> String {
-    ts.to_rfc3339_opts(SecondsFormat::Secs, true)
+    ts.to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
 /// Parse any RFC 3339 spelling into a UTC instant, truncated to the canonical
@@ -74,7 +79,7 @@ pub fn parse_rfc3339(s: &str) -> Option<DateTime<Utc>> {
         .map(|dt| dt.with_timezone(&Utc))
         .or_else(|_| s.parse::<DateTime<Utc>>())
         .ok()
-        .map(truncate_to_seconds)
+        .map(truncate_to_millis)
 }
 
 /// Re-spell any parseable RFC 3339 string canonically.
@@ -150,7 +155,7 @@ mod tests {
     /// `PARSE_ERROR` that `clove doctor` called unfixable.
     #[test]
     fn reading_is_at_least_as_permissive_as_it_was() {
-        let want = "2026-06-02T10:00:00Z";
+        let want = "2026-06-02T10:00:00.000Z";
         for spelling in [
             "2026-06-02 10:00:00 +00:00",
             "2026-06-02T10:00:00+0000",
@@ -167,7 +172,7 @@ mod tests {
             "2026-06-02T10:00:00Z",
             "2026-06-02T10:00:00+00:00",
             "2026-06-02T12:00:00+02:00",
-            "2026-06-02T10:00:00.904816670Z",
+            "2026-06-02T10:00:00.000816670Z",
         ] {
             assert_eq!(
                 canonical_rfc3339(parse_rfc3339(spelling).unwrap()),
@@ -197,11 +202,11 @@ mod tests {
         "2026-06-02T10:00:00.000000000+00:00",
         "2026-06-02T12:00:00+02:00",
         "2026-06-02T04:30:00-05:30",
-        // Sub-second precision below the canonical resolution: the on-disk
-        // precision is whole seconds, so these are the same stored instant.
-        "2026-06-02T10:00:00.904816670+00:00",
-        "2026-06-02T10:00:00.5Z",
-        "2026-06-02T12:00:00.999999999+02:00",
+        // Sub-millisecond precision below the canonical resolution: the on-disk
+        // precision is milliseconds, so these are the same stored instant.
+        "2026-06-02T10:00:00.000816670+00:00",
+        "2026-06-02T10:00:00.0005Z",
+        "2026-06-02T12:00:00.000999999+02:00",
     ];
 
     #[test]
@@ -209,7 +214,7 @@ mod tests {
         for spelling in EQUIVALENT {
             assert_eq!(
                 canonicalize_rfc3339(spelling),
-                "2026-06-02T10:00:00Z",
+                "2026-06-02T10:00:00.000Z",
                 "`{spelling}` must canonicalize to the one spelling"
             );
         }
@@ -230,6 +235,7 @@ mod tests {
     #[test]
     fn canonical_form_is_stable_under_re_canonicalization() {
         let once = canonicalize_rfc3339("2026-06-02T10:00:00.904816670+00:00");
+        assert_eq!(once, "2026-06-02T10:00:00.904Z");
         assert_eq!(canonicalize_rfc3339(&once), once);
     }
 
@@ -239,11 +245,18 @@ mod tests {
             canonicalize_rfc3339("2026-06-02T10:00:00Z"),
             canonicalize_rfc3339("2026-06-02T10:00:01Z")
         );
-        // A sub-second difference that crosses a second boundary is a real
-        // difference, not a spelling one.
         assert_ne!(
             canonicalize_rfc3339("2026-06-02T10:00:00.999Z"),
             canonicalize_rfc3339("2026-06-02T10:00:01.000Z")
+        );
+        // Two writes in the same second stay distinguishable — the GitHub
+        // sync's `updated > last-synced` change detection depends on it.
+        assert!(
+            parse_rfc3339("2026-06-02T10:00:00.100Z") < parse_rfc3339("2026-06-02T10:00:00.600Z")
+        );
+        assert_ne!(
+            canonicalize_rfc3339("2026-06-02T10:00:00Z"),
+            canonicalize_rfc3339("2026-06-02T10:00:00.001Z")
         );
     }
 
@@ -254,8 +267,19 @@ mod tests {
     }
 
     #[test]
-    fn canonical_rendering_has_no_fraction_and_a_z_suffix() {
+    fn canonical_rendering_has_a_millisecond_fraction_and_a_z_suffix() {
         let ts: DateTime<Utc> = "2026-06-02T10:00:00.904816670Z".parse().unwrap();
-        assert_eq!(canonical_rfc3339(ts), "2026-06-02T10:00:00Z");
+        assert_eq!(canonical_rfc3339(ts), "2026-06-02T10:00:00.904Z");
+        let whole: DateTime<Utc> = "2026-06-02T10:00:00Z".parse().unwrap();
+        assert_eq!(canonical_rfc3339(whole), "2026-06-02T10:00:00.000Z");
+    }
+
+    #[test]
+    fn truncation_drops_only_the_sub_millisecond_part() {
+        let ts: DateTime<Utc> = "2026-06-02T10:00:05.123456789Z".parse().unwrap();
+        assert_eq!(
+            truncate_to_millis(ts),
+            "2026-06-02T10:00:05.123Z".parse::<DateTime<Utc>>().unwrap()
+        );
     }
 }

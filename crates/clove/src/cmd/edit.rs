@@ -8,7 +8,7 @@ use serde_json::Map;
 use crate::cli::EditArgs;
 use crate::context::Ctx;
 use crate::item_json::print_item;
-use crate::util::{now_seconds, parse_id};
+use crate::util::{now_millis, parse_id};
 
 /// Apply `KEY=VALUE` (and `labels+=`/`labels-=`) assignments to `id` atomically,
 /// returning the saved item. Shared by `clove edit --field` and `clove set`.
@@ -22,7 +22,7 @@ pub fn apply_assignments_to(
     id: &CloveId,
     assignments: &[String],
 ) -> Result<clove_types::Item, CloveError> {
-    let now = now_seconds();
+    let now = now_millis();
     store.update_with(id, now, |item| {
         clove_types::apply_assignments(&mut item.frontmatter, assignments, now)
     })

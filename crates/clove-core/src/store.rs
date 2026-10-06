@@ -15,7 +15,7 @@ use crate::fields;
 use crate::id::{new_id, CloveId};
 use crate::model::{Item, ItemFrontmatter, ItemStatus, ItemType, Priority, CURRENT_SCHEMA_VERSION};
 use crate::parse::{parse_frontmatter_file, parse_item_file};
-use crate::time::truncate_to_seconds;
+use crate::time::truncate_to_millis;
 use crate::validate::validate_item;
 use crate::write::write_item_file;
 
@@ -138,8 +138,8 @@ impl ItemStore {
     /// Create a new item, generating its id and writing its file.
     ///
     /// `now` is supplied by the caller (the CLI passes `Utc::now()`); it is
-    /// truncated to whole seconds to match the canonical on-disk timestamp
-    /// precision.
+    /// truncated to whole milliseconds to match the canonical on-disk
+    /// timestamp precision.
     ///
     /// Enforces the same field validations as the edit path (a title must be
     /// non-empty, an assignee must be non-blank) plus referential integrity for
@@ -188,7 +188,7 @@ impl ItemStore {
         labels.sort();
         labels.dedup();
 
-        let now = truncate_to_seconds(now);
+        let now = truncate_to_millis(now);
         let id = new_id(prefix, &self.issues_dir)?;
 
         let frontmatter = ItemFrontmatter {
@@ -287,7 +287,7 @@ impl ItemStore {
         self.path_for(id).exists()
     }
 
-    /// Persist `item`, stamping `updated = now` (truncated to seconds). Holds the
+    /// Persist `item`, stamping `updated = now` (truncated to milliseconds). Holds the
     /// store-wide write lock across validate + write.
     ///
     /// Note: `update` alone cannot cover the caller's earlier read. Callers that
@@ -346,7 +346,7 @@ impl ItemStore {
     /// [`ItemStore::update`] and [`ItemStore::update_with`].
     fn update_locked(&self, item: &Item, now: DateTime<Utc>) -> Result<Item, CloveError> {
         let mut next = item.clone();
-        next.frontmatter.updated = truncate_to_seconds(now);
+        next.frontmatter.updated = truncate_to_millis(now);
 
         let path = self.path_for(&next.frontmatter.id);
         if !path.exists() {

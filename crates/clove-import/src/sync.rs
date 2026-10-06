@@ -780,8 +780,7 @@ pub(crate) fn epoch() -> DateTime<Utc> {
 fn obj_updated(obj: &Map<String, Value>) -> DateTime<Utc> {
     obj.get("updated")
         .and_then(Value::as_str)
-        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-        .map(|dt| dt.with_timezone(&Utc))
+        .and_then(clove_types::parse_rfc3339)
         .unwrap_or_else(epoch)
 }
 
@@ -1332,6 +1331,76 @@ mod tests {
         assert!(plan.pull_update.is_empty());
     }
 
+    /// A pull writes the item and records its `updated`; a local edit landing in
+    /// the same wall-clock second must still be planned as a push. Driven
+    /// through the real store so the persisted precision is what is compared.
+    #[test]
+    fn local_edit_in_the_same_second_as_the_last_pull_is_pushed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = camino::Utf8Path::from_path(tmp.path()).unwrap().to_owned();
+        std::fs::create_dir_all(root.join(".clove").join("issues")).unwrap();
+        let store = clove_core::ItemStore::new(root);
+        let created = store
+            .create(
+                "proj",
+                clove_core::NewItem {
+                    title: "Reopened".to_owned(),
+                    item_type: clove_types::ItemType::default(),
+                    priority: Priority::DEFAULT,
+                    labels: vec![],
+                    deps: vec![],
+                    parent: None,
+                    assignee: None,
+                    body: "Body text.".to_owned(),
+                },
+                ts("2026-10-06T18:00:00Z"),
+            )
+            .unwrap();
+        let id = created.frontmatter.id;
+
+        let pulled = store
+            .update_with(&id, ts("2026-10-06T18:08:37.100Z"), |item| {
+                item.frontmatter.external_ref = Some("gh-7".to_owned());
+                Ok(())
+            })
+            .unwrap();
+        let mut state = SyncState::default();
+        state.record(
+            "gh-7",
+            Some(ts("2026-10-06T18:08:36Z")),
+            pulled.frontmatter.updated,
+        );
+
+        clove_core::ops::transition(
+            &store,
+            &id,
+            ItemStatus::Closed,
+            ts("2026-10-06T18:08:37.600Z"),
+        )
+        .unwrap();
+
+        let (items, errors) = store.scan().unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        let local: Vec<Map<String, Value>> = items
+            .iter()
+            .map(|item| {
+                let mut obj = clove_core::frontmatter_object(&item.frontmatter);
+                obj.insert("body".to_owned(), Value::String(item.body.clone()));
+                obj
+            })
+            .collect();
+
+        let plan = plan_sync(
+            &[issue(7, "Reopened", "open", "2026-10-06T18:08:36Z")],
+            &local,
+            &state,
+            ConflictPolicy::Newer,
+        )
+        .unwrap();
+        assert_eq!(plan.push_update.len(), 1, "the close must be pushed");
+        assert!(plan.in_sync.is_empty(), "not reported as in sync");
+    }
+
     #[test]
     fn unchanged_both_sides_is_in_sync() {
         let mut state = SyncState::default();
@@ -1743,7 +1812,7 @@ mod tests {
         state.record(
             "gh-7",
             Some(ts("2026-06-04T00:00:00Z")),
-            ts("2026-06-03T00:00:00Z"),
+            ts("2026-06-03T00:00:00.250Z"),
         );
         state.save(&path).unwrap();
 
@@ -1751,8 +1820,46 @@ mod tests {
         assert_eq!(loaded.entries.len(), 1);
         assert_eq!(
             loaded.entries["gh-7"].local_updated,
-            ts("2026-06-03T00:00:00Z")
+            ts("2026-06-03T00:00:00.250Z"),
+            "millisecond fingerprint survives the round-trip"
         );
+    }
+
+    /// A state file written when the fingerprint was whole seconds still loads,
+    /// and an untouched item (still whole seconds on disk) reads as in sync.
+    #[test]
+    fn whole_second_state_file_still_loads_and_compares() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = camino::Utf8Path::from_path(dir.path()).unwrap();
+        let path = SyncState::path_for(root, "owner/repo");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"version":1,"repo":"owner/repo","entries":{"gh-7":
+                {"gh_updated_at":"2026-06-02T00:00:00Z","local_updated":"2026-06-01T00:00:00Z"}}}"#,
+        )
+        .unwrap();
+        let state = SyncState::load(&path, "owner/repo");
+        assert_eq!(
+            state.entries["gh-7"].local_updated,
+            ts("2026-06-01T00:00:00Z")
+        );
+
+        let plan = plan_sync(
+            &[issue(7, "Remote", "open", "2026-06-02T00:00:00Z")],
+            &[local(
+                "proj-AAAA1111",
+                "Remote",
+                "open",
+                Some("gh-7"),
+                "2026-06-01T00:00:00Z",
+            )],
+            &state,
+            ConflictPolicy::Newer,
+        )
+        .unwrap();
+        assert_eq!(plan.in_sync.len(), 1);
+        assert!(plan.push_update.is_empty());
     }
 
     #[test]

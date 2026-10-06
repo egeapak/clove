@@ -5,9 +5,9 @@ title: Article image download and compression
 status: closed
 type: feature
 priority: 1
-created: 2026-06-02T10:00:00Z
-updated: 2026-06-02T14:23:00Z
-closed: 2026-06-02T14:23:00Z
+created: 2026-06-02T10:00:00.000Z
+updated: 2026-06-02T14:23:00.000Z
+closed: 2026-06-02T14:23:00.000Z
 assignee: ege
 parent: proj-2BK8NXYZ
 labels: [area:core, perf]

@@ -135,7 +135,7 @@ pub const COMMENT_PAGE_JSON: &str = r##"{
         "properties": {
           "author": { "type": "string" },
           "timestamp": {
-            "description": "RFC3339 UTC with whole seconds — the one canonical spelling every surface writes.",
+            "description": "RFC3339 UTC with millisecond precision — the one canonical spelling every surface writes.",
             "type": "string"
           },
           "body": { "type": "string" }

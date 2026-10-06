@@ -1846,9 +1846,9 @@ fn a_re_spelled_local_timestamp_is_not_a_change() {
     // precision a foreign tool renders — must not read as an edit and push a
     // no-op PATCH to GitHub.
     for spelling in [
-        "%Y-%m-%dT%H:%M:%S+00:00",
-        "%Y-%m-%dT%H:%M:%S.904816670+00:00",
-        "%Y-%m-%dT%H:%M:%S.000Z",
+        "%Y-%m-%dT%H:%M:%S%.3f+00:00",
+        "%Y-%m-%dT%H:%M:%S%.3f816670+00:00",
+        "%Y-%m-%dT%H:%M:%S%.6fZ",
     ] {
         let mock = MockGitHub::start();
         let dir = init_repo();
@@ -1903,7 +1903,7 @@ fn a_pulled_item_carries_canonical_timestamps() {
             .or_else(|| line.strip_prefix("closed: "))
         {
             assert!(
-                value.ends_with('Z') && !value.contains('.'),
+                value.len() == 24 && value.ends_with('Z') && value.find('.') == Some(19),
                 "non-canonical timestamp `{value}` in:\n{on_disk}"
             );
         }

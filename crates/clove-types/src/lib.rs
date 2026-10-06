@@ -20,5 +20,5 @@ pub use model::{
     normalize_label, Item, ItemFrontmatter, ItemStatus, ItemType, Priority, CURRENT_SCHEMA_VERSION,
 };
 pub use request::{apply_assignments, normalize_body, set_status, EditRequest, LabelEdit, NewSpec};
-pub use time::{canonical_rfc3339, canonicalize_rfc3339, parse_rfc3339, truncate_to_seconds};
+pub use time::{canonical_rfc3339, canonicalize_rfc3339, parse_rfc3339, truncate_to_millis};
 pub use validate::{validate_item, ValidationError};

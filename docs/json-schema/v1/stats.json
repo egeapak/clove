@@ -132,7 +132,7 @@
           "enum": ["daemon", "index", "files"]
         },
         "generated_at": {
-          "description": "The instant the report was computed, RFC3339 with whole seconds — the same stamp `--snapshot` records as `captured_at`.",
+          "description": "The instant the report was computed, RFC3339 with millisecond precision — the same stamp `--snapshot` records as `captured_at`.",
           "type": "string"
         },
         "snapshotted": {

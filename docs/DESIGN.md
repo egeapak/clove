@@ -174,24 +174,37 @@ equivalent spellings of the same instant — `Z` vs `+00:00`, an equivalent non-
 amount of sub-second precision — and clove compares timestamp *strings* in places where a
 difference in spelling would read as a difference in content (the GitHub sync's change
 detection, `stats --history` ordering). So there is exactly one spelling clove ever **writes**:
-**UTC, whole seconds, `Z` suffix** (`2026-06-02T10:00:00Z`), rendered by
-`clove_types::canonical_rfc3339`. Every **read** accepts any parseable RFC 3339 and normalizes
-it — `ItemFrontmatter` does this at the type boundary (`clove_types::time::serde_ts`), so YAML
-frontmatter and `import json` — the two surfaces that carry an `ItemFrontmatter` —
-cannot diverge, and a
+**UTC, millisecond precision, `Z` suffix** (`2026-06-02T10:00:00.123Z`; a whole second is
+`…:00.000Z`), rendered by `clove_types::canonical_rfc3339`. Every timestamp clove stamps is
+truncated to that precision by the one helper `clove_types::truncate_to_millis`. Every **read**
+accepts any parseable RFC 3339 and normalizes it to the same precision — `ItemFrontmatter` does
+this at the type boundary (`clove_types::time::serde_ts`), so YAML frontmatter and
+`import json` — the two surfaces that carry an `ItemFrontmatter` — cannot diverge, and a
 hand-edited or foreign-written value is simply re-spelled on the next write. **There is no
-migration step and no flag day** (no `clove migrate` pass, no index-schema bump): the store is
-files, and files are rewritten as they are touched. Two deliberate exceptions, both because
-the value is not a rendered RFC 3339 string:
+migration step and no flag day** (no `clove migrate` pass, no index-schema bump, no item-schema
+or export-format bump): the store is files, and files are rewritten as they are touched.
+
+*Why milliseconds, not whole seconds.* clove 0.1.1 and earlier wrote whole seconds. The GitHub
+sync decides an item changed locally by `updated > last-synced updated`, and at whole-second
+precision a local edit made in the same second as a sync's own write left `updated` unchanged —
+the edit was never pushed, and every later sync reported "in sync". Whole-second values written
+by an older clove still read back as the same instant (`…:00Z` == `…:00.000Z`), and an older
+clove reading a millisecond value accepts it and truncates it to its own precision, so mixing
+versions on one store is safe.
+
+Two deliberate exceptions, both because the value is not a rendered RFC 3339 string:
 
 - **Comment file names** keep nanosecond precision (§2.5). The name is a comment's only
-  timestamp *and* its only record of the order of two comments added in the same second, so
-  truncating it would re-order a thread. Its format is fixed and single-spelled already; only
-  its rendering is canonicalized.
+  timestamp *and* its only record of the order of two comments added in the same
+  millisecond, so truncating it would re-order a thread. Its format is fixed and
+  single-spelled already; only its rendering is canonicalized.
 - **The index's `created_at`/`updated_at`/`closed_at` columns** keep chrono's `+00:00`
   rendering (§6). They are an internal ordering key that no surface renders; re-spelling them
   would force a `SCHEMA_VERSION` bump — a full rebuild for every user — for no visible change.
   The *values* they are written from are canonical, so the index and file paths always agree.
+  `to_rfc3339()` omits a zero fraction and otherwise renders exactly three digits for a
+  millisecond value, so whole-second rows left by an older clove and millisecond rows sort
+  correctly together as TEXT (`'+'` 0x2B < `'.'` 0x2E: `…:00+00:00` < `…:00.123+00:00`).
 
 **Label normalization rule (case-insensitive labels):** Labels are **canonicalized to
 lowercase on every write** — `clove new -l`, `clove label add`, `clove edit labels+=`, and all
@@ -289,10 +302,10 @@ are added or reordered.
 - **Timestamp:** nanosecond-precision RFC3339 (`2026-06-02T10:00:00.123456789Z`) so
   lexicographic sort == chronological sort. The nanosecond portion plus the 4-char random
   suffix makes same-clock-second collisions astronomically unlikely.
-  **This is the one stored timestamp that is not truncated to whole seconds**, and it is an
-  exception on purpose (see the canonicalization rule in §2.2): comment files are append-only
-  and never rewritten, so the name is the only record of the order of two comments added
-  within the same second. The *rendered* timestamp (`clove comments`, the web API, the
+  **This is the one stored timestamp that is not truncated to the canonical millisecond
+  precision**, and it is an exception on purpose (see the canonicalization rule in §2.2):
+  comment files are append-only and never rewritten, so the name is the only record of the
+  order of two comments added within the same millisecond. The *rendered* timestamp (`clove comments`, the web API, the
   `clove_comments` MCP tool) is canonical like every other one. Because the name format is
   unchanged, comments written by any earlier clove read back unchanged. Listing sorts by
   timestamp, then author, then file name — a **total** order, so a thread whose timestamps
@@ -583,11 +596,13 @@ CREATE TABLE labels (
 -- bump, i.e. a full rebuild for every user, to change a string no surface shows. The *values*
 -- they are written from are canonical (ItemFrontmatter normalizes on deserialize), so the index
 -- and file paths cannot rank two items differently for anything written since.
-An index built *before* canonicalization can still hold a sub-second value where
-the file now parses to a truncated one, and staleness is mtime/hash-based, so an
-untouched file is never re-indexed: `clove reindex` is the remedy. Not worth a
-forced rebuild for everyone, since reaching it needs a hand-edited sub-second
-timestamp *and* a pre-upgrade index. Pinned by
+An index built by an older clove can hold a value at that clove's precision where the
+file now parses to a different one (a pre-canonicalization sub-second value, or a
+whole-second truncation of a hand-edited sub-second timestamp that now parses to its
+milliseconds), and staleness is mtime/hash-based, so an untouched file is never
+re-indexed: `clove reindex` is the remedy. Not worth a forced rebuild for everyone,
+since reaching it needs a hand-edited sub-second timestamp *and* a pre-upgrade index.
+Files clove itself wrote at whole seconds parse to the same instant either way. Pinned by
 -- `timestamp_columns_keep_their_stored_spelling` in clove-index.
 
 -- Staleness oracle (exactly one row enforced by the CHECK constraint)

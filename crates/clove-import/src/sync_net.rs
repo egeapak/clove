@@ -761,13 +761,12 @@ fn value_updated(value: &Value) -> Option<DateTime<Utc>> {
     value
         .get("updated")
         .and_then(Value::as_str)
-        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-        .map(|dt| dt.with_timezone(&Utc))
+        .and_then(clove_types::parse_rfc3339)
 }
 
-/// Truncate to whole seconds (the canonical on-disk timestamp precision).
+/// Truncate to whole milliseconds (the canonical on-disk timestamp precision).
 fn truncate(ts: DateTime<Utc>) -> DateTime<Utc> {
-    clove_types::truncate_to_seconds(ts)
+    clove_types::truncate_to_millis(ts)
 }
 
 /// The base backoff delay between network retries. Overridable via

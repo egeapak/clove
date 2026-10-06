@@ -6,7 +6,7 @@ expression: items
   {
     "assignee": null,
     "closed": null,
-    "created": "2026-01-01T00:00:00Z",
+    "created": "2026-01-01T00:00:00.000Z",
     "deps": [
       "proj-BBBBBBBB"
     ],
@@ -25,12 +25,12 @@ expression: items
     "supersedes": [],
     "title": "Chain head A blocked by B",
     "type": "feature",
-    "updated": "2026-01-01T00:00:00Z"
+    "updated": "2026-01-01T00:00:00.000Z"
   },
   {
     "assignee": null,
     "closed": null,
-    "created": "2026-01-01T00:00:00Z",
+    "created": "2026-01-01T00:00:00.000Z",
     "deps": [
       "proj-CCCCCCCC"
     ],
@@ -47,12 +47,12 @@ expression: items
     "supersedes": [],
     "title": "Chain middle B ready once C closed",
     "type": "feature",
-    "updated": "2026-01-01T00:00:00Z"
+    "updated": "2026-01-01T00:00:00.000Z"
   },
   {
     "assignee": null,
-    "closed": "2026-01-02T00:00:00Z",
-    "created": "2026-01-01T00:00:00Z",
+    "closed": "2026-01-02T00:00:00.000Z",
+    "created": "2026-01-01T00:00:00.000Z",
     "deps": [],
     "duplicates": [],
     "external_ref": null,
@@ -67,12 +67,12 @@ expression: items
     "supersedes": [],
     "title": "Chain tail C already closed",
     "type": "chore",
-    "updated": "2026-01-02T00:00:00Z"
+    "updated": "2026-01-02T00:00:00.000Z"
   },
   {
     "assignee": null,
     "closed": null,
-    "created": "2026-01-01T00:00:00Z",
+    "created": "2026-01-01T00:00:00.000Z",
     "deps": [
       "proj-EEEEEEEE"
     ],
@@ -92,12 +92,12 @@ expression: items
     "supersedes": [],
     "title": "Chain head D blocked by E",
     "type": "bug",
-    "updated": "2026-01-01T00:00:00Z"
+    "updated": "2026-01-01T00:00:00.000Z"
   },
   {
     "assignee": null,
     "closed": null,
-    "created": "2026-01-01T00:00:00Z",
+    "created": "2026-01-01T00:00:00.000Z",
     "deps": [],
     "duplicates": [],
     "external_ref": null,
@@ -112,12 +112,12 @@ expression: items
     "supersedes": [],
     "title": "Chain tail E ready to start",
     "type": "bug",
-    "updated": "2026-01-03T00:00:00Z"
+    "updated": "2026-01-03T00:00:00.000Z"
   },
   {
     "assignee": null,
     "closed": null,
-    "created": "2026-01-01T00:00:00Z",
+    "created": "2026-01-01T00:00:00.000Z",
     "deps": [
       "proj-GGGGGGGG"
     ],
@@ -134,12 +134,12 @@ expression: items
     "supersedes": [],
     "title": "Cycle node F depends on G",
     "type": "feature",
-    "updated": "2026-01-01T00:00:00Z"
+    "updated": "2026-01-01T00:00:00.000Z"
   },
   {
     "assignee": null,
     "closed": null,
-    "created": "2026-01-01T00:00:00Z",
+    "created": "2026-01-01T00:00:00.000Z",
     "deps": [
       "proj-FFFFFFFF"
     ],
@@ -156,6 +156,6 @@ expression: items
     "supersedes": [],
     "title": "Cycle node G depends on F",
     "type": "feature",
-    "updated": "2026-01-01T00:00:00Z"
+    "updated": "2026-01-01T00:00:00.000Z"
   }
 ]
