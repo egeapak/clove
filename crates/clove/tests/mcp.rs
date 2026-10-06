@@ -508,6 +508,108 @@ fn comments_round_trip_through_mcp() {
     s.shutdown();
 }
 
+/// A `clove mcp` command with no author in the environment and git config
+/// isolated from the machine's: only the repo's own config (if any) and `$USER`
+/// are left for author resolution.
+fn authorless_cmd(dir: &Path, user: &str) -> Command {
+    let mut cmd = clove(dir);
+    cmd.env_remove("CLOVE_AUTHOR")
+        .env_remove("GIT_AUTHOR_EMAIL")
+        .env("GIT_CONFIG_GLOBAL", dir.join("no-global-gitconfig"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CEILING_DIRECTORIES", dir.parent().unwrap())
+        .env("USER", user);
+    cmd
+}
+
+fn git_config_local(dir: &Path, key: &str, value: &str) {
+    let status = Command::new("git")
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", dir.join("no-global-gitconfig"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(["config", key, value])
+        .status()
+        .unwrap();
+    assert!(status.success(), "git config {key} failed");
+}
+
+fn git_init(dir: &Path) {
+    let status = Command::new("git")
+        .current_dir(dir)
+        .args(["init", "-q"])
+        .status()
+        .unwrap();
+    assert!(status.success(), "git init failed");
+}
+
+/// The author of the only comment on a fresh item, written via `clove_comment`.
+fn mcp_comment_author(mut s: Session) -> String {
+    let created = s.call(2, "clove_new", json!({ "title": "attributed" }));
+    let id = created["structuredContent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let r = s.call(3, "clove_comment", json!({ "id": id, "message": "note" }));
+    assert_ne!(r["isError"], true, "comment failed: {r}");
+    let page = s.call(4, "clove_comments", json!({ "id": id }));
+    let author = page["structuredContent"]["items"][0]["author"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    s.shutdown();
+    author
+}
+
+/// #74: `clove_comment` resolves its author through the same chain as
+/// `clove comment` — with `CLOVE_AUTHOR`/`GIT_AUTHOR_EMAIL` unset it falls back
+/// to the repo's git config, then `$USER`, rather than writing `unknown`.
+#[test]
+fn comment_author_falls_back_to_git_config_then_user() {
+    let dir = init_repo();
+    git_init(dir.path());
+    git_config_local(dir.path(), "user.email", "cfg@example.com");
+    let s = Session::start_cmd({
+        let mut cmd = authorless_cmd(dir.path(), "login-user");
+        cmd.env("CLOVE_MCP_NO_DAEMON", "1");
+        cmd
+    });
+    assert_eq!(mcp_comment_author(s), "cfg-example-com");
+
+    let bare = init_repo();
+    let s = Session::start_cmd({
+        let mut cmd = authorless_cmd(bare.path(), "login-user");
+        cmd.env("CLOVE_MCP_NO_DAEMON", "1");
+        cmd
+    });
+    assert_eq!(mcp_comment_author(s), "login-user");
+}
+
+/// #74, daemon-routed: the author is resolved in the MCP process from the
+/// caller's env and repo, not inside the hub (which runs with a minimal env
+/// from its runtime directory).
+#[cfg(unix)]
+#[test]
+fn daemon_routed_comment_author_is_resolved_by_the_caller() {
+    let dir = init_repo();
+    git_init(dir.path());
+    git_config_local(dir.path(), "user.email", "cfg@example.com");
+    let _stop = StopDaemon(runtime_dir(dir.path()));
+    let cloved = escargot::CargoBuild::new()
+        .package("cloved")
+        .bin("cloved")
+        .run()
+        .expect("build cloved for the author test");
+
+    let mut cmd = authorless_cmd(dir.path(), "login-user");
+    cmd.env("CLOVED_PATH", cloved.path())
+        .env("CLOVED_DISABLE_WEB", "1");
+    let s = Session::start_cmd(cmd);
+    // Up and watching before the write, so it routes to the hub rather than
+    // falling back to the local ops.
+    wait_watching(dir.path());
+    assert_eq!(mcp_comment_author(s), "cfg-example-com");
+}
+
 /// Every list-shaped read tool honours the *same* `offset`/`limit` contract:
 /// absent → the surface default, `0` → unlimited, `n` → at most `n`; `total` is
 /// always the pre-pagination match count and `limit` is echoed back.
