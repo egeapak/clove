@@ -5,6 +5,7 @@
   import { toasts } from '$lib/toast.svelte';
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
+  import { untrack } from 'svelte';
   import { base } from '$app/paths';
   import StatusGlyph from '$lib/components/StatusGlyph.svelte';
   import PriorityGlyph from '$lib/components/PriorityGlyph.svelte';
@@ -62,27 +63,57 @@
     goto(`?${p.toString()}`, { replaceState: true, noScroll: true, keepFocus: true });
   }
 
-  // load full item (body etc) + deptree when id changes
-  $effect(() => {
-    const curId = id;
-    full = null;
+  // Each load is numbered so an older response landing late cannot overwrite a
+  // newer one (live refetches can overlap).
+  let itemLoad = 0;
+  let deptreeLoad = 0;
+  let commentsLoad = 0;
+
+  function loadItem(curId: string, live: boolean) {
+    const token = ++itemLoad;
     api
       .item(curId)
       .then((it) => {
         store.upsert(it);
-        if (curId === id) full = it;
+        if (token === itemLoad && curId === id) full = it;
       })
       .catch((e) => {
         console.warn('[clove] failed to load item', curId, e);
-        toasts.error('Failed to load item');
+        if (!live) toasts.error('Failed to load item');
       });
+  }
+
+  function loadDeptree(curId: string) {
+    const token = ++deptreeLoad;
     api
       .deptree(curId)
-      .then((t) => (deptree = t))
+      .then((t) => {
+        if (token === deptreeLoad && curId === id) deptree = t;
+      })
       .catch((e) => {
-        deptree = null;
+        if (token === deptreeLoad && curId === id) deptree = null;
         console.warn('[clove] failed to load dep tree', curId, e);
       });
+  }
+
+  function loadComments(curId: string) {
+    const token = ++commentsLoad;
+    api
+      .comments(curId)
+      .then((c) => {
+        if (token === commentsLoad && curId === id) comments = c;
+      })
+      .catch(() => {
+        if (token === commentsLoad && curId === id) comments = [];
+      });
+  }
+
+  // load full item (body etc) + deptree when id changes
+  $effect(() => {
+    const curId = id;
+    full = null;
+    loadItem(curId, false);
+    loadDeptree(curId);
   });
 
   // load comments only when the Comments tab is opened
@@ -92,14 +123,22 @@
     const curId = id;
     if (commentsFor === curId) return;
     commentsFor = curId;
-    api
-      .comments(curId)
-      .then((c) => {
-        if (curId === id) comments = c;
-      })
-      .catch(() => {
-        if (curId === id) comments = [];
-      });
+    loadComments(curId);
+  });
+
+  // The store's live refetch only covers its own window, which may not hold
+  // this item at all (a direct link declares no query) and never carries the
+  // body, comments or dep tree — so refetch them on every live change.
+  let seenRev = store.liveRev;
+  $effect(() => {
+    const rev = store.liveRev;
+    if (rev === seenRev) return;
+    seenRev = rev;
+    untrack(() => {
+      loadItem(id, true);
+      loadDeptree(id);
+      if (commentsFor === id) loadComments(id);
+    });
   });
 
   // ---- inline edits (optimistic) ----

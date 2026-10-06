@@ -51,6 +51,19 @@ describe('store optimistic concurrency', () => {
     expect(store.items.get('proj-1')!.priority).toBe(0);
   });
 
+  it('keeps a pending edit visible when a fresh read of the item is upserted', () => {
+    // The detail route re-reads its item on every live batch — including the
+    // one its own in-flight edit causes.
+    const a = store.optimistic('proj-1', { priority: 0 });
+    store.upsert(item({ id: 'proj-1', title: 'renamed elsewhere', priority: 2 }));
+    expect(store.items.get('proj-1')!.title).toBe('renamed elsewhere');
+    expect(store.items.get('proj-1')!.priority).toBe(0);
+
+    a.rollback();
+    expect(store.items.get('proj-1')!.title).toBe('renamed elsewhere');
+    expect(store.items.get('proj-1')!.priority).toBe(2);
+  });
+
   it('settles edits that complete out of order without leaking a patch', () => {
     // Edit A (status) then edit B (priority); B's HTTP response arrives FIRST,
     // then A FAILS. The positional (shift-oldest) settle consumed A's patch on
