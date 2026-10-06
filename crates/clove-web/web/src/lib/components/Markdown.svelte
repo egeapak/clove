@@ -38,10 +38,25 @@
 <div class="md">{@html html}</div>
 
 <style>
+  .md {
+    color: var(--text-muted);
+    line-height: 1.6;
+    overflow-wrap: break-word;
+  }
+  .md > :global(:first-child) {
+    margin-top: 0;
+  }
+  .md > :global(:last-child) {
+    margin-bottom: 0;
+  }
   .md :global(h1),
   .md :global(h2),
-  .md :global(h3) {
+  .md :global(h3),
+  .md :global(h4),
+  .md :global(h5),
+  .md :global(h6) {
     font-size: 14px;
+    line-height: 1.35;
     margin: 18px 0 8px;
     font-weight: 600;
     color: var(--text);
@@ -49,35 +64,49 @@
   .md :global(h1) {
     font-size: 17px;
   }
-  .md :global(p) {
+  .md :global(h2) {
+    font-size: 15px;
+  }
+  .md :global(h5),
+  .md :global(h6) {
+    font-size: 13px;
     color: var(--text-muted);
+  }
+  .md :global(p) {
     margin: 8px 0;
+  }
+  .md :global(strong) {
+    color: var(--text);
   }
   .md :global(ul),
   .md :global(ol) {
     margin: 8px 0;
-    padding-left: 20px;
-    color: var(--text-muted);
+    padding-left: 22px;
   }
   .md :global(li) {
     margin: 3px 0;
   }
-  /* Native GFM task lists render as `<li><input type=checkbox disabled> text`.
-     GFM marks the parent list with `class="contains-task-list"`; style the
-     items that hold a checkbox so they sit flush and lose the bullet. */
+  .md :global(li > ul),
+  .md :global(li > ol) {
+    margin: 2px 0;
+  }
+  .md :global(li > p) {
+    margin: 4px 0;
+  }
+  .md :global(li::marker) {
+    color: var(--text-dim);
+  }
+  /* GFM task items render as `<li><input type=checkbox disabled> text`. The
+     checkbox takes the bullet's place and the text stays in inline flow (a
+     flex `li` made every text run and code span a separate flex item). */
   .md :global(li:has(> input[type='checkbox'])) {
     list-style: none;
-    margin-left: -20px;
-    display: flex;
-    align-items: baseline;
-    gap: 8px;
   }
   .md :global(li > input[type='checkbox']) {
-    margin: 0;
-    flex: none;
+    margin: 0 6px 0 -20px;
+    vertical-align: -2px;
     accent-color: var(--accent);
   }
-  /* GFM strikethrough renders as `<del>`. */
   .md :global(del) {
     color: var(--text-dim);
   }
@@ -94,17 +123,25 @@
   }
   .md :global(code) {
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: 0.92em;
+    color: var(--text);
     background: var(--surface-inset);
-    padding: 1px 4px;
+    border: 1px solid var(--border);
+    padding: 0 4px;
     border-radius: 3px;
   }
   .md :global(pre code) {
+    color: inherit;
+    font-size: inherit;
     background: none;
+    border: none;
     padding: 0;
   }
   .md :global(a) {
     color: var(--accent);
+  }
+  .md :global(a code) {
+    color: inherit;
   }
   .md :global(blockquote) {
     border-left: 3px solid var(--border-strong);
@@ -112,4 +149,46 @@
     padding-left: 12px;
     color: var(--text-dim);
   }
+  .md :global(hr) {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 16px 0;
+  }
+  .md :global(img) {
+    max-width: 100%;
+  }
+  /* A wide table scrolls inside the body instead of widening the page. */
+  .md :global(table) {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+    border-collapse: collapse;
+    margin: 10px 0;
+    font-size: 12px;
+  }
+  .md :global(th),
+  .md :global(td) {
+    border: 1px solid var(--border);
+    padding: 5px 10px;
+    text-align: left;
+  }
+  .md :global(th[align='center']),
+  .md :global(td[align='center']) {
+    text-align: center;
+  }
+  .md :global(th[align='right']),
+  .md :global(td[align='right']) {
+    text-align: right;
+  }
+  .md :global(th) {
+    background: var(--surface-inset);
+    color: var(--text);
+    font-weight: 600;
+  }
+  .md :global(.footnotes) {
+    font-size: 12px;
+    border-top: 1px solid var(--border);
+    margin-top: 16px;
+  }
 </style>
+
