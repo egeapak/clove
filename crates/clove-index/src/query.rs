@@ -58,6 +58,9 @@ pub struct Filter {
     pub assignee: Option<String>,
     /// Canonical labels the item must carry — **all** of them.
     pub labels: Vec<String>,
+    /// Whether the item carries an external ref, per
+    /// [`clove_core::view::is_synced`].
+    pub synced: Option<bool>,
     pub parent: Option<CloveId>,
     /// The result ordering. `Order::default()` is `rank` ascending — the
     /// historical `(priority, topological_rank, id)`.
@@ -116,6 +119,8 @@ pub fn push_down(filters: &Filters) -> (Filter, Option<PostFilter>) {
         labels,
         assignee,
         q,
+        synced,
+        parent,
     } = filters;
     let filter = Filter {
         mode: QueryMode::default(),
@@ -124,7 +129,8 @@ pub fn push_down(filters: &Filters) -> (Filter, Option<PostFilter>) {
         priority: priority.clone(),
         assignee: assignee.clone(),
         labels: labels.clone(),
-        parent: None,
+        synced: *synced,
+        parent: parent.clone(),
         order: Order::default(),
         limit: None,
     };
@@ -227,6 +233,13 @@ fn where_clause(filter: &Filter) -> (String, Vec<Box<dyn ToSql>>) {
     if let Some(a) = &filter.assignee {
         where_clauses.push("assignee = ?".to_owned());
         params.push(Box::new(a.clone()));
+    }
+    match filter.synced {
+        Some(true) => {
+            where_clauses.push("(external_ref IS NOT NULL AND external_ref != '')".to_owned())
+        }
+        Some(false) => where_clauses.push("(external_ref IS NULL OR external_ref = '')".to_owned()),
+        None => {}
     }
     if let Some(parent) = &filter.parent {
         where_clauses.push("parent_id = ?".to_owned());
@@ -674,7 +687,7 @@ mod tests {
     /// cannot catch.
     #[test]
     fn push_down_carries_every_filter_field() {
-        let filters = Filters::parse_multi(
+        let mut filters = Filters::parse_multi(
             &["open".to_owned(), "in_progress".to_owned()],
             &["bug".to_owned(), "docs".to_owned()],
             &["area:core".to_owned(), "area:ios".to_owned()],
@@ -683,6 +696,8 @@ mod tests {
             Some("needle"),
         )
         .unwrap();
+        filters.synced = Some(false);
+        filters.parent = Some(CloveId::new("proj-EPICEPIC").unwrap());
         let (filter, residue) = push_down(&filters);
 
         assert_eq!(filter.status, filters.status);
@@ -690,6 +705,8 @@ mod tests {
         assert_eq!(filter.priority, filters.priority);
         assert_eq!(filter.labels, filters.labels);
         assert_eq!(filter.assignee, filters.assignee);
+        assert_eq!(filter.synced, filters.synced);
+        assert_eq!(filter.parent, filters.parent);
         // `q` is the residue, and the *only* residue.
         assert!(residue.is_some(), "`q` must not vanish");
         assert!(residue.unwrap().matches_parts("x", "a needle here", &[]));
@@ -698,7 +715,6 @@ mod tests {
         assert_eq!(filter.mode, QueryMode::List);
         assert_eq!(filter.order, Order::default());
         assert_eq!(filter.limit, None);
-        assert_eq!(filter.parent, None);
 
         // No `q` → no residue, i.e. the historical full fast path.
         let (_, none) = push_down(&Filters::default());

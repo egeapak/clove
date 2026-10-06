@@ -74,6 +74,15 @@ pub struct Filters {
     /// Case-insensitive substring over id/title/labels (see [`q_matches`]).
     #[serde(default)]
     pub q: Option<String>,
+    /// `Some(true)`: the item carries a non-empty `external_ref`; `Some(false)`:
+    /// it carries none. Provider-agnostic — a `tk:` import ref counts as much
+    /// as a GitHub `gh-<n>`. `None` does not constrain.
+    #[serde(default)]
+    pub synced: Option<bool>,
+    /// Exact match on the item's `parent`: the children of one item. Scalar
+    /// for the reason `assignee` is — an item has at most one parent.
+    #[serde(default)]
+    pub parent: Option<CloveId>,
 }
 
 impl Filters {
@@ -110,6 +119,8 @@ impl Filters {
                 .collect(),
             assignee: assignee.map(str::to_owned),
             q: None,
+            synced: None,
+            parent: None,
         })
     }
 
@@ -148,7 +159,25 @@ impl Filters {
                 .collect::<Result<_, _>>()?,
             assignee: assignee.map(str::to_owned),
             q: q.map(str::to_owned),
+            synced: None,
+            parent: None,
         })
+    }
+
+    /// Validate a raw `parent` filter value. Absent or blank does not
+    /// constrain; anything else must be a well-formed item id — a
+    /// [`CloveError::InvalidField`] otherwise, like every other filter value,
+    /// rather than a filter that silently matches nothing.
+    pub fn parse_parent(raw: Option<&str>) -> Result<Option<CloveId>, CloveError> {
+        match raw.map(str::trim) {
+            None | Some("") => Ok(None),
+            Some(id) => CloveId::new(id)
+                .map(Some)
+                .map_err(|e| CloveError::InvalidField {
+                    field: "parent".to_owned(),
+                    reason: e.to_string(),
+                }),
+        }
     }
 
     /// Split one repeated/csv query value (`a,b,c`) into trimmed, non-empty
@@ -197,8 +226,27 @@ impl Filters {
                 return false;
             }
         }
+        if let Some(synced) = self.synced {
+            if is_synced(fm.external_ref.as_deref()) != synced {
+                return false;
+            }
+        }
+        if let Some(parent) = &self.parent {
+            if fm.parent.as_ref() != Some(parent) {
+                return false;
+            }
+        }
         true
     }
+}
+
+/// The `synced` predicate: an `external_ref` that is present **and non-empty**.
+///
+/// The index's SQL twin (`clove_index::query`) spells the same rule as
+/// `external_ref IS NOT NULL AND external_ref != ''`; a hand-written
+/// `external_ref: ''` must land on the same side of the line on both tiers.
+pub fn is_synced(external_ref: Option<&str>) -> bool {
+    external_ref.is_some_and(|r| !r.is_empty())
 }
 
 /// Parse a priority word (`"0"`..`"4"`) with the same error the typed
@@ -855,6 +903,64 @@ mod tests {
             .matches(&f));
     }
 
+    #[test]
+    fn synced_filter_counts_any_non_empty_external_ref() {
+        let synced = Filters {
+            synced: Some(true),
+            ..Filters::default()
+        };
+        let unsynced = Filters {
+            synced: Some(false),
+            ..Filters::default()
+        };
+        let mut f = fm("a", ItemStatus::Open, ItemType::Bug, 1, &[]);
+        for (external_ref, is) in [
+            (None, false),
+            (Some(""), false),
+            (Some("gh-12"), true),
+            (Some("tk:abc-1"), true),
+        ] {
+            f.external_ref = external_ref.map(str::to_owned);
+            assert_eq!(synced.matches(&f), is, "{external_ref:?}");
+            assert_eq!(unsynced.matches(&f), !is, "{external_ref:?}");
+            assert!(Filters::default().matches(&f), "{external_ref:?}");
+        }
+    }
+
+    #[test]
+    fn parent_filter_is_an_exact_id_match() {
+        let epic = CloveId::new("proj-EPICEPIC").unwrap();
+        let filters = Filters {
+            parent: Some(epic.clone()),
+            ..Filters::default()
+        };
+        let mut f = fm("a", ItemStatus::Open, ItemType::Bug, 1, &[]);
+        assert!(!filters.matches(&f), "an item with no parent");
+        f.parent = Some(CloveId::new("proj-OTHEROTH").unwrap());
+        assert!(!filters.matches(&f));
+        f.parent = Some(epic);
+        assert!(filters.matches(&f));
+    }
+
+    #[test]
+    fn parse_parent_validates_the_id() {
+        assert_eq!(Filters::parse_parent(None).unwrap(), None);
+        assert_eq!(Filters::parse_parent(Some("  ")).unwrap(), None);
+        assert_eq!(
+            Filters::parse_parent(Some(" proj-EPICEPIC ")).unwrap(),
+            Some(CloveId::new("proj-EPICEPIC").unwrap())
+        );
+        for bad in ["nope", "proj-epicepic", "../proj-EPICEPIC"] {
+            assert!(
+                matches!(
+                    Filters::parse_parent(Some(bad)),
+                    Err(CloveError::InvalidField { ref field, .. }) if field == "parent"
+                ),
+                "{bad}"
+            );
+        }
+    }
+
     /// Multi-value is **any-of within a field, all-of across fields** — the
     /// semantics the web already had, now shared. The single-value spelling is
     /// the one-element case of the same rule, which is why `Filters::parse`
@@ -1036,6 +1142,18 @@ mod tests {
         assert_eq!(json["labels"], serde_json::json!(["area:core"]));
         assert_eq!(json["assignee"], "alice");
         assert_eq!(json["q"], "needle");
+        assert_eq!(json["synced"], serde_json::Value::Null);
+        assert_eq!(json["parent"], serde_json::Value::Null);
+        assert_eq!(serde_json::from_value::<Filters>(json).unwrap(), f);
+
+        let f = Filters {
+            synced: Some(false),
+            parent: Some(CloveId::new("proj-EPICEPIC").unwrap()),
+            ..f
+        };
+        let json = serde_json::to_value(&f).unwrap();
+        assert_eq!(json["synced"], false);
+        assert_eq!(json["parent"], "proj-EPICEPIC");
         assert_eq!(serde_json::from_value::<Filters>(json).unwrap(), f);
 
         // Every field defaults, so `{}` is the unconstrained filter.

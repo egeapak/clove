@@ -81,6 +81,11 @@ pub struct FilterArgs {
     /// Keep only items whose id, title, or labels contain this text
     /// (case-insensitive). A filter, not a search: it never reads the body.
     pub q: Option<String>,
+    /// `true`: only items linked to an external tracker (any `external_ref`,
+    /// e.g. a GitHub `gh-12`); `false`: only items with none.
+    pub synced: Option<bool>,
+    /// Only the direct children of this item id (e.g. `proj-7af3q2k9`).
+    pub parent: Option<String>,
     /// Sort by `rank|priority|created|updated|id|status|type`. Default `rank`:
     /// priority, then dependency order, then id.
     pub sort: Option<String>,

@@ -1444,6 +1444,81 @@ fn filter_args_take_one_value_or_many() {
     s.shutdown();
 }
 
+/// `synced` and `parent` are part of the shared `FilterArgs`, so every list
+/// tool takes them, echoes them, and publishes them in its input schema.
+#[test]
+fn filter_args_take_synced_and_parent() {
+    let dir = init_repo();
+    let mut s = Session::start(dir.path());
+    let mk = |s: &mut Session, id: i64, args: Value| {
+        let r = s.call(id, "clove_new", args);
+        assert_ne!(r["isError"], true, "create failed: {r}");
+        r["structuredContent"]["id"].as_str().unwrap().to_owned()
+    };
+    let epic = mk(&mut s, 2, json!({ "title": "epic", "type": "epic" }));
+    let plain = mk(&mut s, 3, json!({ "title": "plain child", "parent": epic }));
+    let linked = mk(
+        &mut s,
+        4,
+        json!({ "title": "linked child", "parent": epic }),
+    );
+    let file = dir
+        .path()
+        .join(".clove/issues")
+        .join(format!("{linked}.md"));
+    let text = std::fs::read_to_string(&file).unwrap();
+    let (front, body) = text[4..].split_once("\n---\n").unwrap();
+    std::fs::write(
+        &file,
+        format!("---\n{front}\nexternal_ref: gh-12\n---\n{body}"),
+    )
+    .unwrap();
+
+    let ids = |s: &mut Session, tool: &str, args: Value| -> (Vec<String>, Value) {
+        let r = s.call(9, tool, args);
+        assert_ne!(r["isError"], true, "{tool} failed: {r}");
+        let mut out: Vec<String> = r["structuredContent"]["items"]
+            .as_array()
+            .expect("items array")
+            .iter()
+            .map(|i| i["id"].as_str().unwrap().to_owned())
+            .collect();
+        out.sort();
+        (out, r["structuredContent"]["filters"].clone())
+    };
+    let mut children = vec![plain.clone(), linked.clone()];
+    children.sort();
+
+    for tool in ["clove_list", "clove_ready"] {
+        let (got, filters) = ids(&mut s, tool, json!({ "parent": epic }));
+        assert_eq!(got, children, "{tool}");
+        assert_eq!(filters["parent"], epic.as_str(), "{tool}");
+        let (got, filters) = ids(&mut s, tool, json!({ "synced": true }));
+        assert_eq!(got, vec![linked.clone()], "{tool}");
+        assert_eq!(filters["synced"], true, "{tool}");
+        let (got, _) = ids(&mut s, tool, json!({ "synced": false, "parent": epic }));
+        assert_eq!(got, vec![plain.clone()], "{tool}");
+    }
+    let (got, _) = ids(&mut s, "clove_blocked", json!({ "parent": epic }));
+    assert!(got.is_empty());
+
+    let bad = s.call(10, "clove_list", json!({ "parent": "not-an-id" }));
+    assert_eq!(bad["isError"], true, "{bad}");
+
+    let resp = s.request(json!({ "jsonrpc": "2.0", "id": 11, "method": "tools/list" }));
+    let tools = resp["result"]["tools"].as_array().unwrap();
+    for name in ["clove_list", "clove_ready", "clove_blocked"] {
+        let schema = &tools.iter().find(|t| t["name"] == name).unwrap()["inputSchema"];
+        for field in ["synced", "parent"] {
+            let description = schema["properties"][field]["description"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{name}.{field} is not published: {schema}"));
+            assert!(!description.is_empty());
+        }
+    }
+    s.shutdown();
+}
+
 /// The MCP read tools are tiered, and they say which tier answered.
 ///
 /// Before read-path §4 every `clove_list`/`clove_ready`/`clove_blocked` call

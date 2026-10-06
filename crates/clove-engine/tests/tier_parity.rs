@@ -121,6 +121,19 @@ fn fixture() -> Fixture {
         fm.deps = vec![CloveId::new("proj-ZZZZZZZZ").unwrap()]
     });
 
+    // Children of a (one of them blocked, one ready) and of the closed d; refs
+    // from two providers, plus a present-but-empty ref, which is *not* synced.
+    edit(&store, &ids[1], |fm| fm.parent = Some(ids[0].clone()));
+    edit(&store, &ids[2], |fm| fm.parent = Some(ids[0].clone()));
+    edit(&store, &ids[4], |fm| fm.parent = Some(ids[3].clone()));
+    edit(&store, &ids[0], |fm| {
+        fm.external_ref = Some("gh-1".to_owned())
+    });
+    edit(&store, &ids[2], |fm| {
+        fm.external_ref = Some("tk:abc-2".to_owned())
+    });
+    edit(&store, &ids[5], |fm| fm.external_ref = Some(String::new()));
+
     clove_index::reindex(&clove_dir.join("issues"), &clove_dir.join("index.db")).unwrap();
     Fixture {
         _dir: dir,
@@ -171,7 +184,14 @@ fn rows_of(rows: &Rows) -> Vec<ObservedRow> {
     }
 }
 
-fn cases() -> Vec<(&'static str, Filters)> {
+fn with(filters: Filters, edit: impl FnOnce(&mut Filters)) -> Filters {
+    let mut filters = filters;
+    edit(&mut filters);
+    filters
+}
+
+fn cases(fx: &Fixture) -> Vec<(&'static str, Filters)> {
+    let parent_a = Some(fx.ids[0].clone());
     vec![
         ("unfiltered", Filters::default()),
         (
@@ -218,6 +238,36 @@ fn cases() -> Vec<(&'static str, Filters)> {
             Filters::parse_multi(&[], &[], &["area:core".into()], None, &[], Some("widget"))
                 .unwrap(),
         ),
+        (
+            "synced",
+            with(Filters::default(), |f| f.synced = Some(true)),
+        ),
+        (
+            "unsynced",
+            with(Filters::default(), |f| f.synced = Some(false)),
+        ),
+        (
+            "parent",
+            with(Filters::default(), |f| f.parent = parent_a.clone()),
+        ),
+        (
+            "parent of a closed item",
+            with(Filters::default(), |f| f.parent = Some(fx.ids[3].clone())),
+        ),
+        (
+            "synced + parent",
+            with(Filters::default(), |f| {
+                f.synced = Some(true);
+                f.parent = parent_a.clone();
+            }),
+        ),
+        (
+            "unsynced + q residue",
+            with(
+                Filters::parse_multi(&[], &[], &[], None, &[], Some("gizmo")).unwrap(),
+                |f| f.synced = Some(false),
+            ),
+        ),
     ]
 }
 
@@ -246,7 +296,7 @@ fn the_index_tier_hydrates_to_exactly_the_file_answer() {
     let indexed = fx.indexed();
     let files = fx.files();
 
-    for (name, filters) in cases() {
+    for (name, filters) in cases(&fx) {
         for order in orders() {
             for window in [
                 Page::unlimited(),
@@ -406,4 +456,51 @@ fn search_reports_files_even_with_a_live_index() {
         .search("idget", order, Page::unlimited())
         .unwrap();
     assert_eq!(mid.total, 3, "substring matching, not whole tokens");
+}
+
+/// The `synced`/`parent` cases above compare tiers; this pins what they
+/// select, so a predicate both tiers get wrong the same way still fails —
+/// notably the present-but-empty ref, which is unsynced on both.
+#[test]
+fn synced_and_parent_select_the_intended_items() {
+    let fx = fixture();
+    let ids = |filters: Filters| -> Vec<String> {
+        let mut got = Vec::new();
+        for engine in [fx.indexed(), fx.files()] {
+            let answer = engine
+                .list(
+                    &filters,
+                    Order::default(),
+                    Page::unlimited(),
+                    Projection::Full,
+                )
+                .unwrap();
+            let mut ids: Vec<String> = rows_of(&answer.rows)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
+            ids.sort();
+            got.push(ids);
+        }
+        assert_eq!(got[0], got[1]);
+        got.remove(0)
+    };
+    let sorted = |picks: &[usize]| -> Vec<String> {
+        let mut want: Vec<String> = picks.iter().map(|&i| fx.ids[i].to_string()).collect();
+        want.sort();
+        want
+    };
+    assert_eq!(
+        ids(with(Filters::default(), |f| f.synced = Some(true))),
+        sorted(&[0, 2])
+    );
+    assert_eq!(
+        ids(with(Filters::default(), |f| f.synced = Some(false))),
+        sorted(&[1, 3, 4, 5])
+    );
+    assert_eq!(
+        ids(with(Filters::default(), |f| f.parent = Some(fx.ids[0].clone()))),
+        sorted(&[1, 2])
+    );
+    assert!(ids(with(Filters::default(), |f| f.parent = Some(fx.ids[5].clone()))).is_empty());
 }

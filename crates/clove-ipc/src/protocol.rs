@@ -55,7 +55,13 @@ use serde::{Deserialize, Serialize};
 /// token a v8 client sends (JSON drops unknown fields) and a v7 client's
 /// token-less calls would fail to decode on a v8 hub, so the versions must meet
 /// at the handshake instead, where the mismatch is a clean refusal.
-pub const PROTOCOL_VERSION: u32 = 8;
+///
+/// **v9 adds `synced` and `parent` to `QueryRequest::filters`.** It is the v5
+/// hazard again: `Filters` ignores unknown keys, so a v8 daemon would decode a
+/// v9 client's query, drop both, and answer the wider list without a word. The
+/// handshake turns that into a refusal and the client answers from the index or
+/// the files.
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// A dependency-graph query (DESIGN §8.4 extension for `blocked`/`dep`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -391,5 +397,56 @@ mod tests {
                 "the service method set changed (search removed); bump the version"
             )
         };
+    }
+
+    /// Why v9 is a version bump: a v8 daemon's `Filters` has no `synced` or
+    /// `parent`, decodes a v9 frame anyway, and answers as if neither was set.
+    #[test]
+    fn a_v8_daemon_would_drop_the_synced_and_parent_filters_which_is_why_the_version_moved() {
+        const {
+            assert!(
+                PROTOCOL_VERSION >= 9,
+                "the filter set grew; the handshake must reject a v8 peer"
+            )
+        };
+        let filters = clove_core::view::Filters {
+            synced: Some(false),
+            parent: Some(clove_types::CloveId::new("proj-AAAAAAAA").unwrap()),
+            ..Default::default()
+        };
+        let v9_frame = serde_json::to_string(&QueryRequest {
+            kind: QueryKind::List,
+            filters,
+            order: Order::default(),
+            offset: 0,
+            limit: None,
+        })
+        .unwrap();
+
+        #[derive(Deserialize, Default, PartialEq, Debug)]
+        struct V8Filters {
+            #[serde(default)]
+            status: Vec<String>,
+            #[serde(default, rename = "type")]
+            item_type: Vec<String>,
+            #[serde(default)]
+            priority: Vec<u8>,
+            #[serde(default)]
+            labels: Vec<String>,
+            #[serde(default)]
+            assignee: Option<String>,
+            #[serde(default)]
+            q: Option<String>,
+        }
+        #[derive(Deserialize)]
+        struct V8QueryRequest {
+            filters: V8Filters,
+        }
+        let old: V8QueryRequest = serde_json::from_str(&v9_frame).unwrap();
+        assert_eq!(
+            old.filters,
+            V8Filters::default(),
+            "a v8 daemon reads a v9 synced/parent query as no filter at all"
+        );
     }
 }

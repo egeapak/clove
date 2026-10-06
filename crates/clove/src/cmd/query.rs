@@ -72,6 +72,10 @@ struct QueryFilter {
     priority: Option<Priorities>,
     /// Substring over id/title/labels, matching `--q`.
     q: Option<String>,
+    /// `true` matches `--synced`, `false` matches `--unsynced`.
+    synced: Option<bool>,
+    /// An item id, matching `--parent`.
+    parent: Option<String>,
     /// `rank|priority|created|updated|id|status|type`, matching `--sort`.
     sort: Option<String>,
     /// Reverse the order, matching `--desc`.
@@ -102,7 +106,7 @@ pub fn run(
 
     // The JSON filter and the flags describe the same filter set, so both go
     // through `Filters::parse_multi` rather than each growing its own decoding.
-    let filters = Filters::parse_multi(
+    let mut filters = Filters::parse_multi(
         &OneOrMany::values(&qf.status),
         &OneOrMany::values(&qf.item_type),
         &OneOrMany::values(&qf.label),
@@ -110,6 +114,8 @@ pub fn run(
         &Priorities::values(&qf.priority),
         qf.q.as_deref(),
     )?;
+    filters.synced = qf.synced;
+    filters.parent = Filters::parse_parent(qf.parent.as_deref())?;
 
     // The flag wins over the JSON filter, exactly as `--limit`/`--offset` do.
     let order = crate::cli::order_of(

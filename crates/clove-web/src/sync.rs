@@ -79,14 +79,6 @@ pub fn targets(clove_dir: &Utf8Path) -> Vec<SyncTarget> {
         .collect()
 }
 
-/// Whether an `external_ref` links the item to a GitHub issue (`gh-<number>`),
-/// the spelling `clove sync github` writes.
-pub fn is_synced(external_ref: Option<&str>) -> bool {
-    external_ref
-        .and_then(|r| r.trim().strip_prefix("gh-"))
-        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,14 +122,5 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = Utf8PathBuf::from_path_buf(tmp.path().join(".clove")).unwrap();
         assert!(targets(&dir).is_empty());
-    }
-
-    #[test]
-    fn only_a_github_issue_ref_counts_as_synced() {
-        assert!(is_synced(Some("gh-67")));
-        assert!(!is_synced(None));
-        assert!(!is_synced(Some("gh-")));
-        assert!(!is_synced(Some("gh-6x")));
-        assert!(!is_synced(Some("tk:abc-123")));
     }
 }
