@@ -13,6 +13,8 @@ mod ui;
 #[cfg(test)]
 mod snapshot;
 
+use std::io::IsTerminal;
+
 use anyhow::Result;
 use clove_core::ItemStore;
 use clove_types::ItemType;
@@ -24,11 +26,14 @@ use app::{App, DetailTab, Mode, Tab};
 ///
 /// `id_prefix` + `default_type` (from `.clove/config`) are used when creating
 /// items from the form. Sets up the alternate screen + raw mode (and a panic
-/// hook that restores the terminal) via [`ratatui::init`], and always restores
-/// on exit.
+/// hook that restores the terminal) via [`ratatui::try_init`], and always
+/// restores on exit. Without an interactive terminal it fails instead.
 pub fn run(store: ItemStore, id_prefix: String, default_type: ItemType) -> Result<()> {
+    if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
+        anyhow::bail!("clove tui needs an interactive terminal (stdin and stdout)");
+    }
     let mut app = App::new(store).with_config(id_prefix, default_type);
-    let mut terminal = ratatui::init();
+    let mut terminal = ratatui::try_init().inspect_err(|_| ratatui::restore())?;
     let result = event_loop(&mut terminal, &mut app);
     ratatui::restore();
     result

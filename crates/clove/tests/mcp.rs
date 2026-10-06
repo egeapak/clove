@@ -856,6 +856,62 @@ fn auto_starts_daemon_and_heartbeats() {
     s.shutdown();
 }
 
+/// Release builds abort on panic, so a panic anywhere in the hub kills it
+/// outright — no cleanup, a corpse socket and pid file left behind. An MCP
+/// session that was using it must put a fresh hub up on its own (the heartbeat)
+/// and route reads to it again, without a restart of the session.
+#[cfg(unix)]
+#[test]
+fn a_killed_daemon_is_respawned_by_the_mcp_heartbeat() {
+    use std::time::{Duration, Instant};
+
+    let dir = init_repo();
+    let run = runtime_dir(dir.path());
+    let _stop = StopDaemon(run.clone());
+    let cloved = escargot::CargoBuild::new()
+        .package("cloved")
+        .bin("cloved")
+        .run()
+        .expect("build cloved for the daemon respawn test");
+    let mut cmd = clove(dir.path());
+    cmd.env("CLOVED_PATH", cloved.path())
+        .env("CLOVED_DISABLE_WEB", "1")
+        .env("CLOVE_MCP_HEARTBEAT_MS", "150");
+    let mut s = Session::start_cmd(cmd);
+
+    let hub_pid = || {
+        std::fs::read_to_string(run.join("hub.pid"))
+            .ok()
+            .and_then(|p| p.trim().parse::<i32>().ok())
+    };
+    let wait_for = |what: &str, done: &dyn Fn() -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !done() {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    wait_for("the auto-started daemon", &|| hub_pid().is_some());
+    wait_watching(dir.path());
+    let first = hub_pid().unwrap();
+    s.call(2, "clove_new", json!({ "title": "before the crash" }));
+
+    // SAFETY: kill(2) with the pid this test's own daemon wrote.
+    unsafe {
+        libc_kill(first, 9);
+    }
+    wait_for("a respawned daemon", &|| {
+        hub_pid().is_some_and(|pid| pid != first)
+    });
+    wait_watching(dir.path());
+
+    let listed = s.call(3, "clove_list", json!({}));
+    let page = &listed["structuredContent"];
+    assert_eq!(page["source"], "daemon", "the new hub must answer: {page}");
+    assert_eq!(page["total"], 1, "{page}");
+    s.shutdown();
+}
+
 /// A write the *daemon* rejects must carry the same error classification the
 /// same failure produces locally. `cloved` used to emit a private code set
 /// (`not_found`, `op_failed`, …) that collapsed distinct failure classes into

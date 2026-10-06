@@ -111,16 +111,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Windows daemon gate: compile the Windows named-event
-      # shutdown path (cloved CreateEventW + `clove daemon stop` OpenEventW/SetEvent)
-      # and run the platform-agnostic daemon unit tests. The Unix-only socket/
-      # signal integration tests are `#![cfg(unix)]` and are exercised on the
-      # ubuntu/macos matrix.
+      # shutdown path (cloved CreateEventW + `clove daemon stop` OpenEventW/SetEvent),
+      # run the platform-agnostic daemon unit tests, and drive the real binaries
+      # end to end. The daemon integration suites are `#![cfg(unix)]` and run on
+      # the ubuntu/macos matrix; the smoke script is Windows' stand-in for them.
       - name: Build daemon (windows shutdown path)
         run: cargo build -p cloved -p clove-cli
       - name: Daemon unit tests
         # `cloved` is a binary crate (no lib target), so its unit tests live in
         # the bin and run with --bins; --lib finds no targets and errors.
         run: cargo test -p cloved --bins
+      - name: Daemon end-to-end smoke
+        shell: bash
+        run: scripts/ci/daemon-smoke.sh "$PWD/target/debug"
 
   feature-matrix:
     name: feature combos + release size

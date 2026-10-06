@@ -923,3 +923,22 @@ fn the_read_tier_flags_are_global_and_say_so() {
         }
     }
 }
+
+/// `clove tui` with no terminal (CI, `ssh -T`, a closed stdout) must refuse
+/// with an error, not panic — a panic is an abort in release builds — and must
+/// not write terminal escapes into a redirected stdout.
+#[test]
+fn tui_without_a_terminal_fails_cleanly() {
+    let dir = init_repo();
+    let out = clove(dir.path())
+        .arg("tui")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "tui ran without a terminal");
+    assert_ne!(out.status.code(), Some(101), "tui panicked: {stderr}");
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert!(stderr.contains("terminal"), "{stderr}");
+    assert!(out.stdout.is_empty(), "wrote to stdout: {:?}", out.stdout);
+}

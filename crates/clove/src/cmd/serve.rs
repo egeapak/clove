@@ -21,11 +21,24 @@ pub fn run(
     no_index: bool,
     deep: bool,
 ) -> Result<(), CloveError> {
+    let ip: IpAddr = args.host.parse().map_err(|_| CloveError::InvalidField {
+        field: "host".to_owned(),
+        reason: format!("not a valid IP address: {}", args.host),
+    })?;
+
+    if !ip.is_loopback() && !args.allow_non_loopback {
+        return Err(CloveError::InvalidField {
+            field: "host".to_owned(),
+            reason: "binding a non-loopback address requires --allow-non-loopback".to_owned(),
+        });
+    }
+
     // Hand off to a running daemon: it serves every project's web UI on one
     // port, so we have it serve this one too and point the user there instead of
     // binding a second server (and blocking this process). With no daemon
     // running, none is started — `serve` runs standalone as it always has. An
-    // explicit `--port` the daemon isn't on is honored with a standalone server.
+    // explicit `--host`/`--port` the daemon isn't on is honored with a standalone
+    // server.
     if let Some(clove_dir) = ctx.issues_dir.parent() {
         let client = match HubPaths::resolve() {
             Ok(hub) if hub.footprint_present() || wait_for_starting_hub(&hub) => {
@@ -36,9 +49,7 @@ pub fn run(
         if let Some(mut client) = client {
             if let Ok(status) = client.status() {
                 match status.web_addr.zip(status.web_url) {
-                    Some((addr, url))
-                        if args.port.is_none_or(|port| port_of(&addr) == Some(port)) =>
-                    {
+                    Some((addr, url)) if serves_requested(&addr, ip, args.port) => {
                         if !quiet {
                             eprintln!("clove web UI served by the running daemon: {url}");
                         }
@@ -58,17 +69,6 @@ pub fn run(
         }
     }
 
-    let ip: IpAddr = args.host.parse().map_err(|_| CloveError::InvalidField {
-        field: "host".to_owned(),
-        reason: format!("not a valid IP address: {}", args.host),
-    })?;
-
-    if !ip.is_loopback() && !args.allow_non_loopback {
-        return Err(CloveError::InvalidField {
-            field: "host".to_owned(),
-            reason: "binding a non-loopback address requires --allow-non-loopback".to_owned(),
-        });
-    }
     if !ip.is_loopback() && !quiet {
         eprintln!(
             "warning: serving on a non-loopback address ({ip}) exposes write access \
@@ -136,9 +136,11 @@ pub fn run(
     })
 }
 
-/// The port of a `host:port` address as the daemon advertises it.
-fn port_of(addr: &str) -> Option<u16> {
-    addr.parse::<SocketAddr>().ok().map(|addr| addr.port())
+/// Whether the daemon's web address (`host:port`, as it advertises it) is on
+/// the requested IP, and on the requested port when one was given.
+fn serves_requested(addr: &str, ip: IpAddr, port: Option<u16>) -> bool {
+    addr.parse::<SocketAddr>()
+        .is_ok_and(|addr| addr.ip() == ip && port.is_none_or(|port| addr.port() == port))
 }
 
 /// A daemon another client is starting holds its lock before it binds its

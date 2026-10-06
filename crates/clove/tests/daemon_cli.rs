@@ -256,6 +256,70 @@ fn start_status_stop_round_trip() {
     assert!(v["data"]["hub"].is_null(), "no hub left: {v}");
 }
 
+/// Release builds abort on panic: a hub that panics dies with no cleanup. Reads
+/// fall back meanwhile, and the next `daemon start` puts up a fresh hub over
+/// the corpse socket and pid file.
+#[test]
+fn a_killed_daemon_is_replaced_by_the_next_start() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let run = Run::new();
+    init(dir, &run.path);
+    clove(dir, &run.path)
+        .args(["new", "alpha"])
+        .assert()
+        .success();
+    clove(dir, &run.path)
+        .args(["daemon", "start"])
+        .assert()
+        .success();
+    wait_watching(dir, &run.path);
+    let first: i32 = std::fs::read_to_string(run.pid_file())
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+
+    // SAFETY: kill(2) with a pid our own test hub wrote.
+    unsafe {
+        libc_kill(first, 9);
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while daemon_status(dir, &run.path)["data"]["hub"] != serde_json::Value::Null {
+        assert!(Instant::now() < deadline, "the killed hub still answers");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    let ls = |run: &Path| {
+        json(
+            &clove(dir, run)
+                .args(["ls", "-f", "json"])
+                .assert()
+                .success()
+                .get_output()
+                .stdout,
+        )
+    };
+    let v = ls(&run.path);
+    assert_ne!(v["_meta"]["source"], "daemon", "{v}");
+    assert_eq!(titles(&v), ["alpha"]);
+
+    let out = clove(dir, &run.path)
+        .args(["daemon", "start", "-f", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let started = json(&out);
+    assert_eq!(started["data"]["started"], serde_json::json!(true));
+    assert_ne!(started["data"]["pid"], serde_json::json!(first));
+    wait_watching(dir, &run.path);
+    let v = ls(&run.path);
+    assert_eq!(v["_meta"]["source"], "daemon", "{v}");
+    assert_eq!(titles(&v), ["alpha"]);
+}
+
 /// #54: `.clove/daemon.sock` in a deeply nested repository overflowed the
 /// 104-byte `sun_path`, so the daemon could never bind. The hub's socket lives
 /// in the per-user runtime directory, whatever the repository's depth.

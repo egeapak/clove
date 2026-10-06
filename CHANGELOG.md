@@ -23,7 +23,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The daemon's web UI and API live under `/p/<slug>/`; bare `/api/v1/…` redirects only while one project is loaded
 - Starting the daemon for a project (`daemon start`, MCP, `serve`) adds `daemon.token` to `.clove/.gitignore`
 - The daemon runs from its runtime directory with a minimal environment; its GitHub sync takes the token from `gh auth token`
-- `clove serve` defaults to the configured `[web] port`, falls back to a free port, and hands off to a running daemon; an explicit `--port` is always honored
+- `clove serve` defaults to the configured `[web] port`, falls back to a free port, and hands off to a running daemon; an explicit `--port` or `--host` the daemon is not on is always honored
 - `clove reindex` waits for a rebuild already in progress instead of failing
 - A symlinked `.clove/issues/` (or directory below it) is refused for reads and writes
 - Daemon IPC protocol 8: clove 0.1.0 clients and daemons fall back to direct file access
@@ -35,6 +35,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `clove serve` in a second project no longer fails on the shared port or blames `[web] enabled = false`
 - `clove sync github` names comment directions: `comments 0 pulled / 6 pushed`
 - `clove doctor --fix` no longer deletes a live but slow daemon's socket and pid files, and `clove daemon stop` no longer reports such a daemon as not running
+- `clove serve --host` is validated even when a daemon is running
+- `clove tui` without an interactive terminal exits with an error instead of panicking
 
 ### Security
 
