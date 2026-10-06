@@ -28,4 +28,10 @@ pub enum ImportError {
     /// (the export container `format` or a per-item `schema` is too new).
     #[error("{message}")]
     Incompatible { message: String },
+
+    /// A GitHub API call failed. `operation` names the call and the item it was
+    /// for (e.g. `issue update of #3 (gh-3) for proj-…`); `reason` is GitHub's
+    /// status, message, and validation errors, or the transport failure.
+    #[error("GitHub {operation} failed: {reason}")]
+    GitHub { operation: String, reason: String },
 }
