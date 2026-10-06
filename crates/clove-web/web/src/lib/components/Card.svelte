@@ -7,6 +7,7 @@
   import LabelChip from './LabelChip.svelte';
   import Avatar from './Avatar.svelte';
   import BlockedBadge from './BlockedBadge.svelte';
+  import ExternalRef from './ExternalRef.svelte';
   import { shortId } from '$lib/glyphs';
 
   let { item, ondragstart }: { item: Item; ondragstart?: (e: DragEvent) => void } = $props();
@@ -34,7 +35,7 @@
     {#if item.deps.length && !item.blocked_by.length}
       <span class="dim mono note">→ deps {item.deps.map(shortId).join(', ')}</span>
     {/if}
-    <span class="right"><Avatar name={item.assignee} /></span>
+    <span class="right"><ExternalRef {item} compact link={false} /><Avatar name={item.assignee} /></span>
   </div>
 </a>
 
@@ -82,6 +83,9 @@
   }
   .card-foot .right {
     margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
   }
   .note {
     font-size: 10px;

@@ -12,9 +12,10 @@
   import TypeIcon from '$lib/components/TypeIcon.svelte';
   import LabelChip from '$lib/components/LabelChip.svelte';
   import Avatar from '$lib/components/Avatar.svelte';
-  import BlockedBadge from '$lib/components/BlockedBadge.svelte';
   import Markdown from '$lib/components/Markdown.svelte';
   import DepTree from '$lib/components/DepTree.svelte';
+  import ExternalRef from '$lib/components/ExternalRef.svelte';
+  import RelatedItem from '$lib/components/RelatedItem.svelte';
   import { shortId, shortDate, relativeTime, priorityLabel, statusLabel } from '$lib/glyphs';
 
   let { data } = $props();
@@ -44,6 +45,22 @@
       comment_count: s.comment_count || fresh.comment_count
     };
   }
+
+  // `blocked_by` holds the open and the dangling hard deps; the rest of `deps`
+  // are closed and only informative.
+  const relationships = $derived.by(() => {
+    if (!item) return [];
+    const blocking = new Set(item.blocked_by);
+    const groups = [
+      { kind: 'part of', ids: item.parent ? [item.parent] : [], warn: false },
+      { kind: 'blocked by', ids: item.blocked_by, warn: true },
+      { kind: 'depends on', ids: item.deps.filter((d) => !blocking.has(d)), warn: false },
+      { kind: 'relates to', ids: item.relates, warn: false },
+      { kind: 'duplicates', ids: item.duplicates ?? [], warn: false },
+      { kind: 'supersedes', ids: item.supersedes ?? [], warn: false }
+    ];
+    return groups.filter((g) => g.ids.length > 0);
+  });
 
   // Enum options driven by store.meta, with literal fallbacks.
   const statusOptions = $derived(store.meta?.statuses?.length ? store.meta.statuses : ['open', 'in_progress', 'closed']);
@@ -271,6 +288,7 @@
         <TypeIcon type={item.type} label />
         <span class="tag status"><StatusGlyph status={item.status} /> {statusLabel(item.status)}</span>
         <PriorityGlyph priority={item.priority} label />
+        <ExternalRef {item} />
         <a class="edit-link" href="{item.id}/edit">Edit</a>
       </div>
       <h1 class="dtitle">{item.title}</h1>
@@ -299,7 +317,7 @@
         {#if item.deps.length}
           <div class="dep-list">
             {#each item.deps as d (d)}
-              <span class="dep-chip mono">{shortId(d)} <button aria-label="remove dep {d}" onclick={() => removeDep(d)}>×</button></span>
+              <span class="dep-chip"><RelatedItem id={d} /> <button aria-label="remove dep {d}" onclick={() => removeDep(d)}>×</button></span>
             {/each}
           </div>
         {/if}
@@ -364,10 +382,14 @@
       </div>
       <div class="side-block">
         <div class="side-label">Relationships</div>
-        {#if item.blocked_by.length}<div class="side-row"><BlockedBadge blockedBy={item.blocked_by} /></div>{/if}
-        {#if item.parent}<div class="side-row"><TypeIcon type="epic" /> part of <a href="../items/{item.parent}">{shortId(item.parent)}</a></div>{/if}
-        {#each item.relates as r (r)}<div class="side-row dim mono">relates {shortId(r)}</div>{/each}
-        {#if !item.blocked_by.length && !item.parent && !item.relates.length}<div class="side-row dim">None</div>{/if}
+        {#each relationships as group (group.kind)}
+          <div class="rel-group">
+            <div class="rel-kind" class:warn={group.warn}>{group.kind}</div>
+            {#each group.ids as rid (rid)}<div class="rel-row"><RelatedItem id={rid} /></div>{/each}
+          </div>
+        {:else}
+          <div class="side-row dim">None</div>
+        {/each}
       </div>
       <div class="side-block">
         <div class="side-label">Dates</div>
@@ -402,9 +424,32 @@
   .screen {
     overflow: hidden;
   }
+  /* Fill the viewport below the top bar (57px), the layout's 16px top padding
+     and a 20px bottom margin, which replaces its taller page padding here. */
   .detail {
     display: grid;
-    grid-template-columns: 1fr 300px;
+    grid-template-columns: minmax(0, 1fr) 300px;
+    min-height: calc(100dvh - 93px);
+  }
+  :global(main.page:has(> .detail)) {
+    padding-bottom: 20px;
+  }
+  .rel-group + .rel-group {
+    margin-top: 8px;
+  }
+  .rel-kind {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-bottom: 2px;
+  }
+  .rel-kind.warn {
+    color: var(--red);
+  }
+  .rel-row {
+    display: flex;
+    min-width: 0;
+    font-size: 12px;
+    padding: 2px 0;
   }
   .detail-main {
     padding: 18px 22px;
@@ -512,7 +557,9 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    font-size: 11px;
+    max-width: 100%;
+    min-width: 0;
+    font-size: 12px;
     background: var(--surface-inset);
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
@@ -648,7 +695,7 @@
   }
   @media (max-width: 820px) {
     .detail {
-      grid-template-columns: 1fr;
+      grid-template-columns: minmax(0, 1fr);
     }
     .detail-main {
       border-right: none;

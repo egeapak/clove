@@ -41,7 +41,8 @@ export function parseQuery(p: URLSearchParams): ListQuery {
     dir: (p.get('dir') as 'asc' | 'desc') || undefined,
     type: csv(p, 'type') as ItemType[],
     priority: csv(p, 'priority').map(Number),
-    label: csv(p, 'label')
+    label: csv(p, 'label'),
+    synced: p.get('synced') === 'true' ? true : p.get('synced') === 'false' ? false : undefined
   };
   return q;
 }
@@ -77,6 +78,7 @@ export function buildParams(query: ListQuery): URLSearchParams {
   if (query.sort) p.set('sort', query.sort);
   if (query.dir) p.set('dir', query.dir);
   if (query.mode && query.mode !== 'list') p.set('mode', query.mode);
+  if (query.synced !== undefined) p.set('synced', String(query.synced));
   // Multi-select filters go as a single comma-joined value (server CSV contract);
   // labels never contain commas (parseLabels splits on them), so this is lossless.
   if (query.type?.length) p.set('type', query.type.join(','));

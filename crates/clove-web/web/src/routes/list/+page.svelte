@@ -11,6 +11,8 @@
   import LabelChip from '$lib/components/LabelChip.svelte';
   import Avatar from '$lib/components/Avatar.svelte';
   import BlockedBadge from '$lib/components/BlockedBadge.svelte';
+  import ExternalRef from '$lib/components/ExternalRef.svelte';
+  import { hasSyncTarget } from '$lib/sync';
   import { relativeTime, priorityLabel } from '$lib/glyphs';
   import { parseQuery, parsePage } from '$lib/query';
   import { defaultDir } from '$lib/filter';
@@ -33,6 +35,7 @@
   const fTypes = $derived(query.type ?? []);
   const fPrios = $derived(query.priority ?? []);
   const fLabels = $derived(query.label ?? []);
+  const fSynced = $derived(query.synced);
   const sort = $derived(query.sort || 'rank');
   // No explicit dir → the column's natural direction. A blanket 'desc' default
   // rendered the default (rank) view in REVERSE canonical order.
@@ -144,6 +147,11 @@
   const meta = $derived(store.meta);
   const typeOptions = $derived((meta?.types as ItemType[] | undefined)?.length ? (meta!.types as ItemType[]) : TYPES_FALLBACK);
   const prioOptions = $derived(meta?.priorities?.length ? meta!.priorities : PRIOS_FALLBACK);
+  const syncTarget = $derived(hasSyncTarget(meta));
+  // The column shows when there is something to say: a sync target (every row
+  // is synced or not), or rows carrying refs from an import.
+  const showSync = $derived(syncTarget || rows.some((r) => r.external_ref));
+  const colCount = $derived(showSync ? 9 : 8);
 
   // ---- keyboard nav ----
   let cursor = $state(0);
@@ -230,6 +238,17 @@
         <option value={a}>{a}</option>
       {/each}
     </select>
+    {#if syncTarget || fSynced !== undefined}
+      <select
+        aria-label="Sync filter"
+        value={fSynced === undefined ? '' : String(fSynced)}
+        onchange={(e) => setSingle('synced', e.currentTarget.value || null)}
+      >
+        <option value="">Sync: any</option>
+        <option value="true">Synced</option>
+        <option value="false">Not synced</option>
+      </select>
+    {/if}
   </div>
 
   <div class="multi" role="group" aria-label="Type filter">
@@ -317,7 +336,8 @@
           <th class="sortable" style="width:52px" aria-sort={ariaSort('priority')}>
             <button type="button" class="th-btn" onclick={() => cycleSort('priority')} onkeydown={(e) => onThKey(e, 'priority')}>Pri <span class="sort">{sortArrow('priority')}</span></button>
           </th>
-          <th>Title</th>
+          <th class="title-col">Title</th>
+          {#if showSync}<th style="width:96px">Sync</th>{/if}
           <th style="width:130px">Assignee</th>
           <th style="width:220px">Labels</th>
           <th class="sortable" style="width:110px" aria-sort={ariaSort('updated')}>
@@ -326,7 +346,7 @@
         </tr>
       </thead>
       <tbody>
-        {#if padTop > 0}<tr class="spacer" style="height:{padTop}px" aria-hidden="true"><td colspan="8"></td></tr>{/if}
+        {#if padTop > 0}<tr class="spacer" style="height:{padTop}px" aria-hidden="true"><td colspan={colCount}></td></tr>{/if}
         {#each vItems as row (row.key)}
           {@const i = row.index}
           {@const item = rows[i]}
@@ -340,9 +360,12 @@
             <td><TypeIcon type={item.type} /></td>
             <td><PriorityGlyph priority={item.priority} /></td>
             <td class="title">
-              {item.title}
-              {#if item.blocked_by.length}<BlockedBadge blockedBy={item.blocked_by} />{/if}
+              <div class="title-in">
+                <span class="title-text">{item.title}</span>
+                {#if item.blocked_by.length}<BlockedBadge blockedBy={item.blocked_by} />{/if}
+              </div>
             </td>
+            {#if showSync}<td><ExternalRef {item} compact /></td>{/if}
             <td>
               <span class="assignee"><Avatar name={item.assignee} /> <span class="muted">{item.assignee ?? '—'}</span></span>
             </td>
@@ -354,9 +377,9 @@
             <td class="upd mono">{relativeTime(item.updated)}</td>
           </tr>
         {/each}
-        {#if padBottom > 0}<tr class="spacer" style="height:{padBottom}px" aria-hidden="true"><td colspan="8"></td></tr>{/if}
+        {#if padBottom > 0}<tr class="spacer" style="height:{padBottom}px" aria-hidden="true"><td colspan={colCount}></td></tr>{/if}
         {#if rows.length === 0}
-          <tr><td colspan="8" class="empty dim">{store.loaded ? 'No items match these filters' : 'Loading…'}</td></tr>
+          <tr><td colspan={colCount} class="empty dim">{store.loaded ? 'No items match these filters' : 'Loading…'}</td></tr>
         {/if}
       </tbody>
     </table>
@@ -583,14 +606,32 @@
   tbody tr.cursor td:first-child {
     box-shadow: inset 2px 0 0 var(--accent);
   }
+  /* The title column takes whatever the fixed-width columns leave: `width:
+     100%` claims the remainder and `max-width: 0` lets the text ellipsize
+     instead of widening the table. The cell stays a table-cell — a flex `td`
+     drops out of the row box, which cut the row's border and hover short. */
+  th.title-col,
   td.title {
-    white-space: normal;
+    width: 100%;
+  }
+  td.title {
+    max-width: 0;
     color: var(--text);
     font-weight: 500;
-    max-width: 360px;
+  }
+  .title-in {
     display: flex;
     align-items: center;
     gap: 8px;
+    min-width: 0;
+  }
+  .title-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }
+  .title-in :global(.blocked) {
+    flex: none;
   }
   td.upd {
     font-size: 11px;
