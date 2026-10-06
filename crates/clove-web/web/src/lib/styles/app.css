@@ -140,5 +140,7 @@ select {
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
   box-shadow: var(--shadow-pop);
-  white-space: nowrap;
+  /* Item titles can be long: wrap them rather than run off the viewport. */
+  max-width: min(480px, calc(100vw - 12px));
+  overflow-wrap: anywhere;
 }
