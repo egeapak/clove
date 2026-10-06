@@ -14,6 +14,9 @@ fn clove(dir: &Path) -> Command {
     cmd.env_remove("CLOVE_FORMAT");
     cmd.env_remove("EDITOR");
     cmd.env("CLOVE_AUTHOR", "tester@example.com");
+    // Never the user's own hub: a live one of another protocol version is a
+    // `doctor` warning these tests do not expect.
+    cmd.env("CLOVE_RUNTIME_DIR", dir.join(".test-run"));
     cmd
 }
 
