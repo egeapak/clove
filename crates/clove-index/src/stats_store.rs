@@ -358,7 +358,7 @@ mod tests {
 
         let all = index.snapshot_history(None, None).unwrap();
         let times: Vec<&str> = all.iter().map(|s| s.captured_at.as_str()).collect();
-        assert_eq!(times[0], "2026-06-03T00:00:00Z", "{times:?}");
+        assert_eq!(times[0], "2026-06-03T00:00:00.000Z", "{times:?}");
 
         let since = index
             .snapshot_history(Some("2026-06-02T00:00:00+00:00"), None)
@@ -421,7 +421,7 @@ mod tests {
             .query_row("SELECT captured_at FROM snapshots", [], |r| r.get(0))
             .unwrap();
         assert_eq!(
-            raw, "2026-06-01T10:00:00Z",
+            raw, "2026-06-01T10:00:00.904Z",
             "the stored string itself must be canonical"
         );
     }
@@ -435,7 +435,7 @@ mod tests {
 
         let hist = index.snapshot_history(None, None).unwrap();
         assert_eq!(
-            hist[0].captured_at, "2026-06-01T10:00:00Z",
+            hist[0].captured_at, "2026-06-01T10:00:00.904Z",
             "a row written by an older clove must still read back canonical"
         );
     }
@@ -582,9 +582,9 @@ mod tests {
         assert_eq!(
             stored,
             vec![
-                "2026-06-01T10:00:00Z",
-                "2026-06-01T10:00:01Z",
-                "2026-06-01T10:00:02Z"
+                "2026-06-01T10:00:00.904Z",
+                "2026-06-01T10:00:01.000Z",
+                "2026-06-01T10:00:02.000Z"
             ],
             "recording a snapshot re-spells the rows already there"
         );

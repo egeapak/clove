@@ -22,7 +22,7 @@
 //! *rendered* timestamp, not to the name:
 //!
 //! - **Rendered** (`ops::comments`, and so the CLI, the web API and the MCP tool
-//!   alike) through [`clove_types::canonical_rfc3339`]: whole seconds, `Z`. This
+//!   alike) through [`clove_types::canonical_rfc3339`]: milliseconds, `Z`. This
 //!   is the gap §3 named — comments used to render `to_rfc3339()` of a
 //!   nanosecond `Utc::now()` (`2026-06-02T08:54:22.904816670+00:00`) while item
 //!   timestamps a line above rendered `2026-06-02T08:54:22Z`.

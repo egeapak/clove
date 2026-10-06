@@ -9,7 +9,7 @@ use serde_json::Map;
 
 use crate::context::Ctx;
 use crate::item_json::print_item;
-use crate::util::{now_seconds, parse_id};
+use crate::util::{now_millis, parse_id};
 
 pub fn run(
     ctx: &Ctx,
@@ -40,7 +40,7 @@ pub fn run(
         assignee: Some(assignee),
         ..EditRequest::default()
     };
-    apply_edit(&ctx.store, &id, &req, now_seconds())?;
+    apply_edit(&ctx.store, &id, &req, now_millis())?;
 
     let saved = ctx.store.get(&id)?;
     print_item(format, &saved, Map::new());

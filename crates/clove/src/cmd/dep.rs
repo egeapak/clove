@@ -12,7 +12,7 @@ use crate::context::Ctx;
 use crate::exit::ExitCode;
 use crate::item_json::print_item;
 use crate::output::print_json_success;
-use crate::util::{now_seconds, parse_id};
+use crate::util::{now_millis, parse_id};
 
 pub fn run(
     ctx: &Ctx,
@@ -34,7 +34,7 @@ fn add(ctx: &Ctx, format: OutputFormat, id_s: &str, dep_s: &str) -> Result<(), C
     // Shared validation pipeline (existence, self-loop, cycle, duplicate — DESIGN
     // §5.4) + write, identical across CLI/web/MCP/daemon. Re-read to print in the
     // CLI's item shape (the op returns the §7.4 JSON the other surfaces use).
-    clove_core::ops::dep_add(&ctx.store, &id, &dep, now_seconds())?;
+    clove_core::ops::dep_add(&ctx.store, &id, &dep, now_millis())?;
     let saved = ctx.store.get(&id)?;
     print_item(format, &saved, Map::new());
     Ok(())
@@ -46,7 +46,7 @@ fn rm(ctx: &Ctx, format: OutputFormat, id_s: &str, dep_s: &str) -> Result<(), Cl
     // Same shared op as web/MCP/daemon: errors (InvalidField) when the dep is
     // absent, so a no-op `rm` doesn't silently bump `updated`. Re-read to print
     // in the CLI's item shape (the op returns the §7.4 JSON the other surfaces use).
-    clove_core::ops::dep_remove(&ctx.store, &id, &dep, now_seconds())?;
+    clove_core::ops::dep_remove(&ctx.store, &id, &dep, now_millis())?;
     let saved = ctx.store.get(&id)?;
     print_item(format, &saved, Map::new());
     Ok(())

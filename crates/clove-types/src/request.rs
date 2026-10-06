@@ -16,8 +16,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    fields, normalize_label, truncate_to_seconds, CloveError, ItemFrontmatter, ItemStatus,
-    ItemType, Priority,
+    fields, normalize_label, truncate_to_millis, CloveError, ItemFrontmatter, ItemStatus, ItemType,
+    Priority,
 };
 
 /// A raw "new item" spec. Strings are parsed/validated by `clove_core::ops::create`;
@@ -42,7 +42,7 @@ pub struct NewSpec {
 /// Apply a status transition to frontmatter, maintaining the closed-timestamp
 /// invariant: set `closed` when moving to closed, clear it otherwise.
 ///
-/// `closed` is truncated to whole seconds (the persisted precision), so the
+/// `closed` is truncated to whole milliseconds (the persisted precision), so the
 /// in-memory frontmatter a mutation returns is identical to what a re-read
 /// parses back from disk — no phantom sub-second diff.
 pub fn set_status(fm: &mut ItemFrontmatter, status: ItemStatus, now: DateTime<Utc>) {
@@ -50,7 +50,7 @@ pub fn set_status(fm: &mut ItemFrontmatter, status: ItemStatus, now: DateTime<Ut
     match status {
         ItemStatus::Closed => {
             if fm.closed.is_none() {
-                fm.closed = Some(truncate_to_seconds(now));
+                fm.closed = Some(truncate_to_millis(now));
             }
         }
         ItemStatus::Open | ItemStatus::InProgress => fm.closed = None,
@@ -460,13 +460,13 @@ mod tests {
 
     #[test]
     fn set_status_truncates_closed_to_persisted_precision() {
-        // The frontmatter writer persists whole seconds; the stamped in-memory
+        // The frontmatter writer persists milliseconds; the stamped in-memory
         // value must match, or a mutation's return value would disagree with a
         // subsequent re-read.
         let mut fm = sample();
         let now: DateTime<Utc> = "2026-06-02T10:00:05.123456789Z".parse().unwrap();
         set_status(&mut fm, ItemStatus::Closed, now);
-        assert_eq!(fm.closed, Some("2026-06-02T10:00:05Z".parse().unwrap()));
+        assert_eq!(fm.closed, Some("2026-06-02T10:00:05.123Z".parse().unwrap()));
     }
 
     #[test]

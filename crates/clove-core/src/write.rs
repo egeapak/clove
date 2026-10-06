@@ -104,8 +104,8 @@ pub fn write_item_file(item: &Item, path: &Utf8Path) -> Result<(), CloveError> {
     atomic_write(path, &buffer)
 }
 
-/// Render an RFC3339 timestamp in the one canonical spelling (UTC, whole
-/// seconds, `Z` suffix) — [`clove_types::canonical_rfc3339`], shared with every
+/// Render an RFC3339 timestamp in the one canonical spelling (UTC, millisecond
+/// precision, `Z` suffix) — [`clove_types::canonical_rfc3339`], shared with every
 /// other surface that renders a timestamp.
 fn rfc3339(ts: DateTime<Utc>) -> String {
     clove_types::canonical_rfc3339(ts)

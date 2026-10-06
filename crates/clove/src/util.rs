@@ -3,10 +3,10 @@
 use chrono::{DateTime, Utc};
 use clove_types::{CloveError, CloveId, ItemStatus, Priority};
 
-/// The current time truncated to whole seconds (the canonical on-disk timestamp
-/// precision; matches `ItemStore`'s internal truncation).
-pub fn now_seconds() -> DateTime<Utc> {
-    clove_types::truncate_to_seconds(Utc::now())
+/// The current time truncated to whole milliseconds (the canonical on-disk
+/// timestamp precision; matches `ItemStore`'s internal truncation).
+pub fn now_millis() -> DateTime<Utc> {
+    clove_types::truncate_to_millis(Utc::now())
 }
 
 /// Parse and validate an item id argument.

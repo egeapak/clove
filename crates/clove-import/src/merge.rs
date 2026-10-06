@@ -534,8 +534,8 @@ mod tests {
             panic!("both sides changed `created` — that is a conflict");
         };
         let created = conflicts.iter().find(|c| c.field == "created").unwrap();
-        assert_eq!(created.ours, "2026-06-02T10:00:00Z");
-        assert_eq!(created.theirs, "2026-06-03T11:30:00Z");
+        assert_eq!(created.ours, "2026-06-02T10:00:00.000Z");
+        assert_eq!(created.theirs, "2026-06-03T11:30:00.000Z");
 
         // `status` renders its closed timestamp inline, through the same helper.
         let ours_closed = fm(
@@ -550,7 +550,7 @@ mod tests {
             panic!("both sides changed `status`");
         };
         let status = conflicts.iter().find(|c| c.field == "status").unwrap();
-        assert_eq!(status.ours, "closed (2026-06-02T10:00:00Z)");
+        assert_eq!(status.ours, "closed (2026-06-02T10:00:00.000Z)");
     }
 
     #[test]

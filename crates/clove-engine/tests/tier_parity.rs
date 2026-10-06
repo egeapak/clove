@@ -90,14 +90,18 @@ fn fixture() -> Fixture {
                 // `updated`, so `--sort created`, `--sort updated` and
                 // `--sort id` are three *different* sequences.
                 //
-                // Every item was stamped `Utc::now()` in this loop, and
-                // timestamps truncate to whole seconds, so all six shared one
-                // instant: the created/updated orders collapsed onto the id
+                // Every item was once stamped `Utc::now()` in this loop, and
+                // timestamps then truncated to whole seconds, so all six shared
+                // one instant: the created/updated orders collapsed onto the id
                 // tiebreak and the "14 orders" this file claims were 10. A bug
                 // confined to the `created_at`/`updated_at` ORDER BY columns —
                 // wrong column, TEXT-vs-date comparison, a missing tiebreak —
                 // would have passed.
-                base + chrono::Duration::minutes(i as i64),
+                //
+                // 250 ms apart, so `created_at` (a TEXT column) mixes
+                // whole-second values (no fraction, as an older clove wrote)
+                // with millisecond ones inside the same second.
+                base + chrono::Duration::milliseconds(250 * i as i64),
             )
             .unwrap();
         // `updated` counts down while `created` counts up.
