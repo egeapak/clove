@@ -1,6 +1,6 @@
-// An item's link to its external record (a synced GitHub issue), mirroring
-// `clove-web`'s `sync::is_synced`: `gh-<number>` is the ref `clove sync github`
-// writes, and the issue URL comes from the project's sync target in `/meta`.
+// An item's link to its external record. `gh-<number>` is the ref `clove sync
+// github` writes, and the issue URL comes from the project's sync target in
+// `/meta`.
 import type { Item, Meta } from './types';
 
 export interface ExternalRef {
@@ -20,9 +20,9 @@ export function githubIssueNumber(ref: string | null | undefined): number | null
   return m ? Number(m[1]) : null;
 }
 
-/** Whether the item is linked to a GitHub issue (`?synced=true` on the API). */
+/** Whether the item has any external ref, as `?synced=true` on the API counts it. */
 export function isSynced(item: Pick<Item, 'external_ref'>): boolean {
-  return githubIssueNumber(item.external_ref) !== null;
+  return (item.external_ref ?? '').trim() !== '';
 }
 
 /** Whether the project syncs with anything; markers stay hidden otherwise. */

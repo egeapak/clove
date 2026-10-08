@@ -4,6 +4,14 @@ All notable changes to clove are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] - 2026-10-08
+
+### Fixed
+
+- `clove daemon status` reports a daemon this clove cannot talk to (an older `cloved` after an upgrade) as running, with the `daemon stop --all` hint, instead of "not running"
+- The daemon hub serves a favicon (`/favicon.svg`, `/favicon.ico`) and the project picker links it, so the picker no longer logs a 404; the web app declares its icon
+- Web UI: the client-side `synced` filter counts any non-empty external ref, like the server
+
 ## [0.1.2] - 2026-10-08
 
 ### Added

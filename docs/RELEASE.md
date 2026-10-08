@@ -1,4 +1,4 @@
-# Release runbook — clove v0.1.2
+# Release runbook — clove v0.1.3
 
 The owner-only steps to cut a clove release: publish the workspace to crates.io
 **and** ship pre-built binaries via a GitHub Release + Homebrew tap. Tracks
@@ -191,7 +191,7 @@ A valid topological publish order:
 > `clove plugin install sync-github`, and that shorthand must not be live before
 > the name it resolves to is ours.
 
-Internal deps already declare both `path` **and** `version = "0.1.2"` (see
+Internal deps already declare both `path` **and** `version = "0.1.3"` (see
 `[workspace.dependencies]` in the root `Cargo.toml`), which is exactly what
 crates.io requires — no Cargo.toml surgery is needed before publishing.
 
@@ -287,7 +287,7 @@ for c in clove-types clove-core clove-plugin clove-index clove-import clove-ipc 
   v=$(curl -s -A "$UA" "https://crates.io/api/v1/crates/$c" \
       | grep -o '"max_version":"[^"]*"' | head -1)
   echo "$c -> ${v:-MISSING}"
-done            # expect max_version 0.1.2 for all fifteen
+done            # expect max_version 0.1.3 for all fifteen
 ```
 
 Then check the two registry behaviours `clove plugin` depends on
@@ -321,12 +321,12 @@ crate, stop and investigate before announcing.
 
 ## 5. Tag the release
 
-Version is already `0.1.2` (inherited via `[workspace.package]`). Tag the
+Version is already `0.1.3` (inherited via `[workspace.package]`). Tag the
 released commit and push — this is what drives the binary builds in step 6.
 
 ```sh
-git tag -a v0.1.2 -m "clove v0.1.2"
-git push origin v0.1.2
+git tag -a v0.1.3 -m "clove v0.1.3"
+git push origin v0.1.3
 ```
 
 ---
@@ -352,7 +352,7 @@ a separate `cargo install`:
 After the tag push:
 
 1. Watch the run: `gh run watch` (or the Actions tab).
-2. Confirm the GitHub Release for `v0.1.2` has all platform archives + `.sha256`
+2. Confirm the GitHub Release for `v0.1.3` has all platform archives + `.sha256`
    files attached.
 3. Run the manual release checklist, [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md),
    against the draft's binaries; resolve or explicitly accept every finding.
@@ -371,11 +371,11 @@ tarball + its published SHA256:
 class Clove < Formula
   desc "Fast, git-native, dependency-aware work-item tracker"
   homepage "https://github.com/egeapak/clove"
-  version "0.1.2"
+  version "0.1.3"
   license "MIT OR Apache-2.0"
 
   on_macos do
-    url "https://github.com/egeapak/clove/releases/download/v0.1.2/clove-v0.1.2-macos-universal2.tar.gz"
+    url "https://github.com/egeapak/clove/releases/download/v0.1.3/clove-v0.1.3-macos-universal2.tar.gz"
     sha256 "PASTE_FROM_THE_RELEASE_.sha256_FILE"
   end
 
@@ -416,12 +416,12 @@ every future release.
 
 ## Rollback / mistakes
 
-- **Bad version already published?** `cargo yank --version 0.1.2 clove-cli`
+- **Bad version already published?** `cargo yank --version 0.1.3 clove-cli`
   (repeat per crate). Yanking prevents *new* dependents from selecting it but
   does **not** delete it — existing `Cargo.lock`s still resolve. There is no
   un-publish; fix forward with `0.1.3`.
 - **Wrong tag?** Delete and re-push before the CI finishes, or cut a new tag:
-  `git tag -d v0.1.2 && git push origin :refs/tags/v0.1.2`.
+  `git tag -d v0.1.3 && git push origin :refs/tags/v0.1.3`.
 
 ---
 

@@ -1248,6 +1248,36 @@ fn stopping_a_project_on_an_incompatible_daemon_says_how() {
     assert!(run.path.join("hub.sock").exists());
 }
 
+/// `status` against a daemon this client cannot talk to must not claim nothing
+/// is running (an old `cloved` serving after a `clove` upgrade is alive).
+#[test]
+fn status_on_an_incompatible_daemon_says_it_is_running() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let run = Run::new();
+    init(dir, &run.path);
+    let _hub = fake_hub(
+        &run.path,
+        r#"{"welcome":"err","protocol":99,"code":"PROTOCOL_MISMATCH","message":"client protocol 9 != daemon protocol 99"}"#,
+    );
+
+    let out = clove(dir, &run.path)
+        .args(["daemon", "status"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("daemon running, but incompatible"),
+        "{stdout}{stderr}"
+    );
+    assert!(!stdout.contains("not running"), "{stdout}");
+    assert!(
+        format!("{stdout}{stderr}").contains("stop --all"),
+        "{stdout}{stderr}"
+    );
+}
+
 /// `clove serve` racing a daemon that is still starting (it holds the lock but
 /// has not bound its socket yet) waits for it and hands off, instead of starting
 /// a second, standalone server.

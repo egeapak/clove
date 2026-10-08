@@ -254,6 +254,29 @@ async fn with_several_projects_the_root_is_a_picker() {
 }
 
 #[tokio::test]
+async fn the_hub_serves_a_favicon_and_the_picker_links_it() {
+    let (_tmp, parent) = tmp_root();
+    let hub = HubWeb::new();
+    let (a_root, a) = repo(&parent, "alpha", "A");
+    let (b_root, b) = repo(&parent, "beta", "B");
+    hub.mount(&a_root, a);
+    hub.mount(&b_root, b);
+    let addr = serve(&hub).await;
+
+    let picker = get(addr, "/").await;
+    assert!(picker.body.contains(r#"rel="icon" href="/favicon.svg""#));
+    for path in ["/favicon.svg", "/favicon.ico"] {
+        let icon = get(addr, path).await;
+        assert_eq!(icon.status, 200, "{path}");
+        assert_eq!(
+            icon.header("content-type").as_deref(),
+            Some("image/svg+xml")
+        );
+        assert!(icon.body.starts_with("<svg"), "{}", icon.body);
+    }
+}
+
+#[tokio::test]
 async fn with_no_projects_the_root_says_so() {
     let hub = HubWeb::new();
     let addr = serve(&hub).await;
