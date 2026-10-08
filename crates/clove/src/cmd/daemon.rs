@@ -334,11 +334,31 @@ fn status(
     let hub_status = HubClient::connect(hub)
         .ok()
         .and_then(|mut c| c.status().ok());
-    let warnings: Vec<String> = hub_status
+    let mut warnings: Vec<String> = hub_status
         .as_ref()
         .and_then(clove_home_mismatch)
         .into_iter()
         .collect();
+    // No answer from the hub is not always "not running": an older daemon that
+    // speaks another protocol, or a busy one, is alive.
+    let unreachable = match hub_status {
+        Some(_) => None,
+        None => match clove_ipc::DaemonClient::health(hub) {
+            clove_ipc::DaemonHealth::Incompatible => {
+                warnings.push(
+                    "a daemon is running but speaks an incompatible protocol version (likely \
+                     an old `cloved` from before a `clove` upgrade); run `clove daemon stop \
+                     --all` then start it again"
+                        .to_owned(),
+                );
+                Some("daemon running, but incompatible with this clove")
+            }
+            clove_ipc::DaemonHealth::Unresponsive => {
+                Some("daemon running, but not answering (busy or still starting)")
+            }
+            _ => None,
+        },
+    };
     // With a hub there to ask, a token this client cannot use is the answer:
     // "not serving" would be wrong — unless the warning explains it.
     if hub.footprint_present() {
@@ -418,7 +438,7 @@ fn status(
                     );
                 }
                 None if hub_status.is_some() => outln!("daemon not serving this project"),
-                None => outln!("daemon not running"),
+                None => outln!("{}", unreachable.unwrap_or("daemon not running")),
             }
             if let Some(h) = &hub_status {
                 let web = h

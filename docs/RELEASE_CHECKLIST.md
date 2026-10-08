@@ -66,7 +66,8 @@ TMPDIR=/tmp CLOVE_HOME=$(mktemp -d /tmp/cvd.XXXX)/h scripts/ci/daemon-smoke.sh <
 - [ ] With the **previous release's daemon still running** on this repo:
       `clove doctor` names it (`DAEMON_LEGACY` or equivalent), reads still work
       (falling back to index/files; an old index schema is rebuilt automatically),
-      and `clove daemon stop` stops it cleanly.
+      `clove daemon status` says it is running but incompatible (not "not running"),
+      and `clove daemon stop --all` stops it cleanly.
 - [ ] `clove reindex`, then `clove doctor` is clean (fix or explain any warning).
 
 ## 3. Daemon (this repo)
@@ -104,7 +105,7 @@ empty or a real GitHub user.
 Drive with a real browser (Playwright MCP is fine). Check the console on every page.
 
 - [ ] With one project loaded `/` redirects to `/p/<slug>/board`; with two, `/` is the
-      project picker and each entry opens its board.
+      project picker (no console errors, favicon loads) and each entry opens its board.
 - [ ] **Board, List, Timeline, Detail** all render the real store; the live indicator
       is green; no console errors.
 - [ ] Navigate **from every view** to an item's detail page: board card, **list row

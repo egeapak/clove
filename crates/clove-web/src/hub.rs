@@ -163,6 +163,8 @@ impl HubWeb {
     pub fn router(&self) -> Router {
         Router::new()
             .route("/", get(root_page))
+            .route("/favicon.svg", get(favicon))
+            .route("/favicon.ico", get(favicon))
             .route("/api/v1/projects", get(list_projects))
             .fallback(dispatch)
             .layer(axum::middleware::from_fn(host_guard))
@@ -209,6 +211,22 @@ async fn list_projects(State(hub): State<HubWeb>) -> Response {
 }
 
 /// `/`: straight into the only project, else a picker.
+/// The tab icon, for the picker page and for browsers that ask for
+/// `/favicon.ico` regardless. A copy of `web/static/favicon.svg`, kept inside
+/// the crate so the published package carries it.
+const FAVICON_SVG: &str = include_str!("favicon.svg");
+
+async fn favicon() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "image/svg+xml"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        FAVICON_SVG,
+    )
+        .into_response()
+}
+
 async fn root_page(State(hub): State<HubWeb>, headers: HeaderMap) -> Response {
     if let Some(slug) = hub.only_slug() {
         return Redirect::temporary(&format!("/p/{slug}/")).into_response();
@@ -335,6 +353,7 @@ fn picker_html(projects: &[ProjectEntry]) -> String {
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
          <meta name=\"color-scheme\" content=\"dark light\"><title>clove</title>\
+         <link rel=\"icon\" href=\"/favicon.svg\" type=\"image/svg+xml\">\
          <style>{PICKER_CSS}</style></head><body><main><h1>clove</h1>{body}</main>\
          </body></html>"
     )

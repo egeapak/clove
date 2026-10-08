@@ -70,9 +70,10 @@ describe('external refs', () => {
     expect(syncTargetLabel(meta([TARGET]))).toBe('GitHub egeapak/clove');
   });
 
-  it('counts only a GitHub issue ref as synced', () => {
+  it('counts any non-empty external ref as synced, as the server does', () => {
     expect(isSynced({ external_ref: 'gh-1' })).toBe(true);
-    expect(isSynced({ external_ref: 'tk:1' })).toBe(false);
+    expect(isSynced({ external_ref: 'tk:1' })).toBe(true);
+    expect(isSynced({ external_ref: '  ' })).toBe(false);
     expect(isSynced({ external_ref: null })).toBe(false);
   });
 });
@@ -93,7 +94,7 @@ describe('the synced list filter', () => {
       { ...base, id: 'b', external_ref: null },
       { ...base, id: 'c', external_ref: 'tk:9' }
     ] as unknown as Item[];
-    expect(applyFilters(items, { synced: false }).map((i) => i.id)).toEqual(['b', 'c']);
-    expect(applyFilters(items, { synced: true }).map((i) => i.id)).toEqual(['a']);
+    expect(applyFilters(items, { synced: false }).map((i) => i.id)).toEqual(['b']);
+    expect(applyFilters(items, { synced: true }).map((i) => i.id)).toEqual(['a', 'c']);
   });
 });
