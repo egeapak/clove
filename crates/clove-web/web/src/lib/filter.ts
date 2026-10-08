@@ -11,6 +11,7 @@
 // Everything here therefore mirrors `clove_core::view::{Filters, Order}`, not
 // what the UI happens to need.
 import type { Item, ListQuery, Status, ItemType } from './types';
+import { isSynced } from './sync';
 
 /**
  * Tab/mode filter: 'all'|'list' (no-op), 'ready', or 'blocked' — `?mode=` on
@@ -34,6 +35,8 @@ export function matchesTab(item: Item, tab: string | undefined): boolean {
 /** Apply every filter in a ListQuery to a list of items (does not sort). */
 export function applyFilters(items: Item[], q: ListQuery): Item[] {
   let out = items.filter((i) => matchesTab(i, q.mode));
+  if (q.synced !== undefined) out = out.filter((i) => isSynced(i) === q.synced);
+  if (q.parent) out = out.filter((i) => i.parent === q.parent);
   if (q.status) out = out.filter((i) => i.status === q.status);
   if (q.assignee) out = out.filter((i) => (i.assignee ?? '') === q.assignee);
   if (q.type?.length) out = out.filter((i) => q.type!.includes(i.type));

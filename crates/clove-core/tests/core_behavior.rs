@@ -162,8 +162,8 @@ fn update_truncates_subsecond_precision() {
     let updated = store
         .update(&created, ts("2026-06-02T15:30:00.123456789Z"))
         .unwrap();
-    // On-disk precision is whole seconds.
-    assert_eq!(updated.frontmatter.updated, ts("2026-06-02T15:30:00Z"));
+    // On-disk precision is milliseconds.
+    assert_eq!(updated.frontmatter.updated, ts("2026-06-02T15:30:00.123Z"));
 }
 
 #[test]
@@ -951,7 +951,7 @@ const TIMESTAMP_SPELLINGS: &[&str] = &[
     "2026-06-02T10:00:00Z",
     "2026-06-02T10:00:00+00:00",
     "2026-06-02T10:00:00.000Z",
-    "2026-06-02T10:00:00.904816670+00:00",
+    "2026-06-02T10:00:00.000816670+00:00",
     "2026-06-02T12:00:00+02:00",
     "2026-06-02T04:30:00-05:30",
 ];
@@ -999,7 +999,7 @@ fn every_timestamp_spelling_serializes_identically() {
     );
     let only = rendered.into_iter().next().unwrap();
     assert!(
-        only.contains(r#""created":"2026-06-02T10:00:00Z""#),
+        only.contains(r#""created":"2026-06-02T10:00:00.000Z""#),
         "canonical spelling in {only}"
     );
 }
@@ -1010,11 +1010,12 @@ fn a_mutation_rewrites_a_non_canonical_timestamp() {
     // migrate`. `created`/`closed` are untouched by the edit itself, so what is
     // asserted here is purely the re-spelling.
     //
-    // Note the read-side assertion below: the *writer* has always rendered
-    // whole seconds, so asserting only on the rewritten file passes with the
-    // type-boundary normalization entirely reverted. What that normalization
-    // adds is the in-memory value being truncated at parse time, which is what
-    // `import json` and every comparison against a stored timestamp see.
+    // Note the read-side assertion below: the *writer* renders milliseconds
+    // whatever it is given, so asserting only on the rewritten file passes with
+    // the type-boundary normalization entirely reverted. What that
+    // normalization adds is the in-memory value being truncated at parse time,
+    // which is what `import json` and every comparison against a stored
+    // timestamp see.
     for spelling in TIMESTAMP_SPELLINGS {
         let (_tmp, store, id) = store_with_timestamp_spelling(spelling);
 
@@ -1023,11 +1024,11 @@ fn a_mutation_rewrites_a_non_canonical_timestamp() {
         assert_eq!(
             parsed.created.timestamp_subsec_nanos(),
             0,
-            "`{spelling}` must lose sub-second precision at parse time"
+            "`{spelling}` must lose sub-millisecond precision at parse time"
         );
         assert_eq!(
             clove_types::canonical_rfc3339(parsed.created),
-            "2026-06-02T10:00:00Z",
+            "2026-06-02T10:00:00.000Z",
             "`{spelling}` must parse to the same instant"
         );
         clove_core::apply_edit(
@@ -1043,15 +1044,15 @@ fn a_mutation_rewrites_a_non_canonical_timestamp() {
 
         let on_disk = std::fs::read_to_string(store.path_for(&id)).unwrap();
         assert!(
-            on_disk.contains("created: 2026-06-02T10:00:00Z\n"),
+            on_disk.contains("created: 2026-06-02T10:00:00.000Z\n"),
             "`{spelling}` must be rewritten canonically, got:\n{on_disk}"
         );
         assert!(
-            on_disk.contains("closed: 2026-06-02T10:00:00Z\n"),
+            on_disk.contains("closed: 2026-06-02T10:00:00.000Z\n"),
             "`{spelling}` must be rewritten canonically, got:\n{on_disk}"
         );
         assert!(
-            on_disk.contains("updated: 2026-06-03T09:00:00Z\n"),
+            on_disk.contains("updated: 2026-06-03T09:00:00.000Z\n"),
             "the edit's own stamp is canonical too, got:\n{on_disk}"
         );
     }
@@ -1098,7 +1099,7 @@ fn comment_timestamps_render_canonically_whatever_the_file_name_holds() {
         .collect();
     assert_eq!(
         stamps,
-        vec!["2026-06-02T08:54:22Z", "2026-06-02T09:00:00Z"],
+        vec!["2026-06-02T08:54:22.904Z", "2026-06-02T09:00:00.000Z"],
         "both comments render in the one canonical spelling"
     );
 }

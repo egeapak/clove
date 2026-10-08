@@ -508,6 +508,108 @@ fn comments_round_trip_through_mcp() {
     s.shutdown();
 }
 
+/// A `clove mcp` command with no author in the environment and git config
+/// isolated from the machine's: only the repo's own config (if any) and `$USER`
+/// are left for author resolution.
+fn authorless_cmd(dir: &Path, user: &str) -> Command {
+    let mut cmd = clove(dir);
+    cmd.env_remove("CLOVE_AUTHOR")
+        .env_remove("GIT_AUTHOR_EMAIL")
+        .env("GIT_CONFIG_GLOBAL", dir.join("no-global-gitconfig"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CEILING_DIRECTORIES", dir.parent().unwrap())
+        .env("USER", user);
+    cmd
+}
+
+fn git_config_local(dir: &Path, key: &str, value: &str) {
+    let status = Command::new("git")
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", dir.join("no-global-gitconfig"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(["config", key, value])
+        .status()
+        .unwrap();
+    assert!(status.success(), "git config {key} failed");
+}
+
+fn git_init(dir: &Path) {
+    let status = Command::new("git")
+        .current_dir(dir)
+        .args(["init", "-q"])
+        .status()
+        .unwrap();
+    assert!(status.success(), "git init failed");
+}
+
+/// The author of the only comment on a fresh item, written via `clove_comment`.
+fn mcp_comment_author(mut s: Session) -> String {
+    let created = s.call(2, "clove_new", json!({ "title": "attributed" }));
+    let id = created["structuredContent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let r = s.call(3, "clove_comment", json!({ "id": id, "message": "note" }));
+    assert_ne!(r["isError"], true, "comment failed: {r}");
+    let page = s.call(4, "clove_comments", json!({ "id": id }));
+    let author = page["structuredContent"]["items"][0]["author"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    s.shutdown();
+    author
+}
+
+/// #74: `clove_comment` resolves its author through the same chain as
+/// `clove comment` — with `CLOVE_AUTHOR`/`GIT_AUTHOR_EMAIL` unset it falls back
+/// to the repo's git config, then `$USER`, rather than writing `unknown`.
+#[test]
+fn comment_author_falls_back_to_git_config_then_user() {
+    let dir = init_repo();
+    git_init(dir.path());
+    git_config_local(dir.path(), "user.email", "cfg@example.com");
+    let s = Session::start_cmd({
+        let mut cmd = authorless_cmd(dir.path(), "login-user");
+        cmd.env("CLOVE_MCP_NO_DAEMON", "1");
+        cmd
+    });
+    assert_eq!(mcp_comment_author(s), "cfg-example-com");
+
+    let bare = init_repo();
+    let s = Session::start_cmd({
+        let mut cmd = authorless_cmd(bare.path(), "login-user");
+        cmd.env("CLOVE_MCP_NO_DAEMON", "1");
+        cmd
+    });
+    assert_eq!(mcp_comment_author(s), "login-user");
+}
+
+/// #74, daemon-routed: the author is resolved in the MCP process from the
+/// caller's env and repo, not inside the hub (which runs with a minimal env
+/// from its runtime directory).
+#[cfg(unix)]
+#[test]
+fn daemon_routed_comment_author_is_resolved_by_the_caller() {
+    let dir = init_repo();
+    git_init(dir.path());
+    git_config_local(dir.path(), "user.email", "cfg@example.com");
+    let _stop = StopDaemon(runtime_dir(dir.path()));
+    let cloved = escargot::CargoBuild::new()
+        .package("cloved")
+        .bin("cloved")
+        .run()
+        .expect("build cloved for the author test");
+
+    let mut cmd = authorless_cmd(dir.path(), "login-user");
+    cmd.env("CLOVED_PATH", cloved.path())
+        .env("CLOVED_DISABLE_WEB", "1");
+    let s = Session::start_cmd(cmd);
+    // Up and watching before the write, so it routes to the hub rather than
+    // falling back to the local ops.
+    wait_watching(dir.path());
+    assert_eq!(mcp_comment_author(s), "cfg-example-com");
+}
+
 /// Every list-shaped read tool honours the *same* `offset`/`limit` contract:
 /// absent → the surface default, `0` → unlimited, `n` → at most `n`; `total` is
 /// always the pre-pagination match count and `limit` is echoed back.
@@ -1339,6 +1441,81 @@ fn filter_args_take_one_value_or_many() {
     }
 
     let _ = (alpha, beta, gamma, delta);
+    s.shutdown();
+}
+
+/// `synced` and `parent` are part of the shared `FilterArgs`, so every list
+/// tool takes them, echoes them, and publishes them in its input schema.
+#[test]
+fn filter_args_take_synced_and_parent() {
+    let dir = init_repo();
+    let mut s = Session::start(dir.path());
+    let mk = |s: &mut Session, id: i64, args: Value| {
+        let r = s.call(id, "clove_new", args);
+        assert_ne!(r["isError"], true, "create failed: {r}");
+        r["structuredContent"]["id"].as_str().unwrap().to_owned()
+    };
+    let epic = mk(&mut s, 2, json!({ "title": "epic", "type": "epic" }));
+    let plain = mk(&mut s, 3, json!({ "title": "plain child", "parent": epic }));
+    let linked = mk(
+        &mut s,
+        4,
+        json!({ "title": "linked child", "parent": epic }),
+    );
+    let file = dir
+        .path()
+        .join(".clove/issues")
+        .join(format!("{linked}.md"));
+    let text = std::fs::read_to_string(&file).unwrap();
+    let (front, body) = text[4..].split_once("\n---\n").unwrap();
+    std::fs::write(
+        &file,
+        format!("---\n{front}\nexternal_ref: gh-12\n---\n{body}"),
+    )
+    .unwrap();
+
+    let ids = |s: &mut Session, tool: &str, args: Value| -> (Vec<String>, Value) {
+        let r = s.call(9, tool, args);
+        assert_ne!(r["isError"], true, "{tool} failed: {r}");
+        let mut out: Vec<String> = r["structuredContent"]["items"]
+            .as_array()
+            .expect("items array")
+            .iter()
+            .map(|i| i["id"].as_str().unwrap().to_owned())
+            .collect();
+        out.sort();
+        (out, r["structuredContent"]["filters"].clone())
+    };
+    let mut children = vec![plain.clone(), linked.clone()];
+    children.sort();
+
+    for tool in ["clove_list", "clove_ready"] {
+        let (got, filters) = ids(&mut s, tool, json!({ "parent": epic }));
+        assert_eq!(got, children, "{tool}");
+        assert_eq!(filters["parent"], epic.as_str(), "{tool}");
+        let (got, filters) = ids(&mut s, tool, json!({ "synced": true }));
+        assert_eq!(got, vec![linked.clone()], "{tool}");
+        assert_eq!(filters["synced"], true, "{tool}");
+        let (got, _) = ids(&mut s, tool, json!({ "synced": false, "parent": epic }));
+        assert_eq!(got, vec![plain.clone()], "{tool}");
+    }
+    let (got, _) = ids(&mut s, "clove_blocked", json!({ "parent": epic }));
+    assert!(got.is_empty());
+
+    let bad = s.call(10, "clove_list", json!({ "parent": "not-an-id" }));
+    assert_eq!(bad["isError"], true, "{bad}");
+
+    let resp = s.request(json!({ "jsonrpc": "2.0", "id": 11, "method": "tools/list" }));
+    let tools = resp["result"]["tools"].as_array().unwrap();
+    for name in ["clove_list", "clove_ready", "clove_blocked"] {
+        let schema = &tools.iter().find(|t| t["name"] == name).unwrap()["inputSchema"];
+        for field in ["synced", "parent"] {
+            let description = schema["properties"][field]["description"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{name}.{field} is not published: {schema}"));
+            assert!(!description.is_empty());
+        }
+    }
     s.shutdown();
 }
 

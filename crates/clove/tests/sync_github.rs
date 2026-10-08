@@ -70,6 +70,9 @@ struct State {
     comment_get_count: u64,
     /// Count of issue PATCHes actually received.
     patch_count: u64,
+    /// Logins GitHub refuses as assignees: an issue create/PATCH naming one gets
+    /// GitHub's real 422 validation-error body and mutates nothing.
+    rejected_assignees: Vec<String>,
 }
 
 impl State {
@@ -105,6 +108,7 @@ impl MockGitHub {
             fail_comment_post_for: None,
             issue_post_count: 0,
             patch_count: 0,
+            rejected_assignees: Vec::new(),
         }));
         let thread_state = Arc::clone(&state);
         std::thread::spawn(move || {
@@ -179,6 +183,15 @@ impl MockGitHub {
     /// Make comment POSTs to `number` fail with 500 (no mutation) until cleared.
     fn set_fail_comment_post_for(&self, number: Option<u64>) {
         self.state.lock().unwrap().fail_comment_post_for = number;
+    }
+
+    /// Make GitHub reject `login` as an assignee (not a user/collaborator).
+    fn reject_assignee(&self, login: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .rejected_assignees
+            .push(login.to_owned());
     }
 
     fn issue_post_count(&self) -> u64 {
@@ -410,6 +423,9 @@ fn route(
         }
         ("POST", None) => {
             s.issue_post_count += 1;
+            if let Some(rejection) = assignee_rejection(&s, body) {
+                return rejection;
+            }
             let number = s.next_number;
             s.next_number += 1;
             let updated = s.tick();
@@ -448,6 +464,9 @@ fn route(
             }
             if let Some(code) = s.patch_fail_status {
                 return (status_line(code), json!({ "message": "patch failed" }));
+            }
+            if let Some(rejection) = assignee_rejection(&s, body) {
+                return rejection;
             }
             let updated = s.tick();
             let Some(issue) = s.issues.iter_mut().find(|i| i["number"] == json!(number)) else {
@@ -494,6 +513,28 @@ fn route(
         }
         _ => ("404 Not Found", json!({ "message": "unsupported" })),
     }
+}
+
+/// GitHub's 422 for an issue create/update naming an assignee it refuses — the
+/// body shape (incl. `value` and the string `status`) real GitHub returns.
+fn assignee_rejection(s: &State, body: &Value) -> Option<(&'static str, Value)> {
+    let rejected = str_array(&body["assignees"])
+        .into_iter()
+        .find(|login| s.rejected_assignees.contains(login))?;
+    Some((
+        status_line(422),
+        json!({
+            "message": "Validation Failed",
+            "errors": [{
+                "value": rejected,
+                "resource": "Issue",
+                "field": "assignees",
+                "code": "invalid"
+            }],
+            "documentation_url": "https://docs.github.com/rest/issues/issues#update-an-issue",
+            "status": "422"
+        }),
+    ))
 }
 
 /// Map an HTTP status code to a status line for the fault-injection responses.
@@ -1846,9 +1887,9 @@ fn a_re_spelled_local_timestamp_is_not_a_change() {
     // precision a foreign tool renders — must not read as an edit and push a
     // no-op PATCH to GitHub.
     for spelling in [
-        "%Y-%m-%dT%H:%M:%S+00:00",
-        "%Y-%m-%dT%H:%M:%S.904816670+00:00",
-        "%Y-%m-%dT%H:%M:%S.000Z",
+        "%Y-%m-%dT%H:%M:%S%.3f+00:00",
+        "%Y-%m-%dT%H:%M:%S%.3f816670+00:00",
+        "%Y-%m-%dT%H:%M:%S%.6fZ",
     ] {
         let mock = MockGitHub::start();
         let dir = init_repo();
@@ -1903,9 +1944,88 @@ fn a_pulled_item_carries_canonical_timestamps() {
             .or_else(|| line.strip_prefix("closed: "))
         {
             assert!(
-                value.ends_with('Z') && !value.contains('.'),
+                value.len() == 24 && value.ends_with('Z') && value.find('.') == Some(19),
                 "non-canonical timestamp `{value}` in:\n{on_disk}"
             );
         }
     }
+}
+
+/// A GitHub rejection must say why (status, GitHub's message, the offending
+/// field) and which item and operation it hit — not the bare `GitHub` octocrab's
+/// `Display` gives.
+#[test]
+fn rejected_assignee_update_names_the_reason_and_the_item() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    clove(dir.path(), mock.addr)
+        .args(["new", "Task", "--type", "bug"])
+        .assert()
+        .success();
+    sync(dir.path(), mock.addr, &[]); // push-create gh-1
+    let id = only_item_id(dir.path(), mock.addr);
+
+    mock.reject_assignee("dogfood-tui");
+    std::thread::sleep(Duration::from_millis(1100));
+    clove(dir.path(), mock.addr)
+        .args(["assign", &id, "dogfood-tui"])
+        .assert()
+        .success();
+
+    let human = clove(dir.path(), mock.addr)
+        .args(["sync", "github", "owner/repo"])
+        .output()
+        .unwrap();
+    assert_eq!(human.status.code(), Some(5), "{human:?}");
+    let stderr = String::from_utf8_lossy(&human.stderr);
+    for needle in [
+        "422",
+        "Validation Failed",
+        "assignees: invalid",
+        "dogfood-tui",
+        "update",
+        "#1",
+        "gh-1",
+        id.as_str(),
+    ] {
+        assert!(stderr.contains(needle), "missing `{needle}` in: {stderr}");
+    }
+    assert!(
+        !stderr.contains("io error at"),
+        "a GitHub rejection is not a filesystem error: {stderr}"
+    );
+
+    let out = sync_raw(dir.path(), mock.addr, &[]);
+    assert_eq!(out.status.code(), Some(5), "{out:?}");
+    let envelope: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(envelope["error"]["code"], "IO_ERROR", "{envelope}");
+    let message = envelope["error"]["message"].as_str().unwrap();
+    for needle in ["422", "Validation Failed", "assignees: invalid", "gh-1"] {
+        assert!(message.contains(needle), "missing `{needle}` in: {message}");
+    }
+    assert!(message.contains(&id), "missing the item id in: {message}");
+}
+
+/// The create path names the local item it was creating an issue for.
+#[test]
+fn rejected_assignee_create_names_the_local_item() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    mock.reject_assignee("dogfood-tui");
+    clove(dir.path(), mock.addr)
+        .args(["new", "Task", "--type", "bug", "--assignee", "dogfood-tui"])
+        .assert()
+        .success();
+    let id = only_item_id(dir.path(), mock.addr);
+
+    let out = clove(dir.path(), mock.addr)
+        .args(["sync", "github", "owner/repo"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(5), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    for needle in ["422", "assignees: invalid", "create", id.as_str()] {
+        assert!(stderr.contains(needle), "missing `{needle}` in: {stderr}");
+    }
+    assert_eq!(mock.issue_count(), 0, "the rejected create made no issue");
 }

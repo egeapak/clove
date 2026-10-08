@@ -5,7 +5,7 @@ expression: rendered
   All 7  │  Ready 4  │  Blocked 1
 ┌ Items (7) ───────────────────────────────────┐┌ Overview · Dep tree · Comments ──────────────────────────────────────┐
 │▌◐ F #9QX4D1B7 ! Build REST API ●             ││ Dependency tree (this → its dependencies)                            │
-│ ○ B #2HZ6C3PW ↑ Investigate flaky CI ●       ││                                                                      │
+│ ○ B #0HZ6C3PW ↑ Investigate flaky CI ●       ││                                                                      │
 │ ● C #7AF3K2MN ↑ Set up database schema       ││ ◐ #9QX4D1B7  Build REST API [ready]                                  │
 │ ○ E #3HT6WYG5 • Ship v1 release ●            ││ └── ● #7AF3K2MN  Set up database schema                              │
 │ ○ F #K2M8ZP5R • Write integration tests ✗    ││                                                                      │

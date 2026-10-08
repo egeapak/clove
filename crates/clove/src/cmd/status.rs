@@ -6,7 +6,7 @@ use serde_json::Map;
 
 use crate::context::Ctx;
 use crate::item_json::print_item;
-use crate::util::{now_seconds, parse_id};
+use crate::util::{now_millis, parse_id};
 
 pub fn run(
     ctx: &Ctx,
@@ -16,7 +16,7 @@ pub fn run(
     quiet: bool,
 ) -> Result<(), CloveError> {
     let id = parse_id(id)?;
-    let now = now_seconds();
+    let now = now_millis();
 
     // The read-modify-write runs under one store-wide lock (`update_with`), not
     // a lock-free `get` followed by a locking `update`: the latter leaves a

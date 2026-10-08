@@ -2,13 +2,19 @@
   import type { Item, StatsHistoryPoint } from '$lib/types';
   import { store, retryLoad } from '$lib/store.svelte';
   import { api } from '$lib/api';
-  import { goto } from '$app/navigation';
+  import { base } from '$app/paths';
   import TypeIcon from '$lib/components/TypeIcon.svelte';
   import ShortId from '$lib/components/ShortId.svelte';
-  import { shortId, typeIcon } from '$lib/glyphs';
+  import StatusGlyph from '$lib/components/StatusGlyph.svelte';
+  import { shortId, typeIcon, statusGlyph, statusColorVar, statusLabel } from '$lib/glyphs';
+  import { dailyHistory, lastDays } from '$lib/history';
+  import { tooltip } from '$lib/tooltip';
+  import { tick } from 'svelte';
 
   let history = $state<StatsHistoryPoint[]>([]);
   let range = $state<'30' | '90' | 'all'>('90');
+  // The row under the pointer: its label and its track highlight together.
+  let hovered = $state<string | null>(null);
 
   $effect(() => {
     api.history().then((h) => (history = h)).catch(() => (history = []));
@@ -63,15 +69,24 @@
     })
   );
 
-  function barStyle(i: Item): string {
+  function barSpan(i: Item): { start: number; width: number } {
     const start = pct(new Date(i.created).getTime());
     const end = pct(new Date(i.closed ?? domain.now).getTime());
-    const w = Math.max(end - start, 1.5);
-    return `left:${start}%;width:${w}%`;
+    return { start, width: Math.max(end - start, 1.5) };
   }
-  // Visual: closed items get a solid type-coloured bar; in-progress/open get the
-  // type colour with reduced emphasis. "blocked" is a SEPARATE concern, driven
-  // by blocked_by (not status) — see isBlocked() / the bar label.
+  function barStyle(i: Item): string {
+    const { start, width } = barSpan(i);
+    return `left:${start}%;width:${width}%`;
+  }
+  /** The status glyph just past the bar's end, in the status colour used everywhere else. */
+  function endStyle(i: Item): string {
+    const { start, width } = barSpan(i);
+    return `left:${start + width}%;color:${statusColorVar(i.status)}`;
+  }
+  // Visual: open and in-progress work is a full type-coloured bar; closed work
+  // is muted to a tinted outline so the live items stand out, and each bar ends
+  // in its status glyph. "blocked" is a SEPARATE concern, driven by blocked_by
+  // (not status) — see isBlocked() / the bar label.
   function barClass(i: Item): string {
     if (i.status === 'closed') return i.type + ' closed';
     if (i.status === 'in_progress') return i.type + ' inprog';
@@ -81,11 +96,28 @@
     return i.blocked_by.length > 0;
   }
 
-  // axis ticks (~8)
+  // The time axis gets a width per day, so a long history scrolls sideways
+  // rather than squeezing every bar into the window.
+  const PX_PER_DAY = 14;
+  const MIN_TRACK_W = 640;
+  const trackW = $derived(Math.max(MIN_TRACK_W, Math.round(((domain.max - domain.min) / 86400000) * PX_PER_DAY)));
+
+  // Open on the recent end: today sits at the right of the scrolled axis.
+  let scrollEl = $state<HTMLDivElement | undefined>();
+  let scrolledToNow = false;
+  $effect(() => {
+    if (scrolledToNow || !scrollEl || rows.length === 0) return;
+    scrolledToNow = true;
+    void tick().then(() => {
+      if (scrollEl) scrollEl.scrollLeft = scrollEl.scrollWidth;
+    });
+  });
+
+  // axis ticks, about one per 140px of track
   const ticks = $derived.by(() => {
     const out: { left: number; label: string }[] = [];
     const { min, max } = domain;
-    const n = 8;
+    const n = Math.max(4, Math.round(trackW / 140));
     for (let k = 0; k <= n; k++) {
       const t = min + ((max - min) * k) / n;
       out.push({
@@ -120,9 +152,9 @@
   const svgH = $derived(rows.length * ROW_H);
 
   // ---- throughput ----
+  const daily = $derived(dailyHistory(history));
   const tput = $derived.by(() => {
-    const days = range === 'all' ? history.length : Number(range);
-    const pts = history.slice(-days);
+    const pts = range === 'all' ? daily : lastDays(daily, Number(range), new Date().toISOString().slice(0, 10));
     const maxV = Math.max(1, ...pts.map((p) => Math.max(p.created, p.closed)));
     return { pts, maxV };
   });
@@ -141,7 +173,9 @@
   <span class="dim mono">{items.length} items · created → closed/now</span>
 </div>
 
-<div class="tl-grid panel">
+<div class="tl panel">
+<div class="tl-scroll" bind:this={scrollEl}>
+<div class="tl-grid" style="--track-w:{trackW}px">
   <div class="tl-corner"></div>
   <div class="tl-axis">
     {#each ticks as t (t.left)}
@@ -151,10 +185,19 @@
 
   <div class="tl-labels">
     {#each rows as it (it.id)}
-      <div class="rowlabel" class:epic={it.type === 'epic'}>
-        <TypeIcon type={it.type} /> <ShortId id={it.id} />
+      <a
+        class="rowlabel"
+        class:closed={it.status === 'closed'}
+        class:epic={it.type === 'epic'}
+        class:hl={hovered === it.id}
+        href="{base}/items/{it.id}"
+        use:tooltip={`${it.id} · ${it.title}`}
+        onmouseenter={() => (hovered = it.id)}
+        onmouseleave={() => (hovered = null)}
+      >
+        <StatusGlyph status={it.status} /><TypeIcon type={it.type} /> <ShortId id={it.id} title={it.title} />
         <span class="rl-title">{it.title}</span>
-      </div>
+      </a>
     {/each}
   </div>
 
@@ -185,18 +228,26 @@
       {/each}
     </svg>
     {#each rows as it, ri (it.id)}
-      <div class="track" style="top:{ri * ROW_H}px">
-        <button
+      <div
+        class="track"
+        class:hl={hovered === it.id}
+        style="top:{ri * ROW_H}px"
+        role="presentation"
+        onmouseenter={() => (hovered = it.id)}
+        onmouseleave={() => (hovered = null)}
+      >
+        <a
           class="bar {barClass(it)}"
           class:blocked={isBlocked(it)}
           style={barStyle(it)}
-          onclick={() => goto(`../items/${it.id}`)}
-          title="{it.type} · {it.title}{isBlocked(it) ? ' · blocked' : ''}"
-          aria-label="{shortId(it.id)} {it.type} {it.title}{isBlocked(it) ? ' (blocked)' : ''}"
+          href="{base}/items/{it.id}"
+          use:tooltip={`${it.type} · ${it.title}${isBlocked(it) ? ' · blocked' : ''}`}
+          aria-label="{shortId(it.id)} {it.type} {it.title}, {statusLabel(it.status)}{isBlocked(it) ? ' (blocked)' : ''}"
         >
           <span class="bar-type" aria-hidden="true">{typeIcon(it.type)}</span>
           {shortId(it.id)}{#if isBlocked(it)} ·blocked{/if}
-        </button>
+        </a>
+        <span class="bar-end mono" style={endStyle(it)} aria-hidden="true">{statusGlyph(it.status)}</span>
       </div>
     {/each}
   </div>
@@ -213,6 +264,8 @@
       {/if}
     </div>
   {/if}
+</div>
+</div>
 </div>
 
 <!-- throughput -->
@@ -258,14 +311,29 @@
     font-size: 16px;
     margin: 0;
   }
-  .tl-grid {
-    display: grid;
-    grid-template-columns: 220px 1fr;
+  .tl {
     overflow: hidden;
+  }
+  .tl-scroll {
+    overflow-x: auto;
+  }
+  .tl-grid {
+    --label-w: clamp(260px, 26vw, 480px);
+    display: grid;
+    grid-template-columns: var(--label-w) minmax(var(--track-w), 1fr);
+  }
+  /* The label column stays put while the time axis scrolls under it; an
+     opaque base keeps bars from showing through a translucent theme. */
+  .tl-corner,
+  .tl-labels {
+    position: sticky;
+    left: 0;
+    z-index: 6;
+    background: linear-gradient(var(--surface), var(--surface)), var(--surface-app);
+    border-right: 1px solid var(--border);
   }
   .tl-corner {
     border-bottom: 1px solid var(--border);
-    border-right: 1px solid var(--border);
   }
   .tl-axis {
     position: relative;
@@ -280,9 +348,6 @@
     transform: translateX(-50%);
     white-space: nowrap;
   }
-  .tl-labels {
-    border-right: 1px solid var(--border);
-  }
   .rowlabel {
     height: 38px;
     display: flex;
@@ -292,11 +357,19 @@
     border-bottom: 1px solid var(--border);
     font-size: 12px;
     color: var(--text-muted);
+    text-decoration: none;
+  }
+  .rowlabel:hover,
+  .rowlabel.hl {
+    background: var(--surface-hover);
+    color: var(--text);
+    text-decoration: none;
   }
   .rowlabel.epic {
     background: color-mix(in srgb, var(--type-epic) 8%, transparent);
   }
   .rl-title {
+    min-width: 0;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -328,6 +401,9 @@
     height: 38px;
     border-bottom: 1px solid var(--border);
   }
+  .track.hl {
+    background: var(--surface-hover);
+  }
   .bar {
     position: absolute;
     top: 9px;
@@ -344,32 +420,53 @@
     overflow: hidden;
     border: none;
     z-index: 2;
+    text-decoration: none;
+  }
+  .bar:hover {
+    text-decoration: none;
+    filter: brightness(1.1);
+  }
+  .bar {
+    background: var(--bar);
   }
   .bar.epic {
-    background: var(--type-epic);
+    --bar: var(--type-epic);
   }
   .bar.feature {
-    background: var(--type-feature);
+    --bar: var(--type-feature);
   }
   .bar.bug {
-    background: var(--type-bug);
+    --bar: var(--type-bug);
     color: #fff;
   }
   .bar.chore {
-    background: var(--type-chore);
+    --bar: var(--type-chore);
   }
   .bar.docs {
-    background: var(--type-docs);
-  }
-  /* open/in-progress: lower-emphasis fill so closed (solid) reads as "done" */
-  .bar.openbar {
-    opacity: 0.55;
-  }
-  .bar.inprog {
-    opacity: 0.85;
+    --bar: var(--type-docs);
   }
   .bar.closed {
-    opacity: 1;
+    background: color-mix(in srgb, var(--bar) 22%, var(--surface-2));
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--bar) 45%, transparent);
+    color: var(--text-muted);
+    font-weight: 500;
+  }
+  .bar-end {
+    position: absolute;
+    top: 9px;
+    height: 20px;
+    display: flex;
+    align-items: center;
+    margin-left: 4px;
+    font-size: 11px;
+    z-index: 2;
+    pointer-events: none;
+  }
+  .rowlabel :global(.st) {
+    font-size: 11px;
+  }
+  .rowlabel.closed .rl-title {
+    color: var(--text-dim);
   }
   /* blocked is driven by blocked_by, NOT status */
   .bar.blocked {
@@ -384,6 +481,9 @@
   }
   .tl-empty {
     grid-column: 1 / -1;
+    position: sticky;
+    left: 0;
+    width: min(100%, 100vw - 40px);
     text-align: center;
     padding: 40px 0;
     font-size: 13px;
@@ -451,7 +551,7 @@
   }
   @media (max-width: 720px) {
     .tl-grid {
-      grid-template-columns: 130px 1fr;
+      --label-w: 160px;
     }
   }
 </style>

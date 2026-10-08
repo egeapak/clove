@@ -1,12 +1,23 @@
 <script lang="ts">
   import type { ItemType } from '$lib/types';
   import { typeIcon, typeColorVar } from '$lib/glyphs';
-  let { type }: { type: ItemType } = $props();
+  import { tooltip } from '$lib/tooltip';
+  let { type, label = false }: { type: ItemType; label?: boolean } = $props();
 </script>
 
-<span class="ty mono" style="color:{typeColorVar(type)};border-color:{typeColorVar(type)}" role="img" aria-label="{type}">
-  {typeIcon(type)}
-</span>
+{#if label}
+  <span class="ty mono labelled" style="color:{typeColorVar(type)};border-color:{typeColorVar(type)}">{type}</span>
+{:else}
+  <span
+    class="ty mono"
+    style="color:{typeColorVar(type)};border-color:{typeColorVar(type)}"
+    role="img"
+    aria-label={type}
+    use:tooltip={type}
+  >
+    {typeIcon(type)}
+  </span>
+{/if}
 
 <style>
   .ty {
@@ -21,5 +32,11 @@
     border: 1px solid;
     background: color-mix(in srgb, currentColor 12%, transparent);
     flex: 0 0 auto;
+  }
+  .ty.labelled {
+    width: auto;
+    height: auto;
+    padding: 2px 8px;
+    font-weight: 500;
   }
 </style>

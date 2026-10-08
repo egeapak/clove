@@ -445,16 +445,20 @@ async fn push_create(
 ) -> Result<String, ImportError> {
     let item = &push.item;
     let handler = crab.issues(owner, repo);
-    let created: Issue = with_retry(false, || {
-        let mut builder = handler.create(&item.title).body(item.body.clone());
-        if !item.labels.is_empty() {
-            builder = builder.labels(item.labels.clone());
-        }
-        if let Some(assignee) = &item.assignee {
-            builder = builder.assignees(vec![assignee.clone()]);
-        }
-        builder.send()
-    })
+    let created: Issue = with_retry(
+        false,
+        &format!("issue create for {}", push.clove_id),
+        || {
+            let mut builder = handler.create(&item.title).body(item.body.clone());
+            if !item.labels.is_empty() {
+                builder = builder.labels(item.labels.clone());
+            }
+            if let Some(assignee) = &item.assignee {
+                builder = builder.assignees(vec![assignee.clone()]);
+            }
+            builder.send()
+        },
+    )
     .await?;
 
     // Link the local item to the new issue *before* anything else can fail: the
@@ -479,7 +483,12 @@ async fn push_create(
     // *close* response's timestamp as the fingerprint, or the next sync would see
     // a spurious remote change and pull-update the just-created item.
     if item.closed {
-        match with_retry(true, || {
+        let operation = format!(
+            "issue close of {} for {}",
+            issue_label(created.number),
+            push.clove_id
+        );
+        match with_retry(true, &operation, || {
             handler
                 .update(created.number)
                 .state(octocrab::models::IssueState::Closed)
@@ -554,7 +563,12 @@ async fn push_update(
     // assignee, leave GitHub's untouched (don't disturb purely-human assignees).
     let touch_assignees = item.assignee.is_some() || prev_owned.is_some();
 
-    let updated: Issue = with_retry(true, || {
+    let operation = format!(
+        "issue update of {} for {}",
+        issue_label(push.number),
+        push.clove_id
+    );
+    let updated: Issue = with_retry(true, &operation, || {
         let state_param = if want_closed {
             octocrab::models::IssueState::Closed
         } else {
@@ -584,6 +598,12 @@ async fn push_update(
     state.record(&external_ref, Some(updated.updated_at), push.local_updated);
     state.record_content_hash(&external_ref, crate::sync::export_fingerprint(item));
     Ok(())
+}
+
+/// How an error names a GitHub issue: `#3 (gh-3)`, the number and the
+/// `external_ref` the local item carries.
+fn issue_label(number: u64) -> String {
+    format!("#{number} ({})", crate::github::external_ref_for(number))
 }
 
 /// Map a GitHub `state_reason` string onto octocrab's enum (`None` for the
@@ -650,7 +670,7 @@ async fn sync_all_comments(
             }
         }
 
-        let gh = fetch_comments(crab, owner, repo, number).await?;
+        let gh = fetch_comments(crab, owner, repo, number, id).await?;
 
         let entry = state
             .entries
@@ -675,8 +695,11 @@ async fn sync_all_comments(
             let body = comment.body.clone();
             // A comment create is non-idempotent — a retry on a lost response would
             // post a duplicate — so it is never retried (see `with_retry`).
-            let created =
-                with_retry(false, || handler.create_comment(number, body.clone())).await?;
+            let operation = format!("comment post on {} for {id}", issue_label(number));
+            let created = with_retry(false, &operation, || {
+                handler.create_comment(number, body.clone())
+            })
+            .await?;
             entry.gh_comment_ids.insert(created.id.into_inner());
             entry.record_comment_hash(body_hash(&comment.body));
             // Posting a comment bumps the issue's `updated_at` on GitHub. Advance
@@ -708,18 +731,24 @@ fn default_entry() -> crate::sync::SyncEntry {
 }
 
 /// Fetch every comment on an issue (paginated), reduced to [`GhComment`].
+/// `clove_id` is the linked local item, named in a failure.
 async fn fetch_comments(
     crab: &Octocrab,
     owner: &str,
     repo: &str,
     number: u64,
+    clove_id: &CloveId,
 ) -> Result<Vec<GhComment>, ImportError> {
+    let operation = format!("comment fetch of {} for {clove_id}", issue_label(number));
     let handler = crab.issues(owner, repo);
-    let first = with_retry(true, || {
+    let first = with_retry(true, &operation, || {
         handler.list_comments(number).per_page(100u8).send()
     })
     .await?;
-    let all = crab.all_pages(first).await.map_err(net_err)?;
+    let all = crab
+        .all_pages(first)
+        .await
+        .map_err(|err| net_err(&operation, &err))?;
     Ok(all
         .into_iter()
         .map(|c| GhComment {
@@ -761,13 +790,12 @@ fn value_updated(value: &Value) -> Option<DateTime<Utc>> {
     value
         .get("updated")
         .and_then(Value::as_str)
-        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-        .map(|dt| dt.with_timezone(&Utc))
+        .and_then(clove_types::parse_rfc3339)
 }
 
-/// Truncate to whole seconds (the canonical on-disk timestamp precision).
+/// Truncate to whole milliseconds (the canonical on-disk timestamp precision).
 fn truncate(ts: DateTime<Utc>) -> DateTime<Utc> {
-    clove_types::truncate_to_seconds(ts)
+    clove_types::truncate_to_millis(ts)
 }
 
 /// The base backoff delay between network retries. Overridable via
@@ -811,7 +839,13 @@ fn is_transient(err: &octocrab::Error) -> bool {
 /// the response was lost, a retry would create a duplicate. Non-idempotent calls
 /// therefore make exactly one attempt. Permanent errors (4xx) are never retried
 /// regardless (see [`is_transient`]).
-async fn with_retry<T, F, Fut>(idempotent: bool, mut op: F) -> Result<T, ImportError>
+///
+/// `operation` names the call and its item for the error (see [`net_err`]).
+async fn with_retry<T, F, Fut>(
+    idempotent: bool,
+    operation: &str,
+    mut op: F,
+) -> Result<T, ImportError>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T, octocrab::Error>>,
@@ -825,7 +859,7 @@ where
             Err(err) => {
                 attempt += 1;
                 if attempt >= MAX_ATTEMPTS || !idempotent || !is_transient(&err) {
-                    return Err(net_err(err));
+                    return Err(net_err(operation, &err));
                 }
                 tokio::time::sleep(delay).await;
                 delay = delay.saturating_mul(2);

@@ -126,3 +126,23 @@ select {
   white-space: nowrap;
   border: 0;
 }
+
+/* Shared tooltip (lib/tooltip.ts): floats on <body>, themed like the popovers. */
+.clove-tooltip {
+  position: fixed;
+  z-index: 110;
+  pointer-events: none;
+  padding: 3px 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text);
+  /* Opaque even in the translucent themes: it floats over arbitrary content. */
+  background: linear-gradient(var(--surface-3), var(--surface-3)), var(--surface-app);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-pop);
+  /* Item titles can be long: wrap them rather than run off the viewport. */
+  max-width: min(480px, calc(100vw - 12px));
+  overflow-wrap: anywhere;
+  white-space: pre-line;
+}

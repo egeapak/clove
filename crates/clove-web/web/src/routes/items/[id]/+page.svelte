@@ -5,15 +5,20 @@
   import { toasts } from '$lib/toast.svelte';
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
+  import { untrack } from 'svelte';
+  import { base } from '$app/paths';
   import StatusGlyph from '$lib/components/StatusGlyph.svelte';
   import PriorityGlyph from '$lib/components/PriorityGlyph.svelte';
   import TypeIcon from '$lib/components/TypeIcon.svelte';
   import LabelChip from '$lib/components/LabelChip.svelte';
   import Avatar from '$lib/components/Avatar.svelte';
-  import BlockedBadge from '$lib/components/BlockedBadge.svelte';
   import Markdown from '$lib/components/Markdown.svelte';
   import DepTree from '$lib/components/DepTree.svelte';
+  import ExternalRef from '$lib/components/ExternalRef.svelte';
+  import RelatedItem from '$lib/components/RelatedItem.svelte';
   import { shortId, shortDate, relativeTime, priorityLabel, statusLabel } from '$lib/glyphs';
+  import { rememberRelated } from '$lib/related.svelte';
+  import { tooltip } from '$lib/tooltip';
 
   let { data } = $props();
   const id = $derived(data.id);
@@ -43,6 +48,28 @@
     };
   }
 
+  // Items whose parent is this one, from `GET /items?parent=`.
+  let children = $state<string[]>([]);
+  let showAllChildren = $state(false);
+  const CHILDREN_SHOWN = 12;
+
+  // `blocked_by` holds the open and the dangling hard deps; the rest of `deps`
+  // are closed and only informative.
+  const relationships = $derived.by(() => {
+    if (!item) return [];
+    const blocking = new Set(item.blocked_by);
+    const groups = [
+      { kind: 'part of', ids: item.parent ? [item.parent] : [], warn: false },
+      { kind: 'children', ids: children, warn: false },
+      { kind: 'blocked by', ids: item.blocked_by, warn: true },
+      { kind: 'depends on', ids: item.deps.filter((d) => !blocking.has(d)), warn: false },
+      { kind: 'relates to', ids: item.relates, warn: false },
+      { kind: 'duplicates', ids: item.duplicates ?? [], warn: false },
+      { kind: 'supersedes', ids: item.supersedes ?? [], warn: false }
+    ];
+    return groups.filter((g) => g.ids.length > 0);
+  });
+
   // Enum options driven by store.meta, with literal fallbacks.
   const statusOptions = $derived(store.meta?.statuses?.length ? store.meta.statuses : ['open', 'in_progress', 'closed']);
   const prioOptions = $derived(store.meta?.priorities?.length ? store.meta.priorities : [0, 1, 2, 3, 4]);
@@ -61,27 +88,79 @@
     goto(`?${p.toString()}`, { replaceState: true, noScroll: true, keepFocus: true });
   }
 
-  // load full item (body etc) + deptree when id changes
-  $effect(() => {
-    const curId = id;
-    full = null;
+  // Each load is numbered so an older response landing late cannot overwrite a
+  // newer one (live refetches can overlap).
+  let itemLoad = 0;
+  let deptreeLoad = 0;
+  let commentsLoad = 0;
+  let childrenLoad = 0;
+
+  function loadItem(curId: string, live: boolean) {
+    const token = ++itemLoad;
     api
       .item(curId)
       .then((it) => {
         store.upsert(it);
-        if (curId === id) full = it;
+        if (token === itemLoad && curId === id) full = it;
       })
       .catch((e) => {
         console.warn('[clove] failed to load item', curId, e);
-        toasts.error('Failed to load item');
+        if (!live) toasts.error('Failed to load item');
       });
+  }
+
+  function loadDeptree(curId: string) {
+    const token = ++deptreeLoad;
     api
       .deptree(curId)
-      .then((t) => (deptree = t))
+      .then((t) => {
+        if (token === deptreeLoad && curId === id) deptree = t;
+      })
       .catch((e) => {
-        deptree = null;
+        if (token === deptreeLoad && curId === id) deptree = null;
         console.warn('[clove] failed to load dep tree', curId, e);
       });
+  }
+
+  function loadComments(curId: string) {
+    const token = ++commentsLoad;
+    api
+      .comments(curId)
+      .then((c) => {
+        if (token === commentsLoad && curId === id) comments = c;
+      })
+      .catch(() => {
+        if (token === commentsLoad && curId === id) comments = [];
+      });
+  }
+
+  function loadChildren(curId: string) {
+    const token = ++childrenLoad;
+    api
+      .items({ parent: curId, limit: 0 })
+      .then((page) => {
+        if (token !== childrenLoad || curId !== id) return;
+        // Checked here too: a server without the `parent` filter answers with
+        // every item rather than refusing.
+        const kids = page.items.filter((i) => i.parent === curId);
+        rememberRelated(kids);
+        children = kids.map((i) => i.id);
+      })
+      .catch((e) => {
+        if (token === childrenLoad && curId === id) children = [];
+        console.warn('[clove] failed to load children', curId, e);
+      });
+  }
+
+  // load full item (body etc), deptree and children when id changes
+  $effect(() => {
+    const curId = id;
+    full = null;
+    children = [];
+    showAllChildren = false;
+    loadItem(curId, false);
+    loadDeptree(curId);
+    loadChildren(curId);
   });
 
   // load comments only when the Comments tab is opened
@@ -91,14 +170,23 @@
     const curId = id;
     if (commentsFor === curId) return;
     commentsFor = curId;
-    api
-      .comments(curId)
-      .then((c) => {
-        if (curId === id) comments = c;
-      })
-      .catch(() => {
-        if (curId === id) comments = [];
-      });
+    loadComments(curId);
+  });
+
+  // The store's live refetch only covers its own window, which may not hold
+  // this item at all (a direct link declares no query) and never carries the
+  // body, comments or dep tree — so refetch them on every live change.
+  let seenRev = store.liveRev;
+  $effect(() => {
+    const rev = store.liveRev;
+    if (rev === seenRev) return;
+    seenRev = rev;
+    untrack(() => {
+      loadItem(id, true);
+      loadDeptree(id);
+      loadChildren(id);
+      if (commentsFor === id) loadComments(id);
+    });
   });
 
   // ---- inline edits (optimistic) ----
@@ -200,7 +288,7 @@
       store.remove(id);
       toasts.push('Item deleted');
       // Rely on the WS batch → refetch for any cascaded changes.
-      goto('../list');
+      goto(`${base}/list`);
     } catch (e) {
       if (e instanceof ApiError && e.code === 'HAS_DEPENDENTS') {
         toasts.error('Other items depend on this. Use force-delete to remove anyway.');
@@ -227,11 +315,11 @@
   <div class="screen panel detail">
     <div class="detail-main">
       <div class="dhead">
-        <span class="id mono">{shortId(item.id)}</span>
-        <TypeIcon type={item.type} />
-        <span class="tag" style="color:{`var(--type-${item.type})`};border-color:{`var(--type-${item.type})`}">{item.type}</span>
+        <span class="id mono" use:tooltip={item.id}>{shortId(item.id)}</span>
+        <TypeIcon type={item.type} label />
         <span class="tag status"><StatusGlyph status={item.status} /> {statusLabel(item.status)}</span>
         <PriorityGlyph priority={item.priority} label />
+        <ExternalRef {item} />
         <a class="edit-link" href="{item.id}/edit">Edit</a>
       </div>
       <h1 class="dtitle">{item.title}</h1>
@@ -260,7 +348,7 @@
         {#if item.deps.length}
           <div class="dep-list">
             {#each item.deps as d (d)}
-              <span class="dep-chip mono">{shortId(d)} <button aria-label="remove dep {d}" onclick={() => removeDep(d)}>×</button></span>
+              <span class="dep-chip"><RelatedItem id={d} /> <button aria-label="remove dep {d}" onclick={() => removeDep(d)}>×</button></span>
             {/each}
           </div>
         {/if}
@@ -271,7 +359,7 @@
               <Avatar name={c.author} />
               <div class="body">
                 <div class="meta"><b>{c.author}</b> · {relativeTime(c.timestamp)}</div>
-                <div class="text">{c.body}</div>
+                <div class="text"><Markdown source={c.body} /></div>
               </div>
             </div>
           {/each}
@@ -325,10 +413,22 @@
       </div>
       <div class="side-block">
         <div class="side-label">Relationships</div>
-        {#if item.blocked_by.length}<div class="side-row"><BlockedBadge blockedBy={item.blocked_by} /></div>{/if}
-        {#if item.parent}<div class="side-row"><TypeIcon type="epic" /> part of <a href="../items/{item.parent}">{shortId(item.parent)}</a></div>{/if}
-        {#each item.relates as r (r)}<div class="side-row dim mono">relates {shortId(r)}</div>{/each}
-        {#if !item.blocked_by.length && !item.parent && !item.relates.length}<div class="side-row dim">None</div>{/if}
+        {#each relationships as group (group.kind)}
+          {@const capped = group.kind === 'children' && !showAllChildren && group.ids.length > CHILDREN_SHOWN}
+          <div class="rel-group">
+            <div class="rel-kind" class:warn={group.warn}>
+              {group.kind}{#if group.kind === 'children'}<span class="rel-count mono">{group.ids.length}</span>{/if}
+            </div>
+            {#each capped ? group.ids.slice(0, CHILDREN_SHOWN) : group.ids as rid (rid)}<div class="rel-row"><RelatedItem id={rid} /></div>{/each}
+            {#if capped}
+              <button class="rel-more" onclick={() => (showAllChildren = true)}>
+                Show all {group.ids.length}
+              </button>
+            {/if}
+          </div>
+        {:else}
+          <div class="side-row dim">None</div>
+        {/each}
       </div>
       <div class="side-block">
         <div class="side-label">Dates</div>
@@ -363,9 +463,50 @@
   .screen {
     overflow: hidden;
   }
+  /* The layout's shell is a viewport-tall column and `main` its growing
+     child; as a column too, it lets the panel take exactly the height left. */
   .detail {
     display: grid;
-    grid-template-columns: 1fr 300px;
+    grid-template-columns: minmax(0, 1fr) 300px;
+    flex: 1;
+  }
+  :global(main.page:has(> .detail)) {
+    display: flex;
+    flex-direction: column;
+    padding-bottom: 20px;
+  }
+  .rel-group + .rel-group {
+    margin-top: 8px;
+  }
+  .rel-kind {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-bottom: 2px;
+  }
+  .rel-kind.warn {
+    color: var(--red);
+  }
+  .rel-count {
+    margin-left: 6px;
+    padding: 0 6px;
+    border-radius: var(--radius-pill);
+    border: 1px solid var(--border);
+    background: var(--surface-inset);
+    font-size: 10px;
+  }
+  .rel-more {
+    margin-top: 2px;
+    padding: 2px 0;
+    background: none;
+    border: none;
+    color: var(--accent);
+    font-size: 11px;
+  }
+  .rel-row {
+    display: flex;
+    min-width: 0;
+    font-size: 12px;
+    padding: 2px 0;
   }
   .detail-main {
     padding: 18px 22px;
@@ -473,7 +614,9 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    font-size: 11px;
+    max-width: 100%;
+    min-width: 0;
+    font-size: 12px;
     background: var(--surface-inset);
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
@@ -491,6 +634,7 @@
   }
   .comment .body {
     flex: 1;
+    min-width: 0;
   }
   .comment .meta {
     font-size: 12px;
@@ -501,9 +645,7 @@
     color: var(--text);
   }
   .comment .text {
-    color: var(--text-muted);
     font-size: 13px;
-    white-space: pre-wrap;
   }
   .addbox {
     display: flex;
@@ -609,7 +751,7 @@
   }
   @media (max-width: 820px) {
     .detail {
-      grid-template-columns: 1fr;
+      grid-template-columns: minmax(0, 1fr);
     }
     .detail-main {
       border-right: none;

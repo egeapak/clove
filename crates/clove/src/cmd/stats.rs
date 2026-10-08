@@ -40,10 +40,10 @@ pub fn run(
     // Compute analytics from the files (the single source of truth).
     let (frontmatters, _errors) = ctx.store.scan_frontmatter()?;
     let (graph, _dangling) = GraphStore::build(&frontmatters);
-    // Whole seconds, like every stored clove timestamp: this stamps both the
+    // Milliseconds, like every stored clove timestamp: this stamps both the
     // `_meta.generated_at` echo and (with `--snapshot`) the recorded
     // `captured_at`, and the two must not disagree in precision.
-    let now = crate::util::now_seconds();
+    let now = crate::util::now_millis();
     let report = compute_stats(&frontmatters, &graph, now, opts);
 
     // Optionally persist the snapshot into the index database's history table.

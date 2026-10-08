@@ -163,6 +163,14 @@ fn bool_param(params: &HashMap<String, String>, key: &str) -> Result<bool, ApiEr
     }
 }
 
+/// `?synced=`: absent or empty is "either"; otherwise strict, as [`bool_param`].
+fn synced_param(params: &HashMap<String, String>) -> Result<Option<bool>, ApiError> {
+    match params.get("synced").map(String::as_str) {
+        None | Some("") => Ok(None),
+        Some(_) => bool_param(params, "synced").map(Some),
+    }
+}
+
 /// The requested `?fields=`/`?compact=`.
 fn shape_of(params: &HashMap<String, String>) -> Result<Shape, ApiError> {
     let fields = match csv(params, "fields") {
@@ -217,8 +225,8 @@ fn load(state: &AppState) -> Result<(Vec<ItemFrontmatter>, GraphContext), ApiErr
     Ok((frontmatters, ctx))
 }
 
-/// The requested `?status=`/`?type=`/`?priority=`/`?label=`/`?assignee=`/`?q=`,
-/// through the shared contract.
+/// The requested `?status=`/`?type=`/`?priority=`/`?label=`/`?assignee=`/`?q=`/
+/// `?synced=`/`?parent=`, through the shared contract.
 ///
 /// This endpoint had the *only* multi-value filter implementation in the project
 /// — a private predicate here comparing raw strings — while the CLI and MCP took
@@ -244,15 +252,17 @@ fn filters_of(params: &HashMap<String, String>) -> Result<clove_core::view::Filt
             .filter(|s| !s.is_empty())
             .map(String::as_str)
     };
-    clove_core::view::Filters::parse_multi(
+    let mut filters = clove_core::view::Filters::parse_multi(
         &csv(params, "status"),
         &csv(params, "type"),
         &csv(params, "label"),
         present("assignee"),
         &csv(params, "priority"),
         present("q"),
-    )
-    .map_err(ApiError::from)
+    )?;
+    filters.synced = synced_param(params)?;
+    filters.parent = clove_core::view::Filters::parse_parent(present("parent"))?;
+    Ok(filters)
 }
 
 /// The requested `?sort=`/`?dir=`, through the shared contract.
@@ -734,6 +744,7 @@ pub async fn get_meta(State(state): State<AppState>) -> ApiResult {
         "labels": labels.into_iter().collect::<Vec<_>>(),
         "assignees": assignees.into_iter().collect::<Vec<_>>(),
         "daemon": { "running": state.daemon_running, "web_addr": Value::Null },
+        "sync": crate::sync::targets(&state.clove_dir()),
         "source": state.source,
     });
     Ok(ok_data(data))

@@ -5,6 +5,7 @@
   import { toasts } from '$lib/toast.svelte';
   import { goto } from '$app/navigation';
   import ItemForm from '$lib/components/ItemForm.svelte';
+  import RelatedItem from '$lib/components/RelatedItem.svelte';
   import { buildPatch, isEmptyPatch, type FormState } from '$lib/itemForm';
   import { shortId } from '$lib/glyphs';
 
@@ -127,7 +128,7 @@
           {#if item.deps.length}
             <div class="chips">
               {#each item.deps as d (d)}
-                <span class="chip mono">{shortId(d)}<button type="button" aria-label="remove dep {d}" onclick={() => removeDep(d)}>×</button></span>
+                <span class="chip"><RelatedItem id={d} /><button type="button" aria-label="remove dep {d}" onclick={() => removeDep(d)}>×</button></span>
               {/each}
             </div>
           {:else}
@@ -143,7 +144,7 @@
           <div class="rel-label">Parent</div>
           {#if !editingParent}
             <div class="rel-row">
-              {#if item.parent}<a class="mono" href={`../${encodeURIComponent(item.parent)}`}>{shortId(item.parent)}</a>{:else}<span class="dim sm">None</span>{/if}
+              {#if item.parent}<span class="parent"><RelatedItem id={item.parent} /></span>{:else}<span class="dim sm">None</span>{/if}
               <button type="button" class="btn sm" onclick={startEditParent}>Edit</button>
             </div>
           {:else}
@@ -161,7 +162,6 @@
 <style>
   .edit-screen {
     padding: 20px 24px;
-    max-width: 1000px;
   }
   .loading {
     padding: 40px;
@@ -186,8 +186,12 @@
   }
   .cols {
     display: grid;
-    grid-template-columns: 1fr 260px;
+    grid-template-columns: minmax(0, 1fr) 300px;
     gap: 24px;
+  }
+  .parent {
+    display: flex;
+    min-width: 0;
   }
   .rel-block {
     padding: 12px 0;
@@ -227,14 +231,16 @@
   }
   .chips {
     display: flex;
-    flex-wrap: wrap;
+    flex-direction: column;
     gap: 6px;
   }
   .chip {
-    display: inline-flex;
+    display: flex;
     align-items: center;
+    justify-content: space-between;
     gap: 5px;
-    font-size: 11px;
+    min-width: 0;
+    font-size: 12px;
     background: var(--surface-inset);
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
@@ -251,7 +257,7 @@
   }
   @media (max-width: 820px) {
     .cols {
-      grid-template-columns: 1fr;
+      grid-template-columns: minmax(0, 1fr);
     }
   }
 </style>

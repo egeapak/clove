@@ -221,12 +221,12 @@ fn top_caps_breakdowns() {
 // Canonical timestamps (READ_PATH_ROADMAP §3)
 // ---------------------------------------------------------------------------
 
-/// Whether `s` is in clove's one canonical spelling: RFC 3339, UTC, whole
-/// seconds, `Z`.
+/// Whether `s` is in clove's one canonical spelling: RFC 3339, UTC,
+/// millisecond precision, `Z`.
 fn is_canonical(s: &str) -> bool {
-    s.len() == 20
+    s.len() == 24
         && s.ends_with('Z')
-        && !s.contains('.')
+        && s.find('.') == Some(19)
         && s.parse::<chrono::DateTime<chrono::Utc>>().is_ok()
 }
 
@@ -271,9 +271,9 @@ fn history_orders_by_instant_across_stored_spellings() {
         .unwrap();
     conn.execute("DELETE FROM snapshots", []).unwrap();
     for captured_at in [
-        "2026-06-01T10:00:02Z",                // canonical
+        "2026-06-01T10:00:02.000Z",            // canonical
         "2026-06-01T10:00:00.904816670+00:00", // as an older clove wrote it
-        "2026-06-01T10:00:01+00:00",
+        "2026-06-01T10:00:01Z",                // whole seconds, as 0.1.1 wrote it
     ] {
         conn.execute(
             "INSERT INTO snapshots (captured_at, total, open, in_progress, closed, ready, \
@@ -294,9 +294,9 @@ fn history_orders_by_instant_across_stored_spellings() {
     assert_eq!(
         series,
         vec![
-            "2026-06-01T10:00:02Z",
-            "2026-06-01T10:00:01Z",
-            "2026-06-01T10:00:00Z"
+            "2026-06-01T10:00:02.000Z",
+            "2026-06-01T10:00:01.000Z",
+            "2026-06-01T10:00:00.904Z"
         ],
         "newest first by instant, every row canonical"
     );

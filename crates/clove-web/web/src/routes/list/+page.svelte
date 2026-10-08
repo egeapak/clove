@@ -3,6 +3,7 @@
   import { store, retryLoad } from '$lib/store.svelte';
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
+  import { base } from '$app/paths';
   import StatusGlyph from '$lib/components/StatusGlyph.svelte';
   import PriorityGlyph from '$lib/components/PriorityGlyph.svelte';
   import TypeIcon from '$lib/components/TypeIcon.svelte';
@@ -10,10 +11,13 @@
   import LabelChip from '$lib/components/LabelChip.svelte';
   import Avatar from '$lib/components/Avatar.svelte';
   import BlockedBadge from '$lib/components/BlockedBadge.svelte';
+  import ExternalRef from '$lib/components/ExternalRef.svelte';
+  import { hasSyncTarget } from '$lib/sync';
   import { relativeTime, priorityLabel } from '$lib/glyphs';
   import { parseQuery, parsePage } from '$lib/query';
   import { defaultDir } from '$lib/filter';
   import { Virtual } from '$lib/virtual.svelte';
+  import { tooltip } from '$lib/tooltip';
 
   // Fallbacks when /meta isn't available yet.
   const TYPES_FALLBACK: ItemType[] = ['bug', 'feature', 'chore', 'docs', 'epic'];
@@ -32,6 +36,7 @@
   const fTypes = $derived(query.type ?? []);
   const fPrios = $derived(query.priority ?? []);
   const fLabels = $derived(query.label ?? []);
+  const fSynced = $derived(query.synced);
   const sort = $derived(query.sort || 'rank');
   // No explicit dir → the column's natural direction. A blanket 'desc' default
   // rendered the default (rank) view in REVERSE canonical order.
@@ -143,6 +148,15 @@
   const meta = $derived(store.meta);
   const typeOptions = $derived((meta?.types as ItemType[] | undefined)?.length ? (meta!.types as ItemType[]) : TYPES_FALLBACK);
   const prioOptions = $derived(meta?.priorities?.length ? meta!.priorities : PRIOS_FALLBACK);
+  const syncTarget = $derived(hasSyncTarget(meta));
+  // The column shows when there is something to say: a sync target (every row
+  // is synced or not), or rows carrying refs from an import.
+  const showSync = $derived(syncTarget || rows.some((r) => r.external_ref));
+  const colCount = $derived(showSync ? 9 : 8);
+  // Fixed columns (see the <colgroup>) plus a floor for the title column, so a
+  // narrow window scrolls the table sideways instead of crushing the title.
+  const TITLE_MIN_PX = 220;
+  const tableMinWidth = $derived((showSync ? 836 : 732) + TITLE_MIN_PX);
 
   // ---- keyboard nav ----
   let cursor = $state(0);
@@ -151,8 +165,11 @@
   });
   function onKey(e: KeyboardEvent) {
     if (e.ctrlKey || e.metaKey || e.altKey) return; // never hijack shortcuts
-    const tag = (e.target as HTMLElement)?.tagName;
+    const target = e.target as HTMLElement | null;
+    const tag = target?.tagName;
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    // Enter on a focused link or button activates it, not the cursor row.
+    if (e.key === 'Enter' && target instanceof Element && target.closest('a, button')) return;
     if (e.key === 'j') {
       e.preventDefault();
       cursor = Math.min(cursor + 1, rows.length - 1);
@@ -161,7 +178,7 @@
       cursor = Math.max(cursor - 1, 0);
     } else if (e.key === 'Enter') {
       const it = rows[cursor];
-      if (it) goto(`../items/${it.id}`);
+      if (it) goto(`${base}/items/${it.id}`);
     }
   }
 
@@ -229,6 +246,17 @@
         <option value={a}>{a}</option>
       {/each}
     </select>
+    {#if syncTarget || fSynced !== undefined}
+      <select
+        aria-label="Sync filter"
+        value={fSynced === undefined ? '' : String(fSynced)}
+        onchange={(e) => setSingle('synced', e.currentTarget.value || null)}
+      >
+        <option value="">Sync: any</option>
+        <option value="true">Synced</option>
+        <option value="false">Not synced</option>
+      </select>
+    {/if}
   </div>
 
   <div class="multi" role="group" aria-label="Type filter">
@@ -238,7 +266,7 @@
         class:on={fTypes.includes(t)}
         aria-label="Filter by type {t}"
         aria-pressed={fTypes.includes(t)}
-        title="type: {t}"
+        use:tooltip={`type: ${t}`}
         onclick={() => toggleMulti('type', t)}
       >
         <TypeIcon type={t} />
@@ -252,7 +280,7 @@
         class:on={fPrios.includes(p)}
         aria-label="Filter by {priorityLabel(p)}"
         aria-pressed={fPrios.includes(p)}
-        title={priorityLabel(p)}
+        use:tooltip={priorityLabel(p)}
         onclick={() => toggleMulti('priority', String(p))}
       >
         <PriorityGlyph priority={p} />
@@ -305,43 +333,61 @@
   </div>
 {:else}
   <div class="table-wrap panel" bind:this={scrollEl}>
-    <table>
+    <!-- Fixed layout: column widths come from the <colgroup> alone, never from
+         the rows the virtualizer happens to have mounted, so scrolling cannot
+         shift them. The title column takes what the others leave. -->
+    <table style:min-width="{tableMinWidth}px">
+      <colgroup>
+        <col style="width:36px" />
+        <col style="width:104px" />
+        <col style="width:52px" />
+        <col style="width:60px" />
+        <col class="title-col" />
+        {#if showSync}<col style="width:104px" />{/if}
+        <col style="width:150px" />
+        <col style="width:220px" />
+        <col style="width:110px" />
+      </colgroup>
       <thead>
         <tr>
-          <th style="width:34px"></th>
-          <th class="sortable" style="width:60px" aria-sort={ariaSort('id')}>
+          <th><span class="sr-only">Status</span></th>
+          <th class="sortable" aria-sort={ariaSort('id')}>
             <button type="button" class="th-btn" onclick={() => cycleSort('id')} onkeydown={(e) => onThKey(e, 'id')}>ID <span class="sort">{sortArrow('id')}</span></button>
           </th>
-          <th style="width:42px">Type</th>
-          <th class="sortable" style="width:52px" aria-sort={ariaSort('priority')}>
+          <th>Type</th>
+          <th class="sortable" aria-sort={ariaSort('priority')}>
             <button type="button" class="th-btn" onclick={() => cycleSort('priority')} onkeydown={(e) => onThKey(e, 'priority')}>Pri <span class="sort">{sortArrow('priority')}</span></button>
           </th>
           <th>Title</th>
-          <th style="width:130px">Assignee</th>
-          <th style="width:220px">Labels</th>
-          <th class="sortable" style="width:110px" aria-sort={ariaSort('updated')}>
+          {#if showSync}<th>Sync</th>{/if}
+          <th>Assignee</th>
+          <th>Labels</th>
+          <th class="sortable" aria-sort={ariaSort('updated')}>
             <button type="button" class="th-btn" onclick={() => cycleSort('updated')} onkeydown={(e) => onThKey(e, 'updated')}>Updated <span class="sort">{sortArrow('updated')}</span></button>
           </th>
         </tr>
       </thead>
       <tbody>
-        {#if padTop > 0}<tr class="spacer" style="height:{padTop}px" aria-hidden="true"><td colspan="8"></td></tr>{/if}
+        {#if padTop > 0}<tr class="spacer" style="height:{padTop}px" aria-hidden="true"><td colspan={colCount}></td></tr>{/if}
         {#each vItems as row (row.key)}
           {@const i = row.index}
           {@const item = rows[i]}
           <tr
             class:cursor={i === cursor}
-            onclick={() => goto(`../items/${item.id}`)}
+            onclick={() => goto(`${base}/items/${item.id}`)}
             onmouseenter={() => (cursor = i)}
           >
             <td><StatusGlyph status={item.status} /></td>
-            <td><ShortId id={item.id} /></td>
+            <td><ShortId id={item.id} title={item.title} /></td>
             <td><TypeIcon type={item.type} /></td>
             <td><PriorityGlyph priority={item.priority} /></td>
             <td class="title">
-              {item.title}
-              {#if item.blocked_by.length}<BlockedBadge blockedBy={item.blocked_by} />{/if}
+              <div class="title-in">
+                <span class="title-text" use:tooltip={{ content: item.title, whenTruncated: true }}>{item.title}</span>
+                {#if item.blocked_by.length}<BlockedBadge blockedBy={item.blocked_by} />{/if}
+              </div>
             </td>
+            {#if showSync}<td><ExternalRef {item} compact /></td>{/if}
             <td>
               <span class="assignee"><Avatar name={item.assignee} /> <span class="muted">{item.assignee ?? '—'}</span></span>
             </td>
@@ -353,9 +399,9 @@
             <td class="upd mono">{relativeTime(item.updated)}</td>
           </tr>
         {/each}
-        {#if padBottom > 0}<tr class="spacer" style="height:{padBottom}px" aria-hidden="true"><td colspan="8"></td></tr>{/if}
+        {#if padBottom > 0}<tr class="spacer" style="height:{padBottom}px" aria-hidden="true"><td colspan={colCount}></td></tr>{/if}
         {#if rows.length === 0}
-          <tr><td colspan="8" class="empty dim">{store.loaded ? 'No items match these filters' : 'Loading…'}</td></tr>
+          <tr><td colspan={colCount} class="empty dim">{store.loaded ? 'No items match these filters' : 'Loading…'}</td></tr>
         {/if}
       </tbody>
     </table>
@@ -500,9 +546,21 @@
   .ltab.active .n {
     color: var(--accent);
   }
+  /* The table scrolls inside the window rather than the page: the shell is
+     pinned to the viewport and the table takes the height the rest leaves. */
+  :global(.shell:has(> main > .table-wrap)) {
+    height: 100dvh;
+  }
+  :global(main.page:has(> .table-wrap)) {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    padding-bottom: 12px;
+  }
   .table-wrap {
     overflow: auto;
-    max-height: calc(100vh - 220px);
+    flex: 1 1 auto;
+    min-height: 240px;
   }
   .loaderr {
     text-align: center;
@@ -542,6 +600,7 @@
   }
   table {
     width: 100%;
+    table-layout: fixed;
     border-collapse: collapse;
     font-size: 13px;
   }
@@ -571,6 +630,8 @@
     border-bottom: 1px solid var(--border);
     vertical-align: middle;
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   tbody tr {
     cursor: pointer;
@@ -582,27 +643,44 @@
   tbody tr.cursor td:first-child {
     box-shadow: inset 2px 0 0 var(--accent);
   }
+  /* The cell stays a table-cell — a flex `td` drops out of the row box, which
+     cut the row's border and hover short; the flex layout lives inside it. */
   td.title {
-    white-space: normal;
     color: var(--text);
     font-weight: 500;
-    max-width: 360px;
+  }
+  .title-in {
     display: flex;
     align-items: center;
     gap: 8px;
+    min-width: 0;
+  }
+  .title-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }
+  .title-in :global(.blocked) {
+    flex: none;
   }
   td.upd {
     font-size: 11px;
     color: var(--text-dim);
   }
   .assignee {
-    display: inline-flex;
+    display: flex;
     align-items: center;
     gap: 6px;
+    min-width: 0;
+  }
+  .assignee .muted {
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .lblrow {
-    display: inline-flex;
+    display: flex;
     gap: 4px;
+    overflow: hidden;
   }
   .empty {
     text-align: center;

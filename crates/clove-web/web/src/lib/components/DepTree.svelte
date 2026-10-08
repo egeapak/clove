@@ -2,6 +2,7 @@
   import type { DepTreeNode } from '$lib/types';
   import Self from './DepTree.svelte';
   import { statusGlyph, statusColorVar, shortId } from '$lib/glyphs';
+  import { tooltip } from '$lib/tooltip';
 
   let {
     node,
@@ -18,7 +19,7 @@
 <div class="line">
   <span class="lvl">{prefix}{branch}</span>
   <span class="glyph" style="color:{statusColorVar(node.status)}" aria-label={node.status}>{statusGlyph(node.status)}</span>
-  <a class="id" href="../items/{node.id}">{shortId(node.id)}</a>
+  <a class="id" href="../items/{node.id}" use:tooltip={`${node.id} · ${node.title}`}>{shortId(node.id)}</a>
   <span class="ttl" class:cur={node.id === currentId}>{node.title}{#if node.id === currentId} <b>(this)</b>{/if}</span>
   {#if node.ready && node.status !== 'closed'}<span class="ready">ready</span>{/if}
   {#if node.cycle_ref}<span class="cycle">(cycle)</span>{/if}

@@ -82,6 +82,8 @@ struct Fixture {
     labels: &'static [&'static str],
     assignee: Option<&'static str>,
     deps: &'static [&'static str],
+    parent: Option<&'static str>,
+    external_ref: Option<&'static str>,
 }
 
 /// Write one item file directly (not `clove new`: the ids, labels, and titles
@@ -96,6 +98,8 @@ fn write_item(root: &Path, f: Fixture) {
         labels,
         assignee,
         deps,
+        parent,
+        external_ref,
     } = f;
     // Timestamps vary per item, and `created` runs opposite to `updated`, so a
     // `--sort created|updated` case cannot pass by degenerating into the id
@@ -116,6 +120,9 @@ fn write_item(root: &Path, f: Fixture) {
     if let Some(a) = assignee {
         s.push_str(&format!("assignee: {a}\n"));
     }
+    if let Some(p) = parent {
+        s.push_str(&format!("parent: {p}\n"));
+    }
     if !labels.is_empty() {
         s.push_str("labels:\n");
         for l in labels {
@@ -127,6 +134,9 @@ fn write_item(root: &Path, f: Fixture) {
         for d in deps {
             s.push_str(&format!("  - {d}\n"));
         }
+    }
+    if let Some(r) = external_ref {
+        s.push_str(&format!("external_ref: {r}\n"));
     }
     s.push_str("---\nthe body says gadget, which no filter may ever see\n");
     std::fs::write(root.join(".clove/issues").join(format!("{id}.md")), s).unwrap();
@@ -143,6 +153,8 @@ const ITEMS: [Fixture; 5] = [
         labels: &["area:core", "area:ios"],
         assignee: Some("alice"),
         deps: &[],
+        parent: None,
+        external_ref: Some("gh-1"),
     },
     Fixture {
         id: B,
@@ -153,6 +165,8 @@ const ITEMS: [Fixture; 5] = [
         labels: &["area:core"],
         assignee: Some("bob"),
         deps: &[],
+        parent: Some(A),
+        external_ref: Some("tk:b1"),
     },
     Fixture {
         id: C,
@@ -163,6 +177,8 @@ const ITEMS: [Fixture; 5] = [
         labels: &["area:ios"],
         assignee: None,
         deps: &[],
+        parent: Some(A),
+        external_ref: None,
     },
     Fixture {
         id: D,
@@ -173,6 +189,8 @@ const ITEMS: [Fixture; 5] = [
         labels: &["area:core", "area:ios"],
         assignee: None,
         deps: &[],
+        parent: None,
+        external_ref: None,
     },
     Fixture {
         id: E,
@@ -183,6 +201,8 @@ const ITEMS: [Fixture; 5] = [
         labels: &[],
         assignee: Some("alice"),
         deps: &[],
+        parent: Some(D),
+        external_ref: Some("gh-5"),
     },
 ];
 
@@ -193,18 +213,19 @@ fn item(id: &str) -> Fixture {
 
 /// A five-item store in which every filter dimension cuts differently.
 ///
-/// | id | status      | type    | pri | labels               | assignee | title          |
-/// |----|-------------|---------|-----|----------------------|----------|----------------|
-/// | A  | open        | bug     | 0   | area:core, area:ios  | alice    | alpha widget   |
-/// | B  | in_progress | feature | 1   | area:core            | bob      | beta gizmo     |
-/// | C  | closed      | chore   | 2   | area:ios             | —        | gamma widget   |
-/// | D  | open        | docs    | 3   | area:core, area:ios  | —        | delta thing    |
-/// | E  | closed      | epic    | 4   | —                    | alice    | epsilon widget |
+/// | id | status      | type    | pri | labels               | assignee | title          | parent | external_ref |
+/// |----|-------------|---------|-----|----------------------|----------|----------------|--------|--------------|
+/// | A  | open        | bug     | 0   | area:core, area:ios  | alice    | alpha widget   | —      | gh-1         |
+/// | B  | in_progress | feature | 1   | area:core            | bob      | beta gizmo     | A      | tk:b1        |
+/// | C  | closed      | chore   | 2   | area:ios             | —        | gamma widget   | A      | —            |
+/// | D  | open        | docs    | 3   | area:core, area:ios  | —        | delta thing    | —      | —            |
+/// | E  | closed      | epic    | 4   | —                    | alice    | epsilon widget | D      | gh-5         |
 ///
 /// A and D carry *both* labels while B and C carry one each — that is what makes
 /// AND-ed labels distinguishable from OR-ed ones. Every body says `gadget`,
 /// which nothing matches: `q` is a filter, not a search, and a `q` that reached
-/// the body would return all five.
+/// the body would return all five. B's `tk:` ref is there because `synced` is
+/// provider-agnostic: any external ref counts, not only a GitHub one.
 fn build_fixture(root: &Path) {
     assert!(run_in(root, &["init", "--prefix", "proj"]).status.success());
     for f in ITEMS {
@@ -306,6 +327,19 @@ fn cases() -> Vec<(&'static str, Vec<&'static str>, Vec<&'static str>)> {
             vec!["--type", "bug", "--priority", "4"],
             vec![],
         ),
+        // --- synced / parent ---------------------------------------------------
+        ("synced", vec!["--synced"], vec![A, B, E]),
+        ("unsynced", vec!["--unsynced"], vec![C, D]),
+        ("parent=A", vec!["--parent", A], vec![B, C]),
+        ("parent=D", vec!["--parent", D], vec![E]),
+        ("parent=missing", vec!["--parent", "proj-ZZZZZZZZ"], vec![]),
+        ("synced+parent", vec!["--synced", "--parent", A], vec![B]),
+        (
+            "unsynced+status",
+            vec!["--unsynced", "--status", "open"],
+            vec![D],
+        ),
+        ("parent+q", vec!["--parent", A, "--q", "widget"], vec![C]),
         // --- unconstrained ---------------------------------------------------
         ("none", vec![], vec![A, B, C, D, E]),
     ]
@@ -390,6 +424,14 @@ fn the_fixture_discriminates_the_ways_a_filter_can_be_wrong() {
 
     // `q` must never reach the body, and every body carries the needle.
     assert!(by_name("q=gadget (body)").is_empty());
+
+    // `synced` and `unsynced` partition the store: an inverted predicate, or
+    // one that only counts GitHub refs, moves an item across the line.
+    let mut both = by_name("synced");
+    both.extend(by_name("unsynced"));
+    both.sort();
+    assert_eq!(both, everything);
+    assert!(by_name("synced").contains(&B), "a non-GitHub ref is synced");
 }
 
 /// The file path and the index path agree, for every filter combination — on
@@ -494,6 +536,9 @@ fn blocked_applies_the_same_filters() {
     );
     assert_eq!(ids(&["--q", "gizmo"]), vec![B.to_owned()]);
     assert!(ids(&["--q", "gadget"]).is_empty(), "`q` never reads bodies");
+    assert_eq!(ids(&["--synced"]), vec![A.to_owned(), B.to_owned()]);
+    assert!(ids(&["--unsynced"]).is_empty());
+    assert_eq!(ids(&["--parent", A]), vec![B.to_owned()]);
 }
 
 /// Paging is correct under a residue: consecutive windows tile the result set
@@ -562,6 +607,22 @@ fn meta_echoes_the_parsed_filter_set() {
     assert_eq!(m["filters"]["labels"], serde_json::json!([]));
     assert_eq!(m["filters"]["assignee"], serde_json::Value::Null);
     assert_eq!(m["filters"]["q"], serde_json::Value::Null);
+    assert_eq!(m["filters"]["synced"], serde_json::Value::Null);
+    assert_eq!(m["filters"]["parent"], serde_json::Value::Null);
+
+    let m = meta(&[
+        "--no-index",
+        "ls",
+        "-f",
+        "json",
+        "--unsynced",
+        "--parent",
+        A,
+    ]);
+    assert_eq!(m["filters"]["synced"], false);
+    assert_eq!(m["filters"]["parent"], A);
+    let m = meta(&["--no-index", "ls", "-f", "json", "--synced"]);
+    assert_eq!(m["filters"]["synced"], true);
 
     let m = meta(&[
         "--no-index",
@@ -680,6 +741,10 @@ fn invalid_filter_values_are_rejected() {
             "-f",
             "json",
         ],
+        vec!["ls", "--parent", "not-an-id", "-f", "json"],
+        vec!["ready", "--parent", "proj-aaaaaaaa", "-f", "json"],
+        vec!["query", "--filter", r#"{"parent":"nope"}"#, "-f", "json"],
+        vec!["query", "--filter", r#"{"synced":"yes"}"#, "-f", "json"],
     ] {
         let out = run_in(root, &args);
         assert!(!out.status.success(), "{args:?} should have failed");
@@ -691,6 +756,15 @@ fn invalid_filter_values_are_rejected() {
     // its error (exit 2) rather than ours — unchanged from before multi-value.
     let out = run_in(root, &["ls", "--priority", "abc", "-f", "json"]);
     assert!(!out.status.success());
+    // `--synced` and `--unsynced` contradict each other: a usage error, not
+    // a filter that silently picks one.
+    let out = run_in(root, &["ls", "--synced", "--unsynced", "-f", "json"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("cannot be used with"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 /// `clove query`'s JSON filter accepts one value or a list on every filter
@@ -743,6 +817,19 @@ fn query_json_filter_takes_one_value_or_many() {
     assert_eq!(
         ids(r#"{"q":"widget"}"#),
         vec![A.to_owned(), C.to_owned(), E.to_owned()]
+    );
+    assert_eq!(
+        ids(r#"{"synced":true}"#),
+        vec![A.to_owned(), B.to_owned(), E.to_owned()]
+    );
+    assert_eq!(ids(r#"{"synced":false}"#), vec![C.to_owned(), D.to_owned()]);
+    assert_eq!(
+        ids(&format!(r#"{{"parent":"{A}"}}"#)),
+        vec![B.to_owned(), C.to_owned()]
+    );
+    assert_eq!(
+        ids(&format!(r#"{{"parent":"{A}","synced":false}}"#)),
+        vec![C.to_owned()]
     );
 }
 
@@ -925,6 +1012,9 @@ mod daemon {
             vec!["--q", "gizmo"],
             vec!["--q", "gadget"],
             vec!["--priority", "0", "--priority", "1"],
+            vec!["--synced"],
+            vec!["--unsynced"],
+            vec!["--parent", A],
         ];
         let fields = [
             "rank", "priority", "id", "created", "updated", "status", "type",

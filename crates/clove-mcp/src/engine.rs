@@ -294,7 +294,7 @@ impl Engine {
     }
 
     pub fn comment(&self, a: CommentArgs) -> Result<Value, String> {
-        let author = author();
+        let author = clove_core::comments::comment_author(&self.repo_root);
         match self.with_daemon(|d| d.add_comment(a.id.clone(), author.clone(), a.message.clone())) {
             Some(result) => result,
             None => {
@@ -434,14 +434,6 @@ fn stringify_core(e: clove_types::CloveError) -> String {
     format!("{code}: {e}")
 }
 
-/// The comment author: `CLOVE_AUTHOR`, then `GIT_AUTHOR_EMAIL`, else `unknown`.
-fn author() -> String {
-    std::env::var("CLOVE_AUTHOR")
-        .ok()
-        .or_else(|| std::env::var("GIT_AUTHOR_EMAIL").ok())
-        .unwrap_or_else(|| "unknown".to_owned())
-}
-
 /// `desc: true` → the shared `dir` word; `false`/absent → no direction (ascending).
 fn dir_of(desc: Option<bool>) -> Option<&'static str> {
     desc.unwrap_or(false).then_some("desc")
@@ -449,7 +441,7 @@ fn dir_of(desc: Option<bool>) -> Option<&'static str> {
 
 impl FilterArgs {
     fn to_filters(&self) -> Result<Filters, String> {
-        Filters::parse_multi(
+        let mut filters = Filters::parse_multi(
             &OneOrMany::values(&self.status),
             &OneOrMany::values(&self.item_type),
             &OneOrMany::values(&self.label),
@@ -457,7 +449,10 @@ impl FilterArgs {
             &Priorities::values(&self.priority),
             self.q.as_deref(),
         )
-        .map_err(stringify_core)
+        .map_err(stringify_core)?;
+        filters.synced = self.synced;
+        filters.parent = Filters::parse_parent(self.parent.as_deref()).map_err(stringify_core)?;
+        Ok(filters)
     }
 
     /// The requested ordering, through the same parser the CLI and web use.

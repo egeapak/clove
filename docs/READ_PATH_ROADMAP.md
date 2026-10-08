@@ -250,8 +250,9 @@ truth.
 ## 3. Canonical timestamps — **DONE**
 
 Shipped, with **no index-schema bump** and two deliberate exceptions. There is one
-spelling clove writes — `clove_types::canonical_rfc3339` (UTC, whole seconds,
-`Z`) — and every read accepts any parseable RFC 3339 and normalizes it.
+spelling clove writes — `clove_types::canonical_rfc3339` (UTC, millisecond
+precision, `Z`; whole seconds until v0.1.2, see DESIGN §2.2) — and every read
+accepts any parseable RFC 3339 and normalizes it.
 `ItemFrontmatter` does the normalizing at the *type* boundary
 (`clove_types::time::{serde_ts, serde_ts_opt}`), so YAML frontmatter, `import
 json` get it — the surfaces that carry an `ItemFrontmatter` — and neither can be

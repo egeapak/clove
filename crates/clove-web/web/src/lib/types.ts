@@ -12,6 +12,12 @@ export interface Item {
   labels: string[];
   deps: string[];
   relates: string[];
+  duplicates?: string[];
+  supersedes?: string[];
+  /** The system an imported/synced item came from, e.g. `github`. */
+  source_system?: string | null;
+  /** The link to that system's record, e.g. `gh-67` for GitHub issue #67. */
+  external_ref?: string | null;
   created: string;
   updated: string;
   closed: string | null;
@@ -59,6 +65,18 @@ export interface Meta {
   assignees: string[];
   daemon: { running: boolean; web_addr: string | null };
   source: string;
+  /** Repositories the project syncs with (empty or absent: none). */
+  sync?: SyncTarget[];
+}
+
+/** One `clove sync` target, from the sync state under `.clove/sync/`. */
+export interface SyncTarget {
+  provider: string;
+  /** `owner/name`. */
+  repo: string;
+  url: string;
+  /** Issue-link prefix: append the issue number. */
+  issue_url: string;
 }
 
 /** A project served by the daemon hub (`GET /api/v1/projects`). */
@@ -104,6 +122,10 @@ export interface ListQuery {
   sort?: string;
   dir?: 'asc' | 'desc';
   mode?: 'list' | 'ready' | 'blocked';
+  /** `true`: only items linked to a sync target's issue; `false`: only those not. */
+  synced?: boolean;
+  /** Only the direct children of this item id. */
+  parent?: string;
   /**
    * Window, sent to the server. `0` means **unlimited** (the API contract on
    * every surface), and so does an absent value — the web API's default is

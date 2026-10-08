@@ -7,7 +7,9 @@
   import LabelChip from './LabelChip.svelte';
   import Avatar from './Avatar.svelte';
   import BlockedBadge from './BlockedBadge.svelte';
-  import { shortId } from '$lib/glyphs';
+  import ExternalRef from './ExternalRef.svelte';
+  import RelatedItem from './RelatedItem.svelte';
+  import { tooltip } from '$lib/tooltip';
 
   let { item, ondragstart }: { item: Item; ondragstart?: (e: DragEvent) => void } = $props();
 </script>
@@ -21,23 +23,23 @@
 >
   <div class="card-top">
     <StatusGlyph status={item.status} />
-    <ShortId id={item.id} />
+    <ShortId id={item.id} title={item.title} />
     <TypeIcon type={item.type} />
     <PriorityGlyph priority={item.priority} />
   </div>
-  <div class="card-title">{item.title}</div>
+  <div class="card-title" use:tooltip={{ content: item.title, whenTruncated: true }}>{item.title}</div>
   <div class="card-foot">
     {#each item.labels.slice(0, 2) as l (l)}
       <LabelChip label={l} />
     {/each}
-    {#if item.type === 'epic'}
-      <span class="dim mono note">epic</span>
-    {/if}
     <BlockedBadge blockedBy={item.blocked_by} />
     {#if item.deps.length && !item.blocked_by.length}
-      <span class="dim mono note">→ deps {item.deps.map(shortId).join(', ')}</span>
+      <span class="deps">
+        <span class="dim" aria-hidden="true">→</span><span class="sr-only">depends on</span>
+        {#each item.deps as d (d)}<RelatedItem id={d} link={false} compact />{/each}
+      </span>
     {/if}
-    <span class="right"><Avatar name={item.assignee} /></span>
+    <span class="right"><ExternalRef {item} compact link={false} /><Avatar name={item.assignee} /></span>
   </div>
 </a>
 
@@ -85,8 +87,27 @@
   }
   .card-foot .right {
     margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
   }
-  .note {
-    font-size: 10px;
+  .card-title {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+  }
+  .deps {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 8px;
+    min-width: 0;
+    max-width: 100%;
+    font-size: 11px;
+  }
+  .deps :global(.rel) {
+    max-width: 150px;
   }
 </style>

@@ -558,6 +558,15 @@ pub struct FilterArgs {
     /// (case-insensitive). A filter, not a search — it never reads the body.
     #[arg(long, value_name = "TEXT")]
     pub q: Option<String>,
+    /// Keep only items linked to an external tracker (any `external_ref`).
+    #[arg(long, conflicts_with = "unsynced")]
+    pub synced: bool,
+    /// Keep only items with no `external_ref`.
+    #[arg(long)]
+    pub unsynced: bool,
+    /// Keep only the direct children of this item.
+    #[arg(long, value_name = "ID")]
+    pub parent: Option<String>,
     /// Sort by `rank|priority|created|updated|id|status|type` (default `rank`:
     /// priority, then dependency order, then id).
     #[arg(long, value_name = "FIELD")]
@@ -596,14 +605,21 @@ impl FilterArgs {
         // error, exit 2, as it has always been); the shared parser takes words,
         // so the validated numbers are spelled back out.
         let priority: Vec<String> = self.priority.iter().map(u8::to_string).collect();
-        clove_core::view::Filters::parse_multi(
+        let mut filters = clove_core::view::Filters::parse_multi(
             &self.status,
             &self.item_type,
             &self.label,
             self.assignee.as_deref(),
             &priority,
             self.q.as_deref(),
-        )
+        )?;
+        filters.synced = match (self.synced, self.unsynced) {
+            (true, _) => Some(true),
+            (_, true) => Some(false),
+            _ => None,
+        };
+        filters.parent = clove_core::view::Filters::parse_parent(self.parent.as_deref())?;
+        Ok(filters)
     }
 }
 

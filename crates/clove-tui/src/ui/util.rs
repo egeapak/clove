@@ -140,17 +140,11 @@ pub(crate) fn centered_fixed(area: Rect, w: u16, h: u16) -> Rect {
 }
 
 /// The short form of an id for display: drop the (per-repo, redundant) prefix
-/// and trim leading zeros — e.g. `proj-00000042` → `42`, `proj-7af3q2k9` →
-/// `7af3q2k9`.
+/// and keep the whole suffix — e.g. `clov-0BRK6DND` → `0BRK6DND`, matching the
+/// web and CLI and keeping the id column aligned.
 pub(crate) fn short_id(id: &clove_types::CloveId) -> String {
     let s = id.as_str();
-    let suffix = s.rsplit_once('-').map(|(_, b)| b).unwrap_or(s);
-    let trimmed = suffix.trim_start_matches('0');
-    if trimmed.is_empty() {
-        "0".to_owned()
-    } else {
-        trimmed.to_owned()
-    }
+    s.rsplit_once('-').map(|(_, b)| b).unwrap_or(s).to_owned()
 }
 
 /// `short_id` with a leading `#` so it reads as a reference.
@@ -197,6 +191,15 @@ pub(crate) fn fit_labels(labels: &[String], budget: usize) -> (String, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn short_id_drops_the_prefix_and_keeps_leading_zeros() {
+        let id = |s: &str| clove_types::CloveId::new(s).unwrap();
+        assert_eq!(short_id(&id("clov-0BRK6DND")), "0BRK6DND");
+        assert_eq!(short_id(&id("proj-00000042")), "00000042");
+        assert_eq!(short_id(&id("proj-7AF3Q2K9")), "7AF3Q2K9");
+        assert_eq!(short_ref(&id("clov-0BRK6DND")), "#0BRK6DND");
+    }
 
     #[test]
     fn truncate_counts_display_columns_not_chars() {

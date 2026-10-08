@@ -189,7 +189,7 @@ fn fixture() -> (tempfile::TempDir, ItemStore) {
     );
     put(
         &store,
-        "proj-2HZ6C3PW",
+        "proj-0HZ6C3PW",
         "Investigate flaky CI",
         ItemType::Bug,
         1,
@@ -839,7 +839,7 @@ fn sort_by_id_orders_ascending() {
     assert_eq!(app.list.sort.field, crate::app::SortField::Id);
     let first = app.visible().next().unwrap();
     // Ascending by id: the lexicographically smallest suffix sorts first.
-    assert_eq!(first.id.as_str(), "proj-2HZ6C3PW");
+    assert_eq!(first.id.as_str(), "proj-0HZ6C3PW");
 }
 
 #[test]

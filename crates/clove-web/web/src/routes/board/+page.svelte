@@ -7,6 +7,8 @@
   import Card from '$lib/components/Card.svelte';
   import StatusGlyph from '$lib/components/StatusGlyph.svelte';
   import { Virtual } from '$lib/virtual.svelte';
+  import { tooltip, type TooltipContent } from '$lib/tooltip';
+  import { shortId, statusGlyph, statusColorVar } from '$lib/glyphs';
 
   // A board renders every item, grouped into columns, so it asks for the whole
   // store explicitly: `limit: 0` (unlimited on every clove surface). The API
@@ -125,10 +127,21 @@
 
   // Move a card's status one column left/right. Reachable via the focusable
   // ‹/› buttons on each card (keyboard + pointer); no hidden move-mode chord.
+  const MOVES = [-1, 1] as const;
+
+  function moveTarget(item: Item, dir: 1 | -1): { key: Status; label: string } {
+    const idx = COLS.findIndex((c) => c.key === item.status);
+    return COLS[(idx + dir + COLS.length) % COLS.length];
+  }
+
+  /** "Move to ◐ In Progress", the target in its column header's glyph and colour. */
+  function moveTip(target: { key: Status; label: string }): TooltipContent {
+    const color = statusColorVar(target.key);
+    return ['Move to ', { text: statusGlyph(target.key), color }, ' ', { text: target.label, color, bold: true }];
+  }
+
   async function move(item: Item, dir: 1 | -1) {
-    const order: Status[] = ['open', 'in_progress', 'closed'];
-    const idx = order.indexOf(item.status);
-    const next = order[(idx + dir + order.length) % order.length];
+    const next = moveTarget(item, dir).key;
     const edit = store.optimistic(item.id, { status: next });
     try {
       edit.settle(await api.patch(item.id, { status: next }));
@@ -190,8 +203,15 @@
               >
                 <Card {item} ondragstart={(e) => onDragStart(e, item.id)} />
                 <div class="kbd-move">
-                  <button class="btn sm" aria-label="move {item.id} left" onclick={() => move(item, -1)}>‹</button>
-                  <button class="btn sm" aria-label="move {item.id} right" onclick={() => move(item, 1)}>›</button>
+                  {#each MOVES as dir (dir)}
+                    {@const target = moveTarget(item, dir)}
+                    <button
+                      class="btn sm"
+                      aria-label="Move {shortId(item.id)} to {target.label}"
+                      use:tooltip={moveTip(target)}
+                      onclick={() => move(item, dir)}>{dir < 0 ? '‹' : '›'}</button
+                    >
+                  {/each}
                 </div>
               </div>
             {/each}
@@ -233,12 +253,25 @@
     font-size: 11px;
     margin-left: auto;
   }
+  /* The columns scroll inside the window rather than the page, as the list does. */
+  :global(.shell:has(> main > .board)) {
+    height: 100dvh;
+  }
+  :global(main.page:has(> .board)) {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    padding-bottom: 12px;
+  }
   .board {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
     gap: 14px;
+    flex: 1 1 auto;
+    min-height: 0;
   }
   .col {
+    min-height: 0;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
@@ -271,10 +304,10 @@
   }
   .col-body {
     padding: 10px;
-    min-height: 120px;
     /* scroll viewport for the virtualizer */
     overflow-y: auto;
-    max-height: calc(100vh - 200px);
+    flex: 1 1 auto;
+    min-height: 0;
   }
   /* sizer holds the full virtual height; cards are absolutely placed within */
   .col-sizer {
@@ -309,8 +342,16 @@
     font-size: 12px;
   }
   @media (max-width: 900px) {
+    /* Stacked columns: the page scrolls again and each column is capped. */
+    :global(.shell:has(> main > .board)) {
+      height: auto;
+    }
     .board {
       grid-template-columns: 1fr;
+    }
+    .col-body {
+      min-height: 120px;
+      max-height: 60vh;
     }
   }
 </style>
