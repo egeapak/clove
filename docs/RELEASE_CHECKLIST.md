@@ -145,6 +145,9 @@ Everything `release-smoke.sh` does not already cover:
       (file tier), `comments --limit`, `export jsonl` → `import jsonl`,
       `init --merge-driver` (driver + `.gitattributes`), `-q`, no-repo error,
       `version -f json`, `setup --help`.
+- [ ] List filters on every tier: `ls --synced`, `--unsynced`, `--parent <id>` (also
+      via `query` JSON and the web `?synced=` / `?parent=`) agree with the files; against
+      a stale (older-protocol) daemon they still answer, falling back.
 - [ ] `clove edit <id>` with `$EDITOR` set to a real editor command.
 
 ## 9. Close out

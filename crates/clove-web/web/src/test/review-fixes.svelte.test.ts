@@ -14,6 +14,7 @@ import { store } from '$lib/store.svelte';
 import { related, ensureRelated, resetRelated } from '$lib/related.svelte';
 import { stubApi, StubError, item, META } from './fake-api';
 import ListPage from '../routes/list/+page.svelte';
+import RelatedItem from '$lib/components/RelatedItem.svelte';
 
 const ID = 'proj-7af3q2k9';
 const OTHER = 'proj-0000000B';
@@ -88,6 +89,46 @@ describe('related-item cache', () => {
     ensureRelated('proj-0000000Z');
     await settle();
     expect(related('proj-0000000Z')).toBeNull();
+  });
+});
+
+describe('related chip', () => {
+  it('keeps following live updates after one lands while its fetch is in flight', async () => {
+    let fetches = 0;
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    stubApi((path) => {
+      if (path === `/items/${OTHER}`) {
+        fetches += 1;
+        return item({ id: OTHER, title: `Title ${fetches}` });
+      }
+      throw new StubError(404, 'NOT_FOUND');
+    });
+    // Hold the first response so a live update lands mid-fetch.
+    const realFetch = globalThis.fetch;
+    let first = true;
+    vi.stubGlobal('fetch', async (input: string | URL) => {
+      if (first) {
+        first = false;
+        await gate;
+      }
+      return realFetch(input);
+    });
+
+    render(RelatedItem, { id: OTHER });
+    await settle();
+    store.liveRev += 1;
+    await settle();
+    release();
+    await settle();
+    await settle();
+    const afterFirst = fetches;
+
+    store.liveRev += 1;
+    await settle();
+    await settle();
+    expect(fetches).toBeGreaterThan(afterFirst);
+    expect(related(OTHER)?.title).toBe(`Title ${fetches}`);
   });
 });
 

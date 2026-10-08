@@ -31,8 +31,9 @@ export function related(id: string): RelatedSummary | null | undefined {
  * only a 404 is cached as missing, so a transient error is retried.
  */
 export function ensureRelated(id: string): void {
-  if (store.items.has(id) || inFlight.has(id)) return;
+  // Read first: an early return must not drop the caller's effect subscription.
   const rev = store.liveRev;
+  if (store.items.has(id) || inFlight.has(id)) return;
   if (fetchedAt.get(id) === rev) return;
   inFlight.add(id);
   api
