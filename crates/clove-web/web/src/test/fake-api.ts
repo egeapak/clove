@@ -3,6 +3,16 @@
 import { vi } from 'vitest';
 import type { Item } from '$lib/types';
 
+/** Thrown by a handler to answer with an error envelope and HTTP status. */
+export class StubError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string
+  ) {
+    super(code);
+  }
+}
+
 export type ApiHandler = (path: string, url: URL) => unknown;
 
 export function stubApi(handler: ApiHandler) {
@@ -12,7 +22,16 @@ export function stubApi(handler: ApiHandler) {
     const apiRoot = url.pathname.indexOf('/api/v1');
     const path = url.pathname.slice(apiRoot + '/api/v1'.length);
     calls.push(path);
-    const data = handler(path, url);
+    let data: unknown;
+    try {
+      data = handler(path, url);
+    } catch (e) {
+      if (!(e instanceof StubError)) throw e;
+      return new Response(JSON.stringify({ v: 1, ok: false, error: { code: e.code, message: e.code, exit: 1 }, _meta: {} }), {
+        status: e.status,
+        headers: { 'content-type': 'application/json' }
+      });
+    }
     return new Response(JSON.stringify({ v: 1, ok: true, data, _meta: {} }), {
       status: 200,
       headers: { 'content-type': 'application/json' }

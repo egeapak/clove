@@ -153,6 +153,10 @@
   // is synced or not), or rows carrying refs from an import.
   const showSync = $derived(syncTarget || rows.some((r) => r.external_ref));
   const colCount = $derived(showSync ? 9 : 8);
+  // Fixed columns (see the <colgroup>) plus a floor for the title column, so a
+  // narrow window scrolls the table sideways instead of crushing the title.
+  const TITLE_MIN_PX = 220;
+  const tableMinWidth = $derived((showSync ? 836 : 732) + TITLE_MIN_PX);
 
   // ---- keyboard nav ----
   let cursor = $state(0);
@@ -161,8 +165,11 @@
   });
   function onKey(e: KeyboardEvent) {
     if (e.ctrlKey || e.metaKey || e.altKey) return; // never hijack shortcuts
-    const tag = (e.target as HTMLElement)?.tagName;
+    const target = e.target as HTMLElement | null;
+    const tag = target?.tagName;
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    // Enter on a focused link or button activates it, not the cursor row.
+    if (e.key === 'Enter' && target instanceof Element && target.closest('a, button')) return;
     if (e.key === 'j') {
       e.preventDefault();
       cursor = Math.min(cursor + 1, rows.length - 1);
@@ -329,7 +336,7 @@
     <!-- Fixed layout: column widths come from the <colgroup> alone, never from
          the rows the virtualizer happens to have mounted, so scrolling cannot
          shift them. The title column takes what the others leave. -->
-    <table>
+    <table style:min-width="{tableMinWidth}px">
       <colgroup>
         <col style="width:36px" />
         <col style="width:104px" />
@@ -593,7 +600,6 @@
   }
   table {
     width: 100%;
-    min-width: 880px;
     table-layout: fixed;
     border-collapse: collapse;
     font-size: 13px;

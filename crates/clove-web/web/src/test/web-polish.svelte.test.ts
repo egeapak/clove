@@ -5,7 +5,7 @@ import { page } from './app-stubs/stores';
 import { store } from '$lib/store.svelte';
 import { resetRelated } from '$lib/related.svelte';
 import type { Item, Meta } from '$lib/types';
-import { stubApi, item, META } from './fake-api';
+import { stubApi, item, META, StubError } from './fake-api';
 import ExternalRef from '$lib/components/ExternalRef.svelte';
 import Card from '$lib/components/Card.svelte';
 import BoardPage from '../routes/board/+page.svelte';
@@ -74,6 +74,7 @@ beforeEach(() => {
     if (one) {
       const found = items.find((i) => i.id === one[1]);
       if (found) return found;
+      throw new StubError(404, 'NOT_FOUND');
     }
     if (path.endsWith('/deptree')) return null;
     throw new Error('unexpected request ' + path);
