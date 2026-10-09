@@ -21,8 +21,12 @@ path = "src/main.rs"
 default = ["git-sync"]
 # `full` adds the periodic two-way GitHub sync loop; the pre-built release
 # artifacts build `--features full` so the daemon retains it.
-full = ["git-sync", "github-sync"]
+full = ["git-sync", "github-sync", "web"]
 git-sync = ["dep:git2"]
+# The hub serves every loaded project's web UI on one local port. **Off by
+# default** (the web server and the embedded SPA are not needed by the CLI, TUI or
+# MCP); the release artifacts build `--features full`, which includes it.
+web = ["dep:clove-web"]
 # Periodic two-way GitHub sync (T-M06). Now a **dependency-free** gate (like
 # `git-sync`): the daemon no longer links octocrab/clove-import — it shells out to
 # `clove sync github <repo>`, which resolves the external `clove-sync-github`
@@ -36,7 +40,7 @@ clove-types.workspace = true
 clove-core.workspace = true
 clove-index.workspace = true
 clove-ipc.workspace = true
-clove-web.workspace = true       # M4: daemon serves the web UI by default
+clove-web = { workspace = true, optional = true }   # the web server + SPA, behind the `web` feature
 clap.workspace = true
 anyhow.workspace = true
 camino.workspace = true

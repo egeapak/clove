@@ -31,11 +31,16 @@ path = "src/main.rs"
 # touches the network.
 [features]
 default = ["mcp"]
-full = ["mcp"]
+full = ["mcp", "web"]
 # `mcp` wires the `clove mcp` subcommand to the clove-mcp (rmcp) server. Kept in
 # `default` (it is small); `--no-default-features` drops it (the subcommand then
 # errors cleanly) for the leanest cross builds.
 mcp = ["dep:clove-mcp"]
+# `web` wires `clove serve` to the clove-web server and its embedded SPA. **Off by
+# default**: the web server needs no part of the CLI, TUI or MCP, and a published
+# `clove-web` fetches its built SPA at build time (see docs/RELEASE.md). Without
+# it `clove serve` errors cleanly. `full` (the release artifacts) includes it.
+web = ["dep:clove-web"]
 
 [dependencies]
 clove-types.workspace = true
@@ -47,7 +52,7 @@ clove-plugin.workspace = true    # single source of truth for CLOVE_PLUGIN_API (
 clove-ipc.workspace = true       # M3: daemon liveness probe + QUERY routing
 clove-mcp = { workspace = true, optional = true }   # M4: `clove mcp` server (rmcp), behind the `mcp` feature
 clove-tui.workspace = true       # M4: `clove tui` terminal browser + add/edit form
-clove-web.workspace = true       # M4: `clove serve` web UI server
+clove-web = { workspace = true, optional = true }   # `clove serve`, behind the `web` feature
 tokio.workspace = true           # M4: async runtime for `clove serve`
 clap.workspace = true
 anyhow.workspace = true

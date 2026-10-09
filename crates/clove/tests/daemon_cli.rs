@@ -20,9 +20,12 @@ const TEST_CLOVE_HOME: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target
 fn cloved() -> &'static Path {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| {
-        escargot::CargoBuild::new()
-            .package("cloved")
-            .bin("cloved")
+        let mut build = escargot::CargoBuild::new().package("cloved").bin("cloved");
+        // The web-server cases need a daemon that has one.
+        if cfg!(feature = "web") {
+            build = build.features("web");
+        }
+        build
             .run()
             .expect("build cloved for the daemon CLI tests")
             .path()
@@ -1281,6 +1284,7 @@ fn status_on_an_incompatible_daemon_says_it_is_running() {
 /// `clove serve` racing a daemon that is still starting (it holds the lock but
 /// has not bound its socket yet) waits for it and hands off, instead of starting
 /// a second, standalone server.
+#[cfg(feature = "web")]
 #[test]
 fn serve_waits_for_a_daemon_that_is_still_starting() {
     let tmp = tempfile::tempdir().unwrap();

@@ -68,6 +68,7 @@ impl DaemonState {
 
     /// Record where this project's web UI is served: the hub's shared
     /// listener (`host:port`) and the project's own URL on it.
+    #[cfg_attr(not(feature = "web"), allow(dead_code))]
     pub fn set_web(&mut self, addr: Option<String>, url: Option<String>) {
         self.web_addr = addr;
         self.web_url = url;

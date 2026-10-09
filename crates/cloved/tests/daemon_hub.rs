@@ -289,6 +289,7 @@ fn http_get(addr: &str, path: &str) -> (u16, Option<String>, String) {
     (status, location, body.to_owned())
 }
 
+#[cfg(feature = "web")]
 #[test]
 fn every_project_is_reachable_on_the_one_web_port() {
     let (_a_tmp, a) = init_clove_dir();

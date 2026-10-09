@@ -32,6 +32,7 @@ pub struct Slot {
     /// Cancelled by the supervisor once teardown has run.
     pub done: CancellationToken,
     /// The web mount's slug, when the project is on the hub's web listener.
+    #[cfg(feature = "web")]
     pub web_slug: Mutex<Option<String>>,
     /// Initialized by whoever starts the slot (web mount, tasks). Every other
     /// caller that attached while it loaded waits for that to finish, so none
@@ -49,7 +50,9 @@ pub struct Settings {
     pub idle: Option<Duration>,
     pub snapshot_interval: Option<Duration>,
     pub git_sync: bool,
+    #[cfg_attr(not(feature = "web"), allow(dead_code))]
     pub web_enabled: bool,
+    #[cfg_attr(not(feature = "web"), allow(dead_code))]
     pub web_port: u16,
     pub id_prefix: String,
     pub default_type: clove_types::ItemType,
@@ -179,6 +182,7 @@ pub fn open(clove_dir: &Utf8Path, cancel: CancellationToken) -> Result<Slot, Loa
         dispatcher,
         cancel,
         done: CancellationToken::new(),
+        #[cfg(feature = "web")]
         web_slug: Mutex::new(None),
         started: tokio::sync::OnceCell::new(),
         settings,
