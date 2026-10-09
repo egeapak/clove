@@ -21,7 +21,7 @@ use rust_embed::RustEmbed;
 use crate::AppState;
 
 #[derive(RustEmbed)]
-#[folder = "dist-gz/"]
+#[folder = "$OUT_DIR/dist-gz/"]
 struct Assets;
 
 /// One asset, both forms resident in memory.
