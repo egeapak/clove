@@ -10,6 +10,7 @@
 //! grace period.
 
 use std::collections::HashMap;
+#[cfg(feature = "web")]
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -45,6 +46,7 @@ const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const REPLY_MARGIN: Duration = Duration::from_millis(250);
 
 /// The hub's shared web listener.
+#[cfg(feature = "web")]
 struct WebSite {
     web: clove_web::HubWeb,
     addr: SocketAddr,
@@ -89,9 +91,11 @@ struct Table {
 struct Inner {
     table: Mutex<Table>,
     /// Whether the hub serves the web UI at all (`CLOVED_DISABLE_WEB` unset).
+    #[cfg_attr(not(feature = "web"), allow(dead_code))]
     web_enabled: bool,
     /// The one web listener, bound when the first web-enabled project loads.
     /// `Some(None)` once a bind has failed: the hub then serves no web UI.
+    #[cfg(feature = "web")]
     web: OnceCell<Option<WebSite>>,
     started: Instant,
     shutdown: CancellationToken,
@@ -119,6 +123,7 @@ impl Hub {
         Hub(Arc::new(Inner {
             table: Mutex::new(Table::default()),
             web_enabled,
+            #[cfg(feature = "web")]
             web: OnceCell::new(),
             started: Instant::now(),
             shutdown: CancellationToken::new(),
@@ -352,6 +357,15 @@ impl Hub {
     /// Mount the slot on the web listener and start its supervised tasks.
     async fn start(&self, slot: &Arc<Slot>) {
         eprintln!("cloved: serving {}", slot.clove_dir);
+        #[cfg(feature = "web")]
+        self.mount_web(slot).await;
+        tokio::spawn(self.clone().supervise(Arc::clone(slot), slot.tasks()));
+    }
+
+    /// Put the slot on the shared web listener, when the hub and the project
+    /// both serve one. A failed bind or mount leaves the project unmounted.
+    #[cfg(feature = "web")]
+    async fn mount_web(&self, slot: &Arc<Slot>) {
         let site = match slot.settings.web_enabled && self.0.web_enabled {
             true => self.web_site(slot.settings.web_port).await,
             false => None,
@@ -376,7 +390,6 @@ impl Hub {
             // armed on a thread of its own, so the load does not wait for it.
             let (web, root) = (site.web.clone(), slot.repo_root.clone());
             let Ok(slug) = tokio::task::spawn_blocking(move || web.mount(&root, app)).await else {
-                tokio::spawn(self.clone().supervise(Arc::clone(slot), slot.tasks()));
                 return;
             };
             if let Ok(mut s) = slot.dispatcher.state.lock() {
@@ -387,7 +400,6 @@ impl Hub {
             }
             *slot.web_slug.lock().unwrap_or_else(|e| e.into_inner()) = Some(slug);
         }
-        tokio::spawn(self.clone().supervise(Arc::clone(slot), slot.tasks()));
     }
 
     /// The shared web listener, binding it on first use.
@@ -397,6 +409,7 @@ impl Hub {
     /// common single-project user that keeps `[web] port` meaning what it says.
     /// A taken port falls back to a free one, which each project's `STATUS`
     /// advertises.
+    #[cfg(feature = "web")]
     async fn web_site(&self, project_port: u16) -> Option<&WebSite> {
         self.0
             .web
@@ -490,13 +503,16 @@ impl Hub {
                 self.0.shutdown.cancel();
             }
         }
-        let slug = slot
-            .web_slug
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take();
-        if let (Some(Some(site)), Some(slug)) = (self.0.web.get(), slug) {
-            site.web.unmount(&slug);
+        #[cfg(feature = "web")]
+        {
+            let slug = slot
+                .web_slug
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take();
+            if let (Some(Some(site)), Some(slug)) = (self.0.web.get(), slug) {
+                site.web.unmount(&slug);
+            }
         }
     }
 
@@ -594,12 +610,15 @@ impl Hub {
         HubStatus {
             pid: std::process::id(),
             uptime_s: self.0.started.elapsed().as_secs(),
+            #[cfg(feature = "web")]
             web_addr: self
                 .0
                 .web
                 .get()
                 .and_then(Option::as_ref)
                 .map(|site| site.addr.to_string()),
+            #[cfg(not(feature = "web"))]
+            web_addr: None,
             projects,
             token_records: clove_core::daemon_token::records_dir()
                 .ok()
@@ -995,6 +1014,7 @@ mod tests {
     /// Every caller that loads a project gets it back only once it is fully
     /// started — its web UI mounted — not just the first: `clove serve` reads
     /// the web URL right after its load returns (L4).
+    #[cfg(feature = "web")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_loads_return_only_once_the_project_is_mounted() {
         let mut early = 0;

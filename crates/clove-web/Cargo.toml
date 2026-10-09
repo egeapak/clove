@@ -9,13 +9,12 @@ repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
-# `dist-gz/` is git-ignored (it is generated), so it ships only because it is
-# named here — and it must ship, or `cargo install` on a machine without npm
-# embeds the placeholder UI instead of the real SPA. Listing `include` at all
-# also drops `web/` (the SvelteKit sources) and `tests/` from the .crate, which
-# is intended: the published crate carries the built assets, not the toolchain
-# that builds them. Keep `build.rs`'s prebuilt guard in step with this list.
-include = ["src/**", "build.rs", "dist-gz/**"]
+# The built SPA is not packaged: a published `clove-web` downloads it from this
+# version's GitHub Release at build time (see `build.rs`), so nothing generated
+# has to ride in the .crate and `cargo publish` needs no `--allow-dirty`. Listing
+# `include` also drops `web/` (the SvelteKit sources) and `tests/`. `build/` holds
+# modules `build.rs` pulls in, so it must ship.
+include = ["src/**", "build.rs", "build/**"]
 
 [dependencies]
 clove-types.workspace = true
@@ -31,7 +30,6 @@ serde_json.workspace = true
 camino.workspace = true
 chrono.workspace = true
 notify.workspace = true
-rust-embed.workspace = true
 mime_guess.workspace = true
 flate2.workspace = true
 futures-util.workspace = true
@@ -40,9 +38,13 @@ base64.workspace = true
 
 [build-dependencies]
 flate2.workspace = true
+sha2.workspace = true
+tar.workspace = true
+ureq.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+tar.workspace = true            # tests/packaging.rs exercises build/fetch.rs
 clove-index.workspace = true    # tests build a real index to exercise the index tier
 # tests/api.rs drives a real server over TCP with #[tokio::test]; use full tokio
 # for tests so the release lib can keep the trimmed feature set.

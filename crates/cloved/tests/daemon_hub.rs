@@ -5,6 +5,7 @@
 
 mod support;
 
+#[cfg(feature = "web")]
 use std::io::{Read, Write};
 use std::time::Duration;
 
@@ -266,6 +267,7 @@ fn a_client_of_another_protocol_is_refused_with_proof_of_life() {
 }
 
 /// Minimal HTTP GET over std TCP: `(status, location header, body)`.
+#[cfg(feature = "web")]
 fn http_get(addr: &str, path: &str) -> (u16, Option<String>, String) {
     let mut stream = std::net::TcpStream::connect(addr).unwrap();
     write!(
@@ -289,6 +291,7 @@ fn http_get(addr: &str, path: &str) -> (u16, Option<String>, String) {
     (status, location, body.to_owned())
 }
 
+#[cfg(feature = "web")]
 #[test]
 fn every_project_is_reachable_on_the_one_web_port() {
     let (_a_tmp, a) = init_clove_dir();

@@ -114,10 +114,14 @@ Network tests use the deterministic in-process mock server in
 
 The SvelteKit SPA lives in `crates/clove-web/web/` and is built by
 `crates/clove-web/build.rs` (`npm run build` when `npm` is present and sources
-changed; otherwise a placeholder), gzipped into `dist-gz/`, and embedded via
-`rust-embed` (both `dist/` and `dist-gz/` are git-ignored — never commit them). A
-Node-free `cargo build` still works (the placeholder is embedded);
-`CLOVE_SKIP_WEB_BUILD=1` skips the npm build. Frontend checks:
+changed; otherwise a placeholder), gzipped into `$OUT_DIR/dist-gz/`, and embedded
+via a generated `include_bytes!` table (`dist/` is git-ignored — never commit it). A Node-free `cargo
+build` still works (the placeholder is embedded); `CLOVE_SKIP_WEB_BUILD=1` skips
+the npm build. The web server is the **`web` feature** of `clove-cli` and `cloved`
+(off by default; `full` includes it, and the release binaries are built with it).
+A *published* `clove-web` has no `web/` sources: its build downloads the SPA from
+the version's GitHub Release (`CLOVE_WEB_DIST_DIR` / `DOCS_RS` escape hatches), so
+the release order is tag → GitHub Release → crates (`docs/RELEASE.md`). Frontend checks:
 `cd crates/clove-web/web && npm run check && npm run test` (svelte-check + vitest).
 Markdown rendering is micromark + a custom id-autolink extension
 (`lib/micromark-clove-id.ts`) — no hand-written markdown regex/sanitizer.
@@ -129,8 +133,12 @@ Before committing UI or logic changes, run (all must be clean):
 ```sh
 cargo fmt && cargo fmt --check
 cargo clippy --all-targets -- -D warnings      # or scope with -p <crate>
-cargo test --workspace
+cargo clippy --workspace --all-targets --all-features -- -D warnings   # the `web` arm
+cargo test --workspace --all-features          # default features skip the web-server tests
 ```
+
+`web` (the HTTP server + SPA in `clove-cli`/`cloved`) is off by default, so a plain
+`cargo test` does not exercise it; CI runs both arms.
 
 ## Release checklist (manual, before every release)
 

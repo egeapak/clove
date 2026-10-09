@@ -1,29 +1,45 @@
 //! Build script: produce the embedded SvelteKit SPA and gzip it for embedding.
 //!
-//! Pipeline: ensure a real (or placeholder) `dist/` exists, then mirror it into
-//! `dist-gz/` as gzip-compressed files (`<path>.gz`). The crate embeds **only**
-//! `dist-gz/` (via rust-embed) and decompresses it into memory once at startup —
-//! so the binary carries the small gzip blob (not the larger uncompressed assets)
-//! and we never link a brotli/zstd library. Both `dist/` and `dist-gz/` are
-//! git-ignored and generated here.
+//! The crate embeds **only** `$OUT_DIR/dist-gz/`: every asset gzip-compressed as
+//! `<path>.gz`, listed in a generated `$OUT_DIR/assets_table.rs` of `include_bytes!`
+//! entries and decompressed into memory once at startup — so the binary carries the
+//! small gzip blob and we never link a brotli/zstd library.
+//! Everything is generated into `OUT_DIR`; Cargo's publish verification rejects a
+//! build script that writes into the package source.
 //!
-//! `dist/` is built with `npm run build` when `npm` is available and a source is
-//! newer; otherwise a minimal placeholder `index.html` is used so a Node-free
-//! `cargo build` still compiles. `CLOVE_SKIP_WEB_BUILD=1` skips the npm build.
+//! Where the SPA comes from:
+//!
+//! * **In the repository** (`web/package.json` exists): `dist/` is built with
+//!   `npm run build` when `npm` is available and a source is newer, else a
+//!   minimal placeholder `index.html` is used so a Node-free `cargo build` still
+//!   compiles. `CLOVE_SKIP_WEB_BUILD=1` skips the npm build.
+//! * **In a published package** (no `web/`): the built SPA is downloaded from
+//!   this version's GitHub Release (`clove-web-dist-v<version>.tar.gz` plus its
+//!   `.sha256`), verified, and extracted — no Node on the user's machine. A
+//!   failed download or a checksum mismatch fails the build; it never falls back
+//!   to the placeholder. Two escapes: `CLOVE_WEB_DIST_DIR` points at an already
+//!   built `dist/` (offline and packager builds), and `DOCS_RS` embeds the
+//!   placeholder because docs.rs builds without network access.
+//!   `CLOVE_WEB_DIST_BASE_URL` serves the assets from a mirror instead.
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use flate2::write::GzEncoder;
 use flate2::Compression;
 
+#[path = "build/fetch.rs"]
+mod fetch;
+
 fn main() {
     let web = Path::new("web");
-    let dist = Path::new("dist");
-    let dist_gz = Path::new("dist-gz");
+    let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"));
+    let dist_gz = out.join("dist-gz");
     for p in [
+        "build.rs",
+        "build/fetch.rs",
         "web/src",
         "web/static",
         "web/package.json",
@@ -34,26 +50,153 @@ fn main() {
     ] {
         println!("cargo:rerun-if-changed={p}");
     }
-    println!("cargo:rerun-if-env-changed=CLOVE_SKIP_WEB_BUILD");
-
-    // A published .crate ships a prebuilt `dist-gz/` (see `include` in
-    // Cargo.toml) but no `web/` sources and no `dist/`. Regenerating from
-    // `dist/` here would mirror a freshly-written placeholder over the real UI,
-    // so the assets survive only if we stop before touching them.
-    if is_prebuilt(dist_gz) && !web.join("package.json").exists() {
-        return;
+    for var in [
+        "CLOVE_SKIP_WEB_BUILD",
+        "CLOVE_WEB_DIST_DIR",
+        "CLOVE_WEB_DIST_BASE_URL",
+        "DOCS_RS",
+    ] {
+        println!("cargo:rerun-if-env-changed={var}");
     }
 
-    ensure_placeholder(dist);
-    maybe_npm_build(web, dist);
-    // Always (re)generate the embedded gzip mirror from the finalized dist.
-    gzip_tree(dist, dist_gz);
+    let dist = if web.join("package.json").exists() {
+        let dist = PathBuf::from("dist");
+        ensure_placeholder(&dist);
+        maybe_npm_build(web, &dist);
+        dist
+    } else {
+        let dist = out.join("dist");
+        acquire_packaged(&dist);
+        dist
+    };
+    gzip_tree(&dist, &dist_gz).unwrap_or_else(|e| {
+        fail(&format!(
+            "could not compress the web UI into {}: {e}",
+            dist_gz.display()
+        ))
+    });
+    write_asset_table(&dist_gz, &out.join("assets_table.rs"))
+        .unwrap_or_else(|e| fail(&format!("could not write the embedded asset table: {e}")));
 }
 
-/// Whether `dist-gz/` holds a real built SPA rather than the placeholder mirror.
-/// Keyed on the hashed asset dir that only a real SvelteKit build produces.
-fn is_prebuilt(dist_gz: &Path) -> bool {
-    dist_gz.join("_app").is_dir()
+/// Write `EMBEDDED: &[(&str, &[u8])]`, one `include_bytes!` entry per file under
+/// `dist_gz`, sorted by path so the output is deterministic. Paths are relative
+/// to `dist_gz` and use `/`.
+fn write_asset_table(dist_gz: &Path, table: &Path) -> std::io::Result<()> {
+    let mut files = Vec::new();
+    let mut stack = vec![dist_gz.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if let Ok(rel) = path.strip_prefix(dist_gz) {
+                let rel: Vec<_> = rel.iter().map(|c| c.to_string_lossy()).collect();
+                files.push(rel.join("/"));
+            }
+        }
+    }
+    files.sort();
+    let mut code = String::from("pub static EMBEDDED: &[(&str, &[u8])] = &[\n");
+    for rel in &files {
+        code.push_str(&format!(
+            "    ({rel:?}, include_bytes!(concat!(env!(\"OUT_DIR\"), \"/dist-gz/\", {rel:?}))),\n"
+        ));
+    }
+    code.push_str("];\n");
+    std::fs::write(table, code)
+}
+
+/// The packaged-crate case: put a built SPA in `dist`, or fail the build.
+fn acquire_packaged(dist: &Path) {
+    let _ = std::fs::remove_dir_all(dist);
+    if std::env::var_os("DOCS_RS").is_some() {
+        println!("cargo:warning=clove-web: building for docs.rs; embedding the placeholder web UI");
+        ensure_placeholder(dist);
+        return;
+    }
+    if let Some(dir) = std::env::var_os("CLOVE_WEB_DIST_DIR") {
+        println!("cargo:rerun-if-changed={}", Path::new(&dir).display());
+        copy_tree(Path::new(&dir), dist).unwrap_or_else(|e| {
+            fail(&format!(
+                "CLOVE_WEB_DIST_DIR={}: {e}",
+                Path::new(&dir).display()
+            ))
+        });
+        if !dist.join("index.html").is_file() {
+            fail("CLOVE_WEB_DIST_DIR has no index.html at its root");
+        }
+        return;
+    }
+    let version = std::env::var("CARGO_PKG_VERSION").expect("cargo sets CARGO_PKG_VERSION");
+    let base = fetch::base_url(
+        &version,
+        std::env::var("CLOVE_WEB_DIST_BASE_URL").ok().as_deref(),
+    );
+    let (tarball_name, checksum_name) = fetch::asset_names(&version);
+    let result = (|| -> Result<usize, String> {
+        let checksum = download(&format!("{base}/{checksum_name}"), 4096)?;
+        let expected = fetch::parse_sha256(&String::from_utf8_lossy(&checksum))?;
+        let tarball = download(&format!("{base}/{tarball_name}"), fetch::MAX_DOWNLOAD)?;
+        fetch::verify(&tarball, &expected)?;
+        std::fs::create_dir_all(dist).map_err(|e| e.to_string())?;
+        fetch::extract(&tarball, dist)
+    })();
+    match result {
+        Ok(files) => {
+            println!("cargo:warning=clove-web: fetched the web UI ({files} files) from {base}")
+        }
+        Err(e) => fail(&format!(
+            "could not fetch the web UI for clove-web {version} from {base}: {e}"
+        )),
+    }
+}
+
+/// Fail the build with a message that says what to do about it.
+fn fail(reason: &str) -> ! {
+    eprintln!(
+        "error: clove-web: {reason}\n\
+         \n\
+         The `web` feature embeds the built web UI. Either build without the `web` \
+         feature, install a release binary from https://github.com/egeapak/clove/releases, \
+         or point CLOVE_WEB_DIST_DIR at an already built `dist/` directory."
+    );
+    std::process::exit(1);
+}
+
+/// GET `url`, refusing anything over `limit` bytes.
+fn download(url: &str, limit: u64) -> Result<Vec<u8>, String> {
+    fetch::check_url(url)?;
+    // An https URL stays https across redirects; only a loopback http mirror
+    // (already vetted by `check_url`) may be plain.
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(120)))
+        .https_only(url.starts_with("https://"))
+        .build()
+        .into();
+    let mut response = agent.get(url).call().map_err(|e| format!("{url}: {e}"))?;
+    response
+        .body_mut()
+        .with_config()
+        .limit(limit)
+        .read_to_vec()
+        .map_err(|e| format!("{url}: {e}"))
+}
+
+/// Copy a directory tree (regular files only).
+fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let target = dst.join(entry.file_name());
+        // `Path::is_dir` follows symlinks, so a linked subdirectory is copied too.
+        if entry.path().is_dir() {
+            copy_tree(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
 }
 
 /// Build `dist/` with npm when possible; otherwise leave the placeholder/previous
@@ -104,38 +247,31 @@ fn maybe_npm_build(web: &Path, dist: &Path) {
 }
 
 /// Mirror every file under `src` into `dst` as a gzip-compressed `<name>.gz`.
-fn gzip_tree(src: &Path, dst: &Path) {
+fn gzip_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
     let _ = std::fs::remove_dir_all(dst);
     let mut stack = vec![src.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
             let path = entry.path();
-            let Ok(ft) = entry.file_type() else { continue };
-            if ft.is_dir() {
+            if entry.file_type()?.is_dir() {
                 stack.push(path);
                 continue;
             }
-            let Ok(rel) = path.strip_prefix(src) else {
-                continue;
-            };
-            let Ok(bytes) = std::fs::read(&path) else {
-                continue;
-            };
+            let rel = path
+                .strip_prefix(src)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            let bytes = std::fs::read(&path)?;
             let out = dst.join(rel).with_added_gz();
             if let Some(parent) = out.parent() {
-                let _ = std::fs::create_dir_all(parent);
+                std::fs::create_dir_all(parent)?;
             }
             let mut enc = GzEncoder::new(Vec::new(), Compression::best());
-            if enc.write_all(&bytes).is_ok() {
-                if let Ok(gz) = enc.finish() {
-                    let _ = std::fs::write(&out, gz);
-                }
-            }
+            enc.write_all(&bytes)?;
+            std::fs::write(&out, enc.finish()?)?;
         }
     }
+    Ok(())
 }
 
 /// Helper to append a `.gz` suffix to a path.
@@ -156,7 +292,7 @@ impl AddGz for std::path::PathBuf {
 }
 
 /// Write a minimal `dist/index.html` if none exists (so the gzip mirror and the
-/// rust-embed macro always have something to embed).
+/// embedded asset table always has something to embed).
 fn ensure_placeholder(dist: &Path) {
     let index = dist.join("index.html");
     if index.exists() {

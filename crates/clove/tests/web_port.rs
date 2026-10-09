@@ -3,7 +3,7 @@
 //! stays reachable and `clove serve` hands off to a working URL. Unix-only, like
 //! the other daemon tests; each test's daemon lives in the test repo's own
 //! runtime directory.
-#![cfg(unix)]
+#![cfg(all(unix, feature = "web"))]
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -23,6 +23,7 @@ fn cloved() -> &'static Path {
         escargot::CargoBuild::new()
             .package("cloved")
             .bin("cloved")
+            .features("web")
             .run()
             .expect("build cloved for the web-port tests")
             .path()

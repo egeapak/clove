@@ -24,6 +24,10 @@ pub mod query;
 pub mod ready;
 pub mod reindex;
 pub mod search;
+#[cfg(feature = "web")]
+pub mod serve;
+#[cfg(not(feature = "web"))]
+#[path = "serve_stub.rs"]
 pub mod serve;
 pub mod set;
 pub mod setup;

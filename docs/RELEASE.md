@@ -1,4 +1,4 @@
-# Release runbook — clove v0.1.3
+# Release runbook — clove v0.1.4
 
 The owner-only steps to cut a clove release: publish the workspace to crates.io
 **and** ship pre-built binaries via a GitHub Release + Homebrew tap. Tracks
@@ -16,6 +16,17 @@ the whole runbook once before running any `cargo publish`.
 > plugins) and `clove-engine` (the read tier, added after that check) must be
 > re-verified too. Re-verify all fifteen at publish time (step 2).
 
+> **Order of operations.** The crates download the web UI from the GitHub Release
+> at build time, so the release has to exist before the crates do:
+> 1. Prepare: bump the version, CHANGELOG, PR, merge (§1).
+> 2. Tag `v<version>` (§5) — `release.yml` builds the binaries **and** the web UI
+>    assets (`clove-web-dist-v<version>.tar.gz` + `.sha256`) into a draft Release (§6).
+> 3. Run [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md) against the draft, then
+>    **publish the GitHub Release** (drafts are not anonymously downloadable).
+> 4. Re-verify the names (§2), then publish the crates (§3-§4) with
+>    `scripts/release/publish.sh`.
+> 5. Verify what landed (§4a).
+
 ---
 
 ## 0. Prerequisites (one-time)
@@ -28,7 +39,7 @@ the whole runbook once before running any `cargo publish`.
   cargo login          # paste the token when prompted (stored in ~/.cargo/credentials.toml)
   ```
 - A clean checkout of `master` at the commit you intend to release, with the
-  full toolchain (`cargo`, and **`npm`** — see the web-UI note in step 4).
+  toolchain (`cargo`; `npm` for the web frontend checks in step 1).
 - `gh` authenticated with `repo` scope (for the GitHub Release / tag push).
 
 ---
@@ -41,8 +52,18 @@ red tree.**
 ```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace
+cargo test --workspace --all-features
 ( cd crates/clove-web/web && npm ci && npm run check && npm run test )
+```
+
+Rehearse the publish before tagging. The dry run packages and verifies all fifteen
+crates against each other, with `clove-web` taking the SPA from your checkout
+(the GitHub Release does not exist yet); it needs a built web UI and a clean
+tracked tree:
+
+```sh
+( cd crates/clove-web/web && npm ci && npm run build )
+scripts/release/publish.sh --dry-run
 ```
 
 Confirm the working tree is clean except the untracked dogfood store:
@@ -191,7 +212,7 @@ A valid topological publish order:
 > `clove plugin install sync-github`, and that shorthand must not be live before
 > the name it resolves to is ours.
 
-Internal deps already declare both `path` **and** `version = "0.1.3"` (see
+Internal deps already declare both `path` **and** `version = "0.1.4"` (see
 `[workspace.dependencies]` in the root `Cargo.toml`), which is exactly what
 crates.io requires — no Cargo.toml surgery is needed before publishing.
 
@@ -199,41 +220,35 @@ crates.io requires — no Cargo.toml surgery is needed before publishing.
 
 ## 4. Publish, one crate at a time
 
-> **Build the web UI before packaging `clove-web`.** The crate ships its built
-> SPA: `crates/clove-web/Cargo.toml` names `dist-gz/**` in `include`, so the
-> git-ignored build output goes into the `.crate` and `cargo install clove-cli`
-> embeds the real UI **with no npm on the user's machine**. npm is a build-time
-> dependency of this repo, never a runtime one.
+> **`clove-web` downloads its web UI.** The crate does not carry the built SPA:
+> `build.rs` fetches `clove-web-dist-v<version>.tar.gz` and its `.sha256` from the
+> `v<version>` GitHub Release, verifies the checksum, and embeds the result. So
+> `cargo publish -p clove-web` — which builds the crate from its package to verify
+> it — **fails until the GitHub Release is published** with those two assets
+> (`publish.sh` checks this first). Nothing generated rides in the `.crate`, so
+> no `--allow-dirty` is needed. Offline or packager builds point
+> `CLOVE_WEB_DIST_DIR` at a built `dist/`; docs.rs builds the placeholder.
 >
-> The consequence is that **whatever is in `dist-gz/` at package time is what
-> every `cargo install` user gets**. Refresh it first:
->
-> ```sh
-> ( cd crates/clove-web/web && npm ci && npm run build )   # repopulates dist/
-> cargo build -p clove-web                                 # mirrors dist/ -> dist-gz/
-> find crates/clove-web/dist-gz -type f | wc -l            # expect ~50, not 1
-> ```
->
-> A count of 1 means `dist-gz/` holds only the placeholder `index.html.gz` —
-> stop and fix the SPA build before publishing, or you will ship the placeholder
-> permanently.
->
-> No `--no-verify` is needed. `build.rs` returns early when it finds a prebuilt
-> `dist-gz/` and no `web/` sources — exactly the packaged-crate layout — so
-> verification no longer overwrites the included assets with a placeholder. If
-> that guard is ever removed, publishing silently regresses to the placeholder;
-> `crates/clove-web/tests/packaging.rs` is what catches it.
+> The web server is the `web` feature of `clove-cli` and `cloved`, **off by
+> default**: `cargo install clove-cli` has no `clove serve` UI, and
+> `cargo install clove-cli --features web` fetches the assets. The release
+> binaries are built with `clove-cli/full,cloved/full`, which include it.
+> `crates/clove-web/tests/packaging.rs` guards the packaging invariants.
 
-Publish the leaf first as a **dry run** to catch metadata/packaging problems
-without uploading (dry-run of non-leaf crates fails until their deps are live,
-so only the leaf is meaningfully dry-runnable up front):
+`scripts/release/publish.sh` runs the whole sequence below: it refuses unless
+`HEAD` is the tagged commit with a clean tracked tree and the web UI assets are
+downloadable, publishes in this order, and stops at the first failure
+(`--from <crate>` resumes). Start with its dry run, which verifies every crate
+against the others (dependents cannot be dry-run one by one before their
+dependencies are live):
 
 ```sh
-cargo publish -p clove-types --dry-run
+scripts/release/publish.sh --dry-run
 ```
 
-Then publish for real, in order. Modern cargo **waits** for each crate to become
-available on the index before returning, so the next publish resolves cleanly:
+The real publish, in order — what `publish.sh` runs. Modern cargo **waits** for
+each crate to become available on the index before returning, so the next publish
+resolves cleanly:
 
 ```sh
 cargo publish -p clove-types
@@ -245,7 +260,7 @@ cargo publish -p clove-ipc
 cargo publish -p clove-tui
 cargo publish -p clove-engine  # the read tier; clove-mcp/clove-web/clove-cli all need it
 cargo publish -p clove-mcp
-cargo publish -p clove-web     # see the web-UI gotcha above
+cargo publish -p clove-web     # needs the GitHub Release's web UI assets (see above)
 cargo publish -p cloved
 # --- name-reservation gate (§2a): these three go BEFORE clove-cli ---
 cargo publish -p clove-sync-github
@@ -287,7 +302,7 @@ for c in clove-types clove-core clove-plugin clove-index clove-import clove-ipc 
   v=$(curl -s -A "$UA" "https://crates.io/api/v1/crates/$c" \
       | grep -o '"max_version":"[^"]*"' | head -1)
   echo "$c -> ${v:-MISSING}"
-done            # expect max_version 0.1.3 for all fifteen
+done            # expect max_version 0.1.4 for all fifteen
 ```
 
 Then check the two registry behaviours `clove plugin` depends on
@@ -310,6 +325,19 @@ clove plugin install sync-github --yes
 clove sync github --help                # dispatch resolves to the installed binary
 clove plugin uninstall sync-github
 rm -rf "$CLOVE_HOME"
+
+# 4. The web feature: the default install has no web server; --features web
+#    fetches the UI from the GitHub Release and serves it.
+root=$(mktemp -d)
+cargo install clove-cli --locked --root "$root" --force
+proj=$(mktemp -d) && ( cd "$proj" && git init -q . && "$root/bin/clove" init >/dev/null )
+( cd "$proj" && "$root/bin/clove" serve ) 2>&1 | grep -q "without the web UI" \
+  && echo "default install: no web server, as designed"
+cargo install clove-cli --locked --features web --root "$root" --force
+( cd "$proj" && exec "$root/bin/clove" serve --port 7791 ) & srv=$!
+sleep 3
+curl -fsS http://127.0.0.1:7791/ | grep -q "_app" && echo "web UI embedded (not the placeholder)"
+kill $srv; rm -rf "$proj" "$root"
 ```
 
 If step 2 returns nothing after propagation, `clove plugin list` will be empty
@@ -321,12 +349,14 @@ crate, stop and investigate before announcing.
 
 ## 5. Tag the release
 
-Version is already `0.1.3` (inherited via `[workspace.package]`). Tag the
-released commit and push — this is what drives the binary builds in step 6.
+Version is already `0.1.4` (inherited via `[workspace.package]`). Tag the
+released commit and push — this drives the binary and web UI asset builds in
+step 6, and it must happen **before** any crate is published: `publish.sh`
+refuses to run unless `HEAD` is the tagged commit.
 
 ```sh
-git tag -a v0.1.3 -m "clove v0.1.3"
-git push origin v0.1.3
+git tag -a v0.1.4 -m "clove v0.1.4"
+git push origin v0.1.4
 ```
 
 ---
@@ -335,9 +365,14 @@ git push origin v0.1.3
 
 Both CI systems trigger on a `v*` tag and build the native binaries — `clove` and
 `cloved` plus the three plugin binaries (`clove-sync-github`, `clove-import-tk`,
-`clove-import-beads`) — **carrying the real embedded SPA** (each job runs
-`npm run build` into `crates/clove-web/dist`, then compiles with
-`CLOVE_SKIP_WEB_BUILD=1`). Shipping the plugins in the release archive is what
+`clove-import-beads`) — **carrying the real embedded SPA** and are built
+`--features clove-cli/full,cloved/full`, so they include the `web` feature. In
+GitHub Actions a `web-dist` job runs `npm run build` **once** into
+`crates/clove-web/dist`; the platform jobs download that tree and compile with
+`CLOVE_SKIP_WEB_BUILD=1`. The same job packs it into
+`clove-web-dist-v<version>.tar.gz` (+ `.sha256`, via
+`scripts/release/pack-web-dist.sh`) and attaches it to the Release, so the
+binaries and the SPA a published `clove-web` downloads are byte-identical. Shipping the plugins in the release archive is what
 lets a binary-install user run `clove sync github` / `clove import beads` without
 a separate `cargo install`:
 
@@ -352,11 +387,14 @@ a separate `cargo install`:
 After the tag push:
 
 1. Watch the run: `gh run watch` (or the Actions tab).
-2. Confirm the GitHub Release for `v0.1.3` has all platform archives + `.sha256`
+2. Confirm the GitHub Release for `v0.1.4` has all platform archives + `.sha256`
    files attached.
 3. Run the manual release checklist, [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md),
    against the draft's binaries; resolve or explicitly accept every finding.
-4. Edit the Release notes (changelog / highlights) and publish it.
+4. Edit the Release notes (changelog / highlights) and publish it
+   (`gh release edit v<version> --draft=false`). **Do this before publishing the
+   crates**: confirm `clove-web-dist-v<version>.tar.gz` and its `.sha256` are
+   among the assets and download anonymously.
 
 ---
 
@@ -371,11 +409,11 @@ tarball + its published SHA256:
 class Clove < Formula
   desc "Fast, git-native, dependency-aware work-item tracker"
   homepage "https://github.com/egeapak/clove"
-  version "0.1.3"
+  version "0.1.4"
   license "MIT OR Apache-2.0"
 
   on_macos do
-    url "https://github.com/egeapak/clove/releases/download/v0.1.3/clove-v0.1.3-macos-universal2.tar.gz"
+    url "https://github.com/egeapak/clove/releases/download/v0.1.4/clove-v0.1.4-macos-universal2.tar.gz"
     sha256 "PASTE_FROM_THE_RELEASE_.sha256_FILE"
   end
 
@@ -416,12 +454,16 @@ every future release.
 
 ## Rollback / mistakes
 
-- **Bad version already published?** `cargo yank --version 0.1.3 clove-cli`
+- **Bad version already published?** `cargo yank --version 0.1.4 clove-cli`
   (repeat per crate). Yanking prevents *new* dependents from selecting it but
   does **not** delete it — existing `Cargo.lock`s still resolve. There is no
-  un-publish; fix forward with `0.1.3`.
-- **Wrong tag?** Delete and re-push before the CI finishes, or cut a new tag:
-  `git tag -d v0.1.3 && git push origin :refs/tags/v0.1.3`.
+  un-publish; fix forward with `0.1.4`.
+- **Never delete or edit the GitHub Release or its `clove-web-dist-*` assets once
+  `clove-web` is on crates.io.** That version's `--features web` build downloads
+  them, so removing them breaks it permanently (yanking does not help existing
+  users); the checksum is the only guard, so a replaced asset fails the build.
+- **Wrong tag?** Before any crate is published, delete and re-push, or cut a new tag:
+  `git tag -d v0.1.4 && git push origin :refs/tags/v0.1.4`.
 
 ---
 

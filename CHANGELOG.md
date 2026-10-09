@@ -4,6 +4,17 @@ All notable changes to clove are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4] - 2026-10-09
+
+### Changed
+
+- The web server is the `web` feature of `clove-cli` and `cloved`, **off by default**: `cargo install clove-cli` / `cloved` no longer link the HTTP server or embed the web UI, and `clove serve` explains how to enable it; the release binaries are built with it (`cargo install clove-cli --features web` to get it from source)
+- A published `clove-web` downloads its built web UI from the matching GitHub Release at build time and verifies its checksum (`CLOVE_WEB_DIST_DIR` for offline builds, `CLOVE_WEB_DIST_BASE_URL` for a mirror), instead of shipping generated assets in the crate; the web UI is generated into `OUT_DIR`
+
+### Added
+
+- Release workflow packs the web UI as `clove-web-dist-v<version>.tar.gz` (+ `.sha256`) and attaches it to the release; `scripts/release/publish.sh` publishes the crates in order behind a guard (tagged `HEAD`, clean tree, assets downloadable)
+
 ## [0.1.3] - 2026-10-08
 
 ### Fixed

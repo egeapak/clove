@@ -25,7 +25,7 @@ exclude = ["fuzz"]
 
 [workspace.package]
 edition = "2021"
-version = "0.1.3"
+version = "0.1.4"
 license = "MIT OR Apache-2.0"
 authors = ["Ege Apak"]
 repository = "https://github.com/egeapak/clove"
@@ -112,7 +112,7 @@ tokio-serde = { version = "0.9", features = ["json"] }   # JSON codec for the ta
 axum = { version = "0.7", default-features = false, features = ["http1", "json", "query", "tokio", "ws"] }
 tower-http = { version = "0.6", features = ["compression-gzip"] }  # gzip-only response compression for the dynamic API (no brotli/zstd C deps in the binary)
 tower = { version = "0.5", default-features = false, features = ["util"] }  # `ServiceExt::oneshot` for the hub web front's per-project dispatch
-rust-embed = "8"                # embed the gzip-precompressed SPA assets into the binary
+tar = { version = "0.4", default-features = false }   # clove-web build script: extract the downloaded SPA tarball
 mime_guess = "2"                # content-type for embedded static assets
 flate2 = "1"                    # gzip the embedded assets (build script) + decompress them once at startup (pure-Rust miniz_oxide; no C deps)
 futures-util = "0.3"            # WS stream/sink helpers for axum::extract::ws
@@ -121,16 +121,16 @@ base64 = "0.22"                 # CSP hash encoding
 
 # Internal crates (explicit version keeps them off cargo-deny's wildcard list
 # and is required for publishing clove-core to crates.io — PRD §13).
-clove-types = { path = "crates/clove-types", version = "0.1.3" }
-clove-core = { path = "crates/clove-core", version = "0.1.3" }
-clove-index = { path = "crates/clove-index", version = "0.1.3" }
-clove-import = { path = "crates/clove-import", version = "0.1.3", default-features = false }
-clove-ipc = { path = "crates/clove-ipc", version = "0.1.3" }
-clove-engine = { path = "crates/clove-engine", version = "0.1.3" }
-clove-mcp = { path = "crates/clove-mcp", version = "0.1.3" }
-clove-tui = { path = "crates/clove-tui", version = "0.1.3" }
-clove-web = { path = "crates/clove-web", version = "0.1.3" }
-clove-plugin = { path = "crates/clove-plugin", version = "0.1.3" }
+clove-types = { path = "crates/clove-types", version = "0.1.4" }
+clove-core = { path = "crates/clove-core", version = "0.1.4" }
+clove-index = { path = "crates/clove-index", version = "0.1.4" }
+clove-import = { path = "crates/clove-import", version = "0.1.4", default-features = false }
+clove-ipc = { path = "crates/clove-ipc", version = "0.1.4" }
+clove-engine = { path = "crates/clove-engine", version = "0.1.4" }
+clove-mcp = { path = "crates/clove-mcp", version = "0.1.4" }
+clove-tui = { path = "crates/clove-tui", version = "0.1.4" }
+clove-web = { path = "crates/clove-web", version = "0.1.4" }
+clove-plugin = { path = "crates/clove-plugin", version = "0.1.4" }
 
 # Debug-build size controls. `target/` was 2.5 GB for a plain `cargo build
 # --workspace`, nearly all of it DWARF. Line tables keep `RUST_BACKTRACE` frames
