@@ -41,7 +41,7 @@ jobs:
         # dispatches to the plugin end-to-end).
         run: |
           cargo test --workspace --all-features
-          cargo test -p clove-cli
+          cargo test -p clove-cli -p cloved
       - name: Benchmarks compile (T-X01)
         run: cargo bench --workspace --no-run
 
@@ -151,7 +151,8 @@ jobs:
       # still compile. The first step asserts the default tree has no clove-web.
       - name: default builds carry no web server
         run: |
-          if cargo tree -p clove-cli -p cloved -e normal | grep -q '^.*clove-web'; then
+          tree=$(cargo tree -p clove-cli -p cloved -e normal) || exit 1
+          if printf '%s\n' "$tree" | grep -q 'clove-web'; then
             echo "clove-web is in the default dependency tree of clove-cli/cloved" >&2
             exit 1
           fi
