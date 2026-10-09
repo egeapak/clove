@@ -365,13 +365,14 @@ git push origin v0.1.4
 
 Both CI systems trigger on a `v*` tag and build the native binaries — `clove` and
 `cloved` plus the three plugin binaries (`clove-sync-github`, `clove-import-tk`,
-`clove-import-beads`) — **carrying the real embedded SPA** (each job runs
-`npm run build` into `crates/clove-web/dist`, then compiles with
-`CLOVE_SKIP_WEB_BUILD=1`) and are built `--features clove-cli/full,cloved/full`, so
-they include the `web` feature. A separate `web-dist` job packs the same SPA into
+`clove-import-beads`) — **carrying the real embedded SPA** and are built
+`--features clove-cli/full,cloved/full`, so they include the `web` feature. In
+GitHub Actions a `web-dist` job runs `npm run build` **once** into
+`crates/clove-web/dist`; the platform jobs download that tree and compile with
+`CLOVE_SKIP_WEB_BUILD=1`. The same job packs it into
 `clove-web-dist-v<version>.tar.gz` (+ `.sha256`, via
-`scripts/release/pack-web-dist.sh`) and attaches it to the Release; that is what
-a published `clove-web` downloads. Shipping the plugins in the release archive is what
+`scripts/release/pack-web-dist.sh`) and attaches it to the Release, so the
+binaries and the SPA a published `clove-web` downloads are byte-identical. Shipping the plugins in the release archive is what
 lets a binary-install user run `clove sync github` / `clove import beads` without
 a separate `cargo install`:
 

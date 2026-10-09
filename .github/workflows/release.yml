@@ -2,13 +2,13 @@
 # the REAL embedded SvelteKit SPA) for Linux, macOS (arm64 + x86_64), and Windows,
 # then publish them — with SHA256 checksums — to a GitHub Release.
 #
-# Each build job first runs the Node SPA build into crates/clove-web/dist (the
-# path clove-web/build.rs embeds) and then compiles the Rust binaries with
-# CLOVE_SKIP_WEB_BUILD=1, so build.rs embeds that dist instead of the placeholder.
-#
-# A separate `web-dist` job packs the built SPA into `clove-web-dist-v<version>.tar.gz`
-# (+ `.sha256`) and attaches it to the same release: a published `clove-web` downloads
-# it at build time (crates/clove-web/build.rs), so the crates carry no generated assets.
+# The `web-dist` job builds the Node SPA ONCE into crates/clove-web/dist. The four
+# platform jobs download that exact tree and compile the Rust binaries with
+# CLOVE_SKIP_WEB_BUILD=1, so build.rs embeds it instead of the placeholder. The same
+# job packs the tree into `clove-web-dist-v<version>.tar.gz` (+ `.sha256`) and attaches
+# it to the release: a published `clove-web` downloads it at build time
+# (crates/clove-web/build.rs), so the crates carry no generated assets — and the
+# binaries and the crates embed the byte-identical SPA.
 #
 # Validate by pushing a tag (e.g. `git tag v0.1.0 && git push origin v0.1.0`).
 name: Release
@@ -27,6 +27,7 @@ env:
 jobs:
   build:
     name: build (${{ matrix.suffix }})
+    needs: web-dist
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -50,16 +51,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Download the web SPA built by web-dist
+        uses: actions/download-artifact@v4
         with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: crates/clove-web/web/package-lock.json
-      - name: Build web SPA
-        working-directory: crates/clove-web/web
-        run: |
-          npm ci
-          npm run build   # -> crates/clove-web/dist, embedded by clove-web/build.rs
+          name: web-dist-tree
+          path: crates/clove-web/dist
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -145,6 +141,13 @@ jobs:
             web-dist/clove-web-dist-*.tar.gz
             web-dist/clove-web-dist-*.tar.gz.sha256
           if-no-files-found: error
+      - name: Share the built SPA with the platform builds
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist-tree
+          path: crates/clove-web/dist
+          if-no-files-found: error
+          retention-days: 1
 
   release:
     name: publish GitHub Release
@@ -154,6 +157,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+          pattern: clove-*   # not web-dist-tree, the raw SPA the platform builds shared
           merge-multiple: true
       - name: Publish
         uses: softprops/action-gh-release@v2
