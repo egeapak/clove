@@ -1,8 +1,9 @@
 //! Build script: produce the embedded SvelteKit SPA and gzip it for embedding.
 //!
-//! The crate embeds **only** `$OUT_DIR/dist-gz/` (via rust-embed): every asset
-//! gzip-compressed as `<path>.gz`, decompressed into memory once at startup — so
-//! the binary carries the small gzip blob and we never link a brotli/zstd library.
+//! The crate embeds **only** `$OUT_DIR/dist-gz/`: every asset gzip-compressed as
+//! `<path>.gz`, listed in a generated `$OUT_DIR/assets_table.rs` of `include_bytes!`
+//! entries and decompressed into memory once at startup — so the binary carries the
+//! small gzip blob and we never link a brotli/zstd library.
 //! Everything is generated into `OUT_DIR`; Cargo's publish verification rejects a
 //! build script that writes into the package source.
 //!
@@ -74,6 +75,36 @@ fn main() {
             dist_gz.display()
         ))
     });
+    write_asset_table(&dist_gz, &out.join("assets_table.rs"))
+        .unwrap_or_else(|e| fail(&format!("could not write the embedded asset table: {e}")));
+}
+
+/// Write `EMBEDDED: &[(&str, &[u8])]`, one `include_bytes!` entry per file under
+/// `dist_gz`, sorted by path so the output is deterministic. Paths are relative
+/// to `dist_gz` and use `/`.
+fn write_asset_table(dist_gz: &Path, table: &Path) -> std::io::Result<()> {
+    let mut files = Vec::new();
+    let mut stack = vec![dist_gz.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if let Ok(rel) = path.strip_prefix(dist_gz) {
+                let rel: Vec<_> = rel.iter().map(|c| c.to_string_lossy()).collect();
+                files.push(rel.join("/"));
+            }
+        }
+    }
+    files.sort();
+    let mut code = String::from("pub static EMBEDDED: &[(&str, &[u8])] = &[\n");
+    for rel in &files {
+        code.push_str(&format!(
+            "    ({rel:?}, include_bytes!(concat!(env!(\"OUT_DIR\"), \"/dist-gz/\", {rel:?}))),\n"
+        ));
+    }
+    code.push_str("];\n");
+    std::fs::write(table, code)
 }
 
 /// The packaged-crate case: put a built SPA in `dist`, or fail the build.
@@ -261,7 +292,7 @@ impl AddGz for std::path::PathBuf {
 }
 
 /// Write a minimal `dist/index.html` if none exists (so the gzip mirror and the
-/// rust-embed macro always have something to embed).
+/// embedded asset table always has something to embed).
 fn ensure_placeholder(dist: &Path) {
     let index = dist.join("index.html");
     if index.exists() {

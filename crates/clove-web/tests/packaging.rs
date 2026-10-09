@@ -68,8 +68,8 @@ fn the_build_script_keeps_its_escape_hatches() {
     }
     let assets = std::fs::read_to_string(crate_dir().join("src/assets.rs")).unwrap();
     assert!(
-        assets.contains("$OUT_DIR/dist-gz"),
-        "assets.rs must embed from OUT_DIR, not from the package directory"
+        assets.contains(r#"concat!(env!("OUT_DIR"), "/assets_table.rs")"#),
+        "assets.rs must embed the table build.rs generates in OUT_DIR, not files from the package directory"
     );
 }
 

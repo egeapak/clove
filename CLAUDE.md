@@ -115,7 +115,7 @@ Network tests use the deterministic in-process mock server in
 The SvelteKit SPA lives in `crates/clove-web/web/` and is built by
 `crates/clove-web/build.rs` (`npm run build` when `npm` is present and sources
 changed; otherwise a placeholder), gzipped into `$OUT_DIR/dist-gz/`, and embedded
-via `rust-embed` (`dist/` is git-ignored — never commit it). A Node-free `cargo
+via a generated `include_bytes!` table (`dist/` is git-ignored — never commit it). A Node-free `cargo
 build` still works (the placeholder is embedded); `CLOVE_SKIP_WEB_BUILD=1` skips
 the npm build. The web server is the **`web` feature** of `clove-cli` and `cloved`
 (off by default; `full` includes it, and the release binaries are built with it).

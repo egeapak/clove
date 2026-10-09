@@ -13,9 +13,9 @@ separately in production.
 ## How it's built & embedded
 `crates/clove-web/build.rs` runs `npm run build` (when `npm` is available and a
 source is newer than the last build), writes the static output to `../dist/`,
-gzips it into `$OUT_DIR/dist-gz/`, and the crate embeds **only** that via
-`rust-embed`. At server start the assets are decompressed once into memory and
-served from there (gzip or identity by `Accept-Encoding`).
+gzips it into `$OUT_DIR/dist-gz/`, and the crate embeds **only** that via a
+generated `include_bytes!` table. At server start the assets are decompressed once
+into memory and served from there (gzip or identity by `Accept-Encoding`).
 
 - A **Node-free `cargo build` still works** — `build.rs` embeds a placeholder page
   when `npm` is missing. Set `CLOVE_SKIP_WEB_BUILD=1` to skip the npm build.
