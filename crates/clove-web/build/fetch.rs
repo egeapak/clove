@@ -29,19 +29,29 @@ pub fn base_url(version: &str, override_base: Option<&str>) -> String {
     }
 }
 
-/// Only HTTPS, or plain HTTP to loopback (a local mirror or a test server).
+/// Only HTTPS, or plain HTTP to loopback (a local mirror or a test server). The
+/// host is compared exactly after the authority is split off, and userinfo
+/// (`user@host`) is refused: `http://127.0.0.1:x@evil.example` must not pass for
+/// loopback.
 pub fn check_url(url: &str) -> Result<(), String> {
     if url.starts_with("https://") {
         return Ok(());
     }
-    for loopback in ["http://127.0.0.1", "http://localhost", "http://[::1]"] {
-        if let Some(rest) = url.strip_prefix(loopback) {
-            if rest.is_empty() || rest.starts_with(':') || rest.starts_with('/') {
-                return Ok(());
-            }
-        }
+    let refused = || format!("refusing to download over a non-HTTPS URL: {url}");
+    let rest = url.strip_prefix("http://").ok_or_else(refused)?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.contains('@') {
+        return Err(refused());
     }
-    Err(format!("refusing to download over a non-HTTPS URL: {url}"))
+    let host = match authority.strip_prefix('[') {
+        Some(v6) => v6.split_once(']').map_or("", |(h, _)| h),
+        None => authority.split(':').next().unwrap_or(""),
+    };
+    if matches!(host, "127.0.0.1" | "localhost" | "::1") {
+        Ok(())
+    } else {
+        Err(refused())
+    }
 }
 
 /// The hex digest from a `sha256sum`-style line (`<64 hex>  <name>`), or a bare digest.

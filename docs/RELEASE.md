@@ -56,6 +56,16 @@ cargo test --workspace --all-features
 ( cd crates/clove-web/web && npm ci && npm run check && npm run test )
 ```
 
+Rehearse the publish before tagging. The dry run packages and verifies all fifteen
+crates against each other, with `clove-web` taking the SPA from your checkout
+(the GitHub Release does not exist yet); it needs a built web UI and a clean
+tracked tree:
+
+```sh
+( cd crates/clove-web/web && npm ci && npm run build )
+scripts/release/publish.sh --dry-run
+```
+
 Confirm the working tree is clean except the untracked dogfood store:
 
 ```sh
@@ -324,10 +334,10 @@ proj=$(mktemp -d) && ( cd "$proj" && git init -q . && "$root/bin/clove" init >/d
 ( cd "$proj" && "$root/bin/clove" serve ) 2>&1 | grep -q "without the web UI" \
   && echo "default install: no web server, as designed"
 cargo install clove-cli --locked --features web --root "$root" --force
-cd "$proj" && "$root/bin/clove" serve --port 7791 & srv=$!; sleep 3
+( cd "$proj" && exec "$root/bin/clove" serve --port 7791 ) & srv=$!
+sleep 3
 curl -fsS http://127.0.0.1:7791/ | grep -q "_app" && echo "web UI embedded (not the placeholder)"
-kill $srv; cd - >/dev/null; rm -rf "$proj"
-rm -rf "$root"
+kill $srv; rm -rf "$proj" "$root"
 ```
 
 If step 2 returns nothing after propagation, `clove plugin list` will be empty
@@ -447,7 +457,11 @@ every future release.
   (repeat per crate). Yanking prevents *new* dependents from selecting it but
   does **not** delete it — existing `Cargo.lock`s still resolve. There is no
   un-publish; fix forward with `0.1.4`.
-- **Wrong tag?** Delete and re-push before the CI finishes, or cut a new tag:
+- **Never delete or edit the GitHub Release or its `clove-web-dist-*` assets once
+  `clove-web` is on crates.io.** That version's `--features web` build downloads
+  them, so removing them breaks it permanently (yanking does not help existing
+  users); the checksum is the only guard, so a replaced asset fails the build.
+- **Wrong tag?** Before any crate is published, delete and re-push, or cut a new tag:
   `git tag -d v0.1.4 && git push origin :refs/tags/v0.1.4`.
 
 ---

@@ -1,6 +1,8 @@
 # Gate the web server behind a `web` feature; download the SPA at build time
 
-> **Status:** Plan — 2026-10-09, targeting clove 0.1.4. Nothing here is implemented.
+> **Status:** Implemented on `feat/web-feature` (clove 0.1.4), 2026-10-09. Where the
+> shipped code differs from this plan, the code and `docs/RELEASE.md` win; the main
+> deviations are noted inline.
 
 ## Why
 
@@ -25,20 +27,21 @@ and the UI are one optional unit, not two.
   error naming `--features web` and the release binaries; `daemon status` shows
   no web URL.
 - **SPA acquisition in `build.rs`, in order:**
-  1. a prebuilt `dist-gz/` (developer builds), else
-  2. `web/` sources via npm (existing behaviour), else
-  3. the packaged-crate case: download `clove-web-dist-v<version>.tar.gz` and its
+  1. `web/` sources via npm (existing behaviour; everything is generated into
+     `OUT_DIR`, since Cargo's publish verification rejects a build script that
+     writes into the package source), else
+  2. the packaged-crate case: download `clove-web-dist-v<version>.tar.gz` and its
      `.sha256` from the matching GitHub Release and verify; a failed download or
      mismatch is a hard build error, never a silent placeholder.
-  `DOCS_RS` is the only exception: it uses the placeholder so docs.rs (offline)
-  still builds.
+  `DOCS_RS` embeds the placeholder so docs.rs (offline) still builds, and
+  `CLOVE_WEB_DIST_DIR` (a built `dist/`) / `CLOVE_WEB_DIST_BASE_URL` (a mirror) are
+  the offline and packager escape hatches.
 - **Integrity:** a checksum asset on the same release (decided 2026-10-09). It
   trusts one host for both files; a pinned in-repo hash was rejected because it
   needs a byte-reproducible tarball across machines and a hash committed before
   the tag.
 - **Package contents:** `dist-gz/**` leaves `include`, so no dirty check and no
-  `--allow-dirty`. The HTTP client is an optional build-dependency, compiled only
-  when step 3 applies.
+  `--allow-dirty`. The download client (`ureq`) is an ordinary build-dependency.
 
 ## Release ordering (changes from the 0.1.3 runbook)
 
@@ -77,7 +80,8 @@ and the UI are one optional unit, not two.
 
 - A published crate whose `--features web` build depends on a GitHub Release asset
   staying available. Deleting a release breaks that version permanently.
-- Offline, proxied or vendored `--features web` installs fail by design.
+- Offline, proxied or vendored `--features web` installs fail unless
+  `CLOVE_WEB_DIST_DIR` points at a built `dist/`.
 - The default `cargo install` loses the UI; the README must say so plainly.
 - 0.1.3 will never exist on crates.io (its GitHub Release stays as is).
 

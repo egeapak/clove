@@ -135,10 +135,16 @@ fn downloads_must_be_https_or_loopback() {
     assert!(fetch::check_url("https://example.com/a").is_ok());
     assert!(fetch::check_url("http://127.0.0.1:8080/a").is_ok());
     assert!(fetch::check_url("http://localhost/a").is_ok());
+    assert!(fetch::check_url("http://[::1]:9000/a").is_ok());
+    assert!(fetch::check_url("http://127.0.0.1").is_ok());
     for bad in [
         "http://example.com/a",
         "http://127.0.0.1.evil.example/a",
         "http://localhost.evil.example/a",
+        "http://127.0.0.1:80@evil.example/a",
+        "http://localhost@evil.example/a",
+        "http://user:pw@127.0.0.1/a",
+        "http://[::1]@evil.example/a",
         "ftp://example.com/a",
         "file:///etc/passwd",
     ] {
@@ -201,6 +207,38 @@ fn extract_unpacks_a_well_formed_archive() {
     let files = fetch::extract(&archive, tmp.path()).unwrap();
     assert_eq!(files, 2);
     assert!(tmp.path().join("_app/immutable/a.js").is_file());
+}
+
+/// What `tar -czf … -C dist .` (pack-web-dist.sh) actually produces: a `./`
+/// directory entry and `./`-prefixed paths.
+#[test]
+fn extract_unpacks_the_archive_shape_the_pack_script_makes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut builder = tar::Builder::new(Vec::new());
+    let mut dir = tar::Header::new_gnu();
+    dir.set_entry_type(tar::EntryType::Directory);
+    dir.set_size(0);
+    dir.set_mode(0o755);
+    dir.as_old_mut().name[..2].copy_from_slice(b"./");
+    dir.set_cksum();
+    builder.append(&dir, &b""[..]).unwrap();
+    let mut file = tar::Header::new_gnu();
+    file.set_entry_type(tar::EntryType::Regular);
+    file.set_size(5);
+    file.set_mode(0o644);
+    file.as_old_mut().name[..12].copy_from_slice(b"./index.html");
+    file.set_cksum();
+    builder.append(&file, &b"<html"[..]).unwrap();
+    let tar_bytes = builder.into_inner().unwrap();
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    std::io::Write::write_all(&mut gz, &tar_bytes).unwrap();
+    let archive = gz.finish().unwrap();
+
+    assert_eq!(fetch::extract(&archive, tmp.path()).unwrap(), 1);
+    assert_eq!(
+        std::fs::read(tmp.path().join("index.html")).unwrap(),
+        b"<html"
+    );
 }
 
 #[test]

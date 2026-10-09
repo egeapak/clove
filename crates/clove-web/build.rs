@@ -68,7 +68,12 @@ fn main() {
         acquire_packaged(&dist);
         dist
     };
-    gzip_tree(&dist, &dist_gz);
+    gzip_tree(&dist, &dist_gz).unwrap_or_else(|e| {
+        fail(&format!(
+            "could not compress the web UI into {}: {e}",
+            dist_gz.display()
+        ))
+    });
 }
 
 /// The packaged-crate case: put a built SPA in `dist`, or fail the build.
@@ -80,6 +85,7 @@ fn acquire_packaged(dist: &Path) {
         return;
     }
     if let Some(dir) = std::env::var_os("CLOVE_WEB_DIST_DIR") {
+        println!("cargo:rerun-if-changed={}", Path::new(&dir).display());
         copy_tree(Path::new(&dir), dist).unwrap_or_else(|e| {
             fail(&format!(
                 "CLOVE_WEB_DIST_DIR={}: {e}",
@@ -130,8 +136,11 @@ fn fail(reason: &str) -> ! {
 /// GET `url`, refusing anything over `limit` bytes.
 fn download(url: &str, limit: u64) -> Result<Vec<u8>, String> {
     fetch::check_url(url)?;
+    // An https URL stays https across redirects; only a loopback http mirror
+    // (already vetted by `check_url`) may be plain.
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(120)))
+        .https_only(url.starts_with("https://"))
         .build()
         .into();
     let mut response = agent.get(url).call().map_err(|e| format!("{url}: {e}"))?;
@@ -149,7 +158,8 @@ fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         let target = dst.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
+        // `Path::is_dir` follows symlinks, so a linked subdirectory is copied too.
+        if entry.path().is_dir() {
             copy_tree(&entry.path(), &target)?;
         } else {
             std::fs::copy(entry.path(), target)?;
@@ -206,38 +216,31 @@ fn maybe_npm_build(web: &Path, dist: &Path) {
 }
 
 /// Mirror every file under `src` into `dst` as a gzip-compressed `<name>.gz`.
-fn gzip_tree(src: &Path, dst: &Path) {
+fn gzip_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
     let _ = std::fs::remove_dir_all(dst);
     let mut stack = vec![src.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
             let path = entry.path();
-            let Ok(ft) = entry.file_type() else { continue };
-            if ft.is_dir() {
+            if entry.file_type()?.is_dir() {
                 stack.push(path);
                 continue;
             }
-            let Ok(rel) = path.strip_prefix(src) else {
-                continue;
-            };
-            let Ok(bytes) = std::fs::read(&path) else {
-                continue;
-            };
+            let rel = path
+                .strip_prefix(src)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            let bytes = std::fs::read(&path)?;
             let out = dst.join(rel).with_added_gz();
             if let Some(parent) = out.parent() {
-                let _ = std::fs::create_dir_all(parent);
+                std::fs::create_dir_all(parent)?;
             }
             let mut enc = GzEncoder::new(Vec::new(), Compression::best());
-            if enc.write_all(&bytes).is_ok() {
-                if let Ok(gz) = enc.finish() {
-                    let _ = std::fs::write(&out, gz);
-                }
-            }
+            enc.write_all(&bytes)?;
+            std::fs::write(&out, enc.finish()?)?;
         }
     }
+    Ok(())
 }
 
 /// Helper to append a `.gz` suffix to a path.

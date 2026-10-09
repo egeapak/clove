@@ -165,4 +165,3 @@ jobs:
             artifacts/clove-*.tar.gz.sha256
             artifacts/clove-*.zip
             artifacts/clove-*.zip.sha256
-            artifacts/clove-web-dist-*
