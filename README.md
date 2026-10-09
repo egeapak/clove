@@ -48,7 +48,8 @@ single, dependency-light, cross-platform binary.
   recorded history snapshots.
 - **Two UIs** — a `ratatui` terminal browser (`clove tui`) and an embedded
   SvelteKit web UI (`clove serve`: Kanban / list / detail / timeline, live
-  file-watch updates, no Node needed at runtime).
+  file-watch updates, no Node needed at runtime; the `web` feature, in the
+  release binaries and opt-in when building from source).
 - **Two-way GitHub sync** — `clove sync github` reconciles issues *and* comments
   in both directions in a single pass, with policy-based conflict resolution.
 - **AI-native** — a built-in MCP server (`clove mcp`) and a Claude Code plugin
@@ -58,24 +59,45 @@ single, dependency-light, cross-platform binary.
 
 ## Install
 
+**Prebuilt binaries** (with the web UI) are attached to each
+[GitHub Release](https://github.com/egeapak/clove/releases) for Linux, macOS
+(arm64 + x86_64) and Windows: `clove`, `cloved` and the integration plugins.
+
+**From source**, the default install is the lean core — CLI, TUI, MCP server and
+the optional daemon, with **no web server and no web UI**:
+
 ```sh
 cargo install --locked --git https://github.com/egeapak/clove clove-cli cloved
 clove version   # the installed command is `clove` (crate: clove-cli)
+```
 
-# ...then add integrations as plugins, only the ones you want:
+To get the web UI (`clove serve`, and the daemon's web port), enable the `web`
+feature on each binary you install:
+
+```sh
+cargo install --locked --git https://github.com/egeapak/clove clove-cli --features web
+cargo install --locked --git https://github.com/egeapak/clove cloved --features web
+```
+
+Without it, `clove serve` exits with a message saying how to enable it. Node is
+never needed to *run* clove. Building with `web`:
+
+- **from crates.io** (`cargo install clove-cli --features web`) downloads the
+  built web UI for that exact version from its GitHub Release at build time and
+  verifies its checksum — it needs network access, not Node. Offline or packager
+  builds can point `CLOVE_WEB_DIST_DIR` at a built `dist/` directory instead;
+- **from git** builds the SPA from source and so needs `npm` on your machine;
+  without it the binary falls back to a placeholder page while the JSON API stays
+  fully live.
+
+See [`crates/clove-web/web/README.md`](crates/clove-web/web/README.md).
+
+Then add integrations as plugins, only the ones you want:
+
+```sh
 cargo install --locked --git https://github.com/egeapak/clove clove-sync-github   # GitHub sync (~3.5 MB of TLS/HTTP)
 cargo install --locked --git https://github.com/egeapak/clove clove-import-tk clove-import-beads   # import from tk / Beads
 ```
-
-This installs the `clove` CLI and the optional `cloved` daemon onto your `PATH`.
-A Rust (stable) toolchain compiles them; Node is never needed to *run* clove —
-the web UI is compiled into the binary and served by `clove serve` itself.
-
-Installing from **crates.io** (`cargo install clove-cli`) needs no Node at all:
-the published crate ships the built SPA. Installing from **git**, as above,
-builds the SPA from source and so needs `npm` on your machine; without it the
-binary falls back to a placeholder page while the JSON API stays fully live.
-See [`crates/clove-web/web/README.md`](crates/clove-web/web/README.md).
 
 **Integrations are cargo-style plugins.** The core `clove` binary carries only
 its own native surface; every foreign-tracker integration is a
@@ -157,7 +179,7 @@ clove stats --history         # replay recorded snapshots (a running daemon also
 
 ```sh
 clove tui                     # terminal browser + add/edit form (master-detail, tabs, filters)
-clove serve                   # serve the web UI on http://127.0.0.1:7373 (loopback)
+clove serve                   # serve the web UI on http://127.0.0.1:7373 (loopback; needs the `web` feature)
 clove serve --open            # …and open it in the browser
 ```
 

@@ -30,6 +30,11 @@ caught, add the step in the same change (see `CLAUDE.md`).
       `cloved`, `clove-sync-github`, `clove-import-tk`, `clove-import-beads`
       (`.exe` on Windows) plus licenses/README.
 - [ ] `file` each binary: macOS arm64 / x86_64 Mach-O, Linux x86-64 ELF, Windows PE32+.
+- [ ] **Web UI assets** — the Release also carries `clove-web-dist-vX.Y.Z.tar.gz`
+      and `.sha256` (what a published `clove-web` downloads at build time). Verify
+      the checksum, then `tar -tzf` it: `index.html` and `_app/` at the root, no
+      `._*` files, and more than a handful of files. After the Release is
+      published, both URLs must download without authentication (`curl -fsSIL`).
 
 ## 1. Packaged-binary smoke (every platform)
 
@@ -43,6 +48,8 @@ scripts/release/release-smoke.sh <extracted-dir> X.Y.Z     # CLI/MCP/web/daemon 
 TMPDIR=/tmp CLOVE_HOME=$(mktemp -d /tmp/cvd.XXXX)/h scripts/ci/daemon-smoke.sh <extracted-dir>   # hub flow
 ```
 
+- [ ] The release binaries carry the web feature: `clove serve` answers (it exits
+      with "built without the web UI" otherwise) and `cloved` reports a web URL.
 - [ ] **macOS arm64** — native.
 - [ ] **macOS x86_64** — the binary is x86_64-only, so it runs under Rosetta by
       itself. Do *not* use `arch -x86_64 bash` (Homebrew's bash is arm64-only).

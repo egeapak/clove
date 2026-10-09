@@ -13,13 +13,19 @@ separately in production.
 ## How it's built & embedded
 `crates/clove-web/build.rs` runs `npm run build` (when `npm` is available and a
 source is newer than the last build), writes the static output to `../dist/`,
-gzips it into `../dist-gz/`, and the crate embeds **only** `dist-gz/` via
+gzips it into `$OUT_DIR/dist-gz/`, and the crate embeds **only** that via
 `rust-embed`. At server start the assets are decompressed once into memory and
 served from there (gzip or identity by `Accept-Encoding`).
 
 - A **Node-free `cargo build` still works** — `build.rs` embeds a placeholder page
   when `npm` is missing. Set `CLOVE_SKIP_WEB_BUILD=1` to skip the npm build.
-- `dist/` and `dist-gz/` are **git-ignored and generated** — never commit them.
+- `dist/` is **git-ignored and generated** — never commit it. (`dist-gz/` lives in
+  Cargo's `OUT_DIR` now, not in the source tree.)
+- A **published** `clove-web` has no `web/` sources: its `build.rs` downloads
+  `clove-web-dist-v<version>.tar.gz` (+ `.sha256`) from that version's GitHub
+  Release, verifies it and embeds it. `CLOVE_WEB_DIST_DIR=<built dist/>` skips the
+  download (offline builds), and `CLOVE_WEB_DIST_BASE_URL` points it at a mirror.
+  The web server itself is the opt-in `web` feature of `clove-cli` and `cloved`.
 
 ## Develop
 ```sh

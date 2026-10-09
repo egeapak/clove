@@ -119,7 +119,8 @@ jobs:
       # end to end. The daemon integration suites are `#![cfg(unix)]` and run on
       # the ubuntu/macos matrix; the smoke script is Windows' stand-in for them.
       - name: Build daemon (windows shutdown path)
-        run: cargo build -p cloved -p clove-cli
+        # The smoke script drives the web API, so build the `web` feature in.
+        run: cargo build -p cloved -p clove-cli --features cloved/web,clove-cli/web
       - name: Daemon unit tests
         # `cloved` is a binary crate (no lib target), so its unit tests live in
         # the bin and run with --bins; --lib finds no targets and errors.
@@ -145,6 +146,17 @@ jobs:
         run: cargo check -p clove-cli --no-default-features
       - name: cloved without git-sync
         run: cargo check -p cloved --no-default-features
+      # `web` is off by default: a plain `cargo install clove-cli` / `cloved` must
+      # not link the HTTP server or the embedded SPA, and the opt-in build must
+      # still compile. The first step asserts the default tree has no clove-web.
+      - name: default builds carry no web server
+        run: |
+          if cargo tree -p clove-cli -p cloved -e normal | grep -q '^.*clove-web'; then
+            echo "clove-web is in the default dependency tree of clove-cli/cloved" >&2
+            exit 1
+          fi
+      - name: clove and cloved with the web feature
+        run: cargo check -p clove-cli -p cloved --features clove-cli/web,cloved/web
       # The registry client (ureq -> rustls) must stay on `ring`. A rustls with
       # default features unifies the tree onto aws-lc-sys and triples the binary,
       # so the workspace pins `ring` explicitly (root Cargo.toml).

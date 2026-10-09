@@ -1882,6 +1882,15 @@ A single slot's teardown (detach, idle eviction, a failed task) is steps 1–3.
 
 ### 8.10 Web UI on the Hub
 
+> **Build feature.** All of this exists only in a `cloved` built with the `web`
+> feature (`--features web`, or `full`, which the release binaries use); `clove
+> serve` likewise needs `clove-cli`'s `web`. It is **off by default**: the HTTP
+> server and the embedded SPA are not needed by the CLI, TUI or MCP, and the SPA
+> is the only consumer of the `/api/v1` server. Without it `STATUS.web_addr`
+> and `web_url` are always `None`, the hub binds no listener, and `clove serve`
+> exits with an error that names the feature. A published `clove-web` fetches
+> its built SPA from the version's GitHub Release at build time (`docs/RELEASE.md`).
+
 The hub binds **one** loopback listener, when the first web-enabled project
 loads: `CLOVED_WEB_PORT`, else that project's `[web] port` (7373 by default) — a
 per-user daemon has no config of its own, and this keeps `[web] port` meaning

@@ -6,6 +6,10 @@
 # path clove-web/build.rs embeds) and then compiles the Rust binaries with
 # CLOVE_SKIP_WEB_BUILD=1, so build.rs embeds that dist instead of the placeholder.
 #
+# A separate `web-dist` job packs the built SPA into `clove-web-dist-v<version>.tar.gz`
+# (+ `.sha256`) and attaches it to the same release: a published `clove-web` downloads
+# it at build time (crates/clove-web/build.rs), so the crates carry no generated assets.
+#
 # Validate by pushing a tag (e.g. `git tag v0.1.0 && git push origin v0.1.0`).
 name: Release
 
@@ -69,9 +73,10 @@ jobs:
         # plugins (`clove-sync-github`, `clove-import-tk`, `clove-import-beads`), so
         # `clove sync github` / `clove import tk|beads` work out of the box (the CLI
         # resolves the sibling plugin binaries). `cloved/full` enables the daemon's
-        # dependency-free periodic-sync spawn gate. Drop the plugin packages to
+        # dependency-free periodic-sync spawn gate; `clove-cli/full` and `cloved/full` also
+        # turn on the `web` feature, so the binaries carry the web UI. Drop the plugin packages to
         # publish a lean, integration-free bundle instead.
-        run: cargo build --release --target ${{ matrix.target }} -p clove-cli -p cloved -p clove-sync-github -p clove-import-tk -p clove-import-beads --features "cloved/full"
+        run: cargo build --release --target ${{ matrix.target }} -p clove-cli -p cloved -p clove-sync-github -p clove-import-tk -p clove-import-beads --features "clove-cli/full,cloved/full"
 
       - name: Package
         shell: bash
@@ -107,9 +112,43 @@ jobs:
             clove-*.zip.sha256
           if-no-files-found: error
 
+  web-dist:
+    name: pack web UI for crates.io builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag must match the crate version
+        run: |
+          set -euo pipefail
+          crate=$(sed -n '/^\[workspace.package\]/,/^\[/{s/^version = "\(.*\)"/\1/p;}' Cargo.toml | head -1)
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$crate" != "$tag" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match the workspace version ${crate}" >&2
+            exit 1
+          fi
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/clove-web/web/package-lock.json
+      - name: Build web SPA
+        working-directory: crates/clove-web/web
+        run: |
+          npm ci
+          npm run build
+      - name: Pack
+        run: scripts/release/pack-web-dist.sh crates/clove-web/dist "${GITHUB_REF_NAME#v}" web-dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clove-web-dist
+          path: |
+            web-dist/clove-web-dist-*.tar.gz
+            web-dist/clove-web-dist-*.tar.gz.sha256
+          if-no-files-found: error
+
   release:
     name: publish GitHub Release
-    needs: build
+    needs: [build, web-dist]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -126,3 +165,4 @@ jobs:
             artifacts/clove-*.tar.gz.sha256
             artifacts/clove-*.zip
             artifacts/clove-*.zip.sha256
+            artifacts/clove-web-dist-*
