@@ -21,6 +21,8 @@
 //! `the_fixture_discriminates_the_ways_a_filter_can_be_wrong`, which is the
 //! guard on that claim.
 
+mod support;
+
 use std::path::Path;
 use std::process::Command;
 
@@ -854,9 +856,7 @@ mod daemon {
     /// this branch already (see `sort_order.rs`), so this test guarantees its
     /// own precondition instead.
     fn cloved_bin() -> PathBuf {
-        escargot::CargoBuild::new()
-            .package("cloved")
-            .bin("cloved")
+        crate::support::cloved_build()
             .run()
             .expect("build cloved for the daemon filter comparison")
             .path()

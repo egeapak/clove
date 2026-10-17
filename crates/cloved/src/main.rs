@@ -18,6 +18,7 @@ mod github_sync;
 mod graph_cache;
 mod hub;
 mod ipc;
+mod knobs;
 mod lifecycle;
 mod reindexer;
 mod slot;

@@ -7,6 +7,8 @@
 //! exactly as a real client would when a later call depends on an earlier write.
 #![cfg(feature = "mcp")]
 
+mod support;
+
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -370,11 +372,7 @@ fn no_repo_does_not_spawn_daemon_or_create_clove_dir() {
 
     // Build `cloved` and point `CLOVED_PATH` at it, so that if the guard were
     // broken the server WOULD find a daemon to spawn (and create `.clove/`).
-    let cloved = escargot::CargoBuild::new()
-        .package("cloved")
-        .bin("cloved")
-        .run()
-        .expect("build cloved");
+    let cloved = support::cloved_build().run().expect("build cloved");
 
     let mut cmd = clove(dir.path()); // daemon enabled (no CLOVE_MCP_NO_DAEMON)
     cmd.env("CLOVED_PATH", cloved.path())
@@ -594,9 +592,7 @@ fn daemon_routed_comment_author_is_resolved_by_the_caller() {
     git_init(dir.path());
     git_config_local(dir.path(), "user.email", "cfg@example.com");
     let _stop = StopDaemon(runtime_dir(dir.path()));
-    let cloved = escargot::CargoBuild::new()
-        .package("cloved")
-        .bin("cloved")
+    let cloved = support::cloved_build()
         .run()
         .expect("build cloved for the author test");
 
@@ -898,9 +894,7 @@ fn auto_starts_daemon_and_heartbeats() {
     // `cloved` crate, so under a scoped run the daemon could never spawn (a 6s
     // timeout). Build `cloved` on demand and point `CLOVED_PATH` at it so the
     // test is self-sufficient under any invocation (`-p clove` or `--workspace`).
-    let cloved = escargot::CargoBuild::new()
-        .package("cloved")
-        .bin("cloved")
+    let cloved = support::cloved_build()
         .run()
         .expect("build cloved for the daemon auto-start test");
 
@@ -970,9 +964,7 @@ fn a_killed_daemon_is_respawned_by_the_mcp_heartbeat() {
     let dir = init_repo();
     let run = runtime_dir(dir.path());
     let _stop = StopDaemon(run.clone());
-    let cloved = escargot::CargoBuild::new()
-        .package("cloved")
-        .bin("cloved")
+    let cloved = support::cloved_build()
         .run()
         .expect("build cloved for the daemon respawn test");
     let mut cmd = clove(dir.path());
@@ -1026,9 +1018,7 @@ fn a_killed_daemon_is_respawned_by_the_mcp_heartbeat() {
 fn daemon_rejected_write_carries_the_shared_error_code() {
     let dir = init_repo();
     let _stop = StopDaemon(runtime_dir(dir.path()));
-    let cloved = escargot::CargoBuild::new()
-        .package("cloved")
-        .bin("cloved")
+    let cloved = support::cloved_build()
         .run()
         .expect("build cloved for the error-classification test");
 
@@ -1067,9 +1057,7 @@ fn subscribed_resource_updated_on_mutation() {
 
     let dir = init_repo();
     let _stop = StopDaemon(runtime_dir(dir.path()));
-    let cloved = escargot::CargoBuild::new()
-        .package("cloved")
-        .bin("cloved")
+    let cloved = support::cloved_build()
         .run()
         .expect("build cloved for the push-notification test");
 
@@ -1569,11 +1557,7 @@ fn read_tools_use_the_daemon_tier_and_agree_with_the_files() {
     };
     assert_eq!(want.len(), 3);
 
-    let cloved = escargot::CargoBuild::new()
-        .package("cloved")
-        .bin("cloved")
-        .run()
-        .expect("build cloved");
+    let cloved = support::cloved_build().run().expect("build cloved");
     let mut daemon = std::process::Command::new(cloved.path())
         .env("CLOVE_HOME", TEST_CLOVE_HOME)
         .env("CLOVE_RUNTIME_DIR", runtime_dir(dir.path()))
@@ -1853,9 +1837,7 @@ fn published_output_schemas_validate_the_tool_results() {
 /// Build `cloved` for the daemon-backed tests below.
 #[cfg(unix)]
 fn cloved_bin() -> std::path::PathBuf {
-    escargot::CargoBuild::new()
-        .package("cloved")
-        .bin("cloved")
+    support::cloved_build()
         .run()
         .expect("build cloved")
         .path()

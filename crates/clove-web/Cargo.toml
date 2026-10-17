@@ -16,6 +16,11 @@ categories.workspace = true
 # modules `build.rs` pulls in, so it must ship.
 include = ["src/**", "build.rs", "build/**"]
 
+[features]
+# Honour `CLOVED_WATCH_ARM_DELAY_MS` (a test stand-in for a slow watch arm).
+# Test-only; enabled through `cloved/test-knobs` (#61).
+test-knobs = []
+
 [dependencies]
 clove-types.workspace = true
 clove-core.workspace = true

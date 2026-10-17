@@ -96,6 +96,7 @@ fn sigkill_then_restart_recovers() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "test-knobs"), ignore = "needs a `test-knobs` cloved")]
 fn an_idle_hub_exits_after_its_projects_idle_out() {
     let (_tmp, clove_dir) = init_clove_dir();
     // CLOVED_IDLE_SHUTDOWN_MS is the test seam for the minute-granularity
@@ -122,6 +123,7 @@ fn an_idle_hub_exits_after_its_projects_idle_out() {
 /// the hub has exited and holds neither its own lock nor the project's
 /// (L-new-2).
 #[test]
+#[cfg_attr(not(feature = "test-knobs"), ignore = "needs a `test-knobs` cloved")]
 fn a_hub_stopped_mid_load_is_gone_when_its_pid_file_is() {
     let (_a_tmp, a) = init_clove_dir();
     let mut hub = TestHub::spawn_with(

@@ -35,13 +35,11 @@ pub fn snapshot_once(repo_root: &Utf8Path, index: &Arc<Mutex<Index>>) -> bool {
 }
 
 /// Resolve the auto-snapshot interval. `stats_snapshot_min == 0` disables it
-/// (returns `None`). `CLOVED_STATS_SNAPSHOT_MS` overrides it (sub-minute values
-/// for tests); `0` there also disables.
+/// (returns `None`). `CLOVED_STATS_SNAPSHOT_MS` (a `test-knobs` build only)
+/// overrides it with sub-minute values for tests; `0` there also disables.
 pub fn snapshot_interval(stats_snapshot_min: u64) -> Option<Duration> {
-    if let Ok(ms) = std::env::var("CLOVED_STATS_SNAPSHOT_MS") {
-        if let Ok(ms) = ms.parse::<u64>() {
-            return (ms > 0).then(|| Duration::from_millis(ms));
-        }
+    if let Some(ms) = crate::knobs::ms("CLOVED_STATS_SNAPSHOT_MS") {
+        return (ms > 0).then(|| Duration::from_millis(ms));
     }
     (stats_snapshot_min > 0).then(|| Duration::from_secs(stats_snapshot_min * 60))
 }
@@ -111,7 +109,7 @@ mod tests {
     #[test]
     fn interval_zero_disables() {
         // With the env override unset, 0 minutes disables.
-        if std::env::var("CLOVED_STATS_SNAPSHOT_MS").is_err() {
+        if crate::knobs::ms("CLOVED_STATS_SNAPSHOT_MS").is_none() {
             assert!(snapshot_interval(0).is_none());
             assert_eq!(snapshot_interval(60), Some(Duration::from_secs(3600)));
         }

@@ -1817,7 +1817,7 @@ process count bounded without a manual `clove daemon stop`. After an eviction
 the next read falls back to the local path until something loads the project
 again; the MCP server's heartbeat re-ensures it for the session's duration. Set
 `0` to never evict; `CLOVED_IDLE_SHUTDOWN_MS` overrides it (sub-minute) for
-tests/CI.
+tests/CI in a `test-knobs` build (below).
 
 **The hub starts with a minimal, pinned environment.** It serves every project
 and belongs to none, so it must not carry one client's shell into all of them.
@@ -1828,8 +1828,8 @@ A client spawns it with an emptied environment plus only: `PATH`, `HOME`,
 config kept somewhere other than `~/.config/gh`), `LANG`/`LC_*`, the `CLOVED_*` knobs (`CLOVED_DISABLE_WEB`, `CLOVED_WEB_PORT`,
 `CLOVED_IDLE_SHUTDOWN_MS`, `CLOVED_HUB_GRACE_MS`, `CLOVED_STATS_SNAPSHOT_MS`,
 `CLOVED_GITHUB_SYNC_MS`, `CLOVED_LOAD_DELAY_MS`, `CLOVED_WATCH_ARM_DELAY_MS`, `CLOVED_BIND_DELAY_MS` — test stand-ins for a large
-project's slow load, a slow watch and a slow bind on a loaded machine, …), `CLOVE_GITHUB_API_URL`/`CLOVE_GITHUB_RETRY_MS` (test
-seams), `CLOVE_RUNTIME_DIR` (always set, absolute), and on Windows `SystemRoot`,
+project's slow load, a slow watch and a slow bind on a loaded machine, …), `CLOVE_GITHUB_API_URL` (GitHub Enterprise) /
+`CLOVE_GITHUB_RETRY_MS` (test seam), `CLOVE_RUNTIME_DIR` (always set, absolute), and on Windows `SystemRoot`,
 `windir`, `LOCALAPPDATA`, `APPDATA`, `USERPROFILE`, `TEMP`/`TMP`, `PATHEXT`. Its
 working directory is its own private runtime directory (`<runtime>`, §8.2) —
 set at spawn and again at startup, so a hand-started `cloved run` behaves the
@@ -1841,7 +1841,12 @@ not passed**: the periodic `clove sync github` a project's daemon runs resolves
 its token the other way the plugin does — `gh auth token` (the GitHub CLI's own
 credential store, reached through `PATH`/`HOME`). The `CLOVED_*` knobs still come
 from whichever client started the hub; `clove daemon stop --all` and a restart
-picks up new ones.
+picks up new ones. Only `CLOVED_DISABLE_WEB` and `CLOVED_WEB_PORT` are honoured
+by every daemon: the timer overrides and delay injectors (and
+`CLOVE_GITHUB_RETRY_MS`) are read only by a build with the **`test-knobs`**
+feature (`cloved`, `clove-web`, `clove-import`/`clove-sync-github`), which is
+never in `default` or `full`, so a released or `cargo install`ed daemon ignores
+them (#61).
 
 **Periodic GitHub sync only targets the project's own remote.** `[daemon]
 github_sync_repo` comes from `.clove/config.toml`, which arrives with the

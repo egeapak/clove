@@ -34,6 +34,10 @@ web = ["dep:clove-web"]
 # *spawns* that subprocess on its interval. **Opt-out** (not in `default`);
 # enable with `--features github-sync` (or `--features full`).
 github-sync = []
+# Honour the `CLOVED_*` test knobs (sub-minute timers, injected delays; see
+# `src/knobs.rs`). **Test-only**: never in `default` or `full`, so a released or
+# `cargo install`ed daemon ignores them (#61).
+test-knobs = ["clove-web?/test-knobs"]
 
 [dependencies]
 clove-types.workspace = true

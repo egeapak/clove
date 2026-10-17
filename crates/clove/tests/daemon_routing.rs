@@ -4,6 +4,8 @@
 #![cfg(unix)]
 #![allow(clippy::zombie_processes)]
 
+mod support;
+
 use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
@@ -16,9 +18,7 @@ const TEST_CLOVE_HOME: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target
 /// The `cloved` binary, built on demand so these tests can never pass by
 /// skipping.
 fn cloved_bin() -> PathBuf {
-    escargot::CargoBuild::new()
-        .package("cloved")
-        .bin("cloved")
+    support::cloved_build()
         .run()
         .expect("build cloved for the daemon routing tests")
         .path()

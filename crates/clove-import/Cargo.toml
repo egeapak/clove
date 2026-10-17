@@ -17,6 +17,9 @@ categories.workspace = true
 [features]
 default = []
 github = ["dep:octocrab", "dep:tokio", "dep:rustls", "dep:fd-lock"]
+# Honour `CLOVE_GITHUB_RETRY_MS` (instant sync retries for the test-suite).
+# Test-only; enabled through `clove-sync-github/test-knobs` (#61).
+test-knobs = []
 
 [dependencies]
 clove-types.workspace = true

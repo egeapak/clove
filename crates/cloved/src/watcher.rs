@@ -94,11 +94,8 @@ fn arm(issues_dir: &Utf8Path) -> Result<Armed, String> {
     })
     .map_err(|e| format!("watcher init failed: {e}"))?;
     // Test knob: a slow arm, as on a loaded machine.
-    if let Some(ms) = std::env::var("CLOVED_WATCH_ARM_DELAY_MS")
-        .ok()
-        .and_then(|ms| ms.parse::<u64>().ok())
-    {
-        std::thread::sleep(Duration::from_millis(ms));
+    if let Some(delay) = crate::knobs::duration("CLOVED_WATCH_ARM_DELAY_MS") {
+        std::thread::sleep(delay);
     }
     watcher
         .watch(issues_dir.as_std_path(), RecursiveMode::Recursive)

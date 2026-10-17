@@ -140,6 +140,7 @@ fn a_project_held_by_a_legacy_daemon_is_refused_safely() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "test-knobs"), ignore = "needs a `test-knobs` cloved")]
 fn each_project_idles_out_on_its_own_then_the_hub_exits() {
     let (_a_tmp, a) = init_clove_dir();
     let (_b_tmp, b) = init_clove_dir();

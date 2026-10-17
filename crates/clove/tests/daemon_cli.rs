@@ -5,6 +5,8 @@
 //! temp runtime directory, never the user's.
 #![cfg(unix)]
 
+mod support;
+
 use std::io::{Read, Write};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
@@ -20,12 +22,15 @@ const TEST_CLOVE_HOME: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target
 fn cloved() -> &'static Path {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| {
-        let mut build = escargot::CargoBuild::new().package("cloved").bin("cloved");
-        // The web-server cases need a daemon that has one.
-        if cfg!(feature = "web") {
-            build = build.features("web");
-        }
-        build
+        // The `CLOVED_*` delay knobs only exist in a `test-knobs` build, and the
+        // web-server cases need a daemon that has one.
+        let features = if cfg!(feature = "web") {
+            "test-knobs web"
+        } else {
+            "test-knobs"
+        };
+        support::cloved_build()
+            .features(features)
             .run()
             .expect("build cloved for the daemon CLI tests")
             .path()
