@@ -13,7 +13,6 @@
 //! through the same `finish_lean` hydration, so a break there breaks here too.
 
 use camino::{Utf8Path, Utf8PathBuf};
-use chrono::Utc;
 use clove_core::view::{Filters, Order, Page, SortField};
 use clove_core::{ItemStore, NewItem};
 use clove_engine::{Engine, Projection, Rows, Source, Tiers};
@@ -116,7 +115,8 @@ fn fixture() -> Fixture {
     // (so c stays ready); e names a missing id (dangling -> blocked).
     edit(&store, &ids[0], |fm| fm.deps = vec![ids[1].clone()]);
     edit(&store, &ids[2], |fm| fm.deps = vec![ids[3].clone()]);
-    clove_core::ops::transition(&store, &ids[3], ItemStatus::Closed, Utc::now()).unwrap();
+    let d_updated = store.get(&ids[3]).unwrap().frontmatter.updated;
+    clove_core::ops::transition(&store, &ids[3], ItemStatus::Closed, d_updated).unwrap();
     edit(&store, &ids[4], |fm| {
         fm.deps = vec![CloveId::new("proj-ZZZZZZZZ").unwrap()]
     });
@@ -134,6 +134,16 @@ fn fixture() -> Fixture {
     });
     edit(&store, &ids[5], |fm| fm.external_ref = Some(String::new()));
 
+    // The graph/ref edits above must not have re-stamped `updated`, or
+    // `--sort updated` silently becomes the order those edits ran in.
+    for (i, id) in ids.iter().enumerate() {
+        assert_eq!(
+            store.get(id).unwrap().frontmatter.updated,
+            base + chrono::Duration::minutes((ids.len() - i) as i64),
+            "fixture `updated` of {id}"
+        );
+    }
+
     clove_index::reindex(&clove_dir.join("issues"), &clove_dir.join("index.db")).unwrap();
     Fixture {
         _dir: dir,
@@ -143,10 +153,13 @@ fn fixture() -> Fixture {
     }
 }
 
+/// Apply `f` and persist, stamping the item's own (possibly just-edited)
+/// `updated` rather than the wall clock, so the fixture's order is the one set.
 fn edit(store: &ItemStore, id: &CloveId, f: impl FnOnce(&mut clove_types::ItemFrontmatter)) {
     let mut item = store.get(id).unwrap();
     f(&mut item.frontmatter);
-    store.update(&item, Utc::now()).unwrap();
+    let updated = item.frontmatter.updated;
+    store.update(&item, updated).unwrap();
 }
 
 impl Fixture {

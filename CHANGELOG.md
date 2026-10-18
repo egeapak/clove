@@ -4,7 +4,20 @@ All notable changes to clove are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.4] - 2026-10-09
+## [0.1.5] - Unreleased
+
+### Changed
+
+- The daemon's test knobs (`CLOVED_IDLE_SHUTDOWN_MS`, `CLOVED_HUB_GRACE_MS`, `CLOVED_STATS_SNAPSHOT_MS`, `CLOVED_GITHUB_SYNC_MS`, `CLOVED_LOAD_DELAY_MS`, `CLOVED_WATCH_ARM_DELAY_MS`, `CLOVED_BIND_DELAY_MS`) and `CLOVE_GITHUB_RETRY_MS` are honoured only by a `test-knobs` build; released and `cargo install`ed binaries ignore them (`CLOVED_WEB_PORT`, `CLOVED_DISABLE_WEB` and `CLOVE_GITHUB_API_URL` are unchanged)
+- Frontmatter YAML is parsed with `serde_norway` instead of `serde_yaml_neo`, which pulled the unmaintained `unsafe-libyaml` (RUSTSEC-2024-0449); parsing, errors and written output are unchanged
+- `rustls` 0.23.46 (RUSTSEC-2026-0346 through RUSTSEC-2026-0349)
+
+### Fixed
+
+- The plugin-install tests no longer see clove plugins installed on the developer's `PATH`
+- The read-tier parity fixture keeps its intended `updated` order instead of re-stamping items with the wall clock
+
+## [0.1.4] - 2026-10-17
 
 ### Changed
 

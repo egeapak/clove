@@ -17,13 +17,16 @@ categories.workspace = true
 [features]
 default = []
 github = ["dep:octocrab", "dep:tokio", "dep:rustls", "dep:fd-lock"]
+# Honour `CLOVE_GITHUB_RETRY_MS` (instant sync retries for the test-suite).
+# Test-only; enabled through `clove-sync-github/test-knobs` (#61).
+test-knobs = []
 
 [dependencies]
 clove-types.workspace = true
 clove-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml_neo.workspace = true
+serde_norway.workspace = true
 camino.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true

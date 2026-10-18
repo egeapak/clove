@@ -688,6 +688,8 @@ fn plugin_dir() -> &'static Path {
         let run = escargot::CargoBuild::new()
             .package("clove-sync-github")
             .bin("clove-sync-github")
+            // `CLOVE_GITHUB_RETRY_MS` (below) only exists in a `test-knobs` build.
+            .features("test-knobs")
             .run()
             .expect("build clove-sync-github plugin");
         run.path()

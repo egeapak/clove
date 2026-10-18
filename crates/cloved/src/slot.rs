@@ -224,13 +224,11 @@ fn settings(config: Option<&clove_core::CloveConfig>) -> Settings {
 }
 
 /// Resolve the idle-eviction window (DESIGN §8.8). `idle_shutdown_min == 0` means
-/// never. `CLOVED_IDLE_SHUTDOWN_MS` overrides it for every project (sub-minute
-/// values for tests). `None` = never evict.
+/// never. `CLOVED_IDLE_SHUTDOWN_MS` (a `test-knobs` build only) overrides it for
+/// every project with sub-minute values for tests. `None` = never evict.
 fn idle_shutdown_duration(idle_min: u64) -> Option<Duration> {
-    if let Ok(ms) = std::env::var("CLOVED_IDLE_SHUTDOWN_MS") {
-        if let Ok(ms) = ms.parse::<u64>() {
-            return (ms > 0).then(|| Duration::from_millis(ms));
-        }
+    if let Some(ms) = crate::knobs::ms("CLOVED_IDLE_SHUTDOWN_MS") {
+        return (ms > 0).then(|| Duration::from_millis(ms));
     }
     (idle_min > 0).then(|| Duration::from_secs(idle_min * 60))
 }

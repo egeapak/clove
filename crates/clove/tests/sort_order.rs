@@ -12,6 +12,8 @@
 //! (or ignores the request entirely and answers in `rank` order, which is what a
 //! dropped wire field looks like) fails rather than coincidentally passing.
 
+mod support;
+
 use std::path::Path;
 use std::process::Command;
 
@@ -470,9 +472,7 @@ mod daemon {
     /// dev-dependency here and is used the same way in `mcp.rs`, so the test can
     /// simply guarantee its own precondition.
     fn cloved_bin() -> PathBuf {
-        escargot::CargoBuild::new()
-            .package("cloved")
-            .bin("cloved")
+        crate::support::cloved_build()
             .run()
             .expect("build cloved for the daemon ordering comparison")
             .path()

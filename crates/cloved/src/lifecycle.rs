@@ -24,7 +24,7 @@ use interprocess::local_socket::ListenerOptions;
 use crate::hub::Hub;
 
 /// How long the hub lingers with no project before exiting, unless
-/// `CLOVED_HUB_GRACE_MS` says otherwise.
+/// `CLOVED_HUB_GRACE_MS` (a `test-knobs` build only) says otherwise.
 const DEFAULT_GRACE: Duration = Duration::from_secs(60);
 
 /// Run the hub rooted at `paths` until a shutdown signal arrives or it has
@@ -59,7 +59,7 @@ pub fn run(paths: &HubPaths) -> anyhow::Result<()> {
         .context("building tokio runtime")?;
 
     // Test knob: a hub slow to bind, as on a loaded machine.
-    if let Some(delay) = env_ms("CLOVED_BIND_DELAY_MS") {
+    if let Some(delay) = crate::knobs::duration("CLOVED_BIND_DELAY_MS") {
         std::thread::sleep(delay);
     }
     let result: anyhow::Result<()> = runtime.block_on(async {
@@ -75,7 +75,7 @@ pub fn run(paths: &HubPaths) -> anyhow::Result<()> {
         restrict_to_owner(&paths.sock(), 0o600);
 
         let hub = Hub::new(std::env::var_os("CLOVED_DISABLE_WEB").is_none(), grace())
-            .with_load_delay(env_ms("CLOVED_LOAD_DELAY_MS").unwrap_or_default());
+            .with_load_delay(crate::knobs::duration("CLOVED_LOAD_DELAY_MS").unwrap_or_default());
 
         // Register the shutdown-signal handler BEFORE advertising readiness (the
         // pid file): "pid present ⇒ ready to shut down cleanly" (DESIGN §8.9).
@@ -156,15 +156,7 @@ async fn orphaned(paths: &HubPaths) {
 
 /// The hub's grace period with no project (`CLOVED_HUB_GRACE_MS` for tests).
 fn grace() -> Duration {
-    env_ms("CLOVED_HUB_GRACE_MS").unwrap_or(DEFAULT_GRACE)
-}
-
-/// A millisecond test knob from the environment.
-fn env_ms(name: &str) -> Option<Duration> {
-    std::env::var(name)
-        .ok()
-        .and_then(|ms| ms.parse::<u64>().ok())
-        .map(Duration::from_millis)
+    crate::knobs::duration("CLOVED_HUB_GRACE_MS").unwrap_or(DEFAULT_GRACE)
 }
 
 /// Create the runtime directory owner-only and refuse one another user can

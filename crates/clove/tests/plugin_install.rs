@@ -307,17 +307,77 @@ fn prepend_path(cmd: &mut Command, dir: &Path) {
     // Isolating `current_exe` was not enough on its own: that closed the *first*
     // search-path entry, and this is the last one. `PATH` cannot simply be
     // emptied — the `--git` tests need the real `git` on it — so the target dir
-    // is filtered out by prefix and everything else is kept.
-    let target_dir = cargo_target_dir();
-    dirs.extend(
-        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).filter(|entry| {
-            match &target_dir {
-                Some(target) => !entry.starts_with(target),
-                None => true,
-            }
-        }),
-    );
+    // is filtered out by prefix and everything else is kept, minus any clove
+    // binaries the developer has installed (see `hermetic_path`).
+    dirs.extend(hermetic_path().iter().cloned());
     cmd.env("PATH", std::env::join_paths(dirs).unwrap());
+}
+
+/// The inherited `PATH` with the cargo target dir dropped and every directory
+/// holding a `clove`/`clove-*` binary swapped for a mirror without them.
+///
+/// A developer with `cargo install clove-sync-github` (or any clove plugin) has
+/// it in `~/.cargo/bin`, which also carries the `rustc`/`cargo` proxies the
+/// `--git` tests need, so the directory is mirrored (every other entry
+/// symlinked) rather than dropped. Built once per test binary.
+fn hermetic_path() -> &'static [std::path::PathBuf] {
+    static PATH: std::sync::OnceLock<(Vec<TempDir>, Vec<std::path::PathBuf>)> =
+        std::sync::OnceLock::new();
+    &PATH
+        .get_or_init(|| {
+            let target_dir = cargo_target_dir();
+            let mut mirrors = Vec::new();
+            let mut dirs = Vec::new();
+            for entry in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
+                if target_dir.as_ref().is_some_and(|t| entry.starts_with(t)) {
+                    continue;
+                }
+                if !holds_clove_binary(&entry) {
+                    dirs.push(entry);
+                    continue;
+                }
+                if let Some(mirror) = mirror_without_clove(&entry) {
+                    dirs.push(mirror.path().to_path_buf());
+                    mirrors.push(mirror);
+                }
+            }
+            (mirrors, dirs)
+        })
+        .1
+}
+
+fn is_clove_name(name: &std::ffi::OsStr) -> bool {
+    let name = name.to_string_lossy();
+    let stem = name
+        .strip_suffix(std::env::consts::EXE_SUFFIX)
+        .unwrap_or(&name);
+    stem == "clove" || stem.starts_with("clove-")
+}
+
+fn holds_clove_binary(dir: &Path) -> bool {
+    std::fs::read_dir(dir)
+        .map(|entries| entries.flatten().any(|e| is_clove_name(&e.file_name())))
+        .unwrap_or(false)
+}
+
+/// A temp dir symlinking every entry of `dir` except the clove binaries.
+#[cfg(unix)]
+fn mirror_without_clove(dir: &Path) -> Option<TempDir> {
+    // Under the cargo target dir (never on the mirrored `PATH`): a static is
+    // never dropped, so this is where the leftover mirrors land.
+    let mirror = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).ok()?;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        if !is_clove_name(&entry.file_name()) {
+            let _ = std::os::unix::fs::symlink(entry.path(), mirror.path().join(entry.file_name()));
+        }
+    }
+    Some(mirror)
+}
+
+/// Symlinks need a privilege on Windows, so the directory is dropped instead.
+#[cfg(not(unix))]
+fn mirror_without_clove(_dir: &Path) -> Option<TempDir> {
+    None
 }
 
 /// The cargo target directory this test binary was built into.
@@ -1762,8 +1822,7 @@ fn plugin_list_and_search_match_the_published_schema() {
             .success(),
     );
     assert_matches(&schema, &discovered);
-    // The ambient `$PATH` carries this repo's own built plugins, so the counts
-    // are not fixed — assert on the rows this test actually published.
+    // Assert on the rows this test actually published, not on counts.
     assert_eq!(
         row(&discovered, "sync-gitlab")["installed"],
         false,

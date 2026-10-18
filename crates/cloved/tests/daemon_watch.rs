@@ -101,6 +101,7 @@ fn wait_until(timeout: Duration, mut f: impl FnMut() -> bool) -> bool {
 
 /// M4: a running daemon records `clove stats` history points on its interval.
 #[test]
+#[cfg_attr(not(feature = "test-knobs"), ignore = "needs a `test-knobs` cloved")]
 fn daemon_auto_snapshots_on_interval() {
     let repo = init_repo();
     repo.add_item("tracked work");
@@ -157,6 +158,7 @@ fn startup_sweep_picks_up_out_of_band_items() {
 /// and the sweep run once it is picks up what was written in between — it is
 /// not lost until the next change.
 #[test]
+#[cfg_attr(not(feature = "test-knobs"), ignore = "needs a `test-knobs` cloved")]
 fn an_item_written_right_after_the_load_is_indexed() {
     let repo = init_repo();
     repo.reindex();
@@ -194,6 +196,7 @@ fn an_item_written_right_after_the_load_is_indexed() {
 /// index or the files itself. Writes are served throughout, and what was
 /// written is served once the watcher is armed.
 #[test]
+#[cfg_attr(not(feature = "test-knobs"), ignore = "needs a `test-knobs` cloved")]
 fn reads_wait_for_the_watcher_but_writes_do_not() {
     let repo = init_repo();
     repo.reindex();

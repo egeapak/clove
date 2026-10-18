@@ -5,6 +5,8 @@
 //! runtime directory.
 #![cfg(all(unix, feature = "web"))]
 
+mod support;
+
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
@@ -20,9 +22,7 @@ const TEST_CLOVE_HOME: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target
 fn cloved() -> &'static Path {
     static BIN: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
     BIN.get_or_init(|| {
-        escargot::CargoBuild::new()
-            .package("cloved")
-            .bin("cloved")
+        support::cloved_build()
             .features("web")
             .run()
             .expect("build cloved for the web-port tests")

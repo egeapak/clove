@@ -17,7 +17,7 @@ use crate::plan::ConflictItem;
 /// Maximum size, in bytes, of a single import source unit handed to a parser —
 /// one tk `*.md` file, or one beads JSONL line. Reuses clove-core's own parse
 /// ceiling (frontmatter + body budget plus a small slack) so importers never
-/// feed an unbounded buffer to `serde_yaml_neo`/`serde_json` (M5). Foreign input
+/// feed an unbounded buffer to `serde_norway`/`serde_json` (M5). Foreign input
 /// exceeding this is rejected cleanly rather than allocated/parsed.
 pub const MAX_IMPORT_UNIT_BYTES: usize = MAX_FRONTMATTER_BYTES + MAX_BODY_BYTES + 4096;
 

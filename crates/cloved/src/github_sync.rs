@@ -19,13 +19,11 @@ use std::time::Duration;
 use camino::{Utf8Path, Utf8PathBuf};
 
 /// Resolve the auto-sync interval. `0` minutes disables it (returns `None`).
-/// `CLOVED_GITHUB_SYNC_MS` overrides it with sub-minute values for tests; `0`
-/// there also disables.
+/// `CLOVED_GITHUB_SYNC_MS` (a `test-knobs` build only) overrides it with
+/// sub-minute values for tests; `0` there also disables.
 pub fn github_sync_interval(interval_min: u64) -> Option<Duration> {
-    if let Ok(ms) = std::env::var("CLOVED_GITHUB_SYNC_MS") {
-        if let Ok(ms) = ms.parse::<u64>() {
-            return (ms > 0).then(|| Duration::from_millis(ms));
-        }
+    if let Some(ms) = crate::knobs::ms("CLOVED_GITHUB_SYNC_MS") {
+        return (ms > 0).then(|| Duration::from_millis(ms));
     }
     (interval_min > 0).then(|| Duration::from_secs(interval_min * 60))
 }
@@ -108,7 +106,7 @@ mod tests {
 
     #[test]
     fn interval_zero_disables() {
-        if std::env::var("CLOVED_GITHUB_SYNC_MS").is_err() {
+        if crate::knobs::ms("CLOVED_GITHUB_SYNC_MS").is_none() {
             assert!(github_sync_interval(0).is_none());
             assert_eq!(github_sync_interval(30), Some(Duration::from_secs(1800)));
         }

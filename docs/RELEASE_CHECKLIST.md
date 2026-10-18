@@ -85,6 +85,9 @@ TMPDIR=/tmp CLOVE_HOME=$(mktemp -d /tmp/cvd.XXXX)/h scripts/ci/daemon-smoke.sh <
 - [ ] `clove -f json ls|ready|blocked` report `_meta.source == "daemon"`.
 - [ ] A second (scratch) project attached with `clove daemon start` shares the same
       hub pid; `clove daemon stop` in it detaches only it.
+- [ ] The release `cloved` ignores the test knobs (#61): with a scratch `CLOVE_HOME`,
+      `CLOVED_IDLE_SHUTDOWN_MS=500 CLOVED_HUB_GRACE_MS=200 clove daemon start` in a
+      scratch project, then `clove daemon status` after ~3 s still shows it serving.
 
 ## 4. GitHub two-way sync (this repo ↔ egeapak/clove)
 

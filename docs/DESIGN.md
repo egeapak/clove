@@ -52,7 +52,7 @@ no SQLite surface.
 | Crate | Version | Rationale |
 |---|---|---|
 | `serde` | 1 | baseline |
-| `serde_yaml_neo` | `"0.9"` | strict YAML (Ware fork of serde_yaml); exact Cargo.toml key: `serde_yaml_neo = "0.9"`. See §4 and §14.2. |
+| `serde_norway` | `"0.9"` | strict YAML (maintained serde_yaml fork); exact Cargo.toml key: `serde_norway = "0.9"`. See §4 and §14.2. |
 | `petgraph` | 0.6 | DAG engine |
 | `rusqlite` | `{ version="0.31", features=["bundled"] }` | embedded SQLite, no runtime dep |
 | `notify` | `6` (stable, NOT 9-rc) | file-watch; 9.0-rc is not production-ready |
@@ -347,16 +347,16 @@ IDs ≤23 bytes (e.g., `proj-7AF3K2MN` is 13 chars) with zero heap allocation.
 
 ## 4. Frontmatter Parsing and Serialization
 
-**Parsing strategy: hand-rolled zero-copy scanner for list/query operations; serde_yaml_neo
+**Parsing strategy: hand-rolled zero-copy scanner for list/query operations; serde_norway
 for full parse.**
 
 Two-phase pipeline:
 1. Byte-budget check: reject files where frontmatter block > 64 KiB before any allocation.
-2. Reject YAML anchors/aliases: scan for `&` in value position and `*` before serde_yaml_neo
+2. Reject YAML anchors/aliases: scan for `&` in value position and `*` before serde_norway
    sees the bytes. Return `ParseError::AliasNotAllowed`.
 3. Boundary scan: `memchr::memmem::find` to locate the closing `---\n`. This is zero-copy —
    the frontmatter bytes are a slice of the mmap'd/read file.
-4. Deserialize via `serde_yaml_neo` into `ItemFrontmatter` with `#[serde(deny_unknown_fields)]`.
+4. Deserialize via `serde_norway` into `ItemFrontmatter` with `#[serde(deny_unknown_fields)]`.
 5. Validate `id` matches filename stem; reject if not.
 6. Validate fields (priority 0–4, ID format, RFC3339, status+closed consistency).
 
@@ -375,7 +375,7 @@ impl<W: Write> FrontmatterWriter<W> {
 }
 ```
 
-**Why hand-rolled:** serde_yaml_neo does not guarantee field order; a future library upgrade
+**Why hand-rolled:** serde_norway does not guarantee field order; a future library upgrade
 could silently reorder fields, producing spurious git diffs on every `clove status` call. The
 hand-rolled writer is the single authoritative code path for all item writes.
 
@@ -1817,7 +1817,7 @@ process count bounded without a manual `clove daemon stop`. After an eviction
 the next read falls back to the local path until something loads the project
 again; the MCP server's heartbeat re-ensures it for the session's duration. Set
 `0` to never evict; `CLOVED_IDLE_SHUTDOWN_MS` overrides it (sub-minute) for
-tests/CI.
+tests/CI in a `test-knobs` build (below).
 
 **The hub starts with a minimal, pinned environment.** It serves every project
 and belongs to none, so it must not carry one client's shell into all of them.
@@ -1828,8 +1828,8 @@ A client spawns it with an emptied environment plus only: `PATH`, `HOME`,
 config kept somewhere other than `~/.config/gh`), `LANG`/`LC_*`, the `CLOVED_*` knobs (`CLOVED_DISABLE_WEB`, `CLOVED_WEB_PORT`,
 `CLOVED_IDLE_SHUTDOWN_MS`, `CLOVED_HUB_GRACE_MS`, `CLOVED_STATS_SNAPSHOT_MS`,
 `CLOVED_GITHUB_SYNC_MS`, `CLOVED_LOAD_DELAY_MS`, `CLOVED_WATCH_ARM_DELAY_MS`, `CLOVED_BIND_DELAY_MS` — test stand-ins for a large
-project's slow load, a slow watch and a slow bind on a loaded machine, …), `CLOVE_GITHUB_API_URL`/`CLOVE_GITHUB_RETRY_MS` (test
-seams), `CLOVE_RUNTIME_DIR` (always set, absolute), and on Windows `SystemRoot`,
+project's slow load, a slow watch and a slow bind on a loaded machine, …), `CLOVE_GITHUB_API_URL` (GitHub Enterprise) /
+`CLOVE_GITHUB_RETRY_MS` (test seam), `CLOVE_RUNTIME_DIR` (always set, absolute), and on Windows `SystemRoot`,
 `windir`, `LOCALAPPDATA`, `APPDATA`, `USERPROFILE`, `TEMP`/`TMP`, `PATHEXT`. Its
 working directory is its own private runtime directory (`<runtime>`, §8.2) —
 set at spawn and again at startup, so a hand-started `cloved run` behaves the
@@ -1841,7 +1841,12 @@ not passed**: the periodic `clove sync github` a project's daemon runs resolves
 its token the other way the plugin does — `gh auth token` (the GitHub CLI's own
 credential store, reached through `PATH`/`HOME`). The `CLOVED_*` knobs still come
 from whichever client started the hub; `clove daemon stop --all` and a restart
-picks up new ones.
+picks up new ones. Only `CLOVED_DISABLE_WEB` and `CLOVED_WEB_PORT` are honoured
+by every daemon: the timer overrides and delay injectors (and
+`CLOVE_GITHUB_RETRY_MS`) are read only by a build with the **`test-knobs`**
+feature (`cloved`, `clove-web`, `clove-import`/`clove-sync-github`), which is
+never in `default` or `full`, so a released or `cargo install`ed daemon ignores
+them (#61).
 
 **Periodic GitHub sync only targets the project's own remote.** `[daemon]
 github_sync_repo` comes from `.clove/config.toml`, which arrives with the
@@ -2249,7 +2254,7 @@ canonical `.clove/issues/` root.
 ### 12.2 YAML Injection / Bomb Prevention
 
 Pre-scan frontmatter bytes for `&` (value-position anchor) and `*` (alias). Reject with
-`ParseError::AliasNotAllowed` before calling serde_yaml_neo. The 64 KiB frontmatter byte cap is
+`ParseError::AliasNotAllowed` before calling serde_norway. The 64 KiB frontmatter byte cap is
 enforced before any allocation.
 
 ### 12.3 Symlink Safety
@@ -2369,19 +2374,19 @@ and 0.5% only at 1,000,000 items. The extra 3 characters are a trivial ergonomic
 Crockford alphabet (uppercase, no I/L/O/U) is used instead of base32 RFC 4648 (a-z2-7)
 for visual clarity in filenames and shell completion.
 
-### 14.2 Frontmatter Parser: serde_yaml vs. gray_matter+serde_yaml_neo vs. hand-rolled
+### 14.2 Frontmatter Parser: serde_yaml vs. gray_matter+serde_norway vs. hand-rolled
 
 **Expert 1** (data model): serde_yaml v0.9+.
 **Expert 7** (performance): hand-rolled scanner.
-**Expert 8** (Rust architecture): gray_matter + serde_yaml_neo.
+**Expert 8** (Rust architecture): gray_matter + serde_norway.
 
-**Resolution: two-phase (serde_yaml_neo for parsing, hand-rolled FrontmatterWriter for
+**Resolution: two-phase (serde_norway for parsing, hand-rolled FrontmatterWriter for
 serialization).** The performance expert is correct that a hand-rolled scanner at ~1-3 µs/item
 vs serde_yaml at ~15 µs/item matters at scale. However, Expert 8's concern about the
-deprecated serde_yaml 0.9 is also valid. The compromise: use the `serde_yaml_neo` crate
-(crates.io: `serde_yaml_neo`, the Ware fork) for deserialization (correctness and
+deprecated serde_yaml 0.9 is also valid. The compromise: use the `serde_norway` crate
+(crates.io: `serde_norway`, a maintained serde_yaml fork) for deserialization (correctness and
 maintenance), with the YAML alias/bomb pre-scan guard. Cargo.toml entry:
-`serde_yaml_neo = "0.9"`. Use a completely hand-rolled `FrontmatterWriter` for serialization
+`serde_norway = "0.9"` (originally `serde_yaml_neo`, replaced in 0.1.5 because it pulled the unmaintained `unsafe-libyaml`, RUSTSEC-2024-0449). Use a completely hand-rolled `FrontmatterWriter` for serialization
 (canonical order, inline-flow lists, deterministic output). This gives correctness on reads
 and performance + determinism on writes. A full hand-rolled scanner for the read path is
 tracked as a post-M0 optimization if benchmarks show it is needed.

@@ -9,7 +9,7 @@
 //! 2. Locate the `---` … `---` frontmatter fences (`memchr`, zero-copy slice).
 //! 3. Enforce the frontmatter byte budget and reject YAML anchors/aliases (bomb
 //!    guard) before handing bytes to the YAML parser.
-//! 4. Deserialize with `serde_yaml_neo` into [`ItemFrontmatter`]
+//! 4. Deserialize with `serde_norway` into [`ItemFrontmatter`]
 //!    (`deny_unknown_fields`); missing `schema` defaults to 1.
 //! 5. Field validation ([`crate::validate::validate_item`]).
 //! 6. Confirm `id` matches the file name stem.
@@ -193,7 +193,7 @@ fn parse_frontmatter_parts<'a>(
     }
 
     let frontmatter: ItemFrontmatter =
-        serde_yaml_neo::from_slice(frontmatter_bytes).map_err(|err| CloveError::InvalidYaml {
+        serde_norway::from_slice(frontmatter_bytes).map_err(|err| CloveError::InvalidYaml {
             path: path.to_owned(),
             message: err.to_string(),
         })?;

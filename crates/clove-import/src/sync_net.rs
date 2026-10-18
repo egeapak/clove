@@ -799,8 +799,12 @@ fn truncate(ts: DateTime<Utc>) -> DateTime<Utc> {
 }
 
 /// The base backoff delay between network retries. Overridable via
-/// `CLOVE_GITHUB_RETRY_MS` so the test-suite can keep retries instant.
+/// `CLOVE_GITHUB_RETRY_MS` in a `test-knobs` build, so the test-suite can keep
+/// retries instant.
 fn retry_base_ms() -> u64 {
+    if !cfg!(feature = "test-knobs") {
+        return 500;
+    }
     std::env::var("CLOVE_GITHUB_RETRY_MS")
         .ok()
         .and_then(|v| v.parse().ok())

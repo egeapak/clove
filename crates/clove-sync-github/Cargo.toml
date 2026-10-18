@@ -17,6 +17,11 @@ keywords.workspace = true
 categories.workspace = true
 publish = true
 
+[features]
+# Test-only: honour `CLOVE_GITHUB_RETRY_MS` (#61). The sync_github suite builds
+# the plugin with it; a published/installed plugin never has it.
+test-knobs = ["clove-import/test-knobs"]
+
 [[bin]]
 name = "clove-sync-github"
 path = "src/main.rs"
