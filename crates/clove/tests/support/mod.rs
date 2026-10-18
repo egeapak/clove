@@ -6,6 +6,7 @@
 /// `cloved` that `crates/cloved/tests` run (`CARGO_BIN_EXE_cloved`) with
 /// whatever features this build picked, so those suites would run against the
 /// wrong binary depending on which of these tests built last.
+#[cfg(unix)]
 pub fn cloved_build() -> escargot::CargoBuild {
     escargot::CargoBuild::new()
         .package("cloved")
