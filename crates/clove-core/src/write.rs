@@ -7,7 +7,7 @@
 //! guarantee field order across versions, so we own the *structure* here.
 //!
 //! We do **not** hand-roll YAML string quoting, though: each free-text scalar is
-//! rendered by `serde_yaml_neo::to_string`, which decides plain vs.
+//! rendered by `serde_norway::to_string`, which decides plain vs.
 //! single/double-quoted correctly. We keep the deterministic structure; the
 //! library keeps the fiddly quoting. (Field *ordering* — the stable-diff-
 //! critical part — stays under our control; the library only renders one scalar
@@ -112,10 +112,10 @@ fn rfc3339(ts: DateTime<Utc>) -> String {
 }
 
 /// Render a free-text scalar with correct YAML quoting, delegated to
-/// `serde_yaml_neo`. Serializing a string to YAML is infallible in practice.
+/// `serde_norway`. Serializing a string to YAML is infallible in practice.
 fn render_scalar(value: &str) -> String {
     let rendered =
-        serde_yaml_neo::to_string(value).expect("serializing a string scalar to YAML cannot fail");
+        serde_norway::to_string(value).expect("serializing a string scalar to YAML cannot fail");
     rendered.trim_end_matches('\n').to_string()
 }
 
@@ -382,7 +382,7 @@ mod tests {
         let mut fm = full_item().frontmatter;
         fm.title = "Fix: the parser, please".to_owned();
         let out = serialize_frontmatter(&fm);
-        // serde_yaml_neo single-quotes a value containing `: ` and `,`.
+        // serde_norway single-quotes a value containing `: ` and `,`.
         assert!(
             out.contains("title: 'Fix: the parser, please'"),
             "got:\n{out}"
@@ -405,7 +405,7 @@ mod tests {
             .unwrap()
             .strip_suffix("---\n")
             .unwrap();
-        let parsed: ItemFrontmatter = serde_yaml_neo::from_str(inner).expect("parses back");
+        let parsed: ItemFrontmatter = serde_norway::from_str(inner).expect("parses back");
         let mut labels = parsed.labels.clone();
         labels.sort();
         assert_eq!(

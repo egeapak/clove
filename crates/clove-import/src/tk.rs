@@ -198,7 +198,7 @@ impl Importer for TkImporter {
             }
 
             let ticket: TkTicket =
-                serde_yaml_neo::from_str(frontmatter_text).map_err(|err| ImportError::Record {
+                serde_norway::from_str(frontmatter_text).map_err(|err| ImportError::Record {
                     message: format!("{path}: {err}"),
                 })?;
 
@@ -379,7 +379,7 @@ pub fn parse_ticket_bytes(bytes: &[u8]) -> Result<(), ImportError> {
     let text = String::from_utf8_lossy(bytes);
     let (frontmatter_text, body) = split_frontmatter(&text);
     let _ticket: TkTicket =
-        serde_yaml_neo::from_str(frontmatter_text).map_err(|err| ImportError::Record {
+        serde_norway::from_str(frontmatter_text).map_err(|err| ImportError::Record {
             message: err.to_string(),
         })?;
     let _ = extract_h1(&body);
@@ -548,7 +548,7 @@ mod tests {
     #[test]
     fn deserializes_tolerating_unknown_fields() {
         let yaml = "id: t-1\nstatus: open\ntype: task\nunknown_field: ignored\ntags: [a, b]\n";
-        let t: TkTicket = serde_yaml_neo::from_str(yaml).unwrap();
+        let t: TkTicket = serde_norway::from_str(yaml).unwrap();
         assert_eq!(t.id.as_deref(), Some("t-1"));
         assert_eq!(t.ticket_type.as_deref(), Some("task"));
         assert_eq!(t.tags, vec!["a", "b"]);
@@ -561,7 +561,7 @@ mod tests {
         assert_eq!(fm, "id: t-1\nstatus: closed");
         assert_eq!(body, "hi\n");
         // The whole document still deserializes id/status (not dropped to body).
-        let t: TkTicket = serde_yaml_neo::from_str(fm).unwrap();
+        let t: TkTicket = serde_norway::from_str(fm).unwrap();
         assert_eq!(t.id.as_deref(), Some("t-1"));
         assert_eq!(t.status.as_deref(), Some("closed"));
     }
