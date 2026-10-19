@@ -419,14 +419,14 @@ impl PluginContext {
     /// error that maps onto the standard error envelope + exit code, so a plugin
     /// launched outside `clove` fails loudly and legibly.
     pub fn from_env() -> Result<Self, PluginEnvError>;
-
-    /// Open the file store the fat-plugin way (§6.4A): `ItemStore::new(root)`.
-    /// Keeps the plugin on the unified write path with one call.
-    pub fn open_store(&self) -> ItemStore;
-    /// Load `config.toml` (the host already validated it; this re-reads it).
-    pub fn load_config(&self) -> Result<CloveConfig, CloveError>;
 }
 ```
+
+`clove-plugin` does not open the store and does not depend on `clove-core`. It
+is the permissively licensed SDK (MIT OR Apache-2.0); `clove-core` is AGPL. A
+fat plugin (§6.4A) depends on `clove-core` itself and opens the store with
+`clove_core::ItemStore::new(cx.root.clone())`; that plugin is then a combined
+work under the AGPL (see §12).
 
 Ergonomics: the crate also re-exports the §6.3 envelope helpers so a whole plugin
 `main` is roughly:
@@ -434,7 +434,7 @@ Ergonomics: the crate also re-exports the §6.3 envelope helpers so a whole plug
 ```rust
 fn main() -> std::process::ExitCode {
     clove_plugin::run(|cx: &PluginContext, args: PluginArgs| {
-        let store = cx.open_store();
+        let store = clove_core::ItemStore::new(cx.root.clone()); // fat plugin
         // …do the provider work through clove_core::apply_edit…
         Ok(json!({ "pulled_created": n /* … */ }))   // wrapped into the {v,ok,data} envelope
     })

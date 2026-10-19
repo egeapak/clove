@@ -36,6 +36,8 @@ pub use run::{
 };
 
 // Re-exported so a plugin's closure signature can name them without adding
-// clove-core/clove-types to its own dependency list for the common case.
-pub use clove_core::{CloveConfig, ItemStore, OutputFormat};
-pub use clove_types::CloveError;
+// clove-types to its own dependency list for the common case. This crate never
+// depends on clove-core: it is the permissively licensed (MIT OR Apache-2.0)
+// plugin SDK, and clove-core is AGPL. A plugin that opens the store itself
+// depends on clove-core directly (and is then a combined work under the AGPL).
+pub use clove_types::{CloveError, OutputFormat};

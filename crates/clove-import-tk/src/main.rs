@@ -20,7 +20,7 @@ use std::process::ExitCode;
 
 use camino::Utf8PathBuf;
 use clap::Parser;
-use clove_core::OutputFormat;
+use clove_core::{ItemStore, OutputFormat};
 use clove_import::{render, ImportCtx, Importer, TkImporter};
 use clove_plugin::{
     clap_exit_code, emit_error, emit_success_with_meta, parse_format, unsupported_capability,
@@ -113,7 +113,7 @@ fn main() -> ExitCode {
 /// Drive the tk import and render its result exactly as the host's
 /// `cmd/import.rs` did.
 fn run(cx: &PluginContext, cli: Cli, format: OutputFormat) -> Result<(), CloveError> {
-    let store = cx.open_store();
+    let store = ItemStore::new(cx.root.clone());
     let import_ctx = ImportCtx::new(&store, cli.dry_run).map_err(import_err)?;
 
     let importer = TkImporter::new(cx.id_prefix.clone(), chrono::Utc::now());

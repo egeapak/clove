@@ -8,8 +8,7 @@
 //! host about where the repo is or which envelope the user asked for.
 
 use camino::Utf8PathBuf;
-use clove_core::{CloveConfig, ItemStore, OutputFormat};
-use clove_types::CloveError;
+use clove_types::{CloveError, OutputFormat};
 
 /// Terminal color preference (`$CLOVE_COLOR`).
 ///
@@ -188,20 +187,6 @@ impl PluginContext {
             Some(provider) => format!("{}:{}", self.command, provider),
             None => self.command.clone(),
         }
-    }
-
-    /// Open the file store the fat-plugin way (§6.4A): `ItemStore::new(root)`.
-    ///
-    /// Keeps the plugin on the unified write path (mutating through
-    /// `clove_core::apply_edit`) with one call.
-    pub fn open_store(&self) -> ItemStore {
-        ItemStore::new(self.root.clone())
-    }
-
-    /// Re-read and validate `config.toml`. The host already validated it; this
-    /// re-loads it from [`self.root`](Self::root).
-    pub fn load_config(&self) -> Result<CloveConfig, CloveError> {
-        clove_core::load_config(&self.root)
     }
 }
 

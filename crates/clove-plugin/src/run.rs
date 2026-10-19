@@ -192,7 +192,7 @@ where
             // directly for this early-failure path (§6.5).
             let format = std::env::var("CLOVE_FORMAT")
                 .ok()
-                .and_then(|value| clove_core::OutputFormat::parse(&value))
+                .and_then(|value| clove_types::OutputFormat::parse(&value))
                 .unwrap_or_default();
             let quiet = std::env::var("CLOVE_QUIET").is_ok_and(|value| value == "1");
             let err: CloveError = env_err.into();

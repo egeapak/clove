@@ -1,8 +1,12 @@
-# The support crate every first-party clove plugin (and, in a later phase, the
-# host) depends on: it materializes the host↔plugin env contract (DESIGN
-# PLUGIN_SYSTEM.md §6.2/§6.5) into a typed `PluginContext` and renders the
-# standard `{ v, ok, data, _meta }` envelope + exit codes so a plugin `main` is a
-# thin wrapper around its provider logic.
+# The plugin SDK every clove plugin (and the host) depends on: it materializes
+# the host↔plugin env contract (PLUGIN_SYSTEM.md §6.2/§6.5) into a typed
+# `PluginContext` and renders the standard `{ v, ok, data, _meta }` envelope +
+# exit codes so a plugin `main` is a thin wrapper around its provider logic.
+#
+# Licensing: this crate is MIT OR Apache-2.0 (the rest of clove is AGPL-3.0-only)
+# so a plugin built on it can use any license. It must never depend on an AGPL
+# clove crate (clove-core, clove-engine, …) in any feature combination; CI
+# enforces this (`.github/workflows/ci.yml`, "SDK license guard").
 [package]
 name = "clove-plugin"
 description = "clove plugin support: typed PluginContext + envelope/exit-code harness for clove-* subcommand plugins"
@@ -17,7 +21,6 @@ categories.workspace = true
 
 [dependencies]
 clove-types.workspace = true
-clove-core.workspace = true
 camino.workspace = true
 serde_json.workspace = true
 # Optional: only the `clap`-based plugin mains (almost all of them) enable this to

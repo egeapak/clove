@@ -27,7 +27,7 @@ use clove_plugin::outln;
 use std::process::ExitCode;
 
 use clap::Parser;
-use clove_core::OutputFormat;
+use clove_core::{ItemStore, OutputFormat};
 use clove_plugin::{
     clap_exit_code, emit_error, emit_success, parse_format, PluginArgs, PluginContext, PluginInfo,
 };
@@ -162,7 +162,7 @@ fn run(
 
     let (summary, report) = clove_import::sync_net::sync_github(
         &cli.target,
-        &cx.open_store(),
+        &ItemStore::new(cx.root.clone()),
         &cx.id_prefix,
         policy,
         !cli.no_comments,

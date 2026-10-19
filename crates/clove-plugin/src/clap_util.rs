@@ -8,7 +8,7 @@
 //! duplication a review flagged across `clove-sync-github` / `clove-import-tk` /
 //! `clove-import-beads`.
 
-use clove_core::OutputFormat;
+use clove_types::OutputFormat;
 
 /// clap value-parser for a `--format` argument (mirrors the host's): parses the
 /// wire spelling (`human` | `json` | `jsonl`) into an [`OutputFormat`], or returns
