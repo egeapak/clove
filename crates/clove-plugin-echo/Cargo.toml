@@ -28,3 +28,4 @@ path = "src/fake_cargo.rs"
 [dependencies]
 clove-plugin.workspace = true
 serde_json.workspace = true
+interprocess.workspace = true   # --host-silent: a raw connection that never says hello

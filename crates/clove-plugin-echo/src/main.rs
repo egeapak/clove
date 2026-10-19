@@ -34,6 +34,22 @@ fn main() -> std::process::ExitCode {
             let refused = clove_plugin::HostClient::connect(&socket, "00", "clove-echo", None);
             return Ok(json!({ "refused": refused.err().map(|e| e.to_string()) }));
         }
+        if args.args.iter().any(|a| a == "--host-silent") {
+            // Connect and never send `hello`: the host must give up on us.
+            use interprocess::local_socket::prelude::*;
+            use interprocess::local_socket::{GenericFilePath, Stream};
+            use std::io::BufRead as _;
+            let socket = cx.host_socket.clone().unwrap_or_default();
+            let name = socket.to_fs_name::<GenericFilePath>().expect("socket name");
+            let stream = Stream::connect(name).expect("connect");
+            let started = std::time::Instant::now();
+            let mut reply = String::new();
+            let _ = std::io::BufReader::new(stream).read_line(&mut reply);
+            return Ok(json!({
+                "reply": reply,
+                "waited_ms": started.elapsed().as_millis() as u64,
+            }));
+        }
         if args.args.iter().any(|a| a == "--host-oversize") {
             // One request line over the host's 16 MiB cap.
             let mut host = cx.host()?;

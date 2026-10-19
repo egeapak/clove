@@ -771,6 +771,7 @@ name = "clove-plugin-echo"
 version = "0.2.0"
 dependencies = [
  "clove-plugin",
+ "interprocess",
  "serde_json",
 ]
 

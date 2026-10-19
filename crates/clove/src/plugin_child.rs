@@ -7,14 +7,24 @@
 //! `timeout`, an agent) the pair must still behave like one process:
 //!
 //! - **stdio** is inherited: the plugin gets the real terminal, unbuffered.
-//! - **Ctrl-C / Ctrl-\\** reach the plugin directly (the terminal signals the
-//!   whole foreground process group). The host only must not die first, so it
-//!   catches SIGINT/SIGQUIT with a no-op handler. A *caught* signal resets to the
-//!   default on exec, so the plugin keeps the default behavior; `SIG_IGN` would
-//!   be inherited and make the plugin uninterruptible. A disposition that is
-//!   already `SIG_IGN` (`nohup`, a background job) is left alone, as under exec.
-//! - **SIGTERM / SIGHUP** sent to the host pid (`kill`, `timeout`, a service
-//!   manager) are forwarded to the plugin, which no longer shares that pid.
+//! - **Signals** are caught by the host with a handler, never `SIG_IGN`: a
+//!   *caught* signal resets to the default on exec, so the plugin keeps the
+//!   default behavior, while `SIG_IGN` would be inherited and make the plugin
+//!   uninterruptible. A disposition that is already `SIG_IGN` (`nohup`, a
+//!   background job) is left alone, as under exec.
+//!   - **Ctrl-C / Ctrl-\\ / hang-up**: the terminal signals the whole
+//!     foreground process group, so the plugin receives them directly; the
+//!     host only must not die first.
+//!   - **Sent by another process to the host pid** (`kill`, `timeout`, a
+//!     service manager): forwarded to the plugin, which no longer shares that
+//!     pid. On Linux this covers SIGINT/SIGQUIT/SIGTERM/SIGHUP (`si_code`
+//!     tells a `kill` from a terminal). Elsewhere only SIGTERM/SIGHUP are
+//!     forwarded, so Ctrl-C is never delivered twice.
+//!   - A signal sent to the whole process group by a process (`kill -TERM
+//!     -<pgid>`, `timeout` without `--foreground`) reaches the plugin twice:
+//!     once directly and once forwarded.
+//!   - Forwarding stops once the plugin has exited and before it is reaped,
+//!     so a recycled pid is never signalled.
 //! - **Exit status**: the plugin's exit code becomes the host's; a plugin killed
 //!   by a signal makes the host die by the same signal.
 //!
@@ -36,6 +46,7 @@ pub fn run_and_exit(cmd: &mut Command, path: &Utf8Path, cleanup: impl FnOnce()) 
         Ok(child) => child,
         Err(source) => {
             drop(guard);
+            cleanup();
             return CloveError::Io {
                 path: path.to_owned(),
                 source,
@@ -43,6 +54,10 @@ pub fn run_and_exit(cmd: &mut Command, path: &Utf8Path, cleanup: impl FnOnce()) 
         }
     };
     imp::child_started(child.id());
+    // Wait without reaping, then stop forwarding, then reap: a signal that
+    // arrives after the child is gone must never reach a recycled pid.
+    imp::wait_exited(child.id());
+    imp::child_finished();
     // `wait` retries on EINTR, so the no-op handlers do not cut it short.
     let status = child.wait();
     cleanup();
@@ -61,30 +76,69 @@ mod imp {
     use std::process::ExitStatus;
     use std::sync::atomic::{AtomicI32, Ordering};
 
-    /// The plugin's pid once spawned; 0 before.
+    /// The plugin's pid once spawned; 0 before; -1 once it has exited (stop
+    /// forwarding: the pid may be recycled).
     static CHILD: AtomicI32 = AtomicI32::new(0);
-    /// A SIGTERM/SIGHUP that arrived before the child existed.
+    /// A forwardable signal that arrived before the child existed.
     static PENDING: AtomicI32 = AtomicI32::new(0);
 
-    /// Signals the host survives while the plugin runs (the terminal sends them
-    /// to the plugin too).
-    const ABSORB: [libc::c_int; 2] = [libc::SIGINT, libc::SIGQUIT];
-    /// Signals aimed at the host pid alone, forwarded to the plugin.
-    const FORWARD: [libc::c_int; 2] = [libc::SIGTERM, libc::SIGHUP];
+    /// The signals the host catches while the plugin runs. A terminal sends
+    /// SIGINT/SIGQUIT (Ctrl-C, Ctrl-\\) and SIGHUP (hang-up) to the whole
+    /// foreground process group, so the plugin receives those directly; a
+    /// signal another process sent to the host pid alone (`kill`, `timeout`, a
+    /// service manager) is forwarded — see [`sent_by_a_process`].
+    const CAUGHT: [libc::c_int; 4] = [libc::SIGINT, libc::SIGQUIT, libc::SIGTERM, libc::SIGHUP];
 
-    extern "C" fn absorb(_sig: libc::c_int) {}
+    // `si_code` of a signal sent with kill(2) / sigqueue(3). libc does not
+    // export these for Apple targets.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    const FROM_PROCESS: [libc::c_int; 2] = [0, -1]; // SI_USER, SI_QUEUE
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    const FROM_PROCESS: [libc::c_int; 2] = [0x10001, 0x10002]; // SI_USER, SI_QUEUE
 
-    extern "C" fn forward(sig: libc::c_int) {
-        // Async-signal-safe: an atomic load and kill(2).
+    /// Whether `sig` should be forwarded, judged from its siginfo.
+    ///
+    /// Linux marks terminal-generated signals `SI_KERNEL`, so anything sent by
+    /// a process is forwarded and terminal signals (already delivered to the
+    /// plugin) are not. Other systems do not mark terminal signals reliably,
+    /// so there only SIGTERM/SIGHUP are forwarded (Ctrl-C is never doubled; a
+    /// `kill -INT <host pid>` is absorbed rather than forwarded).
+    fn sent_by_a_process(sig: libc::c_int, info: *const libc::siginfo_t) -> bool {
+        if cfg!(any(target_os = "linux", target_os = "android")) {
+            // SAFETY: the kernel passes a valid siginfo with SA_SIGINFO.
+            let code = unsafe { (*info).si_code };
+            FROM_PROCESS.contains(&code)
+        } else {
+            matches!(sig, libc::SIGTERM | libc::SIGHUP)
+        }
+    }
+
+    extern "C" fn on_signal(sig: libc::c_int, info: *mut libc::siginfo_t, _ctx: *mut libc::c_void) {
+        // Async-signal-safe: atomics and kill(2) only.
+        if info.is_null() || !sent_by_a_process(sig, info) {
+            return;
+        }
         let pid = CHILD.load(Ordering::SeqCst);
         if pid > 0 {
-            // SAFETY: kill is async-signal-safe; a stale pid is impossible
-            // because the host reaps the child only after it stops forwarding.
+            // SAFETY: CHILD is positive only between spawn and the child's
+            // exit (before it is reaped), so the pid is still ours.
             unsafe {
                 libc::kill(pid, sig);
             }
-        } else {
+        } else if pid == 0 {
             PENDING.store(sig, Ordering::SeqCst);
+            // The child may have been published after the load above; if so,
+            // deliver the pending signal ourselves (whoever swaps it sends it).
+            let pid = CHILD.load(Ordering::SeqCst);
+            if pid > 0 {
+                let pending = PENDING.swap(0, Ordering::SeqCst);
+                if pending != 0 {
+                    // SAFETY: as above.
+                    unsafe {
+                        libc::kill(pid, pending);
+                    }
+                }
+            }
         }
     }
 
@@ -97,14 +151,9 @@ mod imp {
     impl SignalGuard {
         pub fn install() -> SignalGuard {
             let mut previous = Vec::new();
-            for (signals, handler) in [
-                (&ABSORB, absorb as extern "C" fn(libc::c_int)),
-                (&FORWARD, forward as extern "C" fn(libc::c_int)),
-            ] {
-                for &sig in signals.iter() {
-                    if let Some(old) = set_handler(sig, handler as libc::sighandler_t) {
-                        previous.push((sig, old));
-                    }
+            for &sig in CAUGHT.iter() {
+                if let Some(old) = set_handler(sig) {
+                    previous.push((sig, old));
                 }
             }
             SignalGuard { previous }
@@ -122,9 +171,10 @@ mod imp {
         }
     }
 
-    /// Install `handler` for `sig` unless the signal is already ignored.
-    /// Returns the previous disposition when it was replaced.
-    fn set_handler(sig: libc::c_int, handler: libc::sighandler_t) -> Option<libc::sigaction> {
+    /// Install [`on_signal`] for `sig` unless the signal is already ignored.
+    /// A caught signal resets to its default on exec, so the plugin keeps the
+    /// default behavior. Returns the previous disposition when it was replaced.
+    fn set_handler(sig: libc::c_int) -> Option<libc::sigaction> {
         // SAFETY: plain sigaction calls with zeroed, fully initialized structs.
         unsafe {
             let mut old: libc::sigaction = std::mem::zeroed();
@@ -135,8 +185,10 @@ mod imp {
                 return None; // inherited "ignore": keep it, the child inherits it too
             }
             let mut new: libc::sigaction = std::mem::zeroed();
-            new.sa_sigaction = handler;
-            new.sa_flags = libc::SA_RESTART;
+            new.sa_sigaction = on_signal
+                as extern "C" fn(libc::c_int, *mut libc::siginfo_t, *mut libc::c_void)
+                as libc::sighandler_t;
+            new.sa_flags = libc::SA_RESTART | libc::SA_SIGINFO;
             libc::sigemptyset(&mut new.sa_mask);
             if libc::sigaction(sig, &new, std::ptr::null_mut()) != 0 {
                 return None;
@@ -149,11 +201,38 @@ mod imp {
         CHILD.store(pid as i32, Ordering::SeqCst);
         let pending = PENDING.swap(0, Ordering::SeqCst);
         if pending != 0 {
-            // SAFETY: kill on the child we just spawned.
+            // SAFETY: kill on the child we just spawned and have not reaped.
             unsafe {
                 libc::kill(pid as i32, pending);
             }
         }
+    }
+
+    /// Block until the child has exited, leaving it unreaped (`WNOWAIT`) so
+    /// its pid cannot be recycled yet.
+    pub fn wait_exited(pid: u32) {
+        loop {
+            // SAFETY: waitid with a zeroed out-parameter; WNOWAIT keeps the
+            // child waitable for the `Child::wait` that follows.
+            let rc = unsafe {
+                let mut info: libc::siginfo_t = std::mem::zeroed();
+                libc::waitid(
+                    libc::P_PID,
+                    pid as libc::id_t,
+                    &mut info,
+                    libc::WEXITED | libc::WNOWAIT,
+                )
+            };
+            if rc == 0 || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
+            {
+                return;
+            }
+        }
+    }
+
+    /// Stop forwarding signals: the child has exited.
+    pub fn child_finished() {
+        CHILD.store(-1, Ordering::SeqCst);
     }
 
     /// Exit the host the way the child exited.
@@ -228,6 +307,10 @@ mod imp {
     }
 
     pub fn child_started(_pid: u32) {}
+
+    pub fn wait_exited(_pid: u32) {}
+
+    pub fn child_finished() {}
 
     /// Exit with the child's code (NTSTATUS values pass through as negative
     /// i32 and are preserved by `process::exit`).

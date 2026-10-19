@@ -194,26 +194,30 @@ impl HostClient {
         // A failed write still reads on: a host that refuses a request (one
         // over its size cap, say) answers with the reason before it closes, and
         // that reason beats a bare "connection closed".
-        let written = writer.write_all(&line).and_then(|()| writer.flush());
+        // The write result is not checked: the read below reports a closed
+        // connection as `HostGone` either way.
+        let _ = writer.write_all(&line).and_then(|()| writer.flush());
 
         let mut reply = Vec::new();
         match self.reader.read_until(b'\n', &mut reply) {
-            Ok(0) | Err(_) => return Err(HostError::HostGone),
-            Ok(_) if written.is_err() && !reply.ends_with(b"\n") => {
-                return Err(HostError::HostGone)
-            }
-            Ok(_) => {}
+            // A reply cut off before its newline means the host went away.
+            Ok(_) if reply.ends_with(b"\n") => {}
+            _ => return Err(HostError::HostGone),
         }
         let reply: Value = serde_json::from_slice(&reply)
             .map_err(|e| HostError::Protocol(format!("unreadable reply: {e}")))?;
-        if let Some(error) = reply.get("error") {
-            return Err(rpc_error(error));
-        }
-        if reply.get("id") != Some(&json!(id)) {
+        // The reply must answer this request. A connection-level error (bad
+        // hello, oversized or unparsable request) carries a null id.
+        let error = reply.get("error");
+        let reply_id = reply.get("id").unwrap_or(&Value::Null);
+        let ours = *reply_id == json!(id) || (error.is_some() && reply_id.is_null());
+        if !ours {
             return Err(HostError::Protocol(format!(
-                "reply for request {:?}, expected {id}",
-                reply.get("id")
+                "reply for request {reply_id}, expected {id}"
             )));
+        }
+        if let Some(error) = error {
+            return Err(rpc_error(error));
         }
         reply
             .get("result")

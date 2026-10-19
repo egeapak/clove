@@ -24,7 +24,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::Command;
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use camino::Utf8PathBuf;
 use clove_service::{Engine, ToolError};
@@ -46,8 +46,13 @@ pub const HOST_API: u32 = 1;
 /// large reads with `limit`/`offset`.
 const MAX_REQUEST: u64 = 16 * 1024 * 1024;
 
-/// How long a new connection has to send its `hello`.
+/// How long a new connection has to send its whole `hello` (Unix; Windows
+/// named pipes in interprocess have no receive timeout, so there an idle
+/// unauthenticated connection holds its thread until the plugin exits).
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The largest `hello` line the host reads before authentication.
+const MAX_HELLO: usize = 64 * 1024;
 
 /// Every method the host answers, in the order `hello` reports them.
 const METHODS: &[&str] = &[
@@ -126,7 +131,11 @@ impl HostServer {
             .name("clove-plugin-host".to_owned())
             .spawn(move || {
                 for conn in listener.incoming() {
-                    let Ok(conn) = conn else { continue };
+                    let Ok(conn) = conn else {
+                        // EMFILE and friends repeat; do not spin on them.
+                        std::thread::sleep(Duration::from_millis(50));
+                        continue;
+                    };
                     let shared = shared.clone();
                     let _ = std::thread::Builder::new()
                         .name("clove-plugin-conn".to_owned())
@@ -189,19 +198,40 @@ fn serve(conn: Stream, shared: &Shared) {
     if !peer_is_this_user_early(&conn) {
         return;
     }
-    let _ = conn.set_recv_timeout(Some(HELLO_TIMEOUT));
     let mut reader = BufReader::new(&conn);
     let mut writer = &conn;
     let mut authed = false;
     let mut line = Vec::new();
+    let deadline = Instant::now() + HELLO_TIMEOUT;
     loop {
         line.clear();
-        match (&mut reader)
-            .take(MAX_REQUEST + 1)
-            .read_until(b'\n', &mut line)
-        {
-            Ok(0) | Err(_) => return,
-            Ok(_) => {}
+        if !authed {
+            match read_hello_line(&mut reader, &conn, deadline, &mut line) {
+                HelloRead::Line => {}
+                HelloRead::Closed => return,
+                HelloRead::TimedOut => {
+                    let _ = send(
+                        &mut writer,
+                        &error(Value::Null, UNAUTHORIZED, "no hello within 5 seconds", None),
+                    );
+                    return;
+                }
+                HelloRead::TooLarge => {
+                    let _ = send(
+                        &mut writer,
+                        &error(Value::Null, UNAUTHORIZED, "hello larger than 64 KiB", None),
+                    );
+                    return;
+                }
+            }
+        } else {
+            match (&mut reader)
+                .take(MAX_REQUEST + 1)
+                .read_until(b'\n', &mut line)
+            {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {}
+            }
         }
         if line.len() as u64 > MAX_REQUEST {
             let _ = send(
@@ -279,6 +309,57 @@ fn serve(conn: Stream, shared: &Shared) {
             if send(&mut writer, &reply).is_err() {
                 return;
             }
+        }
+    }
+}
+
+/// How reading the unauthenticated first line ended.
+enum HelloRead {
+    Line,
+    Closed,
+    TimedOut,
+    TooLarge,
+}
+
+/// Read the first line under one overall deadline (not a per-read timeout, so a
+/// client trickling bytes cannot stay unauthenticated) and a 64 KiB cap.
+fn read_hello_line(
+    reader: &mut BufReader<&Stream>,
+    conn: &Stream,
+    deadline: Instant,
+    line: &mut Vec<u8>,
+) -> HelloRead {
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return HelloRead::TimedOut;
+        }
+        let _ = conn.set_recv_timeout(Some(left));
+        let chunk = match reader.fill_buf() {
+            Ok([]) => return HelloRead::Closed,
+            Ok(chunk) => chunk,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                return HelloRead::TimedOut
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return HelloRead::Closed,
+        };
+        let (take, done) = match chunk.iter().position(|&b| b == b'\n') {
+            Some(at) => (at + 1, true),
+            None => (chunk.len(), false),
+        };
+        line.extend_from_slice(&chunk[..take]);
+        reader.consume(take);
+        if line.len() > MAX_HELLO {
+            return HelloRead::TooLarge;
+        }
+        if done {
+            return HelloRead::Line;
         }
     }
 }

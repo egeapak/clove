@@ -386,30 +386,49 @@ mod signals {
         wait_gone(plugin);
     }
 
-    /// A signal sent to the host pid alone: SIGINT is absorbed (the host keeps
-    /// waiting, the plugin keeps running), SIGTERM is forwarded to the plugin,
-    /// and the host then dies of the plugin's SIGTERM.
+    /// SIGTERM sent to the host pid alone (`kill`, `timeout`, a service
+    /// manager) is forwarded to the plugin, and the host then dies of the
+    /// plugin's SIGTERM.
     #[test]
     fn sigterm_to_the_host_reaches_the_plugin() {
         let (plugin_dir, _echo) = install_echo();
         let repo = init_repo("proj");
         let (mut host, plugin) = start(repo.path(), plugin_dir.path());
-        let host_pid = host.id() as i32;
-
         // SAFETY: signalling the test's own child.
-        unsafe { libc::kill(host_pid, libc::SIGINT) };
-        std::thread::sleep(Duration::from_millis(300));
-        assert!(
-            host.try_wait().unwrap().is_none(),
-            "the host died of SIGINT"
-        );
-        assert!(alive(plugin), "SIGINT to the host alone reached the plugin");
-
-        // SAFETY: as above.
-        unsafe { libc::kill(host_pid, libc::SIGTERM) };
+        unsafe { libc::kill(host.id() as i32, libc::SIGTERM) };
         let status = host.wait().unwrap();
         assert_eq!(status.signal(), Some(libc::SIGTERM), "{status:?}");
         wait_gone(plugin);
+    }
+
+    /// SIGINT sent to the host pid alone by another process: on Linux it is
+    /// forwarded like SIGTERM (`si_code` tells it from a terminal's Ctrl-C);
+    /// elsewhere the host absorbs it and the plugin keeps running.
+    #[test]
+    fn sigint_to_the_host_alone() {
+        let (plugin_dir, _echo) = install_echo();
+        let repo = init_repo("proj");
+        let (mut host, plugin) = start(repo.path(), plugin_dir.path());
+        let host_pid = host.id() as i32;
+        // SAFETY: signalling the test's own child.
+        unsafe { libc::kill(host_pid, libc::SIGINT) };
+        if cfg!(target_os = "linux") {
+            let status = host.wait().unwrap();
+            assert_eq!(status.signal(), Some(libc::SIGINT), "{status:?}");
+            wait_gone(plugin);
+        } else {
+            std::thread::sleep(Duration::from_millis(300));
+            assert!(
+                host.try_wait().unwrap().is_none(),
+                "the host died of SIGINT"
+            );
+            assert!(alive(plugin), "SIGINT to the host alone reached the plugin");
+            // SAFETY: as above.
+            unsafe { libc::kill(host_pid, libc::SIGTERM) };
+            let status = host.wait().unwrap();
+            assert_eq!(status.signal(), Some(libc::SIGTERM), "{status:?}");
+            wait_gone(plugin);
+        }
     }
 }
 
@@ -539,4 +558,18 @@ fn the_host_socket_is_removed_after_the_plugin_exits() {
         .map(|e| e.unwrap().file_name())
         .collect();
     assert!(left.is_empty(), "left behind: {left:?}");
+}
+
+/// A connection that never sends `hello` is answered and closed after the
+/// 5-second deadline (Unix; Windows named pipes have no receive timeout).
+#[cfg(unix)]
+#[test]
+fn the_host_channel_drops_a_silent_connection() {
+    let (plugin_dir, _echo) = install_echo();
+    let repo = init_repo("proj");
+    let data = echo_json(repo.path(), plugin_dir.path(), &["--host-silent"]);
+    let reply = data["reply"].as_str().unwrap();
+    assert!(reply.contains("no hello within 5 seconds"), "{reply}");
+    let waited = data["waited_ms"].as_u64().unwrap();
+    assert!((4_000..30_000).contains(&waited), "waited {waited} ms");
 }

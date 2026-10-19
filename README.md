@@ -351,7 +351,7 @@ releases keep that license. The AGPL applies from version 0.2.0.
 If you run a modified clove and let other people use it over a network (for
 example `clove serve` behind a proxy), section 13 of the AGPL requires you to
 offer them the source of your version. Set `CLOVE_SOURCE_URL` when you build
-it, so the web UI and `clove --version` point to your source.
+it, so the web UI and `clove version` point to your source.
 
 Contributions are licensed under the license of the files they change, and
 every commit needs a DCO sign-off. See [CONTRIBUTING.md](CONTRIBUTING.md).

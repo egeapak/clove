@@ -249,9 +249,19 @@ same:
   so it outlives the plugin. A caught signal resets to its default on exec, so
   the plugin keeps default behavior (an `SIG_IGN` would be inherited). An
   inherited `SIG_IGN` (`nohup`, a background job) is left in place for both.
-- **SIGTERM / SIGHUP** sent to the host pid are forwarded to the plugin: `kill`,
-  `timeout` and service managers target the host pid, which is no longer the
-  plugin's.
+- **Signals sent by another process to the host pid** (`kill`, `timeout`,
+  service managers) are forwarded to the plugin, whose pid is no longer the
+  one the user started. On Linux this covers SIGINT, SIGQUIT, SIGTERM and
+  SIGHUP: `si_code` tells a `kill` from a terminal-generated signal, which the
+  plugin already received. Elsewhere only SIGTERM and SIGHUP are forwarded, so
+  Ctrl-C is never delivered twice; there a `kill -INT <host pid>` is absorbed.
+- A signal that a process sends to the **whole process group** (`kill -TERM
+  -<pgid>`, `timeout` without `--foreground`) reaches the plugin twice: once
+  directly and once forwarded. A plugin that treats a second signal as "force
+  quit" should allow for this.
+- Forwarding stops when the plugin exits, before the host reaps it, so a
+  recycled pid is never signalled. If the plugin cannot be spawned, the host
+  removes its IPC socket directory and reports an I/O error.
 - **Exit status:** the host exits with the plugin's exit code. If the plugin dies
   of a signal, the host resets that signal to its default and raises it on
   itself (with core dumps off), so the caller sees the same signal death.
@@ -428,8 +438,12 @@ API, std threads; no tokio runtime on the server threads).
 
 **Authentication.** Unix checks the peer uid at accept; Windows checks the
 client SID after the first message. The first message must be `hello` with the
-token from `$CLOVE_HOST_TOKEN` (compared in constant time) and arrive within
-5 seconds; otherwise the host answers `-32001` and closes the connection. The
+token from `$CLOVE_HOST_TOKEN` (compared in constant time). On Unix the whole
+`hello` line must arrive within 5 seconds (one deadline, not a per-read
+timeout) and be at most 64 KiB; otherwise, or with a wrong token, the host
+answers `-32001` and closes the connection. Windows named pipes have no
+receive timeout in `interprocess`, so there an idle unauthenticated connection
+(only this user can open one) holds its thread until the plugin exits. The
 token is reusable for the whole invocation.
 
 **Framing.** Newline-delimited JSON-RPC 2.0: one request object per line, UTF-8.

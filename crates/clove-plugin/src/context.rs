@@ -186,11 +186,6 @@ impl PluginContext {
         })
     }
 
-    /// The capability this dispatch reached the plugin for, as a `provides` token:
-    /// `"<command>:<provider>"` for a multiplexer plugin, or bare `"<command>"` for
-    /// a generic one. A multi-capability plugin compares this against its own
-    /// [`PluginInfo::provides`](crate::PluginInfo) set to decide whether it was
-    /// handed a capability it implements (`PLUGIN_SYSTEM.md` §4.2).
     /// Open the host IPC channel (§6.6): read and write items through the
     /// `clove` that started this plugin, with the MCP tool arguments.
     ///
@@ -209,6 +204,11 @@ impl PluginContext {
         crate::HostClient::connect(socket, token, &client_name, Some(self.clove_dir.as_str()))
     }
 
+    /// The capability this dispatch reached the plugin for, as a `provides` token:
+    /// `"<command>:<provider>"` for a multiplexer plugin, or bare `"<command>"` for
+    /// a generic one. A multi-capability plugin compares this against its own
+    /// [`PluginInfo::provides`](crate::PluginInfo) set to decide whether it was
+    /// handed a capability it implements (`PLUGIN_SYSTEM.md` §4.2).
     pub fn capability(&self) -> String {
         match &self.provider {
             Some(provider) => format!("{}:{}", self.command, provider),
