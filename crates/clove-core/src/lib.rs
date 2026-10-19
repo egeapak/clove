@@ -17,6 +17,7 @@ pub mod home;
 pub mod ops;
 pub mod parse;
 pub mod repo;
+pub mod source;
 pub mod stats;
 pub mod store;
 pub mod view;

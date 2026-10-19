@@ -20,6 +20,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   license text.
 - Contributions need a DCO sign-off (`CONTRIBUTING.md`).
 
+### Added
+
+- **Source offer (AGPL-3.0 section 13):** the web UI links to the source of the
+  running build (`/api/v1/meta` → `source_code`), and `clove version` prints the
+  license and source URL. A fork sets `CLOVE_SOURCE_URL` at build time.
+
 - **Breaking (plugin SDK):** `clove-plugin` no longer depends on `clove-core`.
   `PluginContext::open_store` / `load_config` and the `ItemStore` / `CloveConfig`
   re-exports are removed; a plugin that opens the store depends on `clove-core`

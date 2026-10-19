@@ -341,5 +341,10 @@ runs, see [`docs/PLUGIN_SYSTEM.md`](docs/PLUGIN_SYSTEM.md)):
 Versions 0.1.5 and earlier were released under "MIT OR Apache-2.0"; those
 releases keep that license. The AGPL applies from version 0.2.0.
 
+If you run a modified clove and let other people use it over a network (for
+example `clove serve` behind a proxy), section 13 of the AGPL requires you to
+offer them the source of your version. Set `CLOVE_SOURCE_URL` when you build
+it, so the web UI and `clove --version` point to your source.
+
 Contributions are licensed under the license of the files they change, and
 every commit needs a DCO sign-off. See [CONTRIBUTING.md](CONTRIBUTING.md).

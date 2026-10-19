@@ -1296,6 +1296,23 @@ async fn meta_has_no_sync_targets_without_sync_state() {
     assert_eq!(meta["data"]["sync"], serde_json::json!([]));
 }
 
+/// `/meta` carries the AGPL-3.0 section 13 source offer the SPA links to.
+#[tokio::test]
+async fn meta_offers_the_source_of_this_build() {
+    let (_tmp, addr, _id) = spawn().await;
+    let (_, body) = get(addr, "/api/v1/meta").await;
+    let meta: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let source = &meta["data"]["source_code"];
+    assert_eq!(source["license"], "AGPL-3.0-only");
+    assert_eq!(source["version"], env!("CARGO_PKG_VERSION"));
+    assert!(
+        source["url"]
+            .as_str()
+            .is_some_and(|u| u.starts_with("https://")),
+        "{source}"
+    );
+}
+
 /// `?parent=` lists an item's children through the shared filter set — on
 /// every mode, combined with `?synced=`, and windowed by the engine like any
 /// other filter. Any external ref counts as synced, not only a GitHub one.

@@ -37,7 +37,11 @@ caught, add the step in the same change (see `CLAUDE.md`).
       and `.sha256` (what a published `clove-web` downloads at build time). Verify
       the checksum, then `tar -tzf` it: `index.html`, `_app/` and
       `THIRD_PARTY_LICENSES.txt` (the bundled npm packages' notices) at the root,
-      no `._*` files, and more than a handful of files. After the Release is
+      no `._*` files, and more than a handful of files.
+- [ ] **Source offer (AGPL-3.0 §13)** — `clove version` prints
+      `license: AGPL-3.0-only; source: https://github.com/egeapak/clove/tree/vX.Y.Z`,
+      that URL opens, and the web UI's top bar shows the source link (`</>`)
+      pointing at the same URL. After the Release is
       published, both URLs must download without authentication (`curl -fsSIL`).
 
 ## 1. Packaged-binary smoke (every platform)
