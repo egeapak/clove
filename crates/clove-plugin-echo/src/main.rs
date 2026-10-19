@@ -18,6 +18,18 @@ const INFO: PluginInfo = PluginInfo {
 
 fn main() -> std::process::ExitCode {
     run_with_info(INFO, |cx, args| {
+        // Process-model probes for crates/clove/tests/plugin_dispatch.rs: exit
+        // with a given code, or record the pid and block until a signal ends the
+        // process (default dispositions, so the test sees how the host relays).
+        if let Some(code) = flag_value(&args.args, "--exit-code") {
+            std::process::exit(code.parse().expect("--exit-code takes an integer"));
+        }
+        if let Some(pid_file) = flag_value(&args.args, "--wait-for-signal") {
+            std::fs::write(pid_file, std::process::id().to_string()).expect("write the pid file");
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(60));
+            }
+        }
         // The file name this binary was invoked as (e.g. `clove-sync-echo` when the
         // same fixture is installed under a second name), so a dispatch test can
         // observe *which* binary the umbrella fallback resolved.
@@ -37,4 +49,10 @@ fn main() -> std::process::ExitCode {
             "id_prefix": cx.id_prefix,
         }))
     })
+}
+
+/// The value after `flag` in the forwarded args, if present.
+fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    let at = args.iter().position(|a| a == flag)?;
+    args.get(at + 1).map(String::as_str)
 }

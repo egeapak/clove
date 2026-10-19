@@ -19,6 +19,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   at `/THIRD_PARTY_LICENSES.txt`. Every published crate now carries its
   license text.
 - Contributions need a DCO sign-off (`CONTRIBUTING.md`).
+- **Plugin process model:** `clove <plugin>` now spawns the plugin and waits for
+  it on every platform (Unix used to `exec` it). Stdio is inherited; Ctrl-C
+  reaches the plugin as before; SIGTERM/SIGHUP sent to the host are forwarded;
+  the host exits with the plugin's exit code, or dies of the same signal. The
+  plugin no longer has the pid the user started.
 
 ### Added
 

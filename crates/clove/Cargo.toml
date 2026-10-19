@@ -65,10 +65,17 @@ ureq.workspace = true            # crates.io registry client (registry/, `plugin
 webpki-root-certs.workspace = true  # bundled roots, extended by $SSL_CERT_FILE/$CARGO_HTTP_CAINFO
 semver.workspace = true          # crates.io version ordering
 
-# `clove daemon stop` on Windows signals the daemon's named event (DESIGN §8.9).
+# Plugin dispatch (plugin_child.rs): sigaction/kill/raise to survive Ctrl-C,
+# forward SIGTERM/SIGHUP, and exit by the plugin's signal (PLUGIN_SYSTEM §6.1).
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+# `clove daemon stop` on Windows signals the daemon's named event (DESIGN §8.9);
+# plugin dispatch ignores console Ctrl-C while the plugin runs (Win32_System_Console).
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
+    "Win32_System_Console",
     # See cloved/Cargo.toml: OpenEventW/SetEvent reach SECURITY_ATTRIBUTES via
     # Win32_Security; required explicitly for the windows-gnu target.
     "Win32_Security",

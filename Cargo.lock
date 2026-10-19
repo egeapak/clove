@@ -587,6 +587,7 @@ dependencies = [
  "fd-lock",
  "insta",
  "jsonschema",
+ "libc",
  "rusqlite",
  "semver",
  "serde",

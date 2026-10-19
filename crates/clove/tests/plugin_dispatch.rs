@@ -306,3 +306,109 @@ fn plugin_output_to_a_closed_pipe_exits_quietly() {
     );
     assert!(!stderr.contains("panicked"), "plugin panicked: {stderr}");
 }
+
+/// The host spawns the plugin and exits with the plugin's own exit code
+/// (PLUGIN_SYSTEM.md §6.1), not a generic failure.
+#[test]
+fn the_plugin_exit_code_is_the_host_exit_code() {
+    let (plugin_dir, _echo) = install_echo();
+    let repo = init_repo("proj");
+    let out = clove(repo.path())
+        .env("CLOVE_PLUGIN_PATH", plugin_dir.path())
+        .args(["echo", "--exit-code", "3"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3), "{out:?}");
+}
+
+/// Signal handling while the host waits for its plugin (PLUGIN_SYSTEM.md §6.1).
+#[cfg(unix)]
+mod signals {
+    use super::*;
+    use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
+    use std::time::{Duration, Instant};
+
+    /// Start `clove echo --wait-for-signal` in its own process group and return
+    /// the host child and the plugin's pid (read from the pid file it writes).
+    // The caller owns the returned child and always waits on it; clippy cannot
+    // see across the return.
+    #[allow(clippy::zombie_processes)]
+    fn start(repo: &Path, plugin_dir: &Path) -> (std::process::Child, i32) {
+        let pid_file = repo.join("plugin.pid");
+        let mut host = clove(repo)
+            .env("CLOVE_PLUGIN_PATH", plugin_dir)
+            .args(["echo", "--wait-for-signal"])
+            .arg(&pid_file)
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Ok(text) = std::fs::read_to_string(&pid_file) {
+                if let Ok(pid) = text.trim().parse() {
+                    return (host, pid);
+                }
+            }
+            if Instant::now() >= deadline {
+                let _ = host.kill();
+                let _ = host.wait();
+                panic!("the plugin never started");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn alive(pid: i32) -> bool {
+        // SAFETY: signal 0 only checks that the process exists.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    fn wait_gone(pid: i32) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while alive(pid) {
+            assert!(Instant::now() < deadline, "plugin {pid} is still running");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Ctrl-C in a terminal signals the whole foreground group: the plugin dies
+    /// of SIGINT, and the host — which survived it — dies of the same signal, so
+    /// the shell sees what it would have seen without the host in between.
+    #[test]
+    fn ctrl_c_to_the_group_ends_both_with_sigint() {
+        let (plugin_dir, _echo) = install_echo();
+        let repo = init_repo("proj");
+        let (mut host, plugin) = start(repo.path(), plugin_dir.path());
+        // SAFETY: signalling the test's own child process group.
+        unsafe { libc::kill(-(host.id() as i32), libc::SIGINT) };
+        let status = host.wait().unwrap();
+        assert_eq!(status.signal(), Some(libc::SIGINT), "{status:?}");
+        wait_gone(plugin);
+    }
+
+    /// A signal sent to the host pid alone: SIGINT is absorbed (the host keeps
+    /// waiting, the plugin keeps running), SIGTERM is forwarded to the plugin,
+    /// and the host then dies of the plugin's SIGTERM.
+    #[test]
+    fn sigterm_to_the_host_reaches_the_plugin() {
+        let (plugin_dir, _echo) = install_echo();
+        let repo = init_repo("proj");
+        let (mut host, plugin) = start(repo.path(), plugin_dir.path());
+        let host_pid = host.id() as i32;
+
+        // SAFETY: signalling the test's own child.
+        unsafe { libc::kill(host_pid, libc::SIGINT) };
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            host.try_wait().unwrap().is_none(),
+            "the host died of SIGINT"
+        );
+        assert!(alive(plugin), "SIGINT to the host alone reached the plugin");
+
+        // SAFETY: as above.
+        unsafe { libc::kill(host_pid, libc::SIGTERM) };
+        let status = host.wait().unwrap();
+        assert_eq!(status.signal(), Some(libc::SIGTERM), "{status:?}");
+        wait_gone(plugin);
+    }
+}

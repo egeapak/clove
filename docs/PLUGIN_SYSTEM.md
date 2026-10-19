@@ -162,9 +162,9 @@ returns the first that resolves:
 | `export` | `export` → `sync` → `import` | dedicated exporter, else a two-way `sync` binary (push is one view), else the cross-sibling importer |
 | `sync`   | `sync` | **no fallback** — a one-way import/export binary cannot serve a two-way reconcile |
 
-The order is **load-bearing**: because dispatch `exec`s the first *existing*
-binary and cannot fall through to a later candidate once one is found (§6.1,
-exec-no-retry), the most-correct binary must come first — the dedicated
+The order is **load-bearing**: because dispatch runs the first *existing*
+binary and does not fall through to a later candidate once one is found (§6.1,
+no retry), the most-correct binary must come first — the dedicated
 `clove-<mux>-<provider>` always leads, so an explicitly-installed one wins over
 the umbrella (this preserves the §4.3 precedence rule). Resolution is purely
 **structural / probe-free** on the hot path: `resolve_mux` is the same cheap
@@ -236,12 +236,30 @@ construction, path search, `resolve(name) -> Option<Utf8PathBuf>`, and
 
 ### 6.1 Invocation
 
-The host **replaces its own process image** where possible (`exec` on Unix via
-`std::os::unix::process::CommandExt::exec`; spawn-and-wait, propagating the exit
-code, on Windows). Rationale: a plugin like `clove tui`-style or an interactive
-auth flow needs the real tty, and streaming output must not be buffered by the
-host. For `sync`/`import`/`export` where the host wants to *post-process* the
-plugin's result (rare), it spawns and pipes instead — but the default is exec.
+The host **spawns the plugin and waits for it** on every platform
+(`crates/clove/src/plugin_child.rs`). It stays alive so it can serve the
+plugin's host IPC channel (§6.6). Until 0.2.0 the host `exec`'d the plugin on
+Unix, replacing its own image; the rules below keep the visible behavior the
+same:
+
+- **stdio is inherited**, never piped: a `clove tui`-style plugin or an
+  interactive auth flow gets the real tty, and output is not buffered by the host.
+- **Ctrl-C / Ctrl-\** go to the whole foreground process group, so the plugin
+  receives them directly. The host catches SIGINT/SIGQUIT with a no-op handler
+  so it outlives the plugin. A caught signal resets to its default on exec, so
+  the plugin keeps default behavior (an `SIG_IGN` would be inherited). An
+  inherited `SIG_IGN` (`nohup`, a background job) is left in place for both.
+- **SIGTERM / SIGHUP** sent to the host pid are forwarded to the plugin: `kill`,
+  `timeout` and service managers target the host pid, which is no longer the
+  plugin's.
+- **Exit status:** the host exits with the plugin's exit code. If the plugin dies
+  of a signal, the host resets that signal to its default and raises it on
+  itself (with core dumps off), so the caller sees the same signal death.
+- **Windows:** the host registers a console control handler function that
+  ignores Ctrl-C/Ctrl-Break while it waits (not `SetConsoleCtrlHandler(NULL,
+  TRUE)`, which the plugin would inherit), and exits with the plugin's exit code.
+- The plugin's pid differs from the host's. A plugin that needs the pid the user
+  started should not assume `getppid()` is a shell.
 
 argv passed to the plugin (cargo-compatible):
 
@@ -583,9 +601,8 @@ because the boundary is a subprocess.
   change to the env/argv/envelope contract; the JSON envelope stays `v:1`
   independently. A plugin that sees an unknown `CLOVE_PLUGIN_API` should still
   attempt to run and warn, not hard-fail (forward-compat).
-- **Windows exec.** No `execvp`; spawn-and-wait propagating the child exit code,
-  and forward Ctrl-C. Interactive plugins get the real console since the host
-  isn't holding the pipes.
+- **Process model.** Spawn-and-wait on every platform (§6.1); interactive
+  plugins get the real console since the host does not hold the pipes.
 - **Decided:** clove's own serialization is built-in; foreign-tracker providers
   are external plugins (§4.2). `import`/`export` both keep native `json`/`jsonl`
   built-in (inverse round-trip); `sync` (github) and the foreign import providers

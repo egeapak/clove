@@ -716,7 +716,7 @@ fn clove(dir: &Path, addr: SocketAddr) -> Command {
     cmd.env("CLOVE_PLUGIN_PATH", plugin_dir());
     // A dummy token (the mock ignores it) and the API-base override that aims
     // octocrab at our server instead of github.com — inherited by the plugin the
-    // host exec's, which is what actually talks to the mock.
+    // host spawns, which is what actually talks to the mock.
     cmd.env("GITHUB_TOKEN", "test-token");
     cmd.env("CLOVE_GITHUB_API_URL", format!("http://{addr}"));
     // Keep any retry backoff effectively instant.
