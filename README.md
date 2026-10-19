@@ -1,7 +1,7 @@
 # clove
 
 [![CI](https://github.com/egeapak/clove/actions/workflows/ci.yml/badge.svg)](https://github.com/egeapak/clove/actions/workflows/ci.yml)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-blue.svg)](#license)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](rust-toolchain.toml)
 
 A fast, git-native, **dependency-aware** work-item tracker for AI coding agents and humans.
@@ -318,13 +318,28 @@ unified write path / the GitHub mapping) rather than per surface — see
 
 ## License
 
-Licensed under either of
+clove is licensed under the GNU Affero General Public License, version 3 only
+([LICENSE](LICENSE), SPDX `AGPL-3.0-only`), with an additional permission for
+plugins ([LICENSE-PLUGIN-EXCEPTION](LICENSE-PLUGIN-EXCEPTION)).
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
-- MIT license ([LICENSE-MIT](LICENSE-MIT))
+The plugin SDK is licensed under either of the Apache License, Version 2.0
+([LICENSE-APACHE](LICENSE-APACHE)) or the MIT license
+([LICENSE-MIT](LICENSE-MIT)), at your option. The SDK is these crates:
 
-at your option.
+- `clove-types` (the shared data types)
+- `clove-plugin` (the plugin context, output envelope and host IPC client)
+- `clove-plugin-echo` (the example plugin)
 
-Unless you explicitly state otherwise, any contribution intentionally submitted
-for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
-dual-licensed as above, without any additional terms or conditions.
+What this means for a plugin (a separate `clove-<name>` program that `clove`
+runs, see [`docs/PLUGIN_SYSTEM.md`](docs/PLUGIN_SYSTEM.md)):
+
+- A plugin that uses only the SDK crates and the documented plugin interface
+  can use any license, including a proprietary one.
+- A plugin that links any other clove crate (for example `clove-core`) is a
+  combined work under the AGPL.
+
+Versions 0.1.5 and earlier were released under "MIT OR Apache-2.0"; those
+releases keep that license. The AGPL applies from version 0.2.0.
+
+Contributions are licensed under the license of the files they change, and
+every commit needs a DCO sign-off. See [CONTRIBUTING.md](CONTRIBUTING.md).

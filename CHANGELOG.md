@@ -8,6 +8,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **License:** clove is now licensed under **AGPL-3.0-only** (`LICENSE`), with
+  an additional permission for plugins (`LICENSE-PLUGIN-EXCEPTION`). The plugin
+  SDK crates (`clove-types`, `clove-plugin`, `clove-plugin-echo`) stay
+  **MIT OR Apache-2.0**. Releases up to and including 0.1.5 keep their
+  "MIT OR Apache-2.0" license.
+- Release archives now include `LICENSE`, `LICENSE-PLUGIN-EXCEPTION`,
+  `LICENSE-MIT`, `LICENSE-APACHE` and `THIRD_PARTY_LICENSES.txt` (notices of the
+  linked Rust crates); the web UI serves the notices of its bundled npm packages
+  at `/THIRD_PARTY_LICENSES.txt`. Every published crate now carries its
+  license text.
+- Contributions need a DCO sign-off (`CONTRIBUTING.md`).
+
 - **Breaking (plugin SDK):** `clove-plugin` no longer depends on `clove-core`.
   `PluginContext::open_store` / `load_config` and the `ItemStore` / `CloveConfig`
   re-exports are removed; a plugin that opens the store depends on `clove-core`

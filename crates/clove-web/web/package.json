@@ -1,5 +1,6 @@
 {
   "name": "clove-web",
+  "license": "AGPL-3.0-only",
   "version": "0.1.5",
   "private": true,
   "type": "module",

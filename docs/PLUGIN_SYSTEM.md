@@ -643,3 +643,22 @@ because the boundary is a subprocess.
 
 Steps 1–2 are independently valuable (they unlock *any* third-party subcommand)
 and carry no risk to existing github behavior; 3–6 are the github migration.
+
+## 12. Licensing of plugins
+
+clove is AGPL-3.0-only with an additional permission for plugins
+(`LICENSE-PLUGIN-EXCEPTION`, an AGPL section 7 permission). The plugin SDK crates
+(`clove-types`, `clove-plugin`, `clove-plugin-echo`) are MIT OR Apache-2.0.
+
+- **Thin plugin** (any license): it links only the SDK crates and talks to clove
+  only through the plugin interface — argv, the `CLOVE_*` environment (§6.2), the
+  output envelope and exit codes (§6.3), and the host IPC protocol (§6.6). The
+  exception lets you convey it under terms of your choice, also together with
+  clove.
+- **Fat plugin** (AGPL): it links `clove-core` (or any other AGPL clove crate) to
+  open the store directly (§6.4A). It is a combined work under AGPL-3.0-only.
+  The first-party plugins (`clove-sync-github`, `clove-import-tk`,
+  `clove-import-beads`) are fat plugins.
+
+`clove-plugin` never depends on `clove-core`; CI checks the SDK's dependency
+tree for copyleft licenses on every push.

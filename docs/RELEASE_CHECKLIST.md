@@ -28,12 +28,16 @@ caught, add the step in the same change (see `CLAUDE.md`).
       — drafts are not anonymously downloadable) into a scratch dir, and verify
       every `.sha256` (`shasum -a 256 -c`). Extract; each archive has `clove`,
       `cloved`, `clove-sync-github`, `clove-import-tk`, `clove-import-beads`
-      (`.exe` on Windows) plus licenses/README.
+      (`.exe` on Windows) plus `README.md`, `LICENSE` (AGPL-3.0),
+      `LICENSE-PLUGIN-EXCEPTION`, `LICENSE-MIT`, `LICENSE-APACHE` and
+      `THIRD_PARTY_LICENSES.txt` (the Rust dependency notices; spot-check that
+      it lists e.g. `tokio` and `serde` with their license texts).
 - [ ] `file` each binary: macOS arm64 / x86_64 Mach-O, Linux x86-64 ELF, Windows PE32+.
 - [ ] **Web UI assets** — the Release also carries `clove-web-dist-vX.Y.Z.tar.gz`
       and `.sha256` (what a published `clove-web` downloads at build time). Verify
-      the checksum, then `tar -tzf` it: `index.html` and `_app/` at the root, no
-      `._*` files, and more than a handful of files. After the Release is
+      the checksum, then `tar -tzf` it: `index.html`, `_app/` and
+      `THIRD_PARTY_LICENSES.txt` (the bundled npm packages' notices) at the root,
+      no `._*` files, and more than a handful of files. After the Release is
       published, both URLs must download without authentication (`curl -fsSIL`).
 
 ## 1. Packaged-binary smoke (every platform)

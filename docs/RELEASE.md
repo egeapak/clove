@@ -410,7 +410,7 @@ class Clove < Formula
   desc "Fast, git-native, dependency-aware work-item tracker"
   homepage "https://github.com/egeapak/clove"
   version "0.1.5"
-  license "MIT OR Apache-2.0"
+  license "AGPL-3.0-only"
 
   on_macos do
     url "https://github.com/egeapak/clove/releases/download/v0.1.5/clove-v0.1.5-macos-universal2.tar.gz"

@@ -14,7 +14,7 @@ categories.workspace = true
 # has to ride in the .crate and `cargo publish` needs no `--allow-dirty`. Listing
 # `include` also drops `web/` (the SvelteKit sources) and `tests/`. `build/` holds
 # modules `build.rs` pulls in, so it must ship.
-include = ["src/**", "build.rs", "build/**"]
+include = ["src/**", "build.rs", "build/**", "LICENSE", "LICENSE-PLUGIN-EXCEPTION"]
 
 [features]
 # Honour `CLOVED_WATCH_ARM_DELAY_MS` (a test stand-in for a slow watch arm).

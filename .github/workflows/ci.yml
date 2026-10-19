@@ -10,6 +10,20 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  dco:
+    # Developer Certificate of Origin: every commit of a pull request carries a
+    # Signed-off-by trailer for its author (CONTRIBUTING.md).
+    name: DCO sign-off
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Every commit is signed off
+        run: scripts/ci/check-dco.sh "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}"
+
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

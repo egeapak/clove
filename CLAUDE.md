@@ -11,6 +11,25 @@ plus `clove` (CLI), `cloved`, `clove-index`, `clove-ipc`, `clove-import`,
 installable plugins `clove-sync-github` / `clove-import-tk` / `clove-import-beads`,
 and the `clove-plugin-echo` test fixture.
 
+## Licensing (two licenses — keep the split intact)
+
+clove is **AGPL-3.0-only** (`LICENSE`) with a plugin exception
+(`LICENSE-PLUGIN-EXCEPTION`). The **plugin SDK** — `clove-types`, `clove-plugin`,
+`clove-plugin-echo` — is **MIT OR Apache-2.0**, so a plugin built on it alone can
+use any license. Rules:
+
+- The SDK crates must never depend on an AGPL crate (`clove-core`,
+  `clove-engine`, …) in any feature combination. CI enforces it ("SDK license
+  guard" in `ci.yml`); `clove-plugin` therefore does not open the store — a fat
+  plugin depends on `clove-core` itself.
+- Moving code from an AGPL crate into an SDK crate relicenses it. That is only
+  allowed while Ege Apak is the sole copyright holder of the moved code.
+- Every published crate carries real copies of its license files;
+  `xtask/tests/license_files.rs` pins them. A new AGPL crate also needs a
+  `[[licenses.exceptions]]` line in `deny.toml`.
+- New third-party dependencies must be permissive (`deny.toml` `allow`).
+- Every commit needs a DCO sign-off (`git commit -s`; `CONTRIBUTING.md`).
+
 ## Plugin system (cargo-style external subcommands)
 
 Integrations users may not want are **separately-installable binaries**, not
