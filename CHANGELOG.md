@@ -22,6 +22,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- New crate **`clove-service`**: the transport-independent tool engine (moved
+  out of `clove-mcp`), shared by the MCP server and the plugin host IPC. The
+  tool argument types moved to `clove_types::tool` (serde, with `JsonSchema`
+  behind `clove-types`' optional `schemars` feature). MCP tool schemas and
+  error texts are unchanged (pinned by a `tools/list` snapshot).
+
 - **Source offer (AGPL-3.0 section 13):** the web UI links to the source of the
   running build (`/api/v1/meta` → `source_code`), and `clove version` prints the
   license and source URL. A fork sets `CLOVE_SOURCE_URL` at build time.

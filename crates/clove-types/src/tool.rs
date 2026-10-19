@@ -1,15 +1,23 @@
-//! Tool argument structs. Each derives `Deserialize` (rmcp parses the call's
-//! `arguments` into it) and `JsonSchema` (rmcp publishes the `inputSchema` in
-//! `tools/list`). Schemars/serde are taken from rmcp's re-exports so the derive
-//! versions match the macro-generated code exactly.
+//! The tool surface's argument types: one struct per tool of the clove tool
+//! surface (MCP `tools/call` arguments and the plugin host IPC params).
+//!
+//! These are plain serde types, so the MCP server (`clove-mcp`, AGPL) and the
+//! plugin SDK client (`clove-plugin`, MIT OR Apache-2.0) share one definition
+//! and the two transports cannot drift. `JsonSchema` derives sit behind the
+//! optional `schemars` feature: only `clove-mcp` enables it, to publish each
+//! tool's `inputSchema` (doc comments become the schema descriptions, so keep
+//! them written for the agent reading `tools/list`).
+//!
+//! The translation into store queries (`Filters`, `Order`) lives with the
+//! engine in `clove-service`, which owns those AGPL types.
 
-use clove_types::{CloveError, EditRequest};
-use rmcp::schemars::{self, JsonSchema};
-use rmcp::serde::Deserialize;
+use serde::{Deserialize, Serialize};
+
+use crate::{CloveError, EditRequest};
 
 /// Result-shaping options shared by the read tools.
-#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
-#[serde(crate = "rmcp::serde")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct ShapeArgs {
     /// Return only these keys per item (e.g. ["id","title","status"]). Unknown
     /// names are ignored. Cuts list payloads by roughly two thirds.
@@ -25,8 +33,9 @@ pub struct ShapeArgs {
 /// the published `inputSchema` gains an `anyOf` branch rather than changing
 /// type. `#[serde(untagged)]` is what makes the string form keep working; the
 /// `JsonSchema` derive mirrors it into the schema agents read.
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(crate = "rmcp::serde", untagged)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(untagged)]
 pub enum OneOrMany {
     One(String),
     Many(Vec<String>),
@@ -44,8 +53,9 @@ impl OneOrMany {
 }
 
 /// One priority or a list of them (`2` or `[0,1]`). Numeric, as it always was.
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(crate = "rmcp::serde", untagged)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(untagged)]
 pub enum Priorities {
     One(u8),
     Many(Vec<u8>),
@@ -63,8 +73,8 @@ impl Priorities {
 }
 
 /// Shared filter fields for `clove_ready` / `clove_list` / `clove_blocked`.
-#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
-#[serde(crate = "rmcp::serde")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct FilterArgs {
     /// Filter by status (`open|in_progress|closed`). A list matches any of them.
     pub status: Option<OneOrMany>,
@@ -99,22 +109,22 @@ pub struct FilterArgs {
     pub shape: ShapeArgs,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
-#[serde(crate = "rmcp::serde")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct BlockedArgs {
     #[serde(flatten)]
     pub filter: FilterArgs,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
-#[serde(crate = "rmcp::serde")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct ListArgs {
     #[serde(flatten)]
     pub filter: FilterArgs,
 }
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(crate = "rmcp::serde")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct IdArgs {
     /// The item id (e.g. `proj-7af3q2k9`).
     pub id: String,
@@ -122,8 +132,8 @@ pub struct IdArgs {
     pub shape: ShapeArgs,
 }
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(crate = "rmcp::serde")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct SearchArgs {
     /// The text to search for (case-insensitive substring).
     pub text: String,
@@ -141,8 +151,8 @@ pub struct SearchArgs {
     pub shape: ShapeArgs,
 }
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(crate = "rmcp::serde")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct CommentsArgs {
     /// The item id (e.g. `proj-7af3q2k9`).
     pub id: String,
@@ -154,8 +164,8 @@ pub struct CommentsArgs {
     pub skip_newest: Option<u64>,
 }
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(crate = "rmcp::serde")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct DepTreeArgs {
     /// The root item id.
     pub id: String,
@@ -163,8 +173,8 @@ pub struct DepTreeArgs {
     pub depth: Option<u64>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
-#[serde(crate = "rmcp::serde")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct StatsArgs {
     /// Cap assignee/label breakdowns to the N highest (0 = no cap; default 10).
     pub top: Option<u64>,
@@ -172,8 +182,8 @@ pub struct StatsArgs {
     pub no_epics: Option<bool>,
 }
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(crate = "rmcp::serde")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct NewArgs {
     /// The item title (required).
     pub title: String,
@@ -194,8 +204,8 @@ pub struct NewArgs {
     pub body: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(crate = "rmcp::serde")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct StatusArgs {
     /// The item id.
     pub id: String,
@@ -203,8 +213,8 @@ pub struct StatusArgs {
     pub status: String,
 }
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(crate = "rmcp::serde")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct EditArgs {
     /// The item id.
     pub id: String,
@@ -267,8 +277,8 @@ impl EditArgs {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(crate = "rmcp::serde")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct CommentArgs {
     /// The item id.
     pub id: String,
@@ -276,8 +286,8 @@ pub struct CommentArgs {
     pub message: String,
 }
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(crate = "rmcp::serde")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct DepAddArgs {
     /// The item that should depend on `dep_id`.
     pub id: String,
@@ -285,8 +295,8 @@ pub struct DepAddArgs {
     pub dep_id: String,
 }
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(crate = "rmcp::serde")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct SetParentArgs {
     /// The item whose parent to set.
     pub id: String,

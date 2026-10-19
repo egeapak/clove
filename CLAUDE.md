@@ -2,10 +2,11 @@
 
 Guidance for working in this repo. `clove` is a Cargo workspace (`crates/*`):
 `clove-types` (pure shared data types: model/id/error/validation + the
-create/edit request types), `clove-core` (file store/graph/high-level ops on top
+create/edit request types + the tool argument types), `clove-core` (file store/graph/high-level ops on top
 of `clove-types`), `clove-engine` (the **read tier**: one daemon → index → files
-cascade behind every read surface), `clove-tui` (the terminal browser + add/edit
-form), `clove-web` (the web UI server + embedded SvelteKit SPA, `clove serve`),
+cascade behind every read surface), `clove-service` (the transport-independent tool
+engine behind `clove-mcp` and the plugin host IPC), `clove-tui` (the terminal
+browser + add/edit form), `clove-web` (the web UI server + embedded SvelteKit SPA, `clove serve`),
 plus `clove` (CLI), `cloved`, `clove-index`, `clove-ipc`, `clove-import`,
 `clove-mcp`, `clove-plugin` (cargo-style subcommand-plugin support), the
 installable plugins `clove-sync-github` / `clove-import-tk` / `clove-import-beads`,

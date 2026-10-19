@@ -33,7 +33,7 @@ done
 # that `clove plugin install` resolves by name.
 crates=(
 	clove-types clove-core clove-plugin clove-index clove-import clove-ipc clove-tui
-	clove-engine clove-mcp clove-web cloved
+	clove-engine clove-service clove-mcp clove-web cloved
 	clove-sync-github clove-import-tk clove-import-beads
 	clove-cli
 )

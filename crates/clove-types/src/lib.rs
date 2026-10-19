@@ -13,6 +13,7 @@ pub mod model;
 pub mod output;
 pub mod request;
 pub mod time;
+pub mod tool;
 pub mod validate;
 
 pub use error::{error_code, CloveError};

@@ -1,0 +1,1624 @@
+---
+source: crates/clove/tests/mcp.rs
+expression: tools
+---
+[
+  {
+    "description": "List work items blocked by open OR missing dependencies, each with its `blocked_by` ids, ordered by (priority, topology). An item whose dependency id has no backing file is blocked too — that is a broken reference worth seeing, not a reason to omit it.",
+    "inputSchema": {
+      "$defs": {
+        "OneOrMany": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          ],
+          "description": "One value or a list of them.\n\nThe filter arguments accept `\"open\"` and `[\"open\",\"in_progress\"]` alike, so\nevery agent already calling these tools with a single string is unaffected —\nthe published `inputSchema` gains an `anyOf` branch rather than changing\ntype. `#[serde(untagged)]` is what makes the string form keep working; the\n`JsonSchema` derive mirrors it into the schema agents read."
+        },
+        "Priorities": {
+          "anyOf": [
+            {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "items": {
+                "format": "uint8",
+                "maximum": 255,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "array"
+            }
+          ],
+          "description": "One priority or a list of them (`2` or `[0,1]`). Numeric, as it always was."
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Shared filter fields for `clove_ready` / `clove_list` / `clove_blocked`.",
+      "properties": {
+        "assignee": {
+          "description": "Filter by assignee.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "compact": {
+          "description": "Omit null and empty-list keys. Defaults to true unless `fields` is given.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "desc": {
+          "description": "Reverse the sort order (newest-first, lowest-priority-first, ...).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "fields": {
+          "description": "Return only these keys per item (e.g. [\"id\",\"title\",\"status\"]). Unknown\nnames are ignored. Cuts list payloads by roughly two thirds.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "label": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OneOrMany"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Filter by label (case-insensitive). A list requires **all** of them."
+        },
+        "limit": {
+          "description": "Max results (0 = no limit; default 50).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "offset": {
+          "description": "Skip this many results.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "parent": {
+          "description": "Only the direct children of this item id (e.g. `proj-7af3q2k9`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "priority": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Priorities"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Filter by priority (0=highest .. 4). A list matches any of them."
+        },
+        "q": {
+          "description": "Keep only items whose id, title, or labels contain this text\n(case-insensitive). A filter, not a search: it never reads the body.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sort": {
+          "description": "Sort by `rank|priority|created|updated|id|status|type`. Default `rank`:\npriority, then dependency order, then id.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OneOrMany"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Filter by status (`open|in_progress|closed`). A list matches any of them."
+        },
+        "synced": {
+          "description": "`true`: only items linked to an external tracker (any `external_ref`,\ne.g. a GitHub `gh-12`); `false`: only items with none.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "type": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OneOrMany"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Filter by item type (`bug|feature|chore|docs|epic`). A list matches any\nof them."
+        }
+      },
+      "title": "BlockedArgs",
+      "type": "object"
+    },
+    "name": "clove_blocked",
+    "outputSchema": {
+      "$id": "https://clove.dev/schema/v1/mcp-item-page.json",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "The result of the MCP read tools that return a list: clove_list, clove_ready, clove_blocked, clove_search. This is the payload the server puts in `structuredContent` (and, byte-identically, in `content[0].text` for clients that do not read structured results), and it is what those tools advertise as their `outputSchema` in tools/list. It is the CLI's list envelope flattened: an MCP tool result has no `{v, ok, data, _meta}` wrapper, so the keys the CLI reports under `_meta` are plain keys beside `items` here.",
+      "properties": {
+        "dir": {
+          "enum": [
+            "asc",
+            "desc"
+          ]
+        },
+        "filters": {
+          "additionalProperties": false,
+          "description": "The parsed, canonicalized filters, echoed so a caller can read back what was applied rather than assume its input survived. Absent on clove_search, which takes no field filters — an empty object there would advertise a surface the tool does not have. Any-of within a field, all-of across fields; `labels` is all-of within the field too. An empty array does not constrain.",
+          "properties": {
+            "assignee": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "labels": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "parent": {
+              "description": "Only the direct children of this item id; null: no constraint.",
+              "pattern": "^[a-z][a-z0-9]{0,7}-[0-9A-Z]{8}$",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "priority": {
+              "items": {
+                "maximum": 4,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "q": {
+              "description": "Case-insensitive substring over id/title/labels (NOT bodies — that is clove_search).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status": {
+              "items": {
+                "enum": [
+                  "open",
+                  "in_progress",
+                  "closed"
+                ]
+              },
+              "type": "array"
+            },
+            "synced": {
+              "description": "true: only items with a non-empty `external_ref` (any provider); false: only items without one; null: no constraint.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "type": {
+              "items": {
+                "enum": [
+                  "bug",
+                  "feature",
+                  "chore",
+                  "docs",
+                  "epic"
+                ]
+              },
+              "type": "array"
+            }
+          },
+          "title": "the applied filter set",
+          "type": "object"
+        },
+        "items": {
+          "description": "The requested page, already windowed. Elements are item objects whose KEY SET depends on the request: the read tools compact by default (null and empty-list keys, plus the `schema` migration marker, are omitted — a missing `assignee` means unset, never unknown), `fields` projects to exactly the keys asked for, and `compact: false` restores every key. The full key set is item.json; no key is required here because any of them can be projected away.",
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "limit": {
+          "description": "The page size in force, in the same encoding callers pass in: 0 means UNLIMITED, not \"empty page\". Echoed so a caller can read the effective cap rather than assume the MCP default (50).",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "offset": {
+          "description": "Rows skipped from the start of the ordered result.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "returned": {
+          "description": "Elements in `items`.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sort": {
+          "description": "The ordering field in force. `relevance` is clove_search's default and cannot be requested on the other three.",
+          "enum": [
+            "rank",
+            "priority",
+            "created",
+            "updated",
+            "id",
+            "status",
+            "type",
+            "relevance"
+          ]
+        },
+        "source": {
+          "description": "Which read tier answered: a running cloved, the SQLite index, or a file scan. The `_meta.source` of the CLI and web, carried as a plain key because this payload has no `_meta`.",
+          "enum": [
+            "daemon",
+            "index",
+            "files"
+          ]
+        },
+        "total": {
+          "description": "Matches BEFORE the window — always the full count, never the page size. `returned < total` means there is more to page through.",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "total",
+        "returned",
+        "offset",
+        "limit",
+        "sort",
+        "dir",
+        "items"
+      ],
+      "title": "clove MCP item page",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Append a comment to an item.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "description": "The item id.",
+          "type": "string"
+        },
+        "message": {
+          "description": "The comment body.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "message"
+      ],
+      "title": "CommentArgs",
+      "type": "object"
+    },
+    "name": "clove_comment"
+  },
+  {
+    "description": "Read an item's comment thread, oldest first. The read counterpart to clove_comment — clove_show reports only a `comment_count`. `limit` keeps the most recent comments; `offset` pages back through older ones.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "description": "The item id (e.g. `proj-7af3q2k9`).",
+          "type": "string"
+        },
+        "limit": {
+          "description": "Max comments, keeping the most recent (0 = no limit; default 50).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "skip_newest": {
+          "description": "Skip this many of the *newest* comments, to page back through older\nones. Named for its direction: unlike `offset` on the list tools, this\nwindow is anchored at the newest end, not the start.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "CommentsArgs",
+      "type": "object"
+    },
+    "name": "clove_comments",
+    "outputSchema": {
+      "$id": "https://clove.dev/schema/v1/mcp-comment-page.json",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "The result of the clove_comments MCP tool: one window of an item's comment thread, oldest first. This is the payload the server puts in `structuredContent` (and, byte-identically, in `content[0].text`), and what the tool advertises as its `outputSchema` in tools/list. The window is anchored at the NEWEST end — `limit` keeps the most recent comments and `skip_newest` pages back into older ones — which is why the skip key is not called `offset`.",
+      "properties": {
+        "items": {
+          "description": "The windowed thread, oldest first.",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "author": {
+                "type": "string"
+              },
+              "body": {
+                "type": "string"
+              },
+              "timestamp": {
+                "description": "RFC3339 UTC with millisecond precision — the one canonical spelling every surface writes.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "author",
+              "timestamp",
+              "body"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "limit": {
+          "description": "The page size in force; 0 means unlimited, as everywhere else.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "returned": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "skip_newest": {
+          "description": "How many of the newest comments were skipped.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total": {
+          "description": "Comments on the item BEFORE the window.",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "total",
+        "returned",
+        "skip_newest",
+        "limit",
+        "items"
+      ],
+      "title": "clove MCP comment page",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Add a hard dependency: `id` depends on `dep_id`. Rejects self-loops and dependencies that would create a cycle.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "dep_id": {
+          "description": "The dependency target id.",
+          "type": "string"
+        },
+        "id": {
+          "description": "The item that should depend on `dep_id`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "dep_id"
+      ],
+      "title": "DepAddArgs",
+      "type": "object"
+    },
+    "name": "clove_dep_add"
+  },
+  {
+    "description": "Remove a hard dependency: `id` no longer depends on `dep_id`. Errors if no such dependency exists.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "dep_id": {
+          "description": "The dependency target id.",
+          "type": "string"
+        },
+        "id": {
+          "description": "The item that should depend on `dep_id`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "dep_id"
+      ],
+      "title": "DepAddArgs",
+      "type": "object"
+    },
+    "name": "clove_dep_remove"
+  },
+  {
+    "description": "Render the dependency tree rooted at an item, with per-node status, `ready`, and `cycle_ref` markers.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "depth": {
+          "description": "Maximum depth (0 = no limit; default 5).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "The root item id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "DepTreeArgs",
+      "type": "object"
+    },
+    "name": "clove_dep_tree"
+  },
+  {
+    "description": "Edit an item's fields in one atomic write: status, priority, type, title, assignee, Markdown body, and label add/remove.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "add_labels": {
+          "description": "Labels to add.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "assignee": {
+          "description": "New assignee (empty string clears it).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "body": {
+          "description": "New Markdown body (replaces the body; empty string clears it).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "The item id.",
+          "type": "string"
+        },
+        "priority": {
+          "description": "New priority (0..4).",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "remove_labels": {
+          "description": "Labels to remove.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "status": {
+          "description": "New status (`open|in_progress|closed`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "description": "New title.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "description": "New type (`bug|feature|chore|docs|epic`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "EditArgs",
+      "type": "object"
+    },
+    "name": "clove_edit"
+  },
+  {
+    "description": "List work items with optional filters, ordered by (priority, topology, id).",
+    "inputSchema": {
+      "$defs": {
+        "OneOrMany": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          ],
+          "description": "One value or a list of them.\n\nThe filter arguments accept `\"open\"` and `[\"open\",\"in_progress\"]` alike, so\nevery agent already calling these tools with a single string is unaffected —\nthe published `inputSchema` gains an `anyOf` branch rather than changing\ntype. `#[serde(untagged)]` is what makes the string form keep working; the\n`JsonSchema` derive mirrors it into the schema agents read."
+        },
+        "Priorities": {
+          "anyOf": [
+            {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "items": {
+                "format": "uint8",
+                "maximum": 255,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "array"
+            }
+          ],
+          "description": "One priority or a list of them (`2` or `[0,1]`). Numeric, as it always was."
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Shared filter fields for `clove_ready` / `clove_list` / `clove_blocked`.",
+      "properties": {
+        "assignee": {
+          "description": "Filter by assignee.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "compact": {
+          "description": "Omit null and empty-list keys. Defaults to true unless `fields` is given.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "desc": {
+          "description": "Reverse the sort order (newest-first, lowest-priority-first, ...).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "fields": {
+          "description": "Return only these keys per item (e.g. [\"id\",\"title\",\"status\"]). Unknown\nnames are ignored. Cuts list payloads by roughly two thirds.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "label": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OneOrMany"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Filter by label (case-insensitive). A list requires **all** of them."
+        },
+        "limit": {
+          "description": "Max results (0 = no limit; default 50).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "offset": {
+          "description": "Skip this many results.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "parent": {
+          "description": "Only the direct children of this item id (e.g. `proj-7af3q2k9`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "priority": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Priorities"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Filter by priority (0=highest .. 4). A list matches any of them."
+        },
+        "q": {
+          "description": "Keep only items whose id, title, or labels contain this text\n(case-insensitive). A filter, not a search: it never reads the body.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sort": {
+          "description": "Sort by `rank|priority|created|updated|id|status|type`. Default `rank`:\npriority, then dependency order, then id.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OneOrMany"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Filter by status (`open|in_progress|closed`). A list matches any of them."
+        },
+        "synced": {
+          "description": "`true`: only items linked to an external tracker (any `external_ref`,\ne.g. a GitHub `gh-12`); `false`: only items with none.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "type": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OneOrMany"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Filter by item type (`bug|feature|chore|docs|epic`). A list matches any\nof them."
+        }
+      },
+      "title": "ListArgs",
+      "type": "object"
+    },
+    "name": "clove_list",
+    "outputSchema": {
+      "$id": "https://clove.dev/schema/v1/mcp-item-page.json",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "The result of the MCP read tools that return a list: clove_list, clove_ready, clove_blocked, clove_search. This is the payload the server puts in `structuredContent` (and, byte-identically, in `content[0].text` for clients that do not read structured results), and it is what those tools advertise as their `outputSchema` in tools/list. It is the CLI's list envelope flattened: an MCP tool result has no `{v, ok, data, _meta}` wrapper, so the keys the CLI reports under `_meta` are plain keys beside `items` here.",
+      "properties": {
+        "dir": {
+          "enum": [
+            "asc",
+            "desc"
+          ]
+        },
+        "filters": {
+          "additionalProperties": false,
+          "description": "The parsed, canonicalized filters, echoed so a caller can read back what was applied rather than assume its input survived. Absent on clove_search, which takes no field filters — an empty object there would advertise a surface the tool does not have. Any-of within a field, all-of across fields; `labels` is all-of within the field too. An empty array does not constrain.",
+          "properties": {
+            "assignee": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "labels": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "parent": {
+              "description": "Only the direct children of this item id; null: no constraint.",
+              "pattern": "^[a-z][a-z0-9]{0,7}-[0-9A-Z]{8}$",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "priority": {
+              "items": {
+                "maximum": 4,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "q": {
+              "description": "Case-insensitive substring over id/title/labels (NOT bodies — that is clove_search).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status": {
+              "items": {
+                "enum": [
+                  "open",
+                  "in_progress",
+                  "closed"
+                ]
+              },
+              "type": "array"
+            },
+            "synced": {
+              "description": "true: only items with a non-empty `external_ref` (any provider); false: only items without one; null: no constraint.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "type": {
+              "items": {
+                "enum": [
+                  "bug",
+                  "feature",
+                  "chore",
+                  "docs",
+                  "epic"
+                ]
+              },
+              "type": "array"
+            }
+          },
+          "title": "the applied filter set",
+          "type": "object"
+        },
+        "items": {
+          "description": "The requested page, already windowed. Elements are item objects whose KEY SET depends on the request: the read tools compact by default (null and empty-list keys, plus the `schema` migration marker, are omitted — a missing `assignee` means unset, never unknown), `fields` projects to exactly the keys asked for, and `compact: false` restores every key. The full key set is item.json; no key is required here because any of them can be projected away.",
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "limit": {
+          "description": "The page size in force, in the same encoding callers pass in: 0 means UNLIMITED, not \"empty page\". Echoed so a caller can read the effective cap rather than assume the MCP default (50).",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "offset": {
+          "description": "Rows skipped from the start of the ordered result.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "returned": {
+          "description": "Elements in `items`.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sort": {
+          "description": "The ordering field in force. `relevance` is clove_search's default and cannot be requested on the other three.",
+          "enum": [
+            "rank",
+            "priority",
+            "created",
+            "updated",
+            "id",
+            "status",
+            "type",
+            "relevance"
+          ]
+        },
+        "source": {
+          "description": "Which read tier answered: a running cloved, the SQLite index, or a file scan. The `_meta.source` of the CLI and web, carried as a plain key because this payload has no `_meta`.",
+          "enum": [
+            "daemon",
+            "index",
+            "files"
+          ]
+        },
+        "total": {
+          "description": "Matches BEFORE the window — always the full count, never the page size. `returned < total` means there is more to page through.",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "total",
+        "returned",
+        "offset",
+        "limit",
+        "sort",
+        "dir",
+        "items"
+      ],
+      "title": "clove MCP item page",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Create a new work item. Returns its generated id and path.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "assignee": {
+          "description": "Assignee.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "body": {
+          "description": "Markdown body.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "deps": {
+          "description": "Ids this item hard-depends on.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "labels": {
+          "description": "Labels to attach (case-insensitive).",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "parent": {
+          "description": "Parent item id (for epics).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "priority": {
+          "description": "Priority 0 (highest) .. 4 (default 2).",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "title": {
+          "description": "The item title (required).",
+          "type": "string"
+        },
+        "type": {
+          "description": "`bug|feature|chore|docs|epic`; defaults to the repo's configured type.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "title"
+      ],
+      "title": "NewArgs",
+      "type": "object"
+    },
+    "name": "clove_new"
+  },
+  {
+    "description": "List work items ready to start now: open/in-progress items whose hard dependencies are all closed and which have no dangling dependencies, ordered by (priority, topology). The primary 'what should I work on?' query.",
+    "inputSchema": {
+      "$defs": {
+        "OneOrMany": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          ],
+          "description": "One value or a list of them.\n\nThe filter arguments accept `\"open\"` and `[\"open\",\"in_progress\"]` alike, so\nevery agent already calling these tools with a single string is unaffected —\nthe published `inputSchema` gains an `anyOf` branch rather than changing\ntype. `#[serde(untagged)]` is what makes the string form keep working; the\n`JsonSchema` derive mirrors it into the schema agents read."
+        },
+        "Priorities": {
+          "anyOf": [
+            {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "items": {
+                "format": "uint8",
+                "maximum": 255,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "array"
+            }
+          ],
+          "description": "One priority or a list of them (`2` or `[0,1]`). Numeric, as it always was."
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Shared filter fields for `clove_ready` / `clove_list` / `clove_blocked`.",
+      "properties": {
+        "assignee": {
+          "description": "Filter by assignee.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "compact": {
+          "description": "Omit null and empty-list keys. Defaults to true unless `fields` is given.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "desc": {
+          "description": "Reverse the sort order (newest-first, lowest-priority-first, ...).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "fields": {
+          "description": "Return only these keys per item (e.g. [\"id\",\"title\",\"status\"]). Unknown\nnames are ignored. Cuts list payloads by roughly two thirds.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "label": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OneOrMany"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Filter by label (case-insensitive). A list requires **all** of them."
+        },
+        "limit": {
+          "description": "Max results (0 = no limit; default 50).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "offset": {
+          "description": "Skip this many results.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "parent": {
+          "description": "Only the direct children of this item id (e.g. `proj-7af3q2k9`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "priority": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Priorities"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Filter by priority (0=highest .. 4). A list matches any of them."
+        },
+        "q": {
+          "description": "Keep only items whose id, title, or labels contain this text\n(case-insensitive). A filter, not a search: it never reads the body.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sort": {
+          "description": "Sort by `rank|priority|created|updated|id|status|type`. Default `rank`:\npriority, then dependency order, then id.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OneOrMany"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Filter by status (`open|in_progress|closed`). A list matches any of them."
+        },
+        "synced": {
+          "description": "`true`: only items linked to an external tracker (any `external_ref`,\ne.g. a GitHub `gh-12`); `false`: only items with none.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "type": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OneOrMany"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Filter by item type (`bug|feature|chore|docs|epic`). A list matches any\nof them."
+        }
+      },
+      "title": "FilterArgs",
+      "type": "object"
+    },
+    "name": "clove_ready",
+    "outputSchema": {
+      "$id": "https://clove.dev/schema/v1/mcp-item-page.json",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "The result of the MCP read tools that return a list: clove_list, clove_ready, clove_blocked, clove_search. This is the payload the server puts in `structuredContent` (and, byte-identically, in `content[0].text` for clients that do not read structured results), and it is what those tools advertise as their `outputSchema` in tools/list. It is the CLI's list envelope flattened: an MCP tool result has no `{v, ok, data, _meta}` wrapper, so the keys the CLI reports under `_meta` are plain keys beside `items` here.",
+      "properties": {
+        "dir": {
+          "enum": [
+            "asc",
+            "desc"
+          ]
+        },
+        "filters": {
+          "additionalProperties": false,
+          "description": "The parsed, canonicalized filters, echoed so a caller can read back what was applied rather than assume its input survived. Absent on clove_search, which takes no field filters — an empty object there would advertise a surface the tool does not have. Any-of within a field, all-of across fields; `labels` is all-of within the field too. An empty array does not constrain.",
+          "properties": {
+            "assignee": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "labels": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "parent": {
+              "description": "Only the direct children of this item id; null: no constraint.",
+              "pattern": "^[a-z][a-z0-9]{0,7}-[0-9A-Z]{8}$",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "priority": {
+              "items": {
+                "maximum": 4,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "q": {
+              "description": "Case-insensitive substring over id/title/labels (NOT bodies — that is clove_search).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status": {
+              "items": {
+                "enum": [
+                  "open",
+                  "in_progress",
+                  "closed"
+                ]
+              },
+              "type": "array"
+            },
+            "synced": {
+              "description": "true: only items with a non-empty `external_ref` (any provider); false: only items without one; null: no constraint.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "type": {
+              "items": {
+                "enum": [
+                  "bug",
+                  "feature",
+                  "chore",
+                  "docs",
+                  "epic"
+                ]
+              },
+              "type": "array"
+            }
+          },
+          "title": "the applied filter set",
+          "type": "object"
+        },
+        "items": {
+          "description": "The requested page, already windowed. Elements are item objects whose KEY SET depends on the request: the read tools compact by default (null and empty-list keys, plus the `schema` migration marker, are omitted — a missing `assignee` means unset, never unknown), `fields` projects to exactly the keys asked for, and `compact: false` restores every key. The full key set is item.json; no key is required here because any of them can be projected away.",
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "limit": {
+          "description": "The page size in force, in the same encoding callers pass in: 0 means UNLIMITED, not \"empty page\". Echoed so a caller can read the effective cap rather than assume the MCP default (50).",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "offset": {
+          "description": "Rows skipped from the start of the ordered result.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "returned": {
+          "description": "Elements in `items`.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sort": {
+          "description": "The ordering field in force. `relevance` is clove_search's default and cannot be requested on the other three.",
+          "enum": [
+            "rank",
+            "priority",
+            "created",
+            "updated",
+            "id",
+            "status",
+            "type",
+            "relevance"
+          ]
+        },
+        "source": {
+          "description": "Which read tier answered: a running cloved, the SQLite index, or a file scan. The `_meta.source` of the CLI and web, carried as a plain key because this payload has no `_meta`.",
+          "enum": [
+            "daemon",
+            "index",
+            "files"
+          ]
+        },
+        "total": {
+          "description": "Matches BEFORE the window — always the full count, never the page size. `returned < total` means there is more to page through.",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "total",
+        "returned",
+        "offset",
+        "limit",
+        "sort",
+        "dir",
+        "items"
+      ],
+      "title": "clove MCP item page",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Search item titles, labels, and bodies for a case-insensitive SUBSTRING (not whole words: `core` matches `corepart`). Title matches rank first, then labels, then bodies.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Result-shaping options shared by the read tools.",
+      "properties": {
+        "compact": {
+          "description": "Omit null and empty-list keys. Defaults to true unless `fields` is given.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "desc": {
+          "description": "Reverse the order (or, with no `sort`, the relevance ranking).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "fields": {
+          "description": "Return only these keys per item (e.g. [\"id\",\"title\",\"status\"]). Unknown\nnames are ignored. Cuts list payloads by roughly two thirds.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "limit": {
+          "description": "Max results (0 = no limit; default 50).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "offset": {
+          "description": "Skip this many results.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "sort": {
+          "description": "Sort by `rank|priority|created|updated|id|status|type`. Omitted, hits are\nranked by relevance (title, then label, then body); naming a field\nreplaces that ranking entirely.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text": {
+          "description": "The text to search for (case-insensitive substring).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "title": "SearchArgs",
+      "type": "object"
+    },
+    "name": "clove_search",
+    "outputSchema": {
+      "$id": "https://clove.dev/schema/v1/mcp-item-page.json",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "The result of the MCP read tools that return a list: clove_list, clove_ready, clove_blocked, clove_search. This is the payload the server puts in `structuredContent` (and, byte-identically, in `content[0].text` for clients that do not read structured results), and it is what those tools advertise as their `outputSchema` in tools/list. It is the CLI's list envelope flattened: an MCP tool result has no `{v, ok, data, _meta}` wrapper, so the keys the CLI reports under `_meta` are plain keys beside `items` here.",
+      "properties": {
+        "dir": {
+          "enum": [
+            "asc",
+            "desc"
+          ]
+        },
+        "filters": {
+          "additionalProperties": false,
+          "description": "The parsed, canonicalized filters, echoed so a caller can read back what was applied rather than assume its input survived. Absent on clove_search, which takes no field filters — an empty object there would advertise a surface the tool does not have. Any-of within a field, all-of across fields; `labels` is all-of within the field too. An empty array does not constrain.",
+          "properties": {
+            "assignee": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "labels": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "parent": {
+              "description": "Only the direct children of this item id; null: no constraint.",
+              "pattern": "^[a-z][a-z0-9]{0,7}-[0-9A-Z]{8}$",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "priority": {
+              "items": {
+                "maximum": 4,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "q": {
+              "description": "Case-insensitive substring over id/title/labels (NOT bodies — that is clove_search).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status": {
+              "items": {
+                "enum": [
+                  "open",
+                  "in_progress",
+                  "closed"
+                ]
+              },
+              "type": "array"
+            },
+            "synced": {
+              "description": "true: only items with a non-empty `external_ref` (any provider); false: only items without one; null: no constraint.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "type": {
+              "items": {
+                "enum": [
+                  "bug",
+                  "feature",
+                  "chore",
+                  "docs",
+                  "epic"
+                ]
+              },
+              "type": "array"
+            }
+          },
+          "title": "the applied filter set",
+          "type": "object"
+        },
+        "items": {
+          "description": "The requested page, already windowed. Elements are item objects whose KEY SET depends on the request: the read tools compact by default (null and empty-list keys, plus the `schema` migration marker, are omitted — a missing `assignee` means unset, never unknown), `fields` projects to exactly the keys asked for, and `compact: false` restores every key. The full key set is item.json; no key is required here because any of them can be projected away.",
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "limit": {
+          "description": "The page size in force, in the same encoding callers pass in: 0 means UNLIMITED, not \"empty page\". Echoed so a caller can read the effective cap rather than assume the MCP default (50).",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "offset": {
+          "description": "Rows skipped from the start of the ordered result.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "returned": {
+          "description": "Elements in `items`.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sort": {
+          "description": "The ordering field in force. `relevance` is clove_search's default and cannot be requested on the other three.",
+          "enum": [
+            "rank",
+            "priority",
+            "created",
+            "updated",
+            "id",
+            "status",
+            "type",
+            "relevance"
+          ]
+        },
+        "source": {
+          "description": "Which read tier answered: a running cloved, the SQLite index, or a file scan. The `_meta.source` of the CLI and web, carried as a plain key because this payload has no `_meta`.",
+          "enum": [
+            "daemon",
+            "index",
+            "files"
+          ]
+        },
+        "total": {
+          "description": "Matches BEFORE the window — always the full count, never the page size. `returned < total` means there is more to page through.",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "total",
+        "returned",
+        "offset",
+        "limit",
+        "sort",
+        "dir",
+        "items"
+      ],
+      "title": "clove MCP item page",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Set or clear an item's parent (epic membership). Omit `parent` to clear it. Rejects self-parenting and parent cycles.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "description": "The item whose parent to set.",
+          "type": "string"
+        },
+        "parent": {
+          "description": "The new parent id, or null/omitted to clear the parent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "SetParentArgs",
+      "type": "object"
+    },
+    "name": "clove_set_parent"
+  },
+  {
+    "description": "Show one work item: its fields, the Markdown body, comment count, and computed `ready`/`blocked_by`.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Result-shaping options shared by the read tools.",
+      "properties": {
+        "compact": {
+          "description": "Omit null and empty-list keys. Defaults to true unless `fields` is given.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "fields": {
+          "description": "Return only these keys per item (e.g. [\"id\",\"title\",\"status\"]). Unknown\nnames are ignored. Cuts list payloads by roughly two thirds.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "The item id (e.g. `proj-7af3q2k9`).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "IdArgs",
+      "type": "object"
+    },
+    "name": "clove_show"
+  },
+  {
+    "description": "Repository analytics: counts by status/type/priority/assignee/label, ready/blocked/excluded/dangling totals, cycle count, per-epic rollups, and throughput.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "no_epics": {
+          "description": "Skip the per-epic completion rollup.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "top": {
+          "description": "Cap assignee/label breakdowns to the N highest (0 = no cap; default 10).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "title": "StatsArgs",
+      "type": "object"
+    },
+    "name": "clove_stats"
+  },
+  {
+    "description": "Change an item's status (open | in_progress | closed). Closing sets the closed timestamp; reopening clears it.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "description": "The item id.",
+          "type": "string"
+        },
+        "status": {
+          "description": "New status: `open`, `in_progress`, or `closed`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "status"
+      ],
+      "title": "StatusArgs",
+      "type": "object"
+    },
+    "name": "clove_status"
+  }
+]

@@ -16,8 +16,8 @@ use rmcp::service::RequestContext;
 use rmcp::{tool, tool_handler, tool_router, ErrorData, RoleServer, ServerHandler};
 use serde_json::Value;
 
-use crate::args::*;
-use crate::engine::Engine;
+use clove_service::{Engine, ToolError};
+use clove_types::tool::*;
 
 /// The two live resources clove exposes. Their contents change on every
 /// graph-affecting mutation; a subscribed client is pushed `resources/updated`
@@ -60,15 +60,18 @@ impl CloveServer {
     }
 
     /// Run a blocking engine call and map it to a tool result: `Ok` → structured
-    /// JSON content; an engine error string → an `isError` tool result (not a
-    /// protocol error); a task panic → a protocol-level internal error.
+    /// JSON content; an engine error → an `isError` tool result carrying its
+    /// text (not a protocol error); a task panic → a protocol-level internal
+    /// error.
     async fn run<F>(&self, f: F) -> Result<CallToolResult, ErrorData>
     where
-        F: FnOnce() -> Result<Value, String> + Send + 'static,
+        F: FnOnce() -> Result<Value, ToolError> + Send + 'static,
     {
         match tokio::task::spawn_blocking(f).await {
             Ok(Ok(value)) => Ok(CallToolResult::structured(value)),
-            Ok(Err(message)) => Ok(CallToolResult::error(vec![Content::text(message)])),
+            Ok(Err(error)) => Ok(CallToolResult::error(vec![Content::text(
+                error.to_string(),
+            )])),
             Err(join) => Err(ErrorData::internal_error(
                 format!("tool task failed: {join}"),
                 None,
@@ -364,7 +367,7 @@ impl ServerHandler for CloveServer {
             }
             // Unlike a tool call (which wraps a repo error in `isError`), a resource
             // read surfaces the error at the protocol level.
-            Ok(Err(message)) => Err(ErrorData::internal_error(message, None)),
+            Ok(Err(error)) => Err(ErrorData::internal_error(error.to_string(), None)),
             Err(join) => Err(ErrorData::internal_error(
                 format!("resource task failed: {join}"),
                 None,

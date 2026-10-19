@@ -21,6 +21,14 @@ smol_str = { workspace = true, features = ["serde"] }
 camino.workspace = true
 thiserror.workspace = true
 getrandom.workspace = true
+# Optional: `JsonSchema` derives on the tool argument types (`tool`), enabled
+# only by clove-mcp to publish each tool's `inputSchema`. Must resolve to the
+# schemars major that rmcp re-exports (one schemars in Cargo.lock); a mismatch
+# is a compile error, not silent drift.
+schemars = { workspace = true, optional = true }
+
+[features]
+schemars = ["dep:schemars"]
 
 [dev-dependencies]
 serde_json.workspace = true

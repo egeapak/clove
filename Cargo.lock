@@ -740,6 +740,7 @@ dependencies = [
  "clove-core",
  "clove-engine",
  "clove-ipc",
+ "clove-service",
  "clove-types",
  "rmcp",
  "serde",
@@ -763,6 +764,19 @@ name = "clove-plugin-echo"
 version = "0.1.5"
 dependencies = [
  "clove-plugin",
+ "serde_json",
+]
+
+[[package]]
+name = "clove-service"
+version = "0.1.5"
+dependencies = [
+ "camino",
+ "chrono",
+ "clove-core",
+ "clove-engine",
+ "clove-ipc",
+ "clove-types",
  "serde_json",
 ]
 
@@ -805,6 +819,7 @@ dependencies = [
  "chrono",
  "getrandom 0.2.17",
  "proptest",
+ "schemars",
  "serde",
  "serde_json",
  "smol_str",

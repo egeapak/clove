@@ -7,11 +7,8 @@
 //! file store directly. So multiple agents on one project share one write
 //! coordinator when a daemon is running, and everything still works without one.
 
-mod args;
-mod engine;
 mod schema;
 mod server;
-mod shape;
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -22,7 +19,7 @@ use clove_types::ItemType;
 use rmcp::model::ResourceUpdatedNotificationParam;
 use rmcp::{Peer, RoleServer};
 
-pub use engine::Engine;
+pub use clove_service::Engine;
 pub use server::{CloveServer, READY_URI, STATS_URI};
 
 /// Default heartbeat interval: ping the daemon this often to keep it alive while
@@ -48,7 +45,11 @@ pub fn run(
     id_prefix: String,
     default_type: ItemType,
 ) -> anyhow::Result<()> {
-    let engine = Engine::new(clove_dir.clone(), repo_root, id_prefix, default_type);
+    // Every tier, fast staleness check: the MCP server has no `--no-index`
+    // equivalent, and `--deep` is a CLI diagnostic. `index.auto_refresh` is the
+    // repo's policy, not the surface's, so `for_repo` honours it.
+    let tiers = clove_engine::Tiers::for_repo(&repo_root);
+    let engine = Engine::new(clove_dir.clone(), repo_root, id_prefix, default_type, tiers);
 
     // Only coordinate through the daemon when the repo actually exists. The
     // server starts even without a `.clove/` (so its tools can report "no
