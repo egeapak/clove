@@ -91,6 +91,9 @@ TMPDIR=/tmp CLOVE_HOME=$(mktemp -d /tmp/cvd.XXXX)/h scripts/ci/daemon-smoke.sh <
       the hub pid, project, web URL and log path.
 - [ ] `.clove/daemon.token` is `0600` and git-ignored (`git check-ignore`).
 - [ ] `clove -f json ls|ready|blocked` report `_meta.source == "daemon"`.
+- [ ] In a scratch project with the daemon serving it, `clove import tk <.tickets>`
+      raises `writes_applied` in `clove -f json daemon status` by at least the
+      number of imported items (plugin writes go through the daemon).
 - [ ] A second (scratch) project attached with `clove daemon start` shares the same
       hub pid; `clove daemon stop` in it detaches only it.
 - [ ] The release `cloved` ignores the test knobs (#61): with a scratch `CLOVE_HOME`,

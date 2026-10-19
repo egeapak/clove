@@ -380,12 +380,12 @@ pub struct CreateItemParams {
     pub item: ItemPayload,
 }
 
-/// `store.apply_edit`: the unified edit, stamped `now`.
+/// `store.apply_edit`: the unified edit. The writer (the daemon, or the host
+/// when no daemon runs) stamps `updated`, as for every other write.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApplyEditParams {
     pub id: String,
     pub request: EditRequest,
-    pub now: chrono::DateTime<chrono::Utc>,
 }
 
 /// `store.dep_add` / `store.dep_remove`.
@@ -393,7 +393,6 @@ pub struct ApplyEditParams {
 pub struct StoreDepParams {
     pub id: String,
     pub dep: String,
-    pub now: chrono::DateTime<chrono::Utc>,
 }
 
 /// `store.link_external`: set `source_system` + `external_ref` on an item.
@@ -402,7 +401,6 @@ pub struct LinkExternalParams {
     pub id: String,
     pub source_system: String,
     pub external_ref: String,
-    pub now: chrono::DateTime<chrono::Utc>,
 }
 
 /// `store.add_comment`: append a comment with its original author and time.

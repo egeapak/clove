@@ -7,16 +7,16 @@
 //!   `clove-import-beads`, `clove-sync-github`) use this.
 //! - [`ItemStore`] — direct access, for unit tests and in-process callers.
 //!
-//! Both implementations write through the same validated path:
-//! `create_item` is `ItemStore::restore_item` (field checks like `create`, never
-//! overwrites), edits are `apply_edit`, dependencies go through the
-//! cycle-checked `ops`, comments through `add_comment_at`.
+//! Both implementations write through the same validated ops in
+//! `clove_core::ops` (`create_item`, `apply_edit`, the cycle-checked `dep_*`,
+//! `link_external`, `comment_at`). The host runs them in the `cloved` daemon
+//! when one is running, and in its own process otherwise.
 
 use std::cell::RefCell;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use chrono::{DateTime, Utc};
-use clove_core::{ItemStore, RestoreOutcome};
+use clove_core::{ops, ItemStore};
 use clove_plugin::{HostClient, HostError};
 use clove_types::tool::{CommentPayload, ItemPayload, ScanErrorPayload};
 use clove_types::{CloveError, CloveId, EditRequest, Item, ItemFrontmatter};
@@ -45,29 +45,19 @@ pub trait Store {
     fn new_id(&self) -> Result<CloveId, ImportError>;
     /// Write a new item exactly as given; an existing id is an error.
     fn create_item(&self, item: &Item) -> Result<(), ImportError>;
-    /// The unified edit, stamped `now`; returns the edited item's JSON.
-    fn apply_edit(
-        &self,
-        id: &CloveId,
-        request: &EditRequest,
-        now: DateTime<Utc>,
-    ) -> Result<Value, ImportError>;
+    /// The unified edit; returns the edited item's JSON. The writer stamps
+    /// `updated`.
+    fn apply_edit(&self, id: &CloveId, request: &EditRequest) -> Result<Value, ImportError>;
     /// Add a hard dependency (cycle-checked).
-    fn dep_add(&self, id: &CloveId, dep: &CloveId, now: DateTime<Utc>) -> Result<(), ImportError>;
+    fn dep_add(&self, id: &CloveId, dep: &CloveId) -> Result<(), ImportError>;
     /// Remove a hard dependency.
-    fn dep_remove(
-        &self,
-        id: &CloveId,
-        dep: &CloveId,
-        now: DateTime<Utc>,
-    ) -> Result<(), ImportError>;
+    fn dep_remove(&self, id: &CloveId, dep: &CloveId) -> Result<(), ImportError>;
     /// Set `source_system` + `external_ref`; returns the item's new `updated`.
     fn link_external(
         &self,
         id: &CloveId,
         source_system: &str,
         external_ref: &str,
-        now: DateTime<Utc>,
     ) -> Result<DateTime<Utc>, ImportError>;
     /// An item's comments, oldest first.
     fn comments(&self, id: &CloveId) -> Result<Vec<CommentPayload>, ImportError>;
@@ -133,37 +123,26 @@ impl Store for DirectStore {
     }
 
     fn create_item(&self, item: &Item) -> Result<(), ImportError> {
-        match self.store.restore_item(item, false)? {
-            RestoreOutcome::Skipped => Err(CloveError::InvalidField {
-                field: "id".to_owned(),
-                reason: format!("item `{}` already exists", item.frontmatter.id),
-            }
-            .into()),
-            _ => Ok(()),
-        }
-    }
-
-    fn apply_edit(
-        &self,
-        id: &CloveId,
-        request: &EditRequest,
-        now: DateTime<Utc>,
-    ) -> Result<Value, ImportError> {
-        Ok(clove_core::apply_edit(&self.store, id, request, now)?)
-    }
-
-    fn dep_add(&self, id: &CloveId, dep: &CloveId, now: DateTime<Utc>) -> Result<(), ImportError> {
-        clove_core::ops::dep_add(&self.store, id, dep, now)?;
+        ops::create_item(&self.store, item)?;
         Ok(())
     }
 
-    fn dep_remove(
-        &self,
-        id: &CloveId,
-        dep: &CloveId,
-        now: DateTime<Utc>,
-    ) -> Result<(), ImportError> {
-        clove_core::ops::dep_remove(&self.store, id, dep, now)?;
+    fn apply_edit(&self, id: &CloveId, request: &EditRequest) -> Result<Value, ImportError> {
+        Ok(clove_core::apply_edit(
+            &self.store,
+            id,
+            request,
+            Utc::now(),
+        )?)
+    }
+
+    fn dep_add(&self, id: &CloveId, dep: &CloveId) -> Result<(), ImportError> {
+        ops::dep_add(&self.store, id, dep, Utc::now())?;
+        Ok(())
+    }
+
+    fn dep_remove(&self, id: &CloveId, dep: &CloveId) -> Result<(), ImportError> {
+        ops::dep_remove(&self.store, id, dep, Utc::now())?;
         Ok(())
     }
 
@@ -172,14 +151,11 @@ impl Store for DirectStore {
         id: &CloveId,
         source_system: &str,
         external_ref: &str,
-        now: DateTime<Utc>,
     ) -> Result<DateTime<Utc>, ImportError> {
-        let saved = self.store.update_with(id, now, |item| {
-            item.frontmatter.source_system = Some(source_system.to_owned());
-            item.frontmatter.external_ref = Some(external_ref.to_owned());
-            Ok(())
-        })?;
-        Ok(saved.frontmatter.updated)
+        let saved = ops::link_external(&self.store, id, source_system, external_ref, Utc::now())?;
+        serde_json::from_value(saved["updated"].clone()).map_err(|e| ImportError::Record {
+            message: format!("link_external returned no `updated` stamp: {e}"),
+        })
     }
 
     fn comments(&self, id: &CloveId) -> Result<Vec<CommentPayload>, ImportError> {
@@ -202,7 +178,7 @@ impl Store for DirectStore {
         body: &str,
         timestamp: DateTime<Utc>,
     ) -> Result<(), ImportError> {
-        clove_core::comments::add_comment_at(self.store.issues_dir(), id, author, body, timestamp)?;
+        ops::comment_at(&self.store, id, author, body, timestamp)?;
         Ok(())
     }
 }
@@ -268,27 +244,17 @@ impl Store for HostStore {
         self.with(|c| c.store_create_item(&payload))
     }
 
-    fn apply_edit(
-        &self,
-        id: &CloveId,
-        request: &EditRequest,
-        now: DateTime<Utc>,
-    ) -> Result<Value, ImportError> {
-        self.with(|c| c.store_apply_edit(id.as_str(), request, now))
+    fn apply_edit(&self, id: &CloveId, request: &EditRequest) -> Result<Value, ImportError> {
+        self.with(|c| c.store_apply_edit(id.as_str(), request))
     }
 
-    fn dep_add(&self, id: &CloveId, dep: &CloveId, now: DateTime<Utc>) -> Result<(), ImportError> {
-        self.with(|c| c.store_dep_add(id.as_str(), dep.as_str(), now))
+    fn dep_add(&self, id: &CloveId, dep: &CloveId) -> Result<(), ImportError> {
+        self.with(|c| c.store_dep_add(id.as_str(), dep.as_str()))
             .map(drop)
     }
 
-    fn dep_remove(
-        &self,
-        id: &CloveId,
-        dep: &CloveId,
-        now: DateTime<Utc>,
-    ) -> Result<(), ImportError> {
-        self.with(|c| c.store_dep_remove(id.as_str(), dep.as_str(), now))
+    fn dep_remove(&self, id: &CloveId, dep: &CloveId) -> Result<(), ImportError> {
+        self.with(|c| c.store_dep_remove(id.as_str(), dep.as_str()))
             .map(drop)
     }
 
@@ -297,9 +263,8 @@ impl Store for HostStore {
         id: &CloveId,
         source_system: &str,
         external_ref: &str,
-        now: DateTime<Utc>,
     ) -> Result<DateTime<Utc>, ImportError> {
-        self.with(|c| c.store_link_external(id.as_str(), source_system, external_ref, now))
+        self.with(|c| c.store_link_external(id.as_str(), source_system, external_ref))
     }
 
     fn comments(&self, id: &CloveId) -> Result<Vec<CommentPayload>, ImportError> {

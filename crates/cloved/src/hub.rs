@@ -17,12 +17,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use camino::{Utf8Path, Utf8PathBuf};
+use chrono::{DateTime, Utc};
 use clove_ipc::hub::{client_is_this_user, codes, frame, recv_frame, send_frame, Hello, Welcome};
 use clove_ipc::{
     transport_from_framed, CloveRpc, Detached, GraphRequest, GraphResponse, HubStatus, Project,
     ProjectInfo, QueryListResponse, QueryRequest, ReindexDone, RpcError, StatusResponse,
     PROTOCOL_VERSION,
 };
+use clove_types::tool::ItemPayload;
 use clove_types::{EditRequest, ItemStatus, NewSpec};
 use futures::StreamExt;
 use interprocess::local_socket::tokio::prelude::*;
@@ -877,6 +879,50 @@ impl CloveRpc for Service {
             .dispatcher(&project, ctx.deadline)
             .await?
             .add_comment(id, author, body)
+            .await
+    }
+
+    async fn create_item(
+        self,
+        ctx: Context,
+        project: Project,
+        item: ItemPayload,
+    ) -> Result<Value, RpcError> {
+        self.0
+            .dispatcher(&project, ctx.deadline)
+            .await?
+            .create_item(item)
+            .await
+    }
+
+    async fn link_external(
+        self,
+        ctx: Context,
+        project: Project,
+        id: String,
+        source_system: String,
+        external_ref: String,
+    ) -> Result<Value, RpcError> {
+        self.0
+            .dispatcher(&project, ctx.deadline)
+            .await?
+            .link_external(id, source_system, external_ref)
+            .await
+    }
+
+    async fn add_comment_at(
+        self,
+        ctx: Context,
+        project: Project,
+        id: String,
+        author: String,
+        body: String,
+        timestamp: DateTime<Utc>,
+    ) -> Result<Value, RpcError> {
+        self.0
+            .dispatcher(&project, ctx.deadline)
+            .await?
+            .add_comment_at(id, author, body, timestamp)
             .await
     }
 

@@ -719,6 +719,7 @@ name = "clove-ipc"
 version = "0.2.0"
 dependencies = [
  "camino",
+ "chrono",
  "clove-core",
  "clove-types",
  "futures",

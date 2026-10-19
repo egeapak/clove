@@ -6,26 +6,31 @@
 //! and time. [`StoreService`] offers exactly that over the store, with every
 //! write going through clove's validated write path:
 //!
-//! - `create_item` → [`ItemStore::restore_item`] (the same field checks as
+//! - `create_item` → [`clove_core::ops::create_item`] (the same field checks as
 //!   `create`; never overwrites),
 //! - `apply_edit` → [`clove_core::apply_edit`],
 //! - `dep_add`/`dep_remove` → [`clove_core::ops`] (cycle-checked),
-//! - `link_external` → [`ItemStore::update_with`] under the store write lock,
-//! - `add_comment` → [`clove_core::comments::add_comment_at`].
+//! - `link_external` → [`clove_core::ops::link_external`],
+//! - `add_comment` → [`clove_core::ops::comment_at`].
 //!
-//! Like the importers before it, this tier writes in the calling process; it
-//! does not route through `cloved`.
+//! Like every other write, these prefer the running `cloved` (which applies the
+//! same op, serialized with every other client's writes, and keeps its index and
+//! graph coherent) and fall back to the op in this process when no daemon is
+//! reachable. The writer stamps the time: the daemon's clock or this one.
+//! Reads (`scan`, `get`, `comments`) read the files.
 
 use camino::Utf8PathBuf;
-use clove_core::comments::{add_comment_at, list_comments};
-use clove_core::{ItemStore, RestoreOutcome, ScanError};
+use chrono::Utc;
+use clove_core::comments::list_comments;
+use clove_core::{ops, ItemStore, ScanError};
 use clove_types::tool::{
     AddCommentParams, ApplyEditParams, CommentPayload, CreateItemParams, FrontmatterScanPayload,
     ItemPayload, LinkExternalParams, ScanErrorPayload, ScanPayload, StoreDepParams, StoreIdParams,
 };
-use clove_types::{CloveError, CloveId, Item};
+use clove_types::{CloveId, Item};
 use serde_json::{json, Value};
 
+use crate::daemon::Daemon;
 use crate::ToolError;
 
 /// The store tier over one repository.
@@ -33,13 +38,16 @@ use crate::ToolError;
 pub struct StoreService {
     store: ItemStore,
     id_prefix: String,
+    daemon: Daemon,
 }
 
 impl StoreService {
-    pub fn new(repo_root: Utf8PathBuf, id_prefix: String) -> Self {
+    /// `clove_dir` is the repository's `.clove/` (to find its daemon).
+    pub fn new(clove_dir: Utf8PathBuf, repo_root: Utf8PathBuf, id_prefix: String) -> Self {
         StoreService {
             store: ItemStore::new(repo_root),
             id_prefix,
+            daemon: Daemon::new(clove_dir),
         }
     }
 
@@ -67,7 +75,9 @@ impl StoreService {
         to_value(ItemPayload::from(item))
     }
 
-    /// A fresh id with the repository's prefix, not yet used by any item.
+    /// A fresh id with the repository's prefix, not yet used by any item. A
+    /// race with another writer is caught by `create_item`, which never
+    /// overwrites.
     pub fn new_id(&self) -> Result<Value, ToolError> {
         let id = clove_types::new_id(&self.id_prefix, self.store.issues_dir())?;
         Ok(json!({ "id": id }))
@@ -75,54 +85,76 @@ impl StoreService {
 
     /// Write a new item exactly as given. Refuses an id that already exists.
     pub fn create_item(&self, p: CreateItemParams) -> Result<Value, ToolError> {
-        let item = Item::from(p.item);
-        match self.store.restore_item(&item, false)? {
-            RestoreOutcome::Skipped => Err(ToolError::Core(CloveError::InvalidField {
-                field: "id".to_owned(),
-                reason: format!("item `{}` already exists", item.frontmatter.id),
-            })),
-            _ => Ok(json!({ "id": item.frontmatter.id })),
+        match self.daemon.with(|d| d.create_item(p.item.clone())) {
+            Some(result) => result,
+            None => Ok(ops::create_item(&self.store, &Item::from(p.item))?),
         }
     }
 
-    /// The unified edit (`clove_core::apply_edit`), stamped `now`.
+    /// The unified edit (`clove_core::apply_edit`).
     pub fn apply_edit(&self, p: ApplyEditParams) -> Result<Value, ToolError> {
-        Ok(clove_core::apply_edit(
-            &self.store,
-            &id(&p.id)?,
-            &p.request,
-            p.now,
-        )?)
+        match self
+            .daemon
+            .with(|d| d.apply_edit(p.id.clone(), p.request.clone()))
+        {
+            Some(result) => result,
+            None => Ok(clove_core::apply_edit(
+                &self.store,
+                &id(&p.id)?,
+                &p.request,
+                Utc::now(),
+            )?),
+        }
     }
 
     /// Add a hard dependency (cycle-checked).
     pub fn dep_add(&self, p: StoreDepParams) -> Result<Value, ToolError> {
-        Ok(clove_core::ops::dep_add(
-            &self.store,
-            &id(&p.id)?,
-            &id(&p.dep)?,
-            p.now,
-        )?)
+        match self.daemon.with(|d| d.dep_add(p.id.clone(), p.dep.clone())) {
+            Some(result) => result,
+            None => Ok(ops::dep_add(
+                &self.store,
+                &id(&p.id)?,
+                &id(&p.dep)?,
+                Utc::now(),
+            )?),
+        }
     }
 
     /// Remove a hard dependency.
     pub fn dep_remove(&self, p: StoreDepParams) -> Result<Value, ToolError> {
-        Ok(clove_core::ops::dep_remove(
-            &self.store,
-            &id(&p.id)?,
-            &id(&p.dep)?,
-            p.now,
-        )?)
+        match self
+            .daemon
+            .with(|d| d.dep_remove(p.id.clone(), p.dep.clone()))
+        {
+            Some(result) => result,
+            None => Ok(ops::dep_remove(
+                &self.store,
+                &id(&p.id)?,
+                &id(&p.dep)?,
+                Utc::now(),
+            )?),
+        }
     }
 
     /// Link an item to an external tracker (`source_system` + `external_ref`).
     pub fn link_external(&self, p: LinkExternalParams) -> Result<Value, ToolError> {
-        let saved = self.store.update_with(&id(&p.id)?, p.now, |item| {
-            item.frontmatter.source_system = Some(p.source_system.clone());
-            item.frontmatter.external_ref = Some(p.external_ref.clone());
-            Ok(())
-        })?;
-        Ok(json!({ "updated": saved.frontmatter.updated }))
+        let routed = self.daemon.with(|d| {
+            d.link_external(
+                p.id.clone(),
+                p.source_system.clone(),
+                p.external_ref.clone(),
+            )
+        });
+        match routed {
+            Some(result) => result,
+            None => Ok(ops::link_external(
+                &self.store,
+                &id(&p.id)?,
+                &p.source_system,
+                &p.external_ref,
+                Utc::now(),
+            )?),
+        }
     }
 
     /// An item's comments, oldest first, with author and time.
@@ -142,14 +174,19 @@ impl StoreService {
 
     /// Append a comment with its original author and time.
     pub fn add_comment(&self, p: AddCommentParams) -> Result<Value, ToolError> {
-        add_comment_at(
-            self.store.issues_dir(),
-            &id(&p.id)?,
-            &p.author,
-            &p.body,
-            p.timestamp,
-        )?;
-        Ok(json!({}))
+        let routed = self.daemon.with(|d| {
+            d.add_comment_at(p.id.clone(), p.author.clone(), p.body.clone(), p.timestamp)
+        });
+        match routed {
+            Some(result) => result,
+            None => Ok(ops::comment_at(
+                &self.store,
+                &id(&p.id)?,
+                &p.author,
+                &p.body,
+                p.timestamp,
+            )?),
+        }
     }
 }
 
@@ -180,7 +217,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
         std::fs::create_dir_all(root.join(".clove/issues")).unwrap();
-        (dir, StoreService::new(root, "proj".to_owned()))
+        (
+            dir,
+            StoreService::new(root.join(".clove"), root, "proj".to_owned()),
+        )
     }
 
     fn item(svc: &StoreService, title: &str) -> ItemPayload {
@@ -238,7 +278,6 @@ mod tests {
         let (ida, idb) = (a.frontmatter.id.to_string(), b.frontmatter.id.to_string());
         svc.create_item(CreateItemParams { item: a }).unwrap();
         svc.create_item(CreateItemParams { item: b }).unwrap();
-        let now = Utc.with_ymd_and_hms(2025, 1, 2, 3, 4, 5).unwrap();
 
         let edited = svc
             .apply_edit(ApplyEditParams {
@@ -247,7 +286,6 @@ mod tests {
                     title: Some("A2".to_owned()),
                     ..Default::default()
                 },
-                now,
             })
             .unwrap();
         assert_eq!(edited["title"], "A2");
@@ -255,14 +293,12 @@ mod tests {
         svc.dep_add(StoreDepParams {
             id: ida.clone(),
             dep: idb.clone(),
-            now,
         })
         .unwrap();
         let cycle = svc
             .dep_add(StoreDepParams {
                 id: idb.clone(),
                 dep: ida.clone(),
-                now,
             })
             .unwrap_err();
         assert_eq!(cycle.code(), ("CYCLE_DETECTED", 3));
@@ -271,7 +307,6 @@ mod tests {
             id: idb.clone(),
             source_system: "github".to_owned(),
             external_ref: "gh-7".to_owned(),
-            now,
         })
         .unwrap();
         let got: ItemPayload =

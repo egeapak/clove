@@ -130,7 +130,10 @@ The plugins pass `HostStore`, which calls the host over the IPC channel's
 channel end to end; `DirectStore` wraps an `ItemStore` for unit tests. When an
 importer or sync needs a new kind of store access, add it to the trait, to
 `clove_service::StoreService`, to the host dispatch (`plugin_host.rs`), and to
-`HostClient` — never open the store from a plugin.
+`HostClient` — never open the store from a plugin. A new **write** also needs a
+`clove_core::ops` function and a daemon RPC (`clove-ipc` service + client,
+`cloved` hub + dispatcher, a `PROTOCOL_VERSION` bump): `StoreService` writes
+through a running `cloved` and falls back to the op in the host.
 
 When adding a synced field, add it to the mapping in one place (`map_issue` /
 `build_export_item`) and to `content_equal`/the `EditRequest` in `sync_net`.

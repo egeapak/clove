@@ -470,22 +470,25 @@ answers its requests in order; there is no cancellation and no host timeout.
 | `store.get` | `{id}` | `{frontmatter, body}` |
 | `store.new_id` | — | `{id}` (a fresh id with the repository prefix) |
 | `store.create_item` | `{item: {frontmatter, body}}` | `{id}` |
-| `store.apply_edit` | `{id, request: EditRequest, now}` | the edited item |
-| `store.dep_add`, `store.dep_remove` | `{id, dep, now}` | the edited item |
-| `store.link_external` | `{id, source_system, external_ref, now}` | `{updated}` |
+| `store.apply_edit` | `{id, request: EditRequest}` | the edited item |
+| `store.dep_add`, `store.dep_remove` | `{id, dep}` | the edited item |
+| `store.link_external` | `{id, source_system, external_ref}` | `{updated}` |
 | `store.comments` | `{id}` | `[{timestamp, author, body}]` |
-| `store.add_comment` | `{id, author, body, timestamp}` | `{}` |
+| `store.add_comment` | `{id, author, body, timestamp}` | `{id, path}` |
 
 The **store tier** (`store.*`, types in `clove_types::tool`) is what an
 importer or a sync engine needs to mirror another tracker: whole items with
 their own timestamps and `external_ref`, ids minted by the host, comments with
-their original author and time. Every write still runs in the host through the
-validated write path: `store.create_item` is `ItemStore::restore_item` (the
-field checks of `create`, and it never overwrites an existing id; an existing id
-is `VALIDATION_ERROR`), `store.apply_edit` is `apply_edit`, the dependency
-methods are the cycle-checked `ops`, and comments use `add_comment_at`. Unlike
-the tools, the store tier writes in the host process and does not route through
-`cloved`. It is not exposed over MCP. `clove_import::HostStore` implements
+their original author and time. Every write goes through the validated ops in
+`clove_core::ops`: `store.create_item` is `create_item` (the field checks of
+`create`, and it never overwrites an existing id; an existing id is
+`VALIDATION_ERROR`), `store.apply_edit` is `apply_edit`, the dependency methods
+are the cycle-checked `dep_add`/`dep_remove`, `store.link_external` is
+`link_external`, and `store.add_comment` is `comment_at`. Like the tools, these
+writes run in the `cloved` daemon when one serves the project, and in the host
+process otherwise. The writer stamps `updated`; no write takes a time from the
+plugin, except a comment's own `timestamp`. The store tier is not exposed over
+MCP. `clove_import::HostStore` implements
 `clove_import::Store` on top of it.
 
 The method names are the MCP tool names without `clove_` (`clove_new` is

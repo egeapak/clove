@@ -17,6 +17,8 @@
 use std::time::Duration;
 
 use camino::{Utf8Path, Utf8PathBuf};
+use chrono::{DateTime, Utc};
+use clove_types::tool::ItemPayload;
 use clove_types::{EditRequest, ItemStatus, NewSpec};
 use interprocess::local_socket::tokio::Stream;
 use interprocess::local_socket::traits::tokio::Stream as _;
@@ -429,6 +431,48 @@ impl DaemonClient {
             self.client
                 .add_comment(context::current(), project, id, author, body),
         )
+    }
+
+    /// Write a new item exactly as given; returns `{ id }`.
+    pub fn create_item(&mut self, item: ItemPayload) -> Result<Value, ClientError> {
+        let project = self.project.clone();
+        self.app(self.client.create_item(context::current(), project, item))
+    }
+
+    /// Set an item's `source_system` + `external_ref`; returns `{ updated }`.
+    pub fn link_external(
+        &mut self,
+        id: String,
+        source_system: String,
+        external_ref: String,
+    ) -> Result<Value, ClientError> {
+        let project = self.project.clone();
+        self.app(self.client.link_external(
+            context::current(),
+            project,
+            id,
+            source_system,
+            external_ref,
+        ))
+    }
+
+    /// Append a comment with its original author and time; returns `{ id, path }`.
+    pub fn add_comment_at(
+        &mut self,
+        id: String,
+        author: String,
+        body: String,
+        timestamp: DateTime<Utc>,
+    ) -> Result<Value, ClientError> {
+        let project = self.project.clone();
+        self.app(self.client.add_comment_at(
+            context::current(),
+            project,
+            id,
+            author,
+            body,
+            timestamp,
+        ))
     }
 
     /// Add a hard dependency `id → dep_id`; returns the updated item object.

@@ -108,6 +108,36 @@ pub fn edit(
     crate::edit::apply_edit(store, id, &req, now)
 }
 
+/// Write a new item exactly as given — its own id, timestamps and
+/// `external_ref` (an imported or synced item). Validated like [`create`];
+/// refuses an id that already exists. Returns `{ id }`.
+pub fn create_item(store: &ItemStore, item: &Item) -> Result<Value, CloveError> {
+    match store.restore_item(item, false)? {
+        crate::RestoreOutcome::Skipped => Err(CloveError::InvalidField {
+            field: "id".to_owned(),
+            reason: format!("item `{}` already exists", item.frontmatter.id),
+        }),
+        _ => Ok(json!({ "id": item.frontmatter.id.as_str() })),
+    }
+}
+
+/// Link an item to an external tracker (`source_system` + `external_ref`).
+/// Returns `{ updated }`, the item's new `updated` stamp.
+pub fn link_external(
+    store: &ItemStore,
+    id: &CloveId,
+    source_system: &str,
+    external_ref: &str,
+    now: DateTime<Utc>,
+) -> Result<Value, CloveError> {
+    let saved = store.update_with(id, now, |item| {
+        item.frontmatter.source_system = Some(source_system.to_owned());
+        item.frontmatter.external_ref = Some(external_ref.to_owned());
+        Ok(())
+    })?;
+    Ok(json!({ "updated": saved.frontmatter.updated }))
+}
+
 /// Append a comment; returns `{ id, path }` (path relative to the repo root).
 pub fn comment(
     store: &ItemStore,
@@ -119,11 +149,31 @@ pub fn comment(
         return Err(CloveError::NotFound { id: id.to_string() });
     }
     let path = add_comment(store.issues_dir(), id, author, body)?;
+    Ok(comment_result(store, id, path))
+}
+
+/// Append a comment with its original author and time (an imported or synced
+/// comment); returns `{ id, path }` like [`comment`].
+pub fn comment_at(
+    store: &ItemStore,
+    id: &CloveId,
+    author: &str,
+    body: &str,
+    timestamp: DateTime<Utc>,
+) -> Result<Value, CloveError> {
+    if !store.exists(id) {
+        return Err(CloveError::NotFound { id: id.to_string() });
+    }
+    let path = crate::comments::add_comment_at(store.issues_dir(), id, author, body, timestamp)?;
+    Ok(comment_result(store, id, path))
+}
+
+fn comment_result(store: &ItemStore, id: &CloveId, path: camino::Utf8PathBuf) -> Value {
     let rel = path
         .strip_prefix(store.repo_root())
         .map(|p| p.to_string())
         .unwrap_or_else(|_| path.to_string());
-    Ok(json!({ "id": id.as_str(), "path": rel }))
+    json!({ "id": id.as_str(), "path": rel })
 }
 
 /// Add a hard dependency `id → dep_id` with the full validation pipeline

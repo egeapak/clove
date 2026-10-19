@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use camino::Utf8PathBuf;
+use chrono::{DateTime, Utc};
 use clove_core::view::Order;
 use clove_core::ItemStore;
 use clove_index::{Filter, Index, ItemListRow, PostFilter, QueryMode};
@@ -18,7 +19,8 @@ use clove_ipc::{
     GraphRequest, GraphResponse, LeanRow, QueryKind, QueryListResponse, QueryRequest, ReindexDone,
     RpcError, StatusResponse,
 };
-use clove_types::{CloveError, CloveId, ItemType, NewSpec};
+use clove_types::tool::ItemPayload;
+use clove_types::{CloveError, CloveId, Item, ItemType, NewSpec};
 use serde_json::Value;
 
 use crate::graph_cache::GraphCache;
@@ -65,6 +67,7 @@ impl Dispatcher {
                 watcher_state: "error".to_owned(),
                 last_event_ms: None,
                 batches_applied: 0,
+                writes_applied: 0,
                 ping_count: 0,
                 last_ping_ms: None,
                 web_addr: None,
@@ -161,6 +164,58 @@ impl Dispatcher {
         self.blocking(move |this| {
             let out =
                 clove_core::ops::comment(&this.store(), &cid, &author, &body).map_err(rpc_err);
+            this.after_write(&out);
+            out
+        })
+        .await
+    }
+
+    pub async fn create_item(self, item: ItemPayload) -> Result<Value, RpcError> {
+        self.touch();
+        let item = Item::from(item);
+        self.blocking(move |this| {
+            let out = clove_core::ops::create_item(&this.store(), &item).map_err(rpc_err);
+            this.after_write(&out);
+            out
+        })
+        .await
+    }
+
+    pub async fn link_external(
+        self,
+        id: String,
+        source_system: String,
+        external_ref: String,
+    ) -> Result<Value, RpcError> {
+        self.touch();
+        let cid = CloveId::new(&id).map_err(rpc_err)?;
+        self.blocking(move |this| {
+            let out = clove_core::ops::link_external(
+                &this.store(),
+                &cid,
+                &source_system,
+                &external_ref,
+                now(),
+            )
+            .map_err(rpc_err);
+            this.after_write(&out);
+            out
+        })
+        .await
+    }
+
+    pub async fn add_comment_at(
+        self,
+        id: String,
+        author: String,
+        body: String,
+        timestamp: DateTime<Utc>,
+    ) -> Result<Value, RpcError> {
+        self.touch();
+        let cid = CloveId::new(&id).map_err(rpc_err)?;
+        self.blocking(move |this| {
+            let out = clove_core::ops::comment_at(&this.store(), &cid, &author, &body, timestamp)
+                .map_err(rpc_err);
             this.after_write(&out);
             out
         })
@@ -282,6 +337,9 @@ impl Dispatcher {
     fn after_write(&self, result: &Result<Value, RpcError>) {
         if result.is_err() {
             return;
+        }
+        if let Ok(mut state) = self.state.lock() {
+            state.inc_writes();
         }
         if let Ok(mut index) = self.index.lock() {
             if let Ok(report) = index.check_staleness_fast(&self.issues_dir) {

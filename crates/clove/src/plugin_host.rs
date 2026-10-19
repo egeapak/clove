@@ -193,8 +193,13 @@ struct Shared {
 
 impl Shared {
     fn store(&self) -> &StoreService {
-        self.store
-            .get_or_init(|| StoreService::new(self.repo_root.clone(), self.id_prefix.clone()))
+        self.store.get_or_init(|| {
+            StoreService::new(
+                self.clove_dir.clone(),
+                self.repo_root.clone(),
+                self.id_prefix.clone(),
+            )
+        })
     }
 
     fn engine(&self) -> &Engine {

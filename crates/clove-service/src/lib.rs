@@ -6,6 +6,7 @@
 //! [`clove_types::tool`], shared with the permissively licensed plugin SDK, so
 //! both transports accept and return the same shapes.
 
+mod daemon;
 mod engine;
 mod error;
 pub mod shape;

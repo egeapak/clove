@@ -18,8 +18,6 @@
 //! are blocking: run them on a blocking task or a plain thread, never inside a
 //! tokio runtime (the daemon client calls `block_on`).
 
-use std::sync::{Arc, Mutex};
-
 use camino::Utf8PathBuf;
 use chrono::Utc;
 use clove_core::ops;
@@ -31,6 +29,7 @@ use serde_json::Value;
 
 use clove_types::tool::*;
 
+use crate::daemon::Daemon;
 use crate::error::ToolError;
 use crate::shape::{self, Shape};
 use clove_core::view::defaults::{DEP_TREE_DEPTH, STATS_TOP};
@@ -46,12 +45,8 @@ pub struct Engine {
     /// Id prefix + default type for `create` (from `.clove/config`).
     pub id_prefix: String,
     pub default_type: ItemType,
-    /// The cached daemon write coordinator. A probe builds a tokio runtime,
-    /// connects, and pings — far too heavy to repeat on every tool call of a
-    /// long-lived server — so the client is kept and only its (cheap, on the
-    /// open connection) `ping` is repeated per call; a dead/restarted daemon
-    /// drops the cache and re-probes.
-    daemon: Arc<Mutex<Option<DaemonClient>>>,
+    /// The daemon write coordinator (see [`Daemon`]).
+    daemon: Daemon,
     /// The read tier. Holds its own cached daemon connection for the same
     /// reason: this server is long-lived and re-probing per tool call would
     /// cost more than the read it accelerates.
@@ -72,12 +67,13 @@ impl Engine {
         // own `--no-index` / `--deep` flags so a plugin's reads honour them.
         let reads =
             clove_engine::Engine::new(ItemStore::new(repo_root.clone()), clove_dir.clone(), tiers);
+        let daemon = Daemon::new(clove_dir.clone());
         Self {
             clove_dir,
             repo_root,
             id_prefix,
             default_type,
-            daemon: Arc::new(Mutex::new(None)),
+            daemon,
             reads,
         }
     }
@@ -86,29 +82,13 @@ impl Engine {
         ItemStore::new(self.repo_root.clone())
     }
 
-    /// Run `call` against the daemon write coordinator, if one is reachable.
-    ///
-    /// `None` → no daemon (caller falls back to direct ops). The call itself
-    /// is attempted exactly ONCE (a failed write RPC must surface, never be
-    /// blindly retried — the daemon may have applied it before the response
-    /// was lost); only the *liveness check* re-probes.
+    /// Run `call` against the daemon write coordinator, if one is reachable;
+    /// see [`Daemon::with`].
     fn with_daemon<T>(
         &self,
         call: impl FnOnce(&mut DaemonClient) -> Result<T, ClientError>,
     ) -> Option<Result<T, ToolError>> {
-        let mut guard = self.daemon.lock().unwrap_or_else(|e| e.into_inner());
-        // Validate the cached connection first: one ping on the already-open
-        // connection, no runtime construction.
-        if let Some(client) = guard.as_mut() {
-            if client.ping().is_err() {
-                *guard = None;
-            }
-        }
-        if guard.is_none() {
-            *guard = DaemonClient::probe(&self.clove_dir);
-        }
-        let client = guard.as_mut()?;
-        Some(call(client).map_err(ToolError::Daemon))
+        self.daemon.with(call)
     }
 
     // ---- Read tools (tiered through clove-engine) ---------------------------

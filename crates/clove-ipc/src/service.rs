@@ -7,6 +7,8 @@
 //! and a serializable error, replacing the old hand-rolled `Request`/`Response`
 //! enums + frame codec.
 
+use chrono::{DateTime, Utc};
+use clove_types::tool::ItemPayload;
 use clove_types::{EditRequest, ItemStatus, NewSpec};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -153,6 +155,25 @@ pub trait CloveRpc {
         id: String,
         author: String,
         body: String,
+    ) -> Result<Value, RpcError>;
+    /// Write a new item exactly as given (an imported or synced item, with its
+    /// own id, timestamps and `external_ref`); refuses an existing id. Returns
+    /// `{ id }`.
+    async fn create_item(project: Project, item: ItemPayload) -> Result<Value, RpcError>;
+    /// Set an item's `source_system` + `external_ref`; returns `{ updated }`.
+    async fn link_external(
+        project: Project,
+        id: String,
+        source_system: String,
+        external_ref: String,
+    ) -> Result<Value, RpcError>;
+    /// Append a comment with its original author and time; returns `{ id, path }`.
+    async fn add_comment_at(
+        project: Project,
+        id: String,
+        author: String,
+        body: String,
+        timestamp: DateTime<Utc>,
     ) -> Result<Value, RpcError>;
     /// Add a hard dependency `id → dep_id`; returns the updated item object.
     async fn dep_add(project: Project, id: String, dep_id: String) -> Result<Value, RpcError>;

@@ -408,6 +408,7 @@ fn status(
             "watcher_state": s.watcher_state,
             "last_event_ms": s.last_event_ms,
             "batches_applied": s.batches_applied,
+            "writes_applied": s.writes_applied,
             "ping_count": s.ping_count,
             "last_ping_ms": s.last_ping_ms,
             "web_addr": s.web_addr,
@@ -429,11 +430,12 @@ fn status(
                         .map(|url| format!("  web {url}"))
                         .unwrap_or_default();
                     outln!(
-                        "running  uptime {}s  items {}  watcher {}  batches {}  pings {}{web}",
+                        "running  uptime {}s  items {}  watcher {}  batches {}  writes {}  pings {}{web}",
                         s.uptime_s,
                         s.items_indexed,
                         s.watcher_state,
                         s.batches_applied,
+                        s.writes_applied,
                         s.ping_count,
                     );
                 }

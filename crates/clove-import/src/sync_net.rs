@@ -409,14 +409,14 @@ fn pull_update(
         let want: std::collections::BTreeSet<&CloveId> = remote_deps.iter().collect();
         let have: std::collections::BTreeSet<&CloveId> = current.frontmatter.deps.iter().collect();
         for dep in want.difference(&have) {
-            let _ = store.dep_add(&pull.clove_id, dep, now);
+            let _ = store.dep_add(&pull.clove_id, dep);
         }
         for dep in have.difference(&want) {
-            let _ = store.dep_remove(&pull.clove_id, dep, now);
+            let _ = store.dep_remove(&pull.clove_id, dep);
         }
     }
 
-    let value = store.apply_edit(&pull.clove_id, &req, now)?;
+    let value = store.apply_edit(&pull.clove_id, &req)?;
     let local_updated = value_updated(&value).unwrap_or_else(|| truncate(now));
     state.record(&staged.external_ref, staged.updated_at, local_updated);
     state.record_content_hash(
@@ -772,7 +772,7 @@ fn link_local(
     let id = CloveId::new(clove_id).map_err(|e| ImportError::Record {
         message: format!("invalid local id `{clove_id}`: {e}"),
     })?;
-    store.link_external(&id, SOURCE_GITHUB, external_ref, Utc::now())
+    store.link_external(&id, SOURCE_GITHUB, external_ref)
 }
 
 /// Parse the `updated` field out of an `apply_edit` result object.

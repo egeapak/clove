@@ -37,7 +37,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   validated like `create` before they are written. `clove-import` code takes a
   `clove_import::Store` (`HostStore` / `DirectStore`). **Breaking (library):**
   `TkImporter::new` / `BeadsImporter::new` no longer take an id prefix, and
-  `sync_net::sync_github` no longer takes one (the host mints ids).
+  `sync_net::sync_github` no longer takes one (the host mints ids). Like every
+  other write, `store.*` writes go through a running `cloved`, and through the
+  host only when no daemon runs.
+- Daemon IPC protocol 10: the daemon applies imported items, external links and
+  timestamped comments (`create_item`, `link_external`, `add_comment_at`), and
+  `clove daemon status` reports `writes_applied`. A 0.1.x daemon is not used
+  until it is restarted on 0.2.0; writes fall back to the host.
 
 - **Host IPC channel for plugins** (`PLUGIN_SYSTEM.md` §6.6): while `clove
   <plugin>` runs, the host serves the clove tool surface (the MCP tools'

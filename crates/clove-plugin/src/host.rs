@@ -353,41 +353,29 @@ impl HostClient {
         .map(drop)
     }
 
-    /// The unified edit, stamped `now`. Returns the edited item's JSON.
+    /// The unified edit. Returns the edited item's JSON.
     pub fn store_apply_edit(
         &mut self,
         id: &str,
         request: &clove_types::EditRequest,
-        now: DateTime<Utc>,
     ) -> Result<Value, HostError> {
         self.typed(
             "store.apply_edit",
             &ApplyEditParams {
                 id: id.to_owned(),
                 request: request.clone(),
-                now,
             },
         )
     }
 
     /// Add a hard dependency (cycle-checked).
-    pub fn store_dep_add(
-        &mut self,
-        id: &str,
-        dep: &str,
-        now: DateTime<Utc>,
-    ) -> Result<Value, HostError> {
-        self.typed("store.dep_add", &dep_params(id, dep, now))
+    pub fn store_dep_add(&mut self, id: &str, dep: &str) -> Result<Value, HostError> {
+        self.typed("store.dep_add", &dep_params(id, dep))
     }
 
     /// Remove a hard dependency.
-    pub fn store_dep_remove(
-        &mut self,
-        id: &str,
-        dep: &str,
-        now: DateTime<Utc>,
-    ) -> Result<Value, HostError> {
-        self.typed("store.dep_remove", &dep_params(id, dep, now))
+    pub fn store_dep_remove(&mut self, id: &str, dep: &str) -> Result<Value, HostError> {
+        self.typed("store.dep_remove", &dep_params(id, dep))
     }
 
     /// Link an item to an external tracker. Returns its new `updated` time.
@@ -396,7 +384,6 @@ impl HostClient {
         id: &str,
         source_system: &str,
         external_ref: &str,
-        now: DateTime<Utc>,
     ) -> Result<DateTime<Utc>, HostError> {
         let reply = self.typed(
             "store.link_external",
@@ -404,7 +391,6 @@ impl HostClient {
                 id: id.to_owned(),
                 source_system: source_system.to_owned(),
                 external_ref: external_ref.to_owned(),
-                now,
             },
         )?;
         decode(reply["updated"].clone())
@@ -436,11 +422,10 @@ impl HostClient {
     }
 }
 
-fn dep_params(id: &str, dep: &str, now: DateTime<Utc>) -> StoreDepParams {
+fn dep_params(id: &str, dep: &str) -> StoreDepParams {
     StoreDepParams {
         id: id.to_owned(),
         dep: dep.to_owned(),
-        now,
     }
 }
 
