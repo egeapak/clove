@@ -412,3 +412,131 @@ mod signals {
         wait_gone(plugin);
     }
 }
+
+/// Run `clove --format json echo <args>` in `repo` and return the plugin's
+/// `data`.
+fn echo_json(repo: &Path, plugin_dir: &Path, args: &[&str]) -> Value {
+    let out = clove(repo)
+        .env("CLOVE_PLUGIN_PATH", plugin_dir)
+        .args(["--format", "json", "echo"])
+        .args(args)
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("stdout is not JSON ({e}): {out:?}"));
+    assert_eq!(
+        v["ok"],
+        true,
+        "{v}; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    v["data"].clone()
+}
+
+/// A published v1 schema, compiled.
+fn published_schema(name: &str) -> jsonschema::Validator {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/json-schema/v1")
+        .join(name);
+    let value: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    jsonschema::validator_for(&value).expect("valid schema")
+}
+
+/// The host IPC channel (PLUGIN_SYSTEM.md §6.6), end to end: a plugin built on
+/// the SDK alone creates, reads, edits, and lists items through the host, which
+/// writes them through the unified write path; results have the MCP shapes, and
+/// a tool failure carries the code a built-in reports.
+#[test]
+fn a_plugin_reads_and_writes_items_over_the_host_channel() {
+    let (plugin_dir, _echo) = install_echo();
+    let repo = init_repo("proj");
+    let data = echo_json(repo.path(), plugin_dir.path(), &["--host-roundtrip"]);
+
+    assert_eq!(data["hello"]["host_api"], 1);
+    let clove_dir = data["hello"]["clove_dir"].as_str().unwrap();
+    assert!(clove_dir.ends_with(".clove"), "{clove_dir}");
+    let methods = data["hello"]["methods"].as_array().unwrap();
+    for m in ["list", "show", "create", "edit", "set_status", "comment"] {
+        assert!(methods.iter().any(|x| x == m), "missing {m}: {methods:?}");
+    }
+
+    let id = data["created"]["id"].as_str().expect("created id");
+    assert!(id.starts_with("proj-"), "{id}");
+    assert_eq!(data["shown"]["title"], "Made over the host channel");
+    assert_eq!(data["shown"]["type"], "bug");
+    assert_eq!(data["edited"]["status"], "in_progress");
+
+    // The write went to the store: the CLI sees it.
+    let out = clove(repo.path())
+        .args(["--format", "json", "show", id])
+        .output()
+        .unwrap();
+    let shown: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(shown["data"]["status"], "in_progress", "{shown}");
+
+    // `list` is the MCP item page.
+    let page = &data["listed"];
+    if let Err(e) = published_schema("mcp-item-page.json").validate(page) {
+        panic!("schema violation: {e} in {page}");
+    }
+    assert_eq!(page["total"], 1, "{page}");
+
+    // A missing id fails as `clove show` would.
+    assert_eq!(
+        data["missing_code"],
+        serde_json::json!({ "clove_code": "ITEM_NOT_FOUND", "exit": 2 })
+    );
+}
+
+/// A connection that does not present the token is refused.
+#[test]
+fn the_host_channel_refuses_a_wrong_token() {
+    let (plugin_dir, _echo) = install_echo();
+    let repo = init_repo("proj");
+    let data = echo_json(repo.path(), plugin_dir.path(), &["--host-bad-token"]);
+    let refused = data["refused"]
+        .as_str()
+        .expect("the connection was refused");
+    assert!(refused.contains("bad token"), "{refused}");
+}
+
+/// A request line over the 16 MiB cap is answered with an error and the
+/// connection is closed.
+#[test]
+fn the_host_channel_rejects_an_oversized_request() {
+    let (plugin_dir, _echo) = install_echo();
+    let repo = init_repo("proj");
+    let data = echo_json(repo.path(), plugin_dir.path(), &["--host-oversize"]);
+    let oversize = data["oversize"].as_str().expect("the request failed");
+    // The host answers with the reason before closing; a platform that drops
+    // unread pipe data on close may surface only the close.
+    assert!(
+        oversize.contains("16 MiB") || oversize.contains("closed the connection"),
+        "{oversize}"
+    );
+    assert!(
+        data["after"].is_string(),
+        "the connection stayed open: {data}"
+    );
+}
+
+/// The host's private socket directory is gone once the plugin exits.
+#[cfg(unix)]
+#[test]
+fn the_host_socket_is_removed_after_the_plugin_exits() {
+    let (plugin_dir, _echo) = install_echo();
+    let repo = init_repo("proj");
+    let tmp = tempfile::tempdir().unwrap();
+    let out = clove(repo.path())
+        .env("CLOVE_PLUGIN_PATH", plugin_dir.path())
+        .env("TMPDIR", tmp.path())
+        .args(["echo", "hello"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let left: Vec<_> = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert!(left.is_empty(), "left behind: {left:?}");
+}

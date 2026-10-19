@@ -50,6 +50,9 @@ clove-engine.workspace = true   # the daemon -> index -> files read cascade (rea
 clove-import = { workspace = true, default-features = false }   # M2 import/export/merge-driver (pure file formats only; no github)
 clove-plugin.workspace = true    # single source of truth for CLOVE_PLUGIN_API (host↔plugin compat, PLUGIN_REGISTRY.md §2)
 clove-ipc.workspace = true       # M3: daemon liveness probe + QUERY routing
+clove-service.workspace = true   # the tool engine the plugin host IPC serves (PLUGIN_SYSTEM §6.6)
+interprocess.workspace = true    # the plugin host IPC socket (sync API, std threads)
+getrandom.workspace = true       # the plugin host IPC token
 clove-mcp = { workspace = true, optional = true }   # M4: `clove mcp` server (rmcp), behind the `mcp` feature
 clove-tui.workspace = true       # M4: `clove tui` terminal browser + add/edit form
 clove-web = { workspace = true, optional = true }   # `clove serve`, behind the `web` feature
@@ -73,6 +76,7 @@ libc.workspace = true
 # `clove daemon stop` on Windows signals the daemon's named event (DESIGN §8.9);
 # plugin dispatch ignores console Ctrl-C while the plugin runs (Win32_System_Console).
 [target.'cfg(windows)'.dependencies]
+widestring = "1"                 # SDDL for the plugin host pipe's owner-only descriptor
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_System_Console",

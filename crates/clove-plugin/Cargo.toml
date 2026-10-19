@@ -22,7 +22,10 @@ categories.workspace = true
 [dependencies]
 clove-types.workspace = true
 camino.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+# The host IPC client (`host.rs`): the sync local-socket API only (no tokio).
+interprocess.workspace = true
 # Optional: only the `clap`-based plugin mains (almost all of them) enable this to
 # reuse the shared `clap_exit_code`/`parse_format` helpers. Gated so the contract
 # crate stays clap-free for a host or a hand-parsed plugin that does not need it.

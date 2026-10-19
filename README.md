@@ -113,6 +113,13 @@ command up with no core rebuild. The daemon's periodic sync spawns the same `clo
 so it needs the plugin too. See [`docs/PLUGIN_SYSTEM.md`](docs/PLUGIN_SYSTEM.md) for
 the dispatch/discovery/env contract.
 
+**Writing a plugin.** Build it on the `clove-plugin` SDK (MIT OR Apache-2.0).
+While `clove` runs your plugin, the plugin can read and write items through the
+host: `cx.host()?.create(…)`, `.list(…)`, `.edit(…)` take the same arguments as
+the MCP tools, and every write goes through clove's own validation. A plugin
+that uses only the SDK and this channel can use any license (see
+[License](#license)).
+
 `clove plugin list` shows what is installed and whether each plugin is compatible
 with this clove; `clove plugin list --all` and `clove plugin search <text>` also
 report plugins published to crates.io. There is no curated registry — a plugin is

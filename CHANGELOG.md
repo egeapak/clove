@@ -27,6 +27,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Host IPC channel for plugins** (`PLUGIN_SYSTEM.md` §6.6): while `clove
+  <plugin>` runs, the host serves the clove tool surface (the MCP tools'
+  arguments and results) over a per-invocation local socket, authenticated with a
+  token (`CLOVE_HOST_SOCKET`, `CLOVE_HOST_TOKEN`). The SDK client is
+  `PluginContext::host()` → `clove_plugin::HostClient`. Writes go through the
+  unified write path in the host; a plugin that uses only this channel and the
+  SDK links no AGPL code.
+
 - New crate **`clove-service`**: the transport-independent tool engine (moved
   out of `clove-mcp`), shared by the MCP server and the plugin host IPC. The
   tool argument types moved to `clove_types::tool` (serde, with `JsonSchema`

@@ -622,7 +622,26 @@ pub fn run_plugin(
     }
     cmd.args(argv_after_name);
     export_env(&mut cmd, ctx, globals, command, provider);
-    Err(crate::plugin_child::run_and_exit(&mut cmd, path, || {}))
+    // The host IPC channel (§6.6). A failure to bind is not fatal: the plugin
+    // runs without it and its SDK reports `HostError::Unavailable` if it asks.
+    let host = match crate::plugin_host::HostServer::start(ctx, globals) {
+        Ok(host) => {
+            host.export(&mut cmd);
+            Some(host)
+        }
+        Err(e) => {
+            crate::plugin_host::clear_env(&mut cmd);
+            if !globals.quiet {
+                eprintln!("warning: plugin host channel unavailable: {e}");
+            }
+            None
+        }
+    };
+    Err(crate::plugin_child::run_and_exit(&mut cmd, path, || {
+        if let Some(host) = &host {
+            host.cleanup();
+        }
+    }))
 }
 
 #[cfg(test)]

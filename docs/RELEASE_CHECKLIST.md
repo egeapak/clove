@@ -168,6 +168,14 @@ Everything `release-smoke.sh` does not already cover:
       via `query` JSON and the web `?synced=` / `?parent=`) agree with the files; against
       a stale (older-protocol) daemon they still answer, falling back.
 - [ ] `clove edit <id>` with `$EDITOR` set to a real editor command.
+- [ ] Plugin process model (the host now spawns plugins instead of `exec`):
+      Ctrl-C during `clove sync github … --dry-run` stops it at once with no
+      leftover `clove-sync-github` process (`pgrep -f clove-sync-github`);
+      `timeout 1 clove sync github …` exits 124 likewise; `clove import tk
+      <missing-dir>; echo $?` prints the plugin's exit code. On Unix, no
+      `$TMPDIR/clove-plugin-*` directory is left behind. (The host IPC channel
+      itself is exercised on all three platforms by `plugin_dispatch.rs` in CI;
+      the shipped plugins do not use it yet.)
 
 ## 9. Close out
 

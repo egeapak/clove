@@ -580,12 +580,15 @@ dependencies = [
  "clove-ipc",
  "clove-mcp",
  "clove-plugin",
+ "clove-service",
  "clove-tui",
  "clove-types",
  "clove-web",
  "escargot",
  "fd-lock",
+ "getrandom 0.2.17",
  "insta",
+ "interprocess",
  "jsonschema",
  "libc",
  "rusqlite",
@@ -596,6 +599,7 @@ dependencies = [
  "tokio",
  "ureq",
  "webpki-root-certs",
+ "widestring",
  "windows-sys 0.59.0",
 ]
 
@@ -757,6 +761,8 @@ dependencies = [
  "camino",
  "clap",
  "clove-types",
+ "interprocess",
+ "serde",
  "serde_json",
 ]
 

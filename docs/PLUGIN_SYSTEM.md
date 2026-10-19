@@ -314,6 +314,13 @@ paths are absolute. The plugin inherits the rest of the environment too, so
 | `CLOVE_NO_INDEX` | `0` \| `1` — the `--no-index` global flag. |
 | `CLOVE_DEEP` | `0` \| `1` — the `--deep` staleness flag. |
 
+**Host IPC channel** (§6.6; since 0.2.0)
+
+| Var | Meaning |
+|-----|---------|
+| `CLOVE_HOST_SOCKET` | The host's local socket: a filesystem path on Unix, a `\\.\pipe\…` path on Windows. Omitted when the channel could not start (the host then also removes any inherited value, so a nested `clove` never passes on an outer host's socket). |
+| `CLOVE_HOST_TOKEN` | 64 hex digits (256 bits) that authenticate to that socket. Valid until the plugin exits; any process the plugin starts may use it. |
+
 Rules: booleans are exactly `0`/`1`; enums are the lowercase wire spelling; a var
 whose value is logically absent (e.g. `CLOVE_PROVIDER` for a generic plugin) is
 **omitted**, never set to empty. New context is added by *appending* vars, never
@@ -393,9 +400,74 @@ splitting `sync_net.rs` — which today interleaves fetch → apply → `externa
 write-back → comment reconcile — into a plan phase and an apply phase with the
 process boundary between them. More work, deferred (§10).
 
-Recommendation: **ship (A)**; keep (B) as a future hardening step if untrusted
-third-party plugins ever become a goal (a fat plugin runs arbitrary code with the
-host's store access — see §7).
+Recommendation: **ship (A)** for the first-party plugins. Since 0.2.0 a third
+way exists:
+
+**(C) Host IPC — the host applies, live.** The plugin calls the host over the
+host IPC channel (§6.6) with the MCP tool arguments; the host runs each call
+through `clove-service` (the same engine as the MCP server), so every write uses
+the unified write path in the host (the `cloved` daemon when one runs). The
+plugin links only the permissively licensed SDK, so it may use any license
+(§12). This is the recommended way for **third-party** plugins.
+
+### 6.6 Host IPC channel
+
+While a plugin runs, the host serves the clove tool surface to it
+(`crates/clove/src/plugin_host.rs`; client: `clove_plugin::HostClient`, via
+`PluginContext::host()`).
+
+**Transport.** One local socket per invocation, through `interprocess` (sync
+API, std threads; no tokio runtime on the server threads).
+
+- Unix: a socket `s` inside a fresh `0700` directory `$TMPDIR/clove-plugin-<rand>/`
+  (falls back to `/tmp` when the path would exceed `sun_path`). The directory is
+  removed after the plugin exits.
+- Windows: a named pipe `\\.\pipe\clove-plugin-<pid>-<rand>` with an
+  owner-only security descriptor.
+- Both sides name it with `to_fs_name::<GenericFilePath>()`.
+
+**Authentication.** Unix checks the peer uid at accept; Windows checks the
+client SID after the first message. The first message must be `hello` with the
+token from `$CLOVE_HOST_TOKEN` (compared in constant time) and arrive within
+5 seconds; otherwise the host answers `-32001` and closes the connection. The
+token is reusable for the whole invocation.
+
+**Framing.** Newline-delimited JSON-RPC 2.0: one request object per line, UTF-8.
+A request line over 16 MiB is answered with `-32600` and the connection is
+closed. Responses are not capped: page large reads with `limit`/`offset`.
+Batches (arrays) are rejected with `-32600`. A request without `id` is a
+notification: it runs and gets no reply. Each connection has its own thread and
+answers its requests in order; there is no cancellation and no host timeout.
+
+**Methods** (`host_api = 1`):
+
+| Method | Params | Result |
+|---|---|---|
+| `hello` | `{token, plugin_api, client: {name}}` | `{host_api, host_version, schema, clove_dir, methods}` |
+| `config` | — | `{id_prefix, default_type, types, statuses, priorities}` |
+| `list`, `ready`, `blocked`, `show`, `search`, `comments`, `dep_tree`, `stats` | the MCP tool arguments (`clove_types::tool`) | the MCP tool result (`mcp-item-page.json`, …) |
+| `create`, `set_status`, `edit`, `comment`, `dep_add`, `dep_remove`, `set_parent` | as above | as above |
+
+The method names are the MCP tool names without `clove_` (`clove_new` is
+`create`, `clove_status` is `set_status`). Reads honour the host's `--no-index`
+and `--deep`. The SDK checks that `hello`'s `clove_dir` equals `$CLOVE_DIR`.
+
+**Errors.** `-32700` parse error, `-32601` unknown method, `-32602` invalid
+params (`data.clove_code = "VALIDATION_ERROR"`), and `-32000` for a tool that ran
+and failed, with `data: {clove_code, exit}` — the code and exit status a built-in
+command reports for the same failure (`ITEM_NOT_FOUND` / 2, …). The SDK turns
+that into a `CloveError`, so a plugin exits the way the built-in would.
+
+**Versioning.** `host_api` is bumped only on a breaking change to a method's
+params or result; new methods are additive, so check `methods` (or
+`HostClient::supports`) before calling a newer one. `CLOVE_PLUGIN_API` stays `1`:
+the channel is an addition to that contract. A plugin that needs the channel
+keeps `min_clove_plugin_api = 1` and fails at run time with
+`HostError::Unavailable` under an older host or when run directly.
+
+**Lifetime.** The server stops when the host exits, right after the plugin. A
+helper process the plugin started and that is still connected loses its
+connection then.
 
 ### 6.5 `PluginContext` — materializing the env into a typed struct
 
@@ -430,6 +502,9 @@ pub struct PluginContext {
     pub quiet: bool,                // $CLOVE_QUIET
     pub no_index: bool,             // $CLOVE_NO_INDEX
     pub deep: bool,                 // $CLOVE_DEEP
+    // host IPC channel (§6.6)
+    pub host_socket: Option<String>, // $CLOVE_HOST_SOCKET
+    pub host_token: Option<String>,  // $CLOVE_HOST_TOKEN
 }
 
 impl PluginContext {
@@ -592,7 +667,11 @@ because the boundary is a subprocess.
 
 ## 10. Security, versioning, open questions
 
-- **Trust.** `clove` will exec any `clove-*` on `PATH`, exactly like cargo/git/
+- **Host IPC.** The channel (§6.6) is reachable only by this user (socket
+  directory mode / pipe DACL, plus a uid/SID check) and only with the
+  per-invocation token, which lives in the plugin's environment (readable by the
+  same user, who can already edit `.clove/` directly).
+- **Trust.** `clove` will run any `clove-*` on `PATH`, exactly like cargo/git/
   kubectl. A fat plugin (§6.4A) runs with full store write access. This is the
   same trust model as any `cargo install`ed subcommand; document it. If untrusted
   third-party plugins ever matter, the thin plan-only boundary (§6.4B) plus a

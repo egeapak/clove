@@ -162,7 +162,7 @@ clove-service      → clove-types, clove-core, clove-ipc, clove-engine
 clove-mcp          → clove-types, clove-core, clove-ipc, clove-engine, clove-service
 clove-web          → clove-types, clove-core, clove-index, clove-engine
 cloved             → clove-types, clove-core, clove-index, clove-ipc, clove-web
-clove-cli          → clove-types, clove-core, clove-plugin, clove-index, clove-import, clove-ipc, clove-engine, clove-mcp, clove-tui, clove-web
+clove-cli          → clove-types, clove-core, clove-plugin, clove-index, clove-import, clove-ipc, clove-engine, clove-service, clove-mcp, clove-tui, clove-web
 clove-sync-github  → clove-types, clove-core, clove-plugin, clove-import (github)
 clove-import-tk    → clove-types, clove-core, clove-plugin, clove-import
 clove-import-beads → clove-types, clove-core, clove-plugin, clove-import
