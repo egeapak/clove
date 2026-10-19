@@ -74,9 +74,6 @@ use std::collections::{BTreeMap, HashSet};
 
 use camino::Utf8Path;
 use chrono::{DateTime, Utc};
-use clove_core::write::write_item_file;
-use clove_core::ItemStore;
-use clove_types::id::new_id;
 use clove_types::model::CURRENT_SCHEMA_VERSION;
 use clove_types::{CloveId, Item, ItemFrontmatter, ItemStatus, ItemType, Priority};
 use serde::Deserialize;
@@ -88,6 +85,7 @@ use crate::map::{
     MAX_IMPORT_UNIT_BYTES,
 };
 use crate::plan::{ImportPlan, ImportReport, PlanItem, SkipItem};
+use crate::store::Store;
 use crate::{ImportCtx, Importer};
 
 /// The set of top-level keys [`BeadsIssue`] maps explicitly. Any other key on an
@@ -230,22 +228,19 @@ struct StagedIssue {
 
 /// The Beads importer.
 ///
-/// Constructed with the id `prefix` (so [`apply`](BeadsImporter::apply) can mint
-/// fresh [`CloveId`]s) and a clock for the `created`/`updated` stamps.
+/// Constructed with a clock for the `created`/`updated` stamps; [`apply`](BeadsImporter::apply)
+/// takes fresh ids from the [`Store`].
 #[derive(Debug)]
 pub struct BeadsImporter {
-    prefix: String,
     now: DateTime<Utc>,
     staged: RefCell<Vec<StagedIssue>>,
     warnings: RefCell<Vec<String>>,
 }
 
 impl BeadsImporter {
-    /// Build an importer that mints ids under `prefix` and stamps timestamps at
-    /// `now`.
-    pub fn new(prefix: impl Into<String>, now: DateTime<Utc>) -> Self {
+    /// Build an importer that stamps timestamps at `now`.
+    pub fn new(now: DateTime<Utc>) -> Self {
         Self {
-            prefix: prefix.into(),
             now,
             staged: RefCell::new(Vec::new()),
             warnings: RefCell::new(Vec::new()),
@@ -400,7 +395,7 @@ impl Importer for BeadsImporter {
         Ok(plan)
     }
 
-    fn apply(&self, plan: ImportPlan, store: &ItemStore) -> Result<ImportReport, ImportError> {
+    fn apply(&self, plan: ImportPlan, store: &dyn Store) -> Result<ImportReport, ImportError> {
         let staged = self.staged.borrow();
         let mut created = 0usize;
 
@@ -409,7 +404,7 @@ impl Importer for BeadsImporter {
         // lock-step during `plan`, so each staged record is written exactly once
         // with its own data.
         for issue in staged.iter() {
-            let id = new_id(&self.prefix, store.issues_dir())?;
+            let id = store.new_id()?;
             let closed = if issue.status == ItemStatus::Closed {
                 Some(self.now)
             } else {
@@ -439,7 +434,7 @@ impl Importer for BeadsImporter {
                 frontmatter,
                 body: issue.body.clone(),
             };
-            write_item_file(&new_item, &store.path_for(&id))?;
+            store.create_item(&new_item)?;
             created += 1;
         }
 

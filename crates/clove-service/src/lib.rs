@@ -9,6 +9,8 @@
 mod engine;
 mod error;
 pub mod shape;
+mod store;
 
 pub use engine::Engine;
 pub use error::ToolError;
+pub use store::StoreService;

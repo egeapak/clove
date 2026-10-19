@@ -23,6 +23,7 @@ categories.workspace = true
 clove-types.workspace = true
 camino.workspace = true
 serde.workspace = true
+chrono.workspace = true
 serde_json.workspace = true
 # The host IPC client (`host.rs`): the sync local-socket API only (no tokio).
 interprocess.workspace = true

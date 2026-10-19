@@ -124,6 +124,14 @@ layer:
   local writes through the unified write path (`apply_edit`), `external_ref`
   write-back, comment reconciliation, and state persistence, with bounded retry.
 
+All importer and sync store access goes through the `clove_import::Store` trait.
+The plugins pass `HostStore`, which calls the host over the IPC channel's
+`store.*` tier (`PLUGIN_SYSTEM.md` §6.6), so the shipped plugins exercise that
+channel end to end; `DirectStore` wraps an `ItemStore` for unit tests. When an
+importer or sync needs a new kind of store access, add it to the trait, to
+`clove_service::StoreService`, to the host dispatch (`plugin_host.rs`), and to
+`HostClient` — never open the store from a plugin.
+
 When adding a synced field, add it to the mapping in one place (`map_issue` /
 `build_export_item`) and to `content_equal`/the `EditRequest` in `sync_net`.
 Network tests use the deterministic in-process mock server in

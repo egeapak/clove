@@ -10,7 +10,7 @@ use std::fmt::Write as _;
 use camino::Utf8PathBuf;
 use chrono::Utc;
 use clove_core::ItemStore;
-use clove_import::{BeadsImporter, ImportCtx, Importer};
+use clove_import::{BeadsImporter, DirectStore, ImportCtx, Importer};
 use criterion::{criterion_group, criterion_main, Criterion};
 
 /// Generate a deterministic beads-style `issues.jsonl` with `n` lines.
@@ -44,9 +44,9 @@ fn bench_import_beads(c: &mut Criterion) {
             let store_tmp = tempfile::tempdir().unwrap();
             let root = Utf8PathBuf::from_path_buf(store_tmp.path().to_path_buf()).unwrap();
             std::fs::create_dir_all(root.join(".clove").join("issues")).unwrap();
-            let store = ItemStore::new(root);
+            let store = DirectStore::new(ItemStore::new(root), "proj");
 
-            let importer = BeadsImporter::new("proj", Utc::now());
+            let importer = BeadsImporter::new(Utc::now());
             let ctx = ImportCtx::new(&store, false).unwrap();
             let plan = importer.plan(&src, &ctx).unwrap();
             let report = importer.apply(plan, &store).unwrap();

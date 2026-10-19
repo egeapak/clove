@@ -27,7 +27,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use camino::Utf8PathBuf;
-use clove_service::{Engine, ToolError};
+use clove_service::{Engine, StoreService, ToolError};
 use clove_types::tool::*;
 use interprocess::local_socket::prelude::*;
 use interprocess::local_socket::{GenericFilePath, ListenerOptions, Stream};
@@ -73,6 +73,17 @@ const METHODS: &[&str] = &[
     "dep_add",
     "dep_remove",
     "set_parent",
+    "store.scan",
+    "store.scan_frontmatter",
+    "store.get",
+    "store.new_id",
+    "store.create_item",
+    "store.apply_edit",
+    "store.dep_add",
+    "store.dep_remove",
+    "store.link_external",
+    "store.comments",
+    "store.add_comment",
 ];
 
 /// JSON-RPC error codes.
@@ -126,6 +137,7 @@ impl HostServer {
                 auto_refresh: ctx.config.index.auto_refresh,
             },
             engine: OnceLock::new(),
+            store: OnceLock::new(),
         });
         std::thread::Builder::new()
             .name("clove-plugin-host".to_owned())
@@ -176,9 +188,15 @@ struct Shared {
     default_type: clove_types::ItemType,
     tiers: clove_engine::Tiers,
     engine: OnceLock<Engine>,
+    store: OnceLock<StoreService>,
 }
 
 impl Shared {
+    fn store(&self) -> &StoreService {
+        self.store
+            .get_or_init(|| StoreService::new(self.repo_root.clone(), self.id_prefix.clone()))
+    }
+
     fn engine(&self) -> &Engine {
         self.engine.get_or_init(|| {
             Engine::new(
@@ -434,6 +452,20 @@ fn dispatch(shared: &Shared, method: &str, params: Value) -> Result<Value, RpcFa
         "dep_add" => call(params, |a: DepAddArgs| engine().dep_add(a)),
         "dep_remove" => call(params, |a: DepAddArgs| engine().dep_remove(a)),
         "set_parent" => call(params, |a: SetParentArgs| engine().set_parent(a)),
+        // The store tier (importers, sync engines): whole items, own timestamps.
+        "store.scan" => shared.store().scan().map_err(RpcFailure::from),
+        "store.scan_frontmatter" => shared.store().scan_frontmatter().map_err(RpcFailure::from),
+        "store.get" => call(params, |p: StoreIdParams| shared.store().get(p)),
+        "store.new_id" => shared.store().new_id().map_err(RpcFailure::from),
+        "store.create_item" => call(params, |p: CreateItemParams| shared.store().create_item(p)),
+        "store.apply_edit" => call(params, |p: ApplyEditParams| shared.store().apply_edit(p)),
+        "store.dep_add" => call(params, |p: StoreDepParams| shared.store().dep_add(p)),
+        "store.dep_remove" => call(params, |p: StoreDepParams| shared.store().dep_remove(p)),
+        "store.link_external" => call(params, |p: LinkExternalParams| {
+            shared.store().link_external(p)
+        }),
+        "store.comments" => call(params, |p: StoreIdParams| shared.store().comments(p)),
+        "store.add_comment" => call(params, |p: AddCommentParams| shared.store().add_comment(p)),
         other => Err(RpcFailure {
             code: METHOD_NOT_FOUND,
             message: format!("unknown method `{other}`"),
@@ -607,6 +639,7 @@ mod tests {
             default_type: clove_types::ItemType::Feature,
             tiers: clove_engine::Tiers::files_only(),
             engine: OnceLock::new(),
+            store: OnceLock::new(),
         };
         let err = dispatch(&shared, "frobnicate", Value::Null).unwrap_err();
         assert_eq!(err.code, METHOD_NOT_FOUND);
@@ -630,6 +663,7 @@ mod tests {
                                 default_type: clove_types::ItemType::Feature,
                                 tiers: clove_engine::Tiers::files_only(),
                                 engine: OnceLock::new(),
+                                store: OnceLock::new(),
                             },
                             method,
                             json!({ "unknown_field_only": true }),

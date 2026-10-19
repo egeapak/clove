@@ -25,13 +25,13 @@ use std::process::ExitCode;
 
 use camino::Utf8PathBuf;
 use clap::Parser;
-use clove_core::{ItemStore, OutputFormat};
-use clove_import::{export_beads, render, BeadsImporter, ImportCtx, Importer};
+use clove_import::{export_beads, render, BeadsImporter, HostStore, ImportCtx, Importer};
 use clove_plugin::{
     clap_exit_code, emit_error, emit_success_with_meta, parse_format, unsupported_capability,
     PluginArgs, PluginContext, PluginInfo,
 };
 use clove_types::CloveError;
+use clove_types::OutputFormat;
 use serde_json::json;
 
 /// The metadata `clove plugin list` / `--clove-plugin-info` reports, emitted via
@@ -154,10 +154,12 @@ fn dispatch_export(cx: &PluginContext, tail: &PluginArgs) -> ExitCode {
 /// Drive the beads import and render its result exactly as the host's
 /// `cmd/import.rs` did.
 fn run(cx: &PluginContext, cli: Cli, format: OutputFormat) -> Result<(), CloveError> {
-    let store = ItemStore::new(cx.root.clone());
+    // Every read and write goes through the `clove` that runs this plugin
+    // (the host IPC channel, PLUGIN_SYSTEM.md §6.6).
+    let store = HostStore::connect(cx)?;
     let import_ctx = ImportCtx::new(&store, cli.dry_run).map_err(import_err)?;
 
-    let importer = BeadsImporter::new(cx.id_prefix.clone(), chrono::Utc::now());
+    let importer = BeadsImporter::new(chrono::Utc::now());
     let plan = importer.plan(&cli.src, &import_ctx).map_err(import_err)?;
     // Drain warnings *after* `plan` so they reach both stderr and the JSON
     // envelope's `_meta.warnings`.
@@ -184,8 +186,8 @@ fn run(cx: &PluginContext, cli: Cli, format: OutputFormat) -> Result<(), CloveEr
 /// `ls`/`export`) rather than aborting the dump. The NDJSON is written raw — no
 /// plugin envelope — so `clove export beads > issues.jsonl` yields a clean file.
 fn run_export(cx: &PluginContext, cli: ExportCli, format: OutputFormat) -> Result<(), CloveError> {
-    let store = ItemStore::new(cx.root.clone());
-    let (items, _errors) = store.scan()?;
+    let store = HostStore::connect(cx)?;
+    let items = clove_import::Store::scan(&store).map_err(import_err)?.items;
 
     match &cli.out {
         Some(path) => {

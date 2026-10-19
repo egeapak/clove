@@ -30,8 +30,10 @@
 
 use std::io::{BufRead, BufReader, Write};
 
+use chrono::{DateTime, Utc};
 use interprocess::local_socket::prelude::*;
 use interprocess::local_socket::{GenericFilePath, Stream};
+use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -311,6 +313,140 @@ impl HostClient {
     pub fn set_parent(&mut self, args: &SetParentArgs) -> Result<Value, HostError> {
         self.typed("set_parent", args)
     }
+}
+
+/// The store tier (`store.*`): what an importer or a sync engine needs to
+/// mirror another tracker. Every write runs in the host through clove's
+/// validated write path; ids come from [`HostClient::store_new_id`].
+impl HostClient {
+    /// Every item, plus the files that failed to parse.
+    pub fn store_scan(&mut self) -> Result<ScanPayload, HostError> {
+        decode(self.call("store.scan", json!({}))?)
+    }
+
+    /// Every item's frontmatter, plus the files that failed to parse.
+    pub fn store_scan_frontmatter(&mut self) -> Result<FrontmatterScanPayload, HostError> {
+        decode(self.call("store.scan_frontmatter", json!({}))?)
+    }
+
+    /// One whole item.
+    pub fn store_get(&mut self, id: &str) -> Result<ItemPayload, HostError> {
+        decode(self.call("store.get", json!({ "id": id }))?)
+    }
+
+    /// A fresh, unused id with the repository's prefix.
+    pub fn store_new_id(&mut self) -> Result<String, HostError> {
+        let reply = self.call("store.new_id", json!({}))?;
+        reply["id"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| HostError::Protocol("store.new_id without an id".to_owned()))
+    }
+
+    /// Write a new item exactly as given (validated like `create`; never
+    /// overwrites an existing id).
+    pub fn store_create_item(&mut self, item: &ItemPayload) -> Result<(), HostError> {
+        self.typed(
+            "store.create_item",
+            &CreateItemParams { item: item.clone() },
+        )
+        .map(drop)
+    }
+
+    /// The unified edit, stamped `now`. Returns the edited item's JSON.
+    pub fn store_apply_edit(
+        &mut self,
+        id: &str,
+        request: &clove_types::EditRequest,
+        now: DateTime<Utc>,
+    ) -> Result<Value, HostError> {
+        self.typed(
+            "store.apply_edit",
+            &ApplyEditParams {
+                id: id.to_owned(),
+                request: request.clone(),
+                now,
+            },
+        )
+    }
+
+    /// Add a hard dependency (cycle-checked).
+    pub fn store_dep_add(
+        &mut self,
+        id: &str,
+        dep: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Value, HostError> {
+        self.typed("store.dep_add", &dep_params(id, dep, now))
+    }
+
+    /// Remove a hard dependency.
+    pub fn store_dep_remove(
+        &mut self,
+        id: &str,
+        dep: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Value, HostError> {
+        self.typed("store.dep_remove", &dep_params(id, dep, now))
+    }
+
+    /// Link an item to an external tracker. Returns its new `updated` time.
+    pub fn store_link_external(
+        &mut self,
+        id: &str,
+        source_system: &str,
+        external_ref: &str,
+        now: DateTime<Utc>,
+    ) -> Result<DateTime<Utc>, HostError> {
+        let reply = self.typed(
+            "store.link_external",
+            &LinkExternalParams {
+                id: id.to_owned(),
+                source_system: source_system.to_owned(),
+                external_ref: external_ref.to_owned(),
+                now,
+            },
+        )?;
+        decode(reply["updated"].clone())
+    }
+
+    /// An item's comments, oldest first, with their author and time.
+    pub fn store_comments(&mut self, id: &str) -> Result<Vec<CommentPayload>, HostError> {
+        decode(self.call("store.comments", json!({ "id": id }))?)
+    }
+
+    /// Append a comment with its original author and time.
+    pub fn store_add_comment(
+        &mut self,
+        id: &str,
+        author: &str,
+        body: &str,
+        timestamp: DateTime<Utc>,
+    ) -> Result<(), HostError> {
+        self.typed(
+            "store.add_comment",
+            &AddCommentParams {
+                id: id.to_owned(),
+                author: author.to_owned(),
+                body: body.to_owned(),
+                timestamp,
+            },
+        )
+        .map(drop)
+    }
+}
+
+fn dep_params(id: &str, dep: &str, now: DateTime<Utc>) -> StoreDepParams {
+    StoreDepParams {
+        id: id.to_owned(),
+        dep: dep.to_owned(),
+        now,
+    }
+}
+
+fn decode<T: DeserializeOwned>(value: Value) -> Result<T, HostError> {
+    serde_json::from_value(value)
+        .map_err(|e| HostError::Protocol(format!("unexpected result shape: {e}")))
 }
 
 fn parse_hello(reply: &Value) -> Result<HostInfo, HostError> {

@@ -653,6 +653,7 @@ dependencies = [
  "camino",
  "chrono",
  "clove-core",
+ "clove-plugin",
  "clove-types",
  "criterion",
  "fd-lock",
@@ -674,7 +675,6 @@ dependencies = [
  "camino",
  "chrono",
  "clap",
- "clove-core",
  "clove-import",
  "clove-plugin",
  "clove-types",
@@ -688,7 +688,6 @@ dependencies = [
  "camino",
  "chrono",
  "clap",
- "clove-core",
  "clove-import",
  "clove-plugin",
  "clove-types",
@@ -759,6 +758,7 @@ name = "clove-plugin"
 version = "0.2.0"
 dependencies = [
  "camino",
+ "chrono",
  "clap",
  "clove-types",
  "interprocess",
@@ -785,7 +785,9 @@ dependencies = [
  "clove-engine",
  "clove-ipc",
  "clove-types",
+ "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -794,7 +796,6 @@ version = "0.2.0"
 dependencies = [
  "camino",
  "clap",
- "clove-core",
  "clove-import",
  "clove-plugin",
  "clove-types",

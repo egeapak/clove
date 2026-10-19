@@ -303,3 +303,113 @@ pub struct SetParentArgs {
     /// The new parent id, or null/omitted to clear the parent.
     pub parent: Option<String>,
 }
+
+// ---- Store tier (host IPC `store.*` methods, PLUGIN_SYSTEM.md §6.6) --------
+//
+// Lower-level than the tools above: what an importer or a sync engine needs to
+// mirror another tracker faithfully (whole items with their own timestamps and
+// `external_ref`, comments with their original author and time). Every write
+// still runs in the host through clove's validated write path. Not exposed over
+// MCP.
+
+/// A whole item on the wire: its frontmatter and Markdown body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemPayload {
+    pub frontmatter: crate::ItemFrontmatter,
+    pub body: String,
+}
+
+impl From<crate::Item> for ItemPayload {
+    fn from(item: crate::Item) -> Self {
+        ItemPayload {
+            frontmatter: item.frontmatter,
+            body: item.body,
+        }
+    }
+}
+
+impl From<ItemPayload> for crate::Item {
+    fn from(p: ItemPayload) -> Self {
+        crate::Item {
+            frontmatter: p.frontmatter,
+            body: p.body,
+        }
+    }
+}
+
+/// An item file that failed to parse during a scan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScanErrorPayload {
+    pub path: String,
+    pub message: String,
+}
+
+/// `store.scan`: every parsable item, plus the files that failed to parse.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScanPayload {
+    pub items: Vec<ItemPayload>,
+    pub errors: Vec<ScanErrorPayload>,
+}
+
+/// `store.scan_frontmatter`: every parsable frontmatter, plus the failures.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FrontmatterScanPayload {
+    pub frontmatters: Vec<crate::ItemFrontmatter>,
+    pub errors: Vec<ScanErrorPayload>,
+}
+
+/// One comment with its original author and time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommentPayload {
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub author: String,
+    pub body: String,
+}
+
+/// `store.get`, `store.comments`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoreIdParams {
+    pub id: String,
+}
+
+/// `store.create_item`: write a new item exactly as given (its id from
+/// `store.new_id`, its own timestamps). Validated like `create`; refuses an id
+/// that already exists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateItemParams {
+    pub item: ItemPayload,
+}
+
+/// `store.apply_edit`: the unified edit, stamped `now`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplyEditParams {
+    pub id: String,
+    pub request: EditRequest,
+    pub now: chrono::DateTime<chrono::Utc>,
+}
+
+/// `store.dep_add` / `store.dep_remove`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoreDepParams {
+    pub id: String,
+    pub dep: String,
+    pub now: chrono::DateTime<chrono::Utc>,
+}
+
+/// `store.link_external`: set `source_system` + `external_ref` on an item.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkExternalParams {
+    pub id: String,
+    pub source_system: String,
+    pub external_ref: String,
+    pub now: chrono::DateTime<chrono::Utc>,
+}
+
+/// `store.add_comment`: append a comment with its original author and time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AddCommentParams {
+    pub id: String,
+    pub author: String,
+    pub body: String,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+}

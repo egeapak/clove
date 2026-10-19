@@ -24,3 +24,7 @@ clove-engine.workspace = true
 serde_json.workspace = true
 camino.workspace = true
 chrono.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

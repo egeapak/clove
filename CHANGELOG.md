@@ -29,6 +29,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The shipped plugins use the host IPC channel:** `clove-import-tk`,
+  `clove-import-beads` and `clove-sync-github` no longer open the store; every
+  read and write goes through the `clove` that runs them, via the new `store.*`
+  tier of the channel (whole items with their own timestamps, host-minted ids,
+  comments with original author and time). Imported and pulled items are now
+  validated like `create` before they are written. `clove-import` code takes a
+  `clove_import::Store` (`HostStore` / `DirectStore`). **Breaking (library):**
+  `TkImporter::new` / `BeadsImporter::new` no longer take an id prefix, and
+  `sync_net::sync_github` no longer takes one (the host mints ids).
+
 - **Host IPC channel for plugins** (`PLUGIN_SYSTEM.md` §6.6): while `clove
   <plugin>` runs, the host serves the clove tool surface (the MCP tools'
   arguments and results) over a per-invocation local socket, authenticated with a

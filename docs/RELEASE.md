@@ -154,7 +154,7 @@ clove-types        → (none)
 clove-core         → clove-types
 clove-plugin       → clove-types
 clove-index        → clove-types, clove-core
-clove-import       → clove-types, clove-core
+clove-import       → clove-types, clove-core, clove-plugin
 clove-ipc          → clove-types, clove-core
 clove-tui          → clove-types, clove-core
 clove-engine       → clove-types, clove-core, clove-index, clove-ipc
@@ -163,9 +163,9 @@ clove-mcp          → clove-types, clove-core, clove-ipc, clove-engine, clove-s
 clove-web          → clove-types, clove-core, clove-index, clove-engine
 cloved             → clove-types, clove-core, clove-index, clove-ipc, clove-web
 clove-cli          → clove-types, clove-core, clove-plugin, clove-index, clove-import, clove-ipc, clove-engine, clove-service, clove-mcp, clove-tui, clove-web
-clove-sync-github  → clove-types, clove-core, clove-plugin, clove-import (github)
-clove-import-tk    → clove-types, clove-core, clove-plugin, clove-import
-clove-import-beads → clove-types, clove-core, clove-plugin, clove-import
+clove-sync-github  → clove-types, clove-plugin, clove-import (github)
+clove-import-tk    → clove-types, clove-plugin, clove-import
+clove-import-beads → clove-types, clove-plugin, clove-import
 ```
 
 > Regenerate this table from the source of truth rather than editing it by hand

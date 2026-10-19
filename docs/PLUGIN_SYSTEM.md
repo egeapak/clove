@@ -410,15 +410,19 @@ splitting `sync_net.rs` — which today interleaves fetch → apply → `externa
 write-back → comment reconcile — into a plan phase and an apply phase with the
 process boundary between them. More work, deferred (§10).
 
-Recommendation: **ship (A)** for the first-party plugins. Since 0.2.0 a third
-way exists:
+Since 0.2.0 a third way exists, and **all plugins use it**, the first-party
+ones included:
 
 **(C) Host IPC — the host applies, live.** The plugin calls the host over the
 host IPC channel (§6.6) with the MCP tool arguments; the host runs each call
 through `clove-service` (the same engine as the MCP server), so every write uses
 the unified write path in the host (the `cloved` daemon when one runs). The
 plugin links only the permissively licensed SDK, so it may use any license
-(§12). This is the recommended way for **third-party** plugins.
+(§12). The first-party plugins (`clove-import-tk`, `clove-import-beads`,
+`clove-sync-github`) reach the store only through it: their logic in
+`clove-import` is written against the `clove_import::Store` trait, and the
+plugins pass `HostStore` (the `store.*` tier). (A) remains possible but no
+shipped plugin uses it.
 
 ### 6.6 Host IPC channel
 
@@ -461,6 +465,28 @@ answers its requests in order; there is no cancellation and no host timeout.
 | `config` | — | `{id_prefix, default_type, types, statuses, priorities}` |
 | `list`, `ready`, `blocked`, `show`, `search`, `comments`, `dep_tree`, `stats` | the MCP tool arguments (`clove_types::tool`) | the MCP tool result (`mcp-item-page.json`, …) |
 | `create`, `set_status`, `edit`, `comment`, `dep_add`, `dep_remove`, `set_parent` | as above | as above |
+| `store.scan` | — | `{items: [{frontmatter, body}], errors: [{path, message}]}` |
+| `store.scan_frontmatter` | — | `{frontmatters, errors}` |
+| `store.get` | `{id}` | `{frontmatter, body}` |
+| `store.new_id` | — | `{id}` (a fresh id with the repository prefix) |
+| `store.create_item` | `{item: {frontmatter, body}}` | `{id}` |
+| `store.apply_edit` | `{id, request: EditRequest, now}` | the edited item |
+| `store.dep_add`, `store.dep_remove` | `{id, dep, now}` | the edited item |
+| `store.link_external` | `{id, source_system, external_ref, now}` | `{updated}` |
+| `store.comments` | `{id}` | `[{timestamp, author, body}]` |
+| `store.add_comment` | `{id, author, body, timestamp}` | `{}` |
+
+The **store tier** (`store.*`, types in `clove_types::tool`) is what an
+importer or a sync engine needs to mirror another tracker: whole items with
+their own timestamps and `external_ref`, ids minted by the host, comments with
+their original author and time. Every write still runs in the host through the
+validated write path: `store.create_item` is `ItemStore::restore_item` (the
+field checks of `create`, and it never overwrites an existing id; an existing id
+is `VALIDATION_ERROR`), `store.apply_edit` is `apply_edit`, the dependency
+methods are the cycle-checked `ops`, and comments use `add_comment_at`. Unlike
+the tools, the store tier writes in the host process and does not route through
+`cloved`. It is not exposed over MCP. `clove_import::HostStore` implements
+`clove_import::Store` on top of it.
 
 The method names are the MCP tool names without `clove_` (`clove_new` is
 `create`, `clove_status` is `set_status`). Reads honour the host's `--no-index`
@@ -765,10 +791,12 @@ clove is AGPL-3.0-only with an additional permission for plugins
   output envelope and exit codes (§6.3), and the host IPC protocol (§6.6). The
   exception lets you convey it under terms of your choice, also together with
   clove.
-- **Fat plugin** (AGPL): it links `clove-core` (or any other AGPL clove crate) to
-  open the store directly (§6.4A). It is a combined work under AGPL-3.0-only.
-  The first-party plugins (`clove-sync-github`, `clove-import-tk`,
-  `clove-import-beads`) are fat plugins.
+- **AGPL plugin**: it links `clove-core`, `clove-import` or any other AGPL clove
+  crate (for example to open the store directly, §6.4A). It is a combined work
+  under AGPL-3.0-only. The first-party plugins (`clove-sync-github`,
+  `clove-import-tk`, `clove-import-beads`) are AGPL because they link
+  `clove-import` for the tracker mappings; they still read and write only
+  through the host channel.
 
 `clove-plugin` never depends on `clove-core`; CI checks the SDK's dependency
 tree for copyleft licenses on every push.
