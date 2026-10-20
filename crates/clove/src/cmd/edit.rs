@@ -51,21 +51,95 @@ fn open_in_editor(ctx: &Ctx, id: &clove_types::CloveId) -> Result<(), CloveError
         .or_else(|_| std::env::var("EDITOR"))
         .unwrap_or_else(|_| "vi".to_owned());
 
-    let status = std::process::Command::new(&editor)
-        .arg(path.as_str())
+    let status = editor_command(&editor, path.as_str())
         .status()
         .map_err(|source| CloveError::Io {
             path: path.clone(),
-            source,
+            source: std::io::Error::new(
+                source.kind(),
+                format!("could not run editor `{editor}`: {source}"),
+            ),
         })?;
     if !status.success() {
         return Err(CloveError::Io {
             path: path.clone(),
-            source: std::io::Error::other(format!("editor `{editor}` exited with failure")),
+            source: std::io::Error::other(format!("editor `{editor}` exited with {status}")),
         });
     }
 
     // Validate that the result still parses (surfaces a corrupt hand-edit).
     parse_item_file(&path)?;
     Ok(())
+}
+
+/// Build the command that opens `file` in `editor`. Like git, the editor value
+/// may carry arguments (`code --wait`, `emacsclient -t`): on Unix it is run
+/// through `sh` with the file passed as `"$@"`, so shell quoting works as it
+/// does in git.
+#[cfg(unix)]
+fn editor_command(editor: &str, file: &str) -> std::process::Command {
+    let mut command = std::process::Command::new("sh");
+    command
+        .arg("-c")
+        .arg(format!("{editor} \"$@\""))
+        .arg(editor)
+        .arg(file);
+    command
+}
+
+/// Windows has no `sh`: split the editor value on whitespace outside double
+/// quotes (`"C:\Program Files\Editor\editor.exe" --wait`).
+#[cfg(not(unix))]
+fn editor_command(editor: &str, file: &str) -> std::process::Command {
+    let mut words = split_editor_words(editor).into_iter();
+    let program = words.next().unwrap_or_else(|| editor.to_owned());
+    let mut command = std::process::Command::new(program);
+    command.args(words).arg(file);
+    command
+}
+
+#[cfg_attr(unix, allow(dead_code))]
+fn split_editor_words(editor: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut in_word = false;
+    for character in editor.chars() {
+        match character {
+            '"' => {
+                in_quotes = !in_quotes;
+                in_word = true;
+            }
+            c if c.is_whitespace() && !in_quotes => {
+                if in_word {
+                    words.push(std::mem::take(&mut current));
+                    in_word = false;
+                }
+            }
+            c => {
+                current.push(c);
+                in_word = true;
+            }
+        }
+    }
+    if in_word {
+        words.push(current);
+    }
+    words
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_editor_words;
+
+    #[test]
+    fn split_editor_words_handles_arguments_and_quoted_paths() {
+        assert_eq!(split_editor_words("vi"), ["vi"]);
+        assert_eq!(split_editor_words("code --wait"), ["code", "--wait"]);
+        assert_eq!(
+            split_editor_words(r#""C:\Program Files\Ed\ed.exe"  -w"#),
+            [r"C:\Program Files\Ed\ed.exe", "-w"]
+        );
+        assert_eq!(split_editor_words("  "), Vec::<String>::new());
+    }
 }
