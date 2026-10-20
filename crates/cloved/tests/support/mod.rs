@@ -9,6 +9,19 @@ use std::time::{Duration, Instant};
 use camino::{Utf8Path, Utf8PathBuf};
 use clove_ipc::{ClientError, DaemonClient, Detached, HubClient, HubPaths};
 
+/// How long any wait may take before the test calls it a hang. Generous on
+/// purpose: a wait ends on its condition, never on this.
+pub const HANG_GUARD: Duration = Duration::from_secs(30);
+
+/// The idle-hold file (`CLOVED_IDLE_HOLD_FILE`): while it exists in a hub's
+/// runtime directory or a project's `.clove/`, that hub's grace period or that
+/// project's idle window does not run. A test holds, sets up, then releases.
+pub const IDLE_HOLD: &str = "idle-hold";
+
+/// The arm-hold file (`CLOVED_WATCH_ARM_HOLD_FILE`): while it exists in a
+/// project's `.clove/`, that project's watcher does not finish arming.
+pub const ARM_HOLD: &str = "arm-hold";
+
 pub const SIGTERM: i32 = 15;
 pub const SIGKILL: i32 = 9;
 
@@ -51,6 +64,25 @@ pub fn runtime_dir() -> (tempfile::TempDir, HubPaths) {
     (dir, HubPaths::at(path))
 }
 
+/// Hold `dir`'s idle timer until [`release_idle`].
+pub fn hold_idle(dir: &Utf8Path) {
+    std::fs::write(dir.join(IDLE_HOLD), "").unwrap();
+}
+
+pub fn release_idle(dir: &Utf8Path) {
+    std::fs::remove_file(dir.join(IDLE_HOLD)).unwrap();
+}
+
+/// Keep `clove_dir`'s watcher from arming until [`release_arm`]. Needs a
+/// hub started with `CLOVED_WATCH_ARM_HOLD_FILE` = [`ARM_HOLD`].
+pub fn hold_arm(clove_dir: &Utf8Path) {
+    std::fs::write(clove_dir.join(ARM_HOLD), "").unwrap();
+}
+
+pub fn release_arm(clove_dir: &Utf8Path) {
+    std::fs::remove_file(clove_dir.join(ARM_HOLD)).unwrap();
+}
+
 /// A running `cloved run` for one test. Killed on drop if still running.
 pub struct TestHub {
     pub paths: HubPaths,
@@ -76,17 +108,48 @@ impl TestHub {
             child,
             _run: Some(run),
         };
-        hub.wait_ready(Duration::from_secs(5));
+        hub.wait_ready(HANG_GUARD);
         if let Some(dir) = clove_dir {
             hub.load(dir).expect("the hub serves the project");
         }
         hub
     }
 
+    /// A `test-knobs` hub with `idle_ms` / `grace_ms` for its projects and its
+    /// own empty period, both held (see [`IDLE_HOLD`]) until the test releases
+    /// them, so loading projects never races the timers under test.
+    pub fn spawn_idle_held(idle_ms: &str, grace_ms: &str) -> TestHub {
+        let (run, paths) = runtime_dir();
+        hold_idle(paths.dir());
+        let child = command(
+            &paths,
+            &[
+                ("CLOVED_DISABLE_WEB", "1"),
+                ("CLOVED_IDLE_SHUTDOWN_MS", idle_ms),
+                ("CLOVED_HUB_GRACE_MS", grace_ms),
+                ("CLOVED_IDLE_HOLD_FILE", IDLE_HOLD),
+            ],
+        )
+        .spawn()
+        .expect("spawn cloved");
+        let hub = TestHub {
+            paths,
+            child,
+            _run: Some(run),
+        };
+        hub.wait_ready(HANG_GUARD);
+        hub
+    }
+
+    /// Release the hub's own grace hold.
+    pub fn release_hub_idle(&self) {
+        release_idle(self.paths.dir());
+    }
+
     /// Wait until the hub's watcher for `clove_dir` watches: until then it
     /// does not answer that project's index reads (`WATCHER_ARMING`).
     pub fn wait_watching(&self, clove_dir: &Utf8Path) {
-        let watching = eventually(Duration::from_secs(20), || {
+        let watching = eventually(HANG_GUARD, || {
             DaemonClient::probe_at(&self.paths, clove_dir)
                 .and_then(|mut client| client.status().ok())
                 .is_some_and(|status| status.watcher_state == "watching")
@@ -107,9 +170,7 @@ impl TestHub {
             _run: None,
         };
         assert!(
-            eventually(Duration::from_secs(5), || hub
-                .load_arming(clove_dir)
-                .is_ok()),
+            eventually(HANG_GUARD, || hub.load_arming(clove_dir).is_ok()),
             "restarted hub serves the project"
         );
         hub.wait_watching(clove_dir);

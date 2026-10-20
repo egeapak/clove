@@ -650,6 +650,10 @@ impl Hub {
         let mut empty_since: Option<Instant> = None;
         loop {
             tokio::time::sleep(tick).await;
+            if crate::knobs::idle_held(std::path::Path::new(".")) {
+                empty_since = None;
+                continue;
+            }
             let mut table = self.table();
             if table.slots.is_empty() {
                 let since = *empty_since.get_or_insert_with(Instant::now);
@@ -1006,6 +1010,9 @@ mod tests {
         (dir, clove_dir)
     }
 
+    /// How long a wait may take before it is a hang; waits end on conditions.
+    const HANG_GUARD: Duration = Duration::from_secs(30);
+
     /// A deadline no test reaches.
     fn far() -> Instant {
         Instant::now() + Duration::from_secs(60)
@@ -1040,7 +1047,7 @@ mod tests {
         tasks.spawn(async { panic!("injected fault") });
         tokio::spawn(hub.clone().supervise(Arc::clone(&beta), tasks));
 
-        tokio::time::timeout(Duration::from_secs(5), beta.done.cancelled())
+        tokio::time::timeout(HANG_GUARD, beta.done.cancelled())
             .await
             .expect("beta torn down");
         let served: Vec<String> = hub
@@ -1125,10 +1132,11 @@ mod tests {
         // Stand in for a daemon-side reindex holding the index.
         let index = Arc::clone(&slot.dispatcher.index);
         let (held_tx, held) = std::sync::mpsc::channel();
+        let (release_tx, release) = std::sync::mpsc::channel::<()>();
         let holder = std::thread::spawn(move || {
             let _busy = index.lock().unwrap();
             held_tx.send(()).unwrap();
-            std::thread::sleep(Duration::from_millis(6500));
+            let _ = release.recv();
         });
         held.recv().unwrap();
         drop(slot);
@@ -1148,7 +1156,12 @@ mod tests {
         );
         drop(lock);
 
-        let restarted = hub.attach(&call(&a, true), far()).await;
+        let restarting = {
+            let (hub, a) = (hub.clone(), a.clone());
+            tokio::spawn(async move { hub.attach(&call(&a, true), far()).await })
+        };
+        release_tx.send(()).unwrap();
+        let restarted = restarting.await.unwrap();
         holder.join().unwrap();
         let restarted = restarted.expect("the start waited out the slow teardown");
         assert!(!restarted.cancel.is_cancelled());
@@ -1164,10 +1177,11 @@ mod tests {
         let slot = hub.attach(&call(&a, true), far()).await.unwrap();
         let index = Arc::clone(&slot.dispatcher.index);
         let (held_tx, held) = std::sync::mpsc::channel();
+        let (release_tx, release) = std::sync::mpsc::channel::<()>();
         let holder = std::thread::spawn(move || {
             let _busy = index.lock().unwrap();
             held_tx.send(()).unwrap();
-            std::thread::sleep(Duration::from_millis(3000));
+            let _ = release.recv();
         });
         held.recv().unwrap();
         drop(slot);
@@ -1179,8 +1193,8 @@ mod tests {
             .await
             .unwrap();
         assert!(stopped.stopping && !stopped.hub_exiting, "{stopped:?}");
-        let exited =
-            tokio::time::timeout(Duration::from_secs(10), hub.shutdown().cancelled()).await;
+        release_tx.send(()).unwrap();
+        let exited = tokio::time::timeout(HANG_GUARD, hub.shutdown().cancelled()).await;
         holder.join().unwrap();
         assert!(
             exited.is_ok(),
@@ -1204,7 +1218,7 @@ mod tests {
         };
         // In flight: A has an entry, and no slot yet.
         let key = slot::canonical_key(a.as_str()).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = Instant::now() + HANG_GUARD;
         while !hub
             .table()
             .slots
@@ -1221,19 +1235,16 @@ mod tests {
         );
         let loaded = loader.await.unwrap();
         assert!(loaded.is_err(), "the load it raced still succeeded");
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        let served: Vec<String> = hub
-            .status()
-            .projects
-            .into_iter()
-            .map(|p| p.clove_dir)
-            .collect();
-        assert!(
-            !served
-                .iter()
-                .any(|dir| dir.ends_with(a.as_str().trim_start_matches("/private"))),
-            "A is served after its stop: {served:?}"
-        );
+        let a_is_served = || {
+            hub.status().projects.into_iter().any(|p| {
+                p.clove_dir
+                    .ends_with(a.as_str().trim_start_matches("/private"))
+            })
+        };
+        while a_is_served() {
+            assert!(Instant::now() < deadline, "A is served after its stop");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
     }
 
     /// A project path is the caller's own, absolute; a relative one would be

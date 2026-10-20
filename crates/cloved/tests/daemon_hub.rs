@@ -7,13 +7,12 @@ mod support;
 
 #[cfg(feature = "web")]
 use std::io::{Read, Write};
-use std::time::Duration;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use clove_ipc::hub::{codes, frame, recv_frame, send_frame, Hello, Welcome};
 use clove_ipc::{ClientError, DaemonClient, QueryKind, QueryRequest};
 use clove_types::NewSpec;
-use support::{eventually, init_clove_dir, TestHub};
+use support::{eventually, hold_idle, init_clove_dir, release_idle, TestHub, HANG_GUARD};
 
 fn list(client: &mut DaemonClient) -> Vec<String> {
     client
@@ -144,22 +143,16 @@ fn a_project_held_by_a_legacy_daemon_is_refused_safely() {
 fn each_project_idles_out_on_its_own_then_the_hub_exits() {
     let (_a_tmp, a) = init_clove_dir();
     let (_b_tmp, b) = init_clove_dir();
-    let mut hub = TestHub::spawn_with(
-        None,
-        &[
-            ("CLOVED_DISABLE_WEB", "1"),
-            ("CLOVED_IDLE_SHUTDOWN_MS", "400"),
-            ("CLOVED_HUB_GRACE_MS", "300"),
-        ],
-    );
+    // Both projects and the hub's grace are held while they load.
+    let mut hub = TestHub::spawn_idle_held("400", "300");
+    hold_idle(&a);
+    hold_idle(&b);
     hub.load(&a).unwrap();
-    let mut busy = hub.load(&b).unwrap();
+    let busy = hub.load(&b).unwrap();
 
-    // Keep beta active while alpha sits idle.
-    let alpha_gone = eventually(Duration::from_secs(3), || {
-        busy.ping().unwrap();
-        hub.projects() == vec![canonical(&b)]
-    });
+    // Let alpha idle while beta stays held (active).
+    release_idle(&a);
+    let alpha_gone = eventually(HANG_GUARD, || hub.projects() == vec![canonical(&b)]);
     assert!(alpha_gone, "alpha evicted, beta kept: {:?}", hub.projects());
     assert!(
         hub.child.try_wait().unwrap().is_none(),
@@ -167,7 +160,9 @@ fn each_project_idles_out_on_its_own_then_the_hub_exits() {
     );
 
     drop(busy);
-    let status = hub.wait_exit(Duration::from_secs(5));
+    release_idle(&b);
+    hub.release_hub_idle();
+    let status = hub.wait_exit(HANG_GUARD);
     assert!(status.is_some_and(|s| s.success()), "hub exited once empty");
 }
 
@@ -194,8 +189,7 @@ fn detaching_one_project_keeps_the_others_and_the_last_stops_the_hub() {
     let last = hub.detach(&b);
     assert!(last.detached && last.hub_exiting, "{last:?}");
     assert!(
-        hub.wait_exit(Duration::from_secs(5))
-            .is_some_and(|s| s.success()),
+        hub.wait_exit(HANG_GUARD).is_some_and(|s| s.success()),
         "detaching the last project stops the hub"
     );
     assert!(!hub.paths.pid().exists());
@@ -363,7 +357,7 @@ fn a_hub_whose_runtime_directory_vanishes_exits() {
     hub.load(&clove_dir).unwrap();
     std::fs::remove_dir_all(hub.paths.dir()).unwrap();
     assert!(
-        hub.wait_exit(Duration::from_secs(10)).is_some(),
+        hub.wait_exit(HANG_GUARD).is_some(),
         "an unreachable hub must exit"
     );
 }
@@ -420,24 +414,31 @@ fn one_connection_carries_calls_for_two_projects() {
     };
     new(&a, "for a");
     new(&b, "for b");
+    // An index read is refused until the project's watcher arms: ask again.
     let titles = |dir: &Utf8Path| -> Vec<String> {
-        rt.block_on(client.query(
-            tarpc::context::current(),
-            project(dir),
-            QueryRequest {
-                kind: QueryKind::List,
-                filters: Default::default(),
-                order: Default::default(),
-                offset: 0,
-                limit: None,
-            },
-        ))
-        .unwrap()
-        .unwrap()
-        .rows
-        .into_iter()
-        .map(|r| r.title)
-        .collect()
+        let started = std::time::Instant::now();
+        loop {
+            let answer = rt
+                .block_on(client.query(
+                    tarpc::context::current(),
+                    project(dir),
+                    QueryRequest {
+                        kind: QueryKind::List,
+                        filters: Default::default(),
+                        order: Default::default(),
+                        offset: 0,
+                        limit: None,
+                    },
+                ))
+                .unwrap();
+            match answer {
+                Ok(page) => return page.rows.into_iter().map(|r| r.title).collect(),
+                Err(e) if e.code == codes::WATCHER_ARMING && started.elapsed() < HANG_GUARD => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(e) => panic!("the query failed: {e:?}"),
+            }
+        }
     };
     assert_eq!(titles(&a), vec!["for a"]);
     assert_eq!(titles(&b), vec!["for b"]);

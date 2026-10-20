@@ -125,9 +125,12 @@ fn spawn_serve(dir: &Path, args: &[&str]) -> (Child, u16) {
             break Some(port);
         }
     };
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    // Serving means accepting connections on the announced port, not merely
+    // not having exited yet.
+    let serving =
+        announced.is_some_and(|port| std::net::TcpStream::connect(("127.0.0.1", port)).is_ok());
     match (announced, child.try_wait().unwrap()) {
-        (Some(port), None) => (child, port),
+        (Some(port), None) if serving => (child, port),
         (_, status) => {
             let _ = child.kill();
             let status = status.or_else(|| child.wait().ok());
