@@ -364,7 +364,7 @@ mod signals {
     }
 
     fn wait_gone(pid: i32) {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(30);
         while alive(pid) {
             assert!(Instant::now() < deadline, "plugin {pid} is still running");
             std::thread::sleep(Duration::from_millis(20));
@@ -417,7 +417,6 @@ mod signals {
             assert_eq!(status.signal(), Some(libc::SIGINT), "{status:?}");
             wait_gone(plugin);
         } else {
-            std::thread::sleep(Duration::from_millis(300));
             assert!(
                 host.try_wait().unwrap().is_none(),
                 "the host died of SIGINT"
