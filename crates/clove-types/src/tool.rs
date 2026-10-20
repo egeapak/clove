@@ -361,9 +361,16 @@ pub struct FrontmatterScanPayload {
 /// One comment with its original author and time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommentPayload {
+    /// The comment's stable name within its item (its file name); what
+    /// `store.update_comment` / `store.delete_comment` take.
+    #[serde(default)]
+    pub key: String,
     pub timestamp: chrono::DateTime<chrono::Utc>,
     pub author: String,
     pub body: String,
+    /// When the comment's body was last written, if the store knows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// `store.get`, `store.comments`.
@@ -401,6 +408,21 @@ pub struct LinkExternalParams {
     pub id: String,
     pub source_system: String,
     pub external_ref: String,
+}
+
+/// `store.update_comment`: replace the body of an existing comment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateCommentParams {
+    pub id: String,
+    pub key: String,
+    pub body: String,
+}
+
+/// `store.delete_comment`: remove an existing comment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeleteCommentParams {
+    pub id: String,
+    pub key: String,
 }
 
 /// `store.add_comment`: append a comment with its original author and time.

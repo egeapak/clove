@@ -29,6 +29,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`clove sync github` propagates comment edits** (#81): a comment edited on
+  GitHub rewrites its local comment file, and a locally edited comment file is
+  `PATCH`ed onto its GitHub comment in place, instead of being pulled or pushed
+  once and then ignored (or, locally, posted again as a duplicate). A comment
+  edited on both sides follows `--prefer` (`newer` compares GitHub's `updated_at`
+  with the file's mtime; with no timestamp, or `manual`, neither side changes and
+  the conflict is reported). Comment pairs are tracked in the sync state; a state
+  written by 0.1.x, or none at all (a fresh clone), adopts identical pairs without
+  duplicating or re-pushing anything.
+- **`clove sync github` propagates comment deletions** (#80): a comment deleted
+  on one side is deleted on the other, but only if the surviving comment was not
+  edited since the last sync (an edited one is re-created instead, never
+  deleted). Every deletion appears in the `--dry-run` plan and in the run's
+  output (`data.comments.delete_local` / `delete_remote`; the summary line gains
+  `edited` and `deleted` counts); `--no-comments` disables all of it. A comment
+  write GitHub rejects is skipped and retried like a rejected item.
+- Plugin host channel: `store.update_comment` and `store.delete_comment`
+  (`clove_import::Store::update_comment` / `delete_comment`), and `store.comments`
+  reports each comment's `key` and modification time. No daemon protocol change
+  (comments are not indexed, so these writes run in the host process).
 - **The shipped plugins use the host IPC channel:** `clove-import-tk`,
   `clove-import-beads` and `clove-sync-github` no longer open the store; every
   read and write goes through the `clove` that runs them, via the new `store.*`

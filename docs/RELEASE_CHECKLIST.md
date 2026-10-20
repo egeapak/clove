@@ -112,6 +112,21 @@ empty or a real GitHub user.
       and comment; `external_ref` written back.
 - [ ] Both sides at once: comment on the issue on GitHub; locally close it and add a
       comment → sync pushes the close and the local comment, pulls the remote comment.
+- [ ] Comment edits, both directions (on the throwaway issue, after a sync that
+      linked its comments): edit a comment on GitHub, `clove sync github
+      egeapak/clove` → the local comment file now has the new text (same file, no
+      second comment). Edit a comment file under `.clove/issues/<id>/comments/`,
+      sync → the GitHub comment shows the new text (edited in place, no new
+      comment, no "edited" duplicate). Edit both to different text: `--prefer
+      manual` reports it and changes neither; `--prefer local`/`remote` picks a side.
+- [ ] Comment deletions, both directions: delete a comment on GitHub, run
+      `--dry-run` → it lists `would delete local comment …`; sync → the file is
+      gone. Delete a comment file, `--dry-run` → `would delete GitHub comment …`;
+      sync → it is gone from the issue. Delete on GitHub but edit the file (and the
+      reverse): nothing is deleted, the edited text is re-created on the other side.
+      `--no-comments` leaves all of it alone.
+- [ ] Upgrade case: copy a `.clove/sync/github/*.json` written by 0.1.5, run the
+      0.2.0 sync → no duplicated or re-pushed comments, then an edit propagates.
 - [ ] Reopen on GitHub → sync pulls `open`; close locally → sync pushes `CLOSED`
       (the same-second case is covered by
       `sync::tests::local_edit_in_the_same_second_as_the_last_pull_is_pushed`; by hand,

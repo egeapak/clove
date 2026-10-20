@@ -54,9 +54,14 @@ const FILENAME_TS_LEN: usize = 26;
 /// A parsed comment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Comment {
+    /// The file name (`<ts>-<author>-<rand4>.md`): unique within the item and
+    /// stable across body edits, so it identifies the comment to sync tools.
+    pub name: String,
     pub timestamp: DateTime<Utc>,
     pub author: String,
     pub body: String,
+    /// The file's last-modified time, when the filesystem reports one.
+    pub modified: Option<DateTime<Utc>>,
 }
 
 /// Append a comment to item `id`, returning the path of the new comment file.
@@ -245,12 +250,19 @@ pub fn list_comments(issues_dir: &Utf8Path, id: &CloveId) -> Result<Vec<Comment>
             path: path.clone(),
             source,
         })?;
+        let modified = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .map(DateTime::<Utc>::from);
         comments.push((
             name.to_owned(),
             Comment {
+                name: name.to_owned(),
                 timestamp,
                 author,
                 body,
+                modified,
             },
         ));
     }
@@ -273,6 +285,71 @@ pub fn list_comments(issues_dir: &Utf8Path, id: &CloveId) -> Result<Vec<Comment>
             .then_with(|| a_name.cmp(b_name))
     });
     Ok(comments.into_iter().map(|(_, comment)| comment).collect())
+}
+
+/// Replace the body of the existing comment file `name` (as listed in
+/// [`Comment::name`]) atomically, keeping its name, author and timestamp.
+pub fn update_comment(
+    issues_dir: &Utf8Path,
+    id: &CloveId,
+    name: &str,
+    body: &str,
+) -> Result<Utf8PathBuf, CloveError> {
+    let path = existing_comment_path(issues_dir, id, name)?;
+    let root = issues_dir.parent().unwrap_or(issues_dir);
+    crate::fs_safe::write_atomic(root, &path, body.as_bytes()).map_err(|source| {
+        CloveError::Io {
+            path: path.clone(),
+            source,
+        }
+    })?;
+    Ok(path)
+}
+
+/// Remove the comment file `name` (as listed in [`Comment::name`]).
+pub fn delete_comment(
+    issues_dir: &Utf8Path,
+    id: &CloveId,
+    name: &str,
+) -> Result<Utf8PathBuf, CloveError> {
+    let path = existing_comment_path(issues_dir, id, name)?;
+    std::fs::remove_file(path.as_std_path()).map_err(|source| CloveError::Io {
+        path: path.clone(),
+        source,
+    })?;
+    Ok(path)
+}
+
+/// The path of comment file `name`, refusing anything that is not a plain,
+/// recognizable comment file name that exists as a regular file.
+fn existing_comment_path(
+    issues_dir: &Utf8Path,
+    id: &CloveId,
+    name: &str,
+) -> Result<Utf8PathBuf, CloveError> {
+    let recognizable = !name.contains(['/', '\\'])
+        && name
+            .strip_suffix(".md")
+            .is_some_and(|stem| parse_comment_name(stem).is_some());
+    if !recognizable {
+        return Err(CloveError::InvalidField {
+            field: "comment".to_owned(),
+            reason: format!("`{name}` is not a comment file name"),
+        });
+    }
+    let dir = comments_dir(issues_dir, id);
+    let root = issues_dir.parent().unwrap_or(issues_dir);
+    crate::fs_safe::check_dirs(root, &dir).map_err(|source| CloveError::Io {
+        path: dir.clone(),
+        source,
+    })?;
+    let path = dir.join(name);
+    match std::fs::symlink_metadata(path.as_std_path()) {
+        Ok(meta) if meta.is_file() => Ok(path),
+        _ => Err(CloveError::NotFound {
+            id: format!("{id} comment {name}"),
+        }),
+    }
 }
 
 /// The `comments/` directory for an item.
@@ -367,6 +444,41 @@ mod tests {
         assert_eq!(comments[1].body, "Second comment.");
         assert_eq!(comments[0].timestamp, ts("2026-06-02T10:00:00Z"));
         assert_eq!(comments[0].author, "ege-example-com");
+    }
+
+    #[test]
+    fn update_and_delete_address_a_comment_by_its_stable_name() {
+        let (_tmp, issues, id) = temp();
+        let when = ts("2026-06-02T10:00:00Z");
+        add_comment_at(&issues, &id, "ege@example.com", "first", when).unwrap();
+        let before = list_comments(&issues, &id).unwrap().remove(0);
+
+        update_comment(&issues, &id, &before.name, "edited").unwrap();
+        let after = list_comments(&issues, &id).unwrap().remove(0);
+        assert_eq!(after.name, before.name);
+        assert_eq!(after.timestamp, before.timestamp);
+        assert_eq!(after.body, "edited");
+
+        delete_comment(&issues, &id, &before.name).unwrap();
+        assert!(list_comments(&issues, &id).unwrap().is_empty());
+        assert!(matches!(
+            delete_comment(&issues, &id, &before.name),
+            Err(CloveError::NotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn update_refuses_names_that_escape_the_comments_dir() {
+        let (_tmp, issues, id) = temp();
+        for name in ["../x.md", "a/b.md", "..\\x.md", "notes.md", "plain"] {
+            assert!(
+                matches!(
+                    update_comment(&issues, &id, name, "x"),
+                    Err(CloveError::InvalidField { .. })
+                ),
+                "{name}"
+            );
+        }
     }
 
     #[test]
