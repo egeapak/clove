@@ -73,6 +73,9 @@ struct State {
     /// Logins GitHub refuses as assignees: an issue create/PATCH naming one gets
     /// GitHub's real 422 validation-error body and mutates nothing.
     rejected_assignees: Vec<String>,
+    /// Titles GitHub refuses: an issue create/PATCH carrying one gets a 422 on
+    /// the `title` field (a rejection that is not about assignees).
+    rejected_titles: Vec<String>,
 }
 
 impl State {
@@ -109,6 +112,7 @@ impl MockGitHub {
             issue_post_count: 0,
             patch_count: 0,
             rejected_assignees: Vec::new(),
+            rejected_titles: Vec::new(),
         }));
         let thread_state = Arc::clone(&state);
         std::thread::spawn(move || {
@@ -192,6 +196,24 @@ impl MockGitHub {
             .unwrap()
             .rejected_assignees
             .push(login.to_owned());
+    }
+
+    /// Make GitHub reject any issue create/PATCH whose title is `title`.
+    fn reject_title(&self, title: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .rejected_titles
+            .push(title.to_owned());
+    }
+
+    /// Stop rejecting `title`.
+    fn accept_title(&self, title: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .rejected_titles
+            .retain(|t| t != title);
     }
 
     fn issue_post_count(&self) -> u64 {
@@ -423,7 +445,7 @@ fn route(
         }
         ("POST", None) => {
             s.issue_post_count += 1;
-            if let Some(rejection) = assignee_rejection(&s, body) {
+            if let Some(rejection) = item_rejection(&s, body) {
                 return rejection;
             }
             let number = s.next_number;
@@ -465,7 +487,7 @@ fn route(
             if let Some(code) = s.patch_fail_status {
                 return (status_line(code), json!({ "message": "patch failed" }));
             }
-            if let Some(rejection) = assignee_rejection(&s, body) {
+            if let Some(rejection) = item_rejection(&s, body) {
                 return rejection;
             }
             let updated = s.tick();
@@ -535,6 +557,32 @@ fn assignee_rejection(s: &State, body: &Value) -> Option<(&'static str, Value)> 
             "status": "422"
         }),
     ))
+}
+
+/// GitHub's 422 for a title it refuses.
+fn title_rejection(s: &State, body: &Value) -> Option<(&'static str, Value)> {
+    let title = body.get("title").and_then(Value::as_str)?;
+    s.rejected_titles.iter().any(|t| t == title).then(|| {
+        (
+            status_line(422),
+            json!({
+                "message": "Validation Failed",
+                "errors": [{
+                    "value": title,
+                    "resource": "Issue",
+                    "field": "title",
+                    "code": "invalid"
+                }],
+                "documentation_url": "https://docs.github.com/rest/issues/issues#create-an-issue",
+                "status": "422"
+            }),
+        )
+    })
+}
+
+/// The 422 an issue create/PATCH body earns, if any.
+fn item_rejection(s: &State, body: &Value) -> Option<(&'static str, Value)> {
+    assignee_rejection(s, body).or_else(|| title_rejection(s, body))
 }
 
 /// Map an HTTP status code to a status line for the fault-injection responses.
@@ -1953,11 +2001,47 @@ fn a_pulled_item_carries_canonical_timestamps() {
     }
 }
 
-/// A GitHub rejection must say why (status, GitHub's message, the offending
-/// field) and which item and operation it hit — not the bare `GitHub` octocrab's
-/// `Display` gives.
+/// An assignee GitHub refuses (not a user) must not sink the push: the issue is
+/// created without it and the run warns instead of aborting.
 #[test]
-fn rejected_assignee_update_names_the_reason_and_the_item() {
+fn rejected_assignee_on_create_is_dropped_with_a_warning() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    mock.reject_assignee("dogfood-tui");
+    clove(dir.path(), mock.addr)
+        .args(["new", "Bad assignee", "--assignee", "dogfood-tui"])
+        .assert()
+        .success();
+    clove(dir.path(), mock.addr)
+        .args(["new", "Good item"])
+        .assert()
+        .success();
+
+    let out = sync_raw(dir.path(), mock.addr, &[]);
+    assert!(out.status.success(), "{out:?}");
+    let envelope: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(envelope["data"]["pushed_created"], 2, "{envelope}");
+    assert_eq!(envelope["data"]["skipped"], json!([]), "{envelope}");
+    let warnings = envelope["_meta"]["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1, "{envelope}");
+    let warning = warnings[0].as_str().unwrap();
+    assert!(warning.contains("dogfood-tui"), "{warning}");
+
+    assert_eq!(mock.issue_count(), 2);
+    for number in [1, 2] {
+        assert!(mock.assignee_logins(number).is_empty());
+    }
+    assert_eq!(
+        sync(dir.path(), mock.addr, &[])["data"]["pushed_created"],
+        0,
+        "both items are linked"
+    );
+}
+
+/// The update path retries without the refused assignee but keeps the human
+/// assignees GitHub already has.
+#[test]
+fn rejected_assignee_on_update_is_dropped_and_extras_kept() {
     let mock = MockGitHub::start();
     let dir = init_repo();
     clove(dir.path(), mock.addr)
@@ -1966,6 +2050,7 @@ fn rejected_assignee_update_names_the_reason_and_the_item() {
         .success();
     sync(dir.path(), mock.addr, &[]); // push-create gh-1
     let id = only_item_id(dir.path(), mock.addr);
+    mock.set_assignees(1, &["octocat"]);
 
     mock.reject_assignee("dogfood-tui");
     std::thread::sleep(Duration::from_millis(1100));
@@ -1974,60 +2059,151 @@ fn rejected_assignee_update_names_the_reason_and_the_item() {
         .assert()
         .success();
 
+    let out = sync_raw(dir.path(), mock.addr, &[]);
+    assert!(out.status.success(), "{out:?}");
+    let envelope: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(envelope["data"]["pushed_updated"], 1, "{envelope}");
+    assert_eq!(envelope["data"]["skipped"], json!([]), "{envelope}");
+    let warning = envelope["_meta"]["warnings"][0].as_str().unwrap();
+    for needle in ["dogfood-tui", "#1", id.as_str()] {
+        assert!(warning.contains(needle), "missing `{needle}` in: {warning}");
+    }
+    assert_eq!(mock.assignee_logins(1), vec!["octocat".to_owned()]);
+}
+
+/// A rejection that is not about assignees skips that one item: the good item is
+/// pushed, the bad one is reported (naming GitHub's reason), the run exits 5, and
+/// the bad one is retried — not forgotten — on the next run.
+#[test]
+fn a_rejected_item_is_skipped_and_retried_next_run() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    mock.reject_title("Bad title");
+    clove(dir.path(), mock.addr)
+        .args(["new", "Bad title"])
+        .assert()
+        .success();
+    clove(dir.path(), mock.addr)
+        .args(["new", "Good title"])
+        .assert()
+        .success();
+
+    let out = sync_raw(dir.path(), mock.addr, &[]);
+    assert_eq!(out.status.code(), Some(5), "{out:?}");
+    let envelope: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(envelope["ok"], true, "{envelope}");
+    assert_eq!(envelope["data"]["pushed_created"], 1, "{envelope}");
+    let skipped = envelope["data"]["skipped"].as_array().unwrap();
+    assert_eq!(skipped.len(), 1, "{envelope}");
+    let reason = skipped[0]["reason"].as_str().unwrap();
+    for needle in ["422", "Validation Failed", "title: invalid", "create"] {
+        assert!(reason.contains(needle), "missing `{needle}` in: {reason}");
+    }
+    assert!(skipped[0]["external_ref"].is_null(), "{envelope}");
+    let warning = envelope["_meta"]["warnings"][0].as_str().unwrap();
+    assert!(
+        warning.contains(skipped[0]["clove_id"].as_str().unwrap()),
+        "{warning}"
+    );
+
+    assert_eq!(mock.issue_count(), 1);
+    assert_eq!(mock.issue(1).unwrap()["title"], "Good title");
     let human = clove(dir.path(), mock.addr)
         .args(["sync", "github", "owner/repo"])
         .output()
         .unwrap();
     assert_eq!(human.status.code(), Some(5), "{human:?}");
     let stderr = String::from_utf8_lossy(&human.stderr);
-    for needle in [
-        "422",
-        "Validation Failed",
-        "assignees: invalid",
-        "dogfood-tui",
-        "update",
-        "#1",
-        "gh-1",
-        id.as_str(),
-    ] {
-        assert!(stderr.contains(needle), "missing `{needle}` in: {stderr}");
+    assert!(stderr.contains("warning: skipped"), "{stderr}");
+    assert!(stderr.contains("title: invalid"), "{stderr}");
+
+    mock.accept_title("Bad title");
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["pushed_created"], 1, "{v}");
+    assert_eq!(v["data"]["skipped"], json!([]), "{v}");
+    assert_eq!(mock.issue_count(), 2, "the good item was not re-created");
+}
+
+/// The same holds on update, and the skipped item's fingerprint stays stale so
+/// the push is retried once GitHub accepts it.
+#[test]
+fn a_rejected_update_is_skipped_and_the_other_update_lands() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    for title in ["First", "Second"] {
+        clove(dir.path(), mock.addr)
+            .args(["new", title])
+            .assert()
+            .success();
     }
-    assert!(
-        !stderr.contains("io error at"),
-        "a GitHub rejection is not a filesystem error: {stderr}"
-    );
+    sync(dir.path(), mock.addr, &[]);
+
+    mock.reject_title("First renamed");
+    std::thread::sleep(Duration::from_millis(1100));
+    for (old, new) in [("First", "First renamed"), ("Second", "Second renamed")] {
+        let list = clove(dir.path(), mock.addr)
+            .args(["ls", "--format", "json"])
+            .output()
+            .unwrap();
+        let list: Value = serde_json::from_slice(&list.stdout).unwrap();
+        let id = list["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["title"] == old)
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        clove(dir.path(), mock.addr)
+            .args(["edit", &id, "--field", &format!("title={new}")])
+            .assert()
+            .success();
+    }
 
     let out = sync_raw(dir.path(), mock.addr, &[]);
     assert_eq!(out.status.code(), Some(5), "{out:?}");
     let envelope: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(envelope["error"]["code"], "IO_ERROR", "{envelope}");
-    let message = envelope["error"]["message"].as_str().unwrap();
-    for needle in ["422", "Validation Failed", "assignees: invalid", "gh-1"] {
-        assert!(message.contains(needle), "missing `{needle}` in: {message}");
-    }
-    assert!(message.contains(&id), "missing the item id in: {message}");
+    assert_eq!(envelope["data"]["pushed_updated"], 1, "{envelope}");
+    // Items created in the same second get issue numbers in either order.
+    let number_of = |title: &str| {
+        (1..=2)
+            .find(|n| mock.issue(*n).unwrap()["title"] == title)
+            .unwrap()
+    };
+    let first = number_of("First");
+    assert_eq!(
+        envelope["data"]["skipped"][0]["external_ref"],
+        format!("gh-{first}")
+    );
+    assert_eq!(mock.issue(3 - first).unwrap()["title"], "Second renamed");
+
+    mock.accept_title("First renamed");
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["pushed_updated"], 1, "{v}");
+    assert_eq!(mock.issue(first).unwrap()["title"], "First renamed");
 }
 
-/// The create path names the local item it was creating an issue for.
+/// Auth and server failures are not about one item and still abort the run.
 #[test]
-fn rejected_assignee_create_names_the_local_item() {
+fn a_server_error_still_aborts_the_run() {
     let mock = MockGitHub::start();
     let dir = init_repo();
-    mock.reject_assignee("dogfood-tui");
     clove(dir.path(), mock.addr)
-        .args(["new", "Task", "--type", "bug", "--assignee", "dogfood-tui"])
+        .args(["new", "Task"])
         .assert()
         .success();
+    sync(dir.path(), mock.addr, &[]);
     let id = only_item_id(dir.path(), mock.addr);
+    std::thread::sleep(Duration::from_millis(1100));
+    clove(dir.path(), mock.addr)
+        .args(["edit", &id, "--field", "title=Renamed"])
+        .assert()
+        .success();
+    mock.set_patch_fail_status(Some(500));
 
-    let out = clove(dir.path(), mock.addr)
-        .args(["sync", "github", "owner/repo"])
-        .output()
-        .unwrap();
+    let out = sync_raw(dir.path(), mock.addr, &[]);
     assert_eq!(out.status.code(), Some(5), "{out:?}");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    for needle in ["422", "assignees: invalid", "create", id.as_str()] {
-        assert!(stderr.contains(needle), "missing `{needle}` in: {stderr}");
-    }
-    assert_eq!(mock.issue_count(), 0, "the rejected create made no issue");
+    let envelope: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(envelope["ok"], false, "{envelope}");
 }

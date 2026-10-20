@@ -75,6 +75,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`clove sync github`: one rejected item no longer aborts the run (#76).** An
+  assignee GitHub refuses (not a user) is dropped from that push with a warning,
+  and any other per-item 4xx rejection (e.g. a 422) skips that item: the rest of
+  the run completes and its state is saved, the skipped item is left unrecorded
+  so the next run retries it, and the run lists it under `data.skipped` /
+  `_meta.warnings` and exits 5. Auth (401/403), rate-limit, 5xx and network
+  errors still abort. `sync_net::sync_github`'s `SyncReport` gains `skipped` and
+  `warnings`.
+
 - `clove edit` runs an `EDITOR`/`VISUAL`/`CLOVE_EDITOR` value that carries
   arguments (`code --wait`, `emacsclient -t`) the way git does, and a failure to
   start the editor names the editor instead of reporting "No such file" on the
