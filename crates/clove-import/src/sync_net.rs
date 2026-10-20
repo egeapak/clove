@@ -48,6 +48,7 @@ pub fn sync_github(
     store: &dyn Store,
     policy: ConflictPolicy,
     sync_comments: bool,
+    delete_remote_comments: bool,
     dry_run: bool,
     direction: Direction,
 ) -> Result<(SyncSummary, Option<SyncReport>), ImportError> {
@@ -127,6 +128,7 @@ pub fn sync_github(
                     &state,
                     &remote_comment_counts,
                     policy,
+                    delete_remote_comments,
                 )
                 .await
             })?;
@@ -158,6 +160,7 @@ pub fn sync_github(
                 &state,
                 &remote_comment_counts,
                 policy,
+                delete_remote_comments,
             )
             .await?;
             let all_applied = apply_comment_threads(
@@ -768,6 +771,7 @@ struct ThreadPlan {
 /// Plan the comment thread of every linked issue that is not provably idle (see
 /// [`comment_thread_idle`]), fetching GitHub's side but writing nothing. Shared
 /// by `--dry-run` and the apply.
+#[allow(clippy::too_many_arguments)]
 async fn plan_comment_threads(
     crab: &Octocrab,
     owner: &str,
@@ -776,6 +780,7 @@ async fn plan_comment_threads(
     state: &SyncState,
     remote_comment_counts: &std::collections::HashMap<String, u64>,
     policy: ConflictPolicy,
+    delete_remote_comments: bool,
 ) -> Result<Vec<ThreadPlan>, ImportError> {
     let touched = touched_issue_numbers(crab, owner, repo, state).await?;
     let mut threads = Vec::new();
@@ -812,7 +817,7 @@ async fn plan_comment_threads(
                 &fallback
             }
         };
-        let plan = plan_comments(&gh, &local, entry, policy);
+        let plan = plan_comments(&gh, &local, entry, policy, delete_remote_comments);
         threads.push(ThreadPlan {
             clove_id: id,
             external_ref,
@@ -981,6 +986,12 @@ async fn apply_comment_threads(
                 Err(CallFailure::Fatal(error)) => return Err(error),
             }
         }
+
+        report.comments.pending_remote_delete.extend(
+            plan.pending_remote_delete
+                .iter()
+                .map(|removal| CommentRef::new(id.as_str(), &external_ref, removal)),
+        );
 
         for removal in &plan.delete_local {
             store.delete_comment(&id, &removal.key)?;

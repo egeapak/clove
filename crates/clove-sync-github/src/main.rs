@@ -3,7 +3,7 @@
 //!
 //! It is the fat-plugin extraction of `clove sync github`: a `clove-plugin`
 //! `main` that materializes the host-exported [`PluginContext`], parses the
-//! forwarded `OWNER/REPO [--dry-run] [--prefer POLICY] [--no-comments]` args, and
+//! forwarded `OWNER/REPO [--dry-run] [--prefer POLICY] [--no-comments] [--delete-remote-comments]` args, and
 //! drives `clove_import::sync_net::sync_github` — the *same* entry point the
 //! in-process `cmd/sync.rs` used. Its `sync github` stdout/stderr and exit codes
 //! are kept byte-for-byte identical to that built-in so scripts, agents, and the
@@ -68,6 +68,10 @@ struct Cli {
     /// Skip syncing issue comments (faster: avoids one API call per issue).
     #[arg(long)]
     no_comments: bool,
+    /// Also delete a GitHub comment whose local file was removed (and is
+    /// unedited on GitHub). Without it such deletions are only reported.
+    #[arg(long)]
+    delete_remote_comments: bool,
     /// Output format override. Also arrives via `$CLOVE_FORMAT`; accepted here
     /// (per PLUGIN_SYSTEM.md §6.3) so `clove sync github <repo> --format json`
     /// works even with the flag after the provider.
@@ -169,6 +173,7 @@ fn run(
         &clove_import::HostStore::connect(cx)?,
         policy,
         !cli.no_comments,
+        cli.delete_remote_comments,
         cli.dry_run,
         direction,
     )
@@ -193,6 +198,7 @@ fn run(
                 "comments_updated_remote": report.comments.update_remote,
                 "comments_deleted_local": report.comments.delete_local.len(),
                 "comments_deleted_remote": report.comments.delete_remote.len(),
+                "comments_pending_remote_delete": report.comments.pending_remote_delete.len(),
                 "comments": report.comments,
                 "in_sync": report.in_sync,
                 "conflicts": summary.conflicts,
@@ -314,6 +320,21 @@ fn print_conflicts(summary: &clove_import::SyncSummary) {
 /// Print one line per comment deletion and per comment edited on both sides, so
 /// a run (or its dry-run plan) never deletes anything unannounced.
 fn print_comment_changes(comments: &clove_import::sync::CommentSummary, verb: &str) {
+    if !comments.pending_remote_delete.is_empty() {
+        outln!(
+            "  {} local comment deletion(s) not propagated to GitHub; re-run with --delete-remote-comments",
+            comments.pending_remote_delete.len()
+        );
+        for comment in &comments.pending_remote_delete {
+            outln!(
+                "    pending {} on {} ({}): {}",
+                comment.comment,
+                comment.clove_id,
+                comment.external_ref,
+                comment.preview
+            );
+        }
+    }
     let deletions = [
         ("local", &comments.delete_local),
         ("GitHub", &comments.delete_remote),
@@ -386,6 +407,7 @@ mod tests {
         assert!(!cli.dry_run);
         assert!(cli.prefer.is_none());
         assert!(!cli.no_comments);
+        assert!(!cli.delete_remote_comments);
 
         let cli = Cli::try_parse_from([
             "egeapak/clove",
@@ -393,12 +415,14 @@ mod tests {
             "--prefer",
             "remote",
             "--no-comments",
+            "--delete-remote-comments",
         ])
         .expect("flagged form parses");
         assert_eq!(cli.target, "egeapak/clove");
         assert!(cli.dry_run);
         assert_eq!(cli.prefer.as_deref(), Some("remote"));
         assert!(cli.no_comments);
+        assert!(cli.delete_remote_comments);
     }
 
     /// A missing target is a usage error. clap's native code is 2, but we map it

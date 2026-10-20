@@ -2178,12 +2178,18 @@ whose body no longer matches that hash has been edited since:
 | unchanged | edited | `PATCH` the GitHub comment in place |
 | edited | edited (different text) | `--prefer` policy (`newer` compares the comment's `updated_at` with the file's mtime; no timestamp, or `manual`: neither side is touched, reported every run) |
 | deleted | unchanged | delete the local file |
-| unchanged | deleted | delete the GitHub comment |
+| unchanged | deleted | delete the GitHub comment, only with `--delete-remote-comments`; otherwise reported as pending and left alone |
 | deleted | edited | post the local text again as a new comment |
 | edited | deleted | pull the GitHub text again as a new local comment |
 
-Deletions propagate automatically, but only when the surviving side is unchanged
-since the last sync; an edited comment is never deleted. Every deletion is listed
+Deletions only propagate when the surviving side is unchanged since the last
+sync; an edited comment is never deleted. A GitHub deletion deletes the local file
+automatically (git can restore it). The reverse is opt-in: a deleted local file is
+deleted on GitHub only with `--delete-remote-comments`, because a missing file is
+also what checking out a branch that lacks the comment looks like. Without the flag
+the deletion is listed as pending (`data.comments.pending_remote_delete`, and a
+"not propagated to GitHub" line), the link is kept so the comment is neither
+re-pulled nor forgotten, and the file coming back is a no-op. Every deletion is listed
 in the `--dry-run` plan and in the run's output (`data.comments.delete_local` /
 `delete_remote`, and a `deleted` count in the summary line). Local edits and
 deletions are made by editing or removing the comment file. A comment with no link
@@ -2191,10 +2197,7 @@ is new: a GitHub comment is pulled, a local one pushed, except that an identical
 unlinked pair is *adopted* as one comment, which is also how a fresh clone (the
 state is git-ignored) and a state file written by 0.1.x are upgraded without
 duplicates. `comments_checked_at` in the state lets the next sync ask GitHub which
-comments changed since and re-fetch only those issues' threads. Because the state
-is per clone and a local deletion is "the file is gone", checking out a branch that
-lacks comments another branch added reads as a local deletion on the next
-`clove sync`; use `--dry-run` first when switching branches.
+comments changed since and re-fetch only those issues' threads. 
 
 Fields clove's model can't represent are still preserved on push (using the live
 issue + sync state, so no item-schema change): extra GitHub **assignees** a human

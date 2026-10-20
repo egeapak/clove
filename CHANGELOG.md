@@ -43,9 +43,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   written by 0.1.x, or none at all (a fresh clone), adopts identical pairs without
   duplicating or re-pushing anything.
 - **`clove sync github` propagates comment deletions** (#80): a comment deleted
-  on one side is deleted on the other, but only if the surviving comment was not
-  edited since the last sync (an edited one is re-created instead, never
-  deleted). Every deletion appears in the `--dry-run` plan and in the run's
+  on GitHub is deleted locally, and a deleted local comment file is deleted on
+  GitHub too when you pass **`--delete-remote-comments`** (opt-in, because a
+  missing file is also what checking out a branch without the comment looks
+  like; without the flag the deletion is only reported as
+  `data.comments.pending_remote_delete` and the comment is not re-pulled). Either
+  way only if the surviving comment was not edited since the last sync (an edited
+  one is re-created instead, never deleted). Every deletion appears in the
+  `--dry-run` plan and in the run's
   output (`data.comments.delete_local` / `delete_remote`; the summary line gains
   `edited` and `deleted` counts); `--no-comments` disables all of it. A comment
   write GitHub rejects is skipped and retried like a rejected item.

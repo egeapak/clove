@@ -121,7 +121,8 @@ pub struct SyncArgs {
 Dispatch for `sync`:
 
 1. Resolve `clove-sync-<provider>` (§5) and exec it with `rest` forwarded (§6).
-   The `sync`-level conventions (`--dry-run`, `--prefer`, `--no-comments`) are
+   The `sync`-level conventions (`--dry-run`, `--prefer`, `--no-comments`, and for
+   `sync github` `--delete-remote-comments`) are
    passed through in `rest` and are a **documented contract** every sync plugin
    must honor (§6.3), so the host need not know each provider's flags.
 2. If it does not resolve: exit 4 (`ValidationError`) — "unknown sync provider
@@ -379,7 +380,9 @@ The `sync`/`import`/`export` conventions the plugin must accept in its tail args
 
 `sync github` reconciles comment *edits and deletions* as well as new comments
 (`DESIGN.md` §11.3): linked pairs are tracked in the sync state, deletions apply
-only when the surviving side is unchanged, and the dry-run plan and the success
+only when the surviving side is unchanged (a deleted local file is deleted on
+GitHub only with `--delete-remote-comments`; otherwise it is reported under
+`comments.pending_remote_delete`), and the dry-run plan and the success
 envelope carry a `comments` object (counts, plus every deletion with its item,
 `gh-N` ref, comment key and a body preview) beside the flat `comments_pulled` /
 `comments_pushed` / `comments_updated_{local,remote}` /

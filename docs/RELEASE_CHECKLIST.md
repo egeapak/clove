@@ -121,8 +121,12 @@ empty or a real GitHub user.
       manual` reports it and changes neither; `--prefer local`/`remote` picks a side.
 - [ ] Comment deletions, both directions: delete a comment on GitHub, run
       `--dry-run` → it lists `would delete local comment …`; sync → the file is
-      gone. Delete a comment file, `--dry-run` → `would delete GitHub comment …`;
-      sync → it is gone from the issue. Delete on GitHub but edit the file (and the
+      gone. Delete a comment file, then sync without the flag → the GitHub
+      comment stays, the run reports it as pending ("not propagated to GitHub"),
+      and no local copy reappears; restore the file (`git checkout`) and sync →
+      nothing changes. Delete it again, `--dry-run --delete-remote-comments` →
+      `would delete GitHub comment …`; sync with `--delete-remote-comments` → it is
+      gone from the issue. Delete on GitHub but edit the file (and the
       reverse): nothing is deleted, the edited text is re-created on the other side.
       `--no-comments` leaves all of it alone.
 - [ ] Upgrade case: copy a `.clove/sync/github/*.json` written by 0.1.5, run the

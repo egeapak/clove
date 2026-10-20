@@ -2516,7 +2516,7 @@ fn a_comment_deleted_locally_is_deleted_on_github() {
     let (mock, dir, id) = linked_comment_pair();
     delete_local_comment(dir.path(), &id, "remote one");
 
-    let v = sync(dir.path(), mock.addr, &[]);
+    let v = sync(dir.path(), mock.addr, &["--delete-remote-comments"]);
     assert_eq!(v["data"]["comments_deleted_remote"], 1, "{v}");
     assert_eq!(
         v["data"]["comments_pulled"], 0,
@@ -2531,9 +2531,82 @@ fn a_comment_deleted_locally_is_deleted_on_github() {
         ["local one"]
     );
 
-    let again = sync(dir.path(), mock.addr, &[]);
+    let again = sync(dir.path(), mock.addr, &["--delete-remote-comments"]);
     assert_eq!(again["data"]["comments_deleted_remote"], 0, "{again}");
     assert_eq!(mock.comment_delete_count(), 1);
+}
+
+#[test]
+fn a_local_comment_deletion_is_not_propagated_to_github_without_the_flag() {
+    let (mock, dir, id) = linked_comment_pair();
+    delete_local_comment(dir.path(), &id, "remote one");
+
+    // Reported as pending, in the plan and in the run; never deleted or re-pulled.
+    for extra in [&["--dry-run"][..], &[][..], &[][..]] {
+        let v = sync(dir.path(), mock.addr, extra);
+        let comments = &v["data"]["comments"];
+        let pending = comments["pending_remote_delete"].as_array().unwrap();
+        assert_eq!(pending.len(), 1, "{v}");
+        assert_eq!(pending[0]["clove_id"], id.as_str(), "{v}");
+        assert_eq!(pending[0]["external_ref"], "gh-5", "{v}");
+        assert_eq!(pending[0]["preview"], "remote one", "{v}");
+        assert!(comments["delete_remote"].as_array().unwrap().is_empty());
+        assert_eq!(comments["pull"], 0, "{v}");
+    }
+    let human = clove(dir.path(), mock.addr)
+        .args(["sync", "github", "owner/repo"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&human.stdout);
+    assert!(
+        stdout.contains("1 local comment deletion(s) not propagated to GitHub; re-run with --delete-remote-comments"),
+        "{stdout}"
+    );
+    assert_eq!(mock.comment_delete_count(), 0);
+    assert_eq!(sorted(mock.comment_bodies(5)), ["local one", "remote one"]);
+    assert_eq!(
+        local_comment_bodies(dir.path(), mock.addr, &id),
+        ["local one"],
+        "not re-pulled as a new local file"
+    );
+
+    // Opting in later deletes it on GitHub.
+    let v = sync(dir.path(), mock.addr, &["--delete-remote-comments"]);
+    assert_eq!(v["data"]["comments_deleted_remote"], 1, "{v}");
+    assert_eq!(mock.comment_bodies(5), ["local one"]);
+}
+
+#[test]
+fn a_comment_file_that_goes_away_and_returns_changes_nothing() {
+    // Switching to a branch without the comment, and back.
+    let (mock, dir, id) = linked_comment_pair();
+    let file = local_comment_file(dir.path(), &id, "remote one");
+    let content = std::fs::read(&file).unwrap();
+    std::fs::remove_file(&file).unwrap();
+
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["comments_pulled"], 0, "{v}");
+    assert_eq!(mock.comment_delete_count(), 0);
+
+    std::fs::write(&file, content).unwrap();
+    let v = sync(dir.path(), mock.addr, &["--delete-remote-comments"]);
+    for counter in [
+        "comments_pulled",
+        "comments_pushed",
+        "comments_updated_local",
+        "comments_updated_remote",
+        "comments_deleted_local",
+        "comments_deleted_remote",
+        "comments_pending_remote_delete",
+    ] {
+        assert_eq!(v["data"][counter], 0, "{counter}: {v}");
+    }
+    assert_eq!(mock.comment_delete_count(), 0);
+    assert_eq!(sorted(mock.comment_bodies(5)), ["local one", "remote one"]);
+    assert_eq!(
+        sorted(local_comment_bodies(dir.path(), mock.addr, &id)),
+        ["local one", "remote one"]
+    );
 }
 
 #[test]
@@ -2569,7 +2642,11 @@ fn dry_run_lists_every_comment_deletion_and_writes_nothing() {
     mock.delete_comment(5, "remote one");
     delete_local_comment(dir.path(), &id, "local one");
 
-    let out = sync_raw(dir.path(), mock.addr, &["--dry-run"]);
+    let out = sync_raw(
+        dir.path(),
+        mock.addr,
+        &["--dry-run", "--delete-remote-comments"],
+    );
     assert!(out.status.success(), "{out:?}");
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
     let comments = &v["data"]["comments"];
@@ -2579,7 +2656,13 @@ fn dry_run_lists_every_comment_deletion_and_writes_nothing() {
     assert_eq!(comments["delete_remote"][0]["external_ref"], "gh-5", "{v}");
 
     let human = clove(dir.path(), mock.addr)
-        .args(["sync", "github", "owner/repo", "--dry-run"])
+        .args([
+            "sync",
+            "github",
+            "owner/repo",
+            "--dry-run",
+            "--delete-remote-comments",
+        ])
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&human.stdout);
@@ -2594,7 +2677,7 @@ fn dry_run_lists_every_comment_deletion_and_writes_nothing() {
     );
 
     // The real run does exactly what the plan listed.
-    let v = sync(dir.path(), mock.addr, &[]);
+    let v = sync(dir.path(), mock.addr, &["--delete-remote-comments"]);
     assert_eq!(v["data"]["comments_deleted_local"], 1, "{v}");
     assert_eq!(v["data"]["comments_deleted_remote"], 1, "{v}");
     assert!(mock.comment_bodies(5).is_empty());
@@ -2712,7 +2795,7 @@ fn a_rejected_comment_write_is_skipped_and_retried_next_run() {
     delete_local_comment(dir.path(), &id, "remote one");
     mock.set_comment_write_fail_status(Some(422));
 
-    let out = sync_raw(dir.path(), mock.addr, &[]);
+    let out = sync_raw(dir.path(), mock.addr, &["--delete-remote-comments"]);
     assert_eq!(out.status.code(), Some(5), "{out:?}");
     let envelope: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(envelope["ok"], true, "{envelope}");
@@ -2741,7 +2824,7 @@ fn a_rejected_comment_write_is_skipped_and_retried_next_run() {
     assert_eq!(sorted(mock.comment_bodies(5)), ["local one", "remote one"]);
 
     mock.set_comment_write_fail_status(None);
-    let v = sync(dir.path(), mock.addr, &[]);
+    let v = sync(dir.path(), mock.addr, &["--delete-remote-comments"]);
     assert_eq!(v["data"]["comments_updated_remote"], 1, "{v}");
     assert_eq!(v["data"]["comments_deleted_remote"], 1, "{v}");
     assert_eq!(mock.comment_bodies(5), ["local edited"]);

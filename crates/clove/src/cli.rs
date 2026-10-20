@@ -137,7 +137,7 @@ There are no built-in sync providers — every provider is an external \
 clove-sync-<provider> plugin. The same clove-sync-github binary also serves the \
 one-way `clove import github` (pull) and `clove export github` (push).\n\
 Form: clove sync [--format json] github <owner/repo> [--dry-run] [--prefer P] \
-[--no-comments].\n\
+[--no-comments] [--delete-remote-comments].\n\
 Note: clove global flags (--format, --color, --quiet, …) must come BEFORE the \
 provider — everything after it is the provider's own arguments.")]
     Sync(SyncArgs),
@@ -837,7 +837,7 @@ pub struct SyncArgs {
     /// `github`).
     pub provider: String,
     /// Everything after the provider — the `owner/repo` and any provider flags
-    /// (`--dry-run`, `--prefer`, `--no-comments`) — forwarded to the plugin.
+    /// (`--dry-run`, `--prefer`, `--no-comments`, `--delete-remote-comments`) — forwarded to the plugin.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub rest: Vec<String>,
 }
