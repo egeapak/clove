@@ -210,6 +210,9 @@ fn tier1_tier2_commands_route_through_daemon_with_parity() {
     // Ground truth (no daemon, file scan).
     let mut want_blocked = list_ids(&run_in(root, &["--no-index", "blocked", "-f", "json"]).stdout);
     want_blocked.sort();
+    let paged = ["blocked", "--offset", "1", "--limit", "1", "-f", "json"];
+    let want_paged =
+        ids_total_source(&run_in(root, &[&["--no-index"][..], &paged].concat()).stdout);
     let want_cycle_count = cycle_count(&run_in(root, &["dep", "cycle", "-f", "json"]).stdout);
     let want_tree = tree_shape(&run_in(root, &["dep", "tree", &c, "-f", "json"]).stdout);
 
@@ -233,6 +236,10 @@ fn tier1_tier2_commands_route_through_daemon_with_parity() {
         blocked_ids, want_blocked,
         "blocked set matches the file path"
     );
+    // …and the daemon windows it: the same page and pre-window total.
+    let (ids, total, source) = ids_total_source(&run_in(root, &paged).stdout);
+    assert_eq!(source, "daemon");
+    assert_eq!((ids, total), (want_paged.0, want_paged.1), "paged blocked");
 
     // dep cycle → daemon, same count.
     assert_eq!(
@@ -252,6 +259,12 @@ fn tier1_tier2_commands_route_through_daemon_with_parity() {
     assert_eq!(rv["data"]["items_indexed"], serde_json::json!(3));
 
     drop(daemon);
+}
+
+fn ids_total_source(out: &[u8]) -> (Vec<String>, u64, String) {
+    let v: serde_json::Value = serde_json::from_slice(out).unwrap();
+    let (ids, source) = ids_and_source(out);
+    (ids, v["_meta"]["total"].as_u64().unwrap(), source)
 }
 
 fn list_ids(out: &[u8]) -> Vec<String> {

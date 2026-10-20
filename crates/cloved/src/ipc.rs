@@ -6,13 +6,11 @@
 //! rebuilds and reopens the index. The hub (`crate::hub`) resolves each call's
 //! project and hands it to that project's [`Dispatcher`].
 
-use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use camino::Utf8PathBuf;
 use chrono::{DateTime, Utc};
-use clove_core::view::Order;
 use clove_core::ItemStore;
 use clove_index::{Filter, Index, ItemListRow, PostFilter, QueryMode};
 use clove_ipc::{
@@ -353,34 +351,12 @@ impl Dispatcher {
 
     /// Serve a dependency-graph query from the daemon's cached graph (Tier 2).
     ///
-    /// Dispatched per variant rather than inside one `with_graph` closure,
-    /// because `blocked` needs the index as well and the arms must stay
-    /// exhaustive — a catch-all `unreachable!()` in an RPC handler turns a future
-    /// variant into a daemon panic instead of a compile error.
+    /// Dispatched per variant rather than inside one `with_graph` closure so the
+    /// arms stay exhaustive — a catch-all `unreachable!()` in an RPC handler
+    /// turns a future variant into a daemon panic instead of a compile error.
     fn handle_graph(&self, req: GraphRequest) -> Result<GraphResponse, RpcError> {
         let unreadable = || RpcError::new("graph_failed", "could not read index");
         match req {
-            // Two steps: the *set* comes from the graph, but the *order* comes
-            // from the index, which is the only place `created`/`updated` and
-            // the lifecycle order live (the cached graph's `ItemMeta` carries
-            // neither timestamp). Reading the id set out of `with_graph` first
-            // also keeps the documented graph→index lock order without nesting
-            // the two.
-            GraphRequest::Blocked { order } => {
-                let blocked: Vec<CloveId> = self
-                    .graph
-                    .with_graph(|graph, _ranks| {
-                        graph
-                            .blocked_items()
-                            .into_iter()
-                            .map(|b| b.id)
-                            .collect::<Vec<_>>()
-                    })
-                    .ok_or_else(unreadable)?;
-                Ok(GraphResponse::Blocked {
-                    ids: self.order_ids(&blocked, order)?,
-                })
-            }
             GraphRequest::Cycles => self
                 .graph
                 .with_graph(|graph, _ranks| GraphResponse::Cycles {
@@ -409,37 +385,6 @@ impl Dispatcher {
                 })
                 .ok_or_else(unreadable),
         }
-    }
-
-    /// Put `ids` into `order`, using the index's `ORDER BY` as the comparator.
-    ///
-    /// The index is asked for **every** id in the requested order and the subset
-    /// is retained from that sequence, rather than sorting the subset directly.
-    /// That is deliberate: it reuses `clove_index::query::order_by_sql` — the
-    /// same clause `ls`/`ready` run and the same one `sort_order.rs` already
-    /// pins against the file path — so `blocked` cannot become a third
-    /// implementation of the comparator. It is one indexed scan of a table the
-    /// daemon holds open, which is cheaper than the whole-store file read the
-    /// CLI is avoiding by asking at all.
-    fn order_ids(&self, ids: &[CloveId], order: Order) -> Result<Vec<String>, RpcError> {
-        let wanted: HashSet<&str> = ids.iter().map(CloveId::as_str).collect();
-        let mut index = self
-            .index
-            .lock()
-            .map_err(|_| RpcError::new("internal", "index lock poisoned"))?;
-        self.refresh(&mut index);
-        let rows = index
-            .query_list(&Filter {
-                mode: QueryMode::List,
-                order,
-                ..Default::default()
-            })
-            .map_err(|e| RpcError::new("graph_failed", e.to_string()))?;
-        Ok(rows
-            .into_iter()
-            .filter(|row| wanted.contains(row.id.as_str()))
-            .map(|row| row.id.to_string())
-            .collect())
     }
 
     /// Serve a lean list query, freshening the index inline first (the daemon owns
@@ -557,6 +502,7 @@ fn build_filter(q: &QueryRequest) -> (Filter, Option<PostFilter>) {
     filter.mode = match q.kind {
         QueryKind::List => QueryMode::List,
         QueryKind::Ready => QueryMode::Ready,
+        QueryKind::Blocked => QueryMode::Blocked,
     };
     // The requested ordering, carried over the wire. Without this the daemon
     // answered every query in `rank` order while the client's `_meta.sort`

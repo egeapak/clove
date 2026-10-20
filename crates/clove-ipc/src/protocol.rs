@@ -67,24 +67,19 @@ use serde::{Deserialize, Serialize};
 /// other write, and `StatusResponse::writes_applied`. A v9 daemon has none of
 /// the three methods, so the handshake must refuse it rather than let the call
 /// fail mid-import.
+///
+/// v10 also moves `blocked` onto `query` as [`QueryKind::Blocked`], so the
+/// daemon filters and windows it in SQL like `ls`/`ready`; `GraphRequest::Blocked`
+/// returned every blocked id for the client to hydrate and filter. A peer on
+/// either side of the change fails to decode the other's request and the client
+/// falls back to its own tier, so no bump beyond 10 was needed while 10 was
+/// unreleased.
 pub const PROTOCOL_VERSION: u32 = 10;
 
 /// A dependency-graph query (DESIGN §8.4 extension for `blocked`/`dep`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum GraphRequest {
-    /// Active items blocked by open or missing dependencies, in `order`.
-    ///
-    /// Ordering rides the request because the alternative was the client
-    /// re-sorting the returned ids — a second implementation of `Order`, living
-    /// in `cmd/blocked.rs`, that could only approximate `rank` (it has no
-    /// topological ranks of its own) and so special-cased it. The daemon has the
-    /// graph *and* the index, so it can answer in any order the shared
-    /// comparator defines.
-    Blocked {
-        #[serde(default)]
-        order: Order,
-    },
     /// All hard-dependency cycles.
     Cycles,
     /// The dependency tree rooted at `root`, to `depth` (use `usize::MAX` for full).
@@ -97,8 +92,6 @@ pub enum GraphRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "graph", rename_all = "snake_case")]
 pub enum GraphResponse {
-    /// Ordered blocked-item ids (the CLI reads those files for full detail).
-    Blocked { ids: Vec<String> },
     /// Each cycle as its member ids.
     Cycles { cycles: Vec<Vec<String>> },
     /// The dependency tree, or `None` if the root is unknown.
@@ -109,7 +102,7 @@ pub enum GraphResponse {
 
 /// Which lean list a `query` call runs — mirrors `clove_index::QueryMode`. Both
 /// `clove ls` and `clove query` are [`QueryKind::List`]; `clove ready` is
-/// [`QueryKind::Ready`].
+/// [`QueryKind::Ready`]; `clove blocked` is [`QueryKind::Blocked`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QueryKind {
@@ -117,6 +110,8 @@ pub enum QueryKind {
     List,
     /// Unblocked open/in_progress items.
     Ready,
+    /// Active items held up by an unclosed or missing hard dependency.
+    Blocked,
 }
 
 /// The payload of a `query` call: the filter the daemon turns into a
@@ -226,15 +221,6 @@ mod tests {
     #[test]
     fn graph_payloads_round_trip() {
         let reqs = vec![
-            GraphRequest::Blocked {
-                order: Order::default(),
-            },
-            GraphRequest::Blocked {
-                order: Order {
-                    field: clove_core::view::SortField::Updated,
-                    descending: true,
-                },
-            },
             GraphRequest::Cycles,
             GraphRequest::Tree {
                 root: "proj-7af".to_owned(),
@@ -251,9 +237,6 @@ mod tests {
         }
 
         let resps = vec![
-            GraphResponse::Blocked {
-                ids: vec!["proj-7af".to_owned()],
-            },
             GraphResponse::Cycles {
                 cycles: vec![vec!["proj-a".to_owned(), "proj-b".to_owned()]],
             },
@@ -294,6 +277,14 @@ mod tests {
                 order: Order::default(),
                 offset: 20,
                 limit: None,
+            },
+            QueryRequest {
+                kind: QueryKind::Blocked,
+                filters: clove_core::view::Filters::parse(Some("open"), None, None, None, None)
+                    .unwrap(),
+                order: Order::default(),
+                offset: 1,
+                limit: Some(1),
             },
         ];
         for case in cases {

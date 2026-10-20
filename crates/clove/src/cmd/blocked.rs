@@ -5,7 +5,7 @@
 //!
 //! - the local re-sort of the daemon's ids, a second implementation of
 //!   `view::Order` that could only fake `rank` (it had no topological ranks);
-//!   the sort rides `GraphRequest::Blocked` and the daemon applies it.
+//!   the sort rides the daemon `query` (`QueryKind::Blocked`) and SQL applies it.
 //! - the `blocked_by` decoration, which is now part of the engine's answer —
 //!   derived from each item's own dependency closure via `ops::graph_terms`, so
 //!   it is O(page) rather than a second whole-store graph build, and it is the

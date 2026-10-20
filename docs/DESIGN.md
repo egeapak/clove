@@ -1721,7 +1721,7 @@ on the refusal like on any daemon error.
 
 **`PROTOCOL_VERSION`** gates a mixed-version pair; the client fails a mismatch
 and falls back, which is safe because the daemon is a cache, not a source of
-truth. It is **9**:
+truth. It is **10**:
 
 | v | change |
 |---|---|
@@ -1732,6 +1732,7 @@ truth. It is **9**:
 | 7 | the hub: every connection opens with a version `Hello`; every project-scoped call carries a `Project` (path, `load`); `hub_status`, `attach`, `detach` added; `STATUS.web_url` added |
 | 8 | `Project` carries the project token, and refuses unknown fields; `Detached` reports a teardown still under way. A v7 hub would drop a v8 client's token on the floor, so the two meet at the handshake instead |
 | 9 | `view::Filters` gains `synced` and `parent` (§7.8). A v8 daemon drops them as unknown keys and answers as if neither was set, so a v9 client must not reach one: the hub refuses the hello and the client answers from the index or the files |
+| 10 | the import/sync writes `create_item`, `link_external` and `add_comment_at`, and `STATUS.writes_applied`; `GraphRequest::Blocked` **removed** in favour of `QueryKind::Blocked`, so `blocked` is filtered and windowed by the daemon's index like `ls`/`ready` |
 
 A v6 client never reaches the hub (it looks for `.clove/daemon.sock`); a hub
 client never reaches a 0.1.0 daemon (it looks in the runtime directory) except

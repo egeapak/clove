@@ -75,7 +75,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Daemon IPC protocol 10: the daemon applies imported items, external links and
   timestamped comments (`create_item`, `link_external`, `add_comment_at`), and
   `clove daemon status` reports `writes_applied`. A 0.1.x daemon is not used
-  until it is restarted on 0.2.0; writes fall back to the host.
+  until it is restarted on 0.2.0; writes fall back to the host. `blocked` moves
+  from the graph RPC onto `query` (`QueryKind::Blocked`), so the daemon filters,
+  counts and pages it in SQL like `ls`/`ready` instead of returning every
+  blocked id for the client to hydrate.
 
 - **Host IPC channel for plugins** (`PLUGIN_SYSTEM.md` §6.6): while `clove
   <plugin>` runs, the host serves the clove tool surface (the MCP tools'
