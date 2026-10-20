@@ -2,7 +2,7 @@
 
 The owner-only steps to cut a clove release: publish the workspace to crates.io
 **and** ship pre-built binaries via a GitHub Release + Homebrew tap. Tracks
-issue **#22**.
+issue **#105**.
 
 Publishing is a **one-way, mostly-irreversible** action (a version can be
 *yanked* but never re-uploaded, and a name, once taken, is yours forever). Read
