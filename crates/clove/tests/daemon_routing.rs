@@ -39,10 +39,14 @@ fn run_in(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
         .unwrap()
 }
 
+/// How long any wait may take before the test calls it a hang. Generous on
+/// purpose: a wait ends on its condition, never on this.
+const HANG_GUARD: Duration = Duration::from_secs(30);
+
 /// Wait until the daemon's watcher for the project at `root` watches: until
 /// then the daemon leaves reads to the index and the files.
 fn wait_watching(root: &std::path::Path) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let deadline = std::time::Instant::now() + HANG_GUARD;
     loop {
         let out = run_in(root, &["daemon", "status", "-f", "json"]);
         let status: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
@@ -105,7 +109,7 @@ fn spawn_daemon(clove_dir: &std::path::Path, bin: &std::path::Path) -> Daemon {
         .expect("spawn cloved");
     let pid = run.join("hub.pid");
     let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(5) {
+    while start.elapsed() < HANG_GUARD {
         if pid.exists() {
             let daemon = Daemon(child);
             // A daemon is started bare; the project is loaded by an ordinary

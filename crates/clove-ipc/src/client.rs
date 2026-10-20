@@ -952,7 +952,7 @@ mod tests {
         let welcome = Welcome::Ok {
             protocol: PROTOCOL_VERSION,
         };
-        let _hub = fake_hub(&hub, Some(welcome), Duration::from_secs(2));
+        let _hub = fake_hub(&hub, Some(welcome));
         let refused = DaemonClient::attach(&hub, &clove_dir, true).err();
         std::fs::set_permissions(&clove_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
         match refused {
@@ -1010,14 +1010,43 @@ mod tests {
         assert!(!hub.running());
     }
 
-    /// A stand-in hub on `hub` that answers each connection's first frame with
-    /// `reply` (or never, when `None`) for as long as `window` lasts.
+    /// A stand-in server on its own thread, up until it is finished or
+    /// dropped: a test needs it for as long as the test runs, however slowly.
     #[cfg(unix)]
-    fn fake_hub(
-        hub: &HubPaths,
-        reply: Option<Welcome>,
-        window: Duration,
-    ) -> std::thread::JoinHandle<()> {
+    struct FakeServer {
+        stop: Option<tokio::sync::oneshot::Sender<()>>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    #[cfg(unix)]
+    impl FakeServer {
+        fn new(
+            stop: tokio::sync::oneshot::Sender<()>,
+            thread: std::thread::JoinHandle<()>,
+        ) -> Self {
+            Self {
+                stop: Some(stop),
+                thread: Some(thread),
+            }
+        }
+
+        fn finish(self) {}
+    }
+
+    #[cfg(unix)]
+    impl Drop for FakeServer {
+        fn drop(&mut self) {
+            drop(self.stop.take());
+            if let Some(thread) = self.thread.take() {
+                thread.join().unwrap();
+            }
+        }
+    }
+
+    /// A stand-in hub on `hub` that answers each connection's first frame with
+    /// `reply` (or never, when `None`).
+    #[cfg(unix)]
+    fn fake_hub(hub: &HubPaths, reply: Option<Welcome>) -> FakeServer {
         use interprocess::local_socket::traits::tokio::Listener as _;
         use interprocess::local_socket::ListenerOptions;
         use std::sync::{Arc, Barrier};
@@ -1025,6 +1054,7 @@ mod tests {
         let name = hub.socket_name().unwrap();
         let bound = Arc::new(Barrier::new(2));
         let bound_srv = Arc::clone(&bound);
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let handle = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -1034,7 +1064,7 @@ mod tests {
                 let listener = ListenerOptions::new().name(name).create_tokio().unwrap();
                 bound_srv.wait();
                 let mut held = Vec::new();
-                let _ = timeout(window, async {
+                let serve = async {
                     loop {
                         if let Ok(stream) = listener.accept().await {
                             let mut framed = frame(stream);
@@ -1045,12 +1075,15 @@ mod tests {
                             held.push(framed);
                         }
                     }
-                })
-                .await;
+                };
+                tokio::select! {
+                    _ = serve => {}
+                    _ = stopped => {}
+                }
             });
         });
         bound.wait();
-        handle
+        FakeServer::new(stop, handle)
     }
 
     /// Regression (D-daemon-1): a live-but-slow hub that accepts the connection
@@ -1061,7 +1094,7 @@ mod tests {
     #[test]
     fn probe_keeps_socket_when_hub_is_alive_but_slow() {
         let (_tmp, hub) = hub_dir();
-        let handle = fake_hub(&hub, None, Duration::from_secs(2));
+        let handle = fake_hub(&hub, None);
         assert!(hub.sock().exists(), "listener created the socket file");
         assert!(
             DaemonClient::probe_at(&hub, Utf8Path::new("/repo/.clove")).is_none(),
@@ -1071,7 +1104,7 @@ mod tests {
             hub.sock().exists(),
             "live-but-slow hub's socket must survive a timeout"
         );
-        handle.join().unwrap();
+        handle.finish();
     }
 
     /// A hub of another protocol refuses the handshake; the refusal carries its
@@ -1085,7 +1118,7 @@ mod tests {
             code: codes::PROTOCOL_MISMATCH.to_owned(),
             message: "protocol mismatch".to_owned(),
         };
-        let handle = fake_hub(&hub, Some(refusal), Duration::from_millis(500));
+        let handle = fake_hub(&hub, Some(refusal));
         match DaemonClient::attach(&hub, Utf8Path::new("/repo/.clove"), false) {
             Err(ClientError::Refused { code, .. }) => {
                 assert_eq!(code, codes::PROTOCOL_MISMATCH)
@@ -1096,7 +1129,7 @@ mod tests {
         assert!(DaemonClient::probe_at(&hub, Utf8Path::new("/repo/.clove")).is_none());
         assert!(hub.sock().exists(), "a refusing hub is alive");
         assert_eq!(DaemonClient::health(&hub), DaemonHealth::Incompatible);
-        handle.join().unwrap();
+        handle.finish();
     }
 
     /// A hub that accepts but does not answer in time is alive but busy — never
@@ -1105,9 +1138,9 @@ mod tests {
     #[test]
     fn a_hub_that_does_not_answer_in_time_is_not_dead() {
         let (_tmp, hub) = hub_dir();
-        let handle = fake_hub(&hub, None, Duration::from_secs(2));
+        let handle = fake_hub(&hub, None);
         assert_ne!(DaemonClient::health(&hub), DaemonHealth::Dead);
-        handle.join().unwrap();
+        handle.finish();
     }
 
     #[test]
@@ -1144,7 +1177,7 @@ mod tests {
     /// A fake clove 0.1.0 daemon on `sock`: protocol 6, `ping` as the first
     /// tarpc request, no hello.
     #[cfg(unix)]
-    fn legacy_server(sock: Utf8PathBuf) -> std::thread::JoinHandle<()> {
+    fn legacy_server(sock: Utf8PathBuf) -> FakeServer {
         use futures::StreamExt;
         use interprocess::local_socket::traits::tokio::Listener as _;
         use interprocess::local_socket::{GenericFilePath, ListenerOptions, ToFsName};
@@ -1166,6 +1199,7 @@ mod tests {
 
         let name = sock.into_string().to_fs_name::<GenericFilePath>().unwrap();
         let (bound_tx, bound_rx) = std::sync::mpsc::channel();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let server = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -1174,18 +1208,21 @@ mod tests {
             rt.block_on(async move {
                 let listener = ListenerOptions::new().name(name).create_tokio().unwrap();
                 bound_tx.send(()).unwrap();
-                let _ = timeout(Duration::from_secs(2), async {
+                let serve = async {
                     let stream = listener.accept().await.unwrap();
                     BaseChannel::with_defaults(crate::build_transport(stream))
                         .execute(V6.serve())
                         .for_each(|response| response)
                         .await;
-                })
-                .await;
+                };
+                tokio::select! {
+                    _ = serve => {}
+                    _ = stopped => {}
+                }
             });
         });
         bound_rx.recv().unwrap();
-        server
+        FakeServer::new(stop, server)
     }
 
     /// A clove 0.1.0 daemon is recognized from its `.clove/daemon.sock`, which
@@ -1198,7 +1235,7 @@ mod tests {
         std::fs::write(pid_path(&clove_dir), b"4242").unwrap();
         let server = legacy_server(legacy_sock_path(&clove_dir));
         assert_eq!(legacy_daemon(&clove_dir), LegacyDaemon::Alive(4242));
-        server.join().unwrap();
+        server.finish();
     }
 
     /// A legacy socket that is a symlink is never trusted: whoever planted it
@@ -1214,8 +1251,7 @@ mod tests {
         let server = legacy_server(real.clone());
         std::os::unix::fs::symlink(&real, legacy_sock_path(&clove_dir)).unwrap();
         assert_eq!(legacy_daemon(&clove_dir), LegacyDaemon::Unknown(Some(4242)));
-        // Let the fake exit on its own timeout.
-        server.join().unwrap();
+        server.finish();
     }
 
     /// Pids that would signal a process group (0, and anything negative as an

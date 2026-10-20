@@ -23,7 +23,7 @@ impl Drop for KillHub {
 
 fn wait_gone(hub: &clove_ipc::HubPaths) {
     let start = Instant::now();
-    while hub.pid().exists() && start.elapsed() < Duration::from_secs(10) {
+    while hub.pid().exists() && start.elapsed() < support::HANG_GUARD {
         std::thread::sleep(Duration::from_millis(20));
     }
 }
@@ -60,7 +60,7 @@ fn a_liveness_poll_never_makes_a_starting_hub_give_up() {
             if let Some(status) = child.try_wait().unwrap() {
                 break Some(status);
             }
-            if hub.pid().exists() || start.elapsed() > Duration::from_secs(10) {
+            if hub.pid().exists() || start.elapsed() > support::HANG_GUARD {
                 break None;
             }
             std::thread::sleep(Duration::from_millis(5));

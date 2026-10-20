@@ -287,7 +287,7 @@ impl Slot {
                 SlotTask::GithubSync
             });
         }
-        let idle = idle_watchdog(d.state.clone(), self.settings.idle);
+        let idle = idle_watchdog(self.clove_dir.clone(), d.state.clone(), self.settings.idle);
         tasks.spawn(async move {
             idle.await;
             SlotTask::Idle
@@ -311,7 +311,11 @@ impl Slot {
 
 /// Resolve once the project has been idle for `idle` (DESIGN §8.8); never when
 /// `idle` is `None`. Any IPC call, web request, or watcher batch resets it.
-async fn idle_watchdog(state: Arc<Mutex<DaemonState>>, idle: Option<Duration>) {
+async fn idle_watchdog(
+    clove_dir: camino::Utf8PathBuf,
+    state: Arc<Mutex<DaemonState>>,
+    idle: Option<Duration>,
+) {
     let Some(idle) = idle else {
         std::future::pending::<()>().await;
         return;
@@ -320,6 +324,12 @@ async fn idle_watchdog(state: Arc<Mutex<DaemonState>>, idle: Option<Duration>) {
     let tick = (idle / 4).max(Duration::from_millis(25));
     loop {
         tokio::time::sleep(tick).await;
+        if crate::knobs::idle_held(clove_dir.as_std_path()) {
+            if let Ok(mut state) = state.lock() {
+                state.mark_event();
+            }
+            continue;
+        }
         let idle_for = state.lock().map(|s| s.idle_for()).unwrap_or_default();
         if idle_for >= idle {
             return;
