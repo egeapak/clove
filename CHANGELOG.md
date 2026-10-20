@@ -29,6 +29,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Web timeline hover guide:** moving the pointer over the timeline shows a
+  vertical guide line and a date chip on the top axis with the date under the
+  cursor (mouse, touch and pen; themed like the tooltip) (#84).
 - **The shipped plugins use the host IPC channel:** `clove-import-tk`,
   `clove-import-beads` and `clove-sync-github` no longer open the store; every
   read and write goes through the `clove` that runs them, via the new `store.*`
