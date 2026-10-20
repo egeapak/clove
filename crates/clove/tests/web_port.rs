@@ -117,6 +117,9 @@ fn spawn_serve(dir: &Path, args: &[&str]) -> (Child, u16) {
             break Some(port);
         }
     };
+    // Keep draining stderr for the child's lifetime: `serve` prints more lines
+    // after the URL, and writing them to a closed pipe kills it mid-test.
+    std::thread::spawn(move || std::io::copy(&mut stderr, &mut std::io::sink()));
     // Serving means accepting connections on the announced port, not merely
     // not having exited yet.
     let serving =
