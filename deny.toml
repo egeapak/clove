@@ -5,9 +5,12 @@
 all-features = true
 
 [licenses]
-# Permissive licenses only. The base policy is MIT / Apache-2.0 / BSD / ISC
-# (per DESIGN.md §1); the remaining entries are equally
-# permissive licenses that transitive dependencies in the tree carry.
+# Third-party dependencies: permissive licenses only (MIT / Apache-2.0 / BSD /
+# ISC and the equally permissive entries below). Every entry must be compatible
+# with AGPL-3.0, clove's own license, and must not be copyleft: the plugin SDK
+# crates (clove-types, clove-plugin) are MIT OR Apache-2.0 and must stay so.
+# clove's own AGPL crates are allowed one by one in [[licenses.exceptions]]
+# below, so a third-party AGPL dependency is still rejected.
 allow = [
     "MIT",
     "Apache-2.0",
@@ -26,6 +29,28 @@ allow = [
 # encountered in the tree (e.g. after a dep upgraded off Unicode-DFS-2016).
 unused-allowed-license = "allow"
 confidence-threshold = 0.9
+
+# clove's own crates are AGPL-3.0-only (LICENSE). Allowed per crate, not in
+# `allow`, so no third-party AGPL dependency can slip in. The plugin SDK crates
+# (clove-types, clove-plugin, clove-plugin-echo) are MIT OR Apache-2.0 and need
+# no entry. A new AGPL workspace crate needs a line here.
+exceptions = [
+    { crate = "clove-cli", allow = ["AGPL-3.0-only"] },
+    { crate = "cloved", allow = ["AGPL-3.0-only"] },
+    { crate = "clove-core", allow = ["AGPL-3.0-only"] },
+    { crate = "clove-engine", allow = ["AGPL-3.0-only"] },
+    { crate = "clove-import", allow = ["AGPL-3.0-only"] },
+    { crate = "clove-import-beads", allow = ["AGPL-3.0-only"] },
+    { crate = "clove-import-tk", allow = ["AGPL-3.0-only"] },
+    { crate = "clove-index", allow = ["AGPL-3.0-only"] },
+    { crate = "clove-ipc", allow = ["AGPL-3.0-only"] },
+    { crate = "clove-mcp", allow = ["AGPL-3.0-only"] },
+    { crate = "clove-service", allow = ["AGPL-3.0-only"] },
+    { crate = "clove-sync-github", allow = ["AGPL-3.0-only"] },
+    { crate = "clove-tui", allow = ["AGPL-3.0-only"] },
+    { crate = "clove-web", allow = ["AGPL-3.0-only"] },
+    { crate = "xtask", allow = ["AGPL-3.0-only"] },
+]
 
 [bans]
 multiple-versions = "warn"

@@ -28,6 +28,11 @@ fn version_human_prints_plain_line() {
     let (ok, out) = stdout_string(&["version"], None);
     assert!(ok);
     assert!(out.starts_with("clove "), "got: {out:?}");
+    // The AGPL-3.0 section 13 source offer rides on the second line.
+    assert!(
+        out.contains("license: AGPL-3.0-only; source: "),
+        "got: {out:?}"
+    );
 }
 
 #[test]
@@ -42,6 +47,10 @@ fn version_json_is_a_valid_envelope() {
     assert_eq!(value["ok"], true);
     assert_eq!(value["data"]["schema"], 1);
     assert!(value["data"]["clove"].is_string());
+    assert_eq!(value["data"]["license"], "AGPL-3.0-only");
+    assert!(value["data"]["source"]
+        .as_str()
+        .is_some_and(|s| s.starts_with("https://")));
 }
 
 #[test]

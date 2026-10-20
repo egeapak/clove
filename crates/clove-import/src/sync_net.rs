@@ -18,21 +18,17 @@
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
 
-use clove_core::write::write_item_file;
-use clove_core::{apply_edit, ItemStore};
-use clove_types::id::new_id;
 use clove_types::model::CURRENT_SCHEMA_VERSION;
 use clove_types::{CloveId, EditRequest, Item, ItemFrontmatter, ItemStatus, LabelEdit};
 
 use octocrab::models::issues::Issue;
 use octocrab::Octocrab;
 
-use clove_core::comments::{add_comment_at, list_comments};
-
 use crate::error::ImportError;
 use crate::github::net::{build_client, fetch_all, net_err, parse_repo_spec};
 use crate::github::{parse_gh_number, StagedIssue};
 use crate::map::build_external_ref_index;
+use crate::store::Store;
 use crate::sync::{
     body_hash, plan_comments, plan_sync, ConflictPolicy, Direction, GhComment, LocalComment,
     PullUpdate, PushCreate, PushUpdate, SyncPlan, SyncReport, SyncState, SyncSummary,
@@ -48,8 +44,7 @@ const SOURCE_GITHUB: &str = "github";
 /// planning and persisted after a successful apply.
 pub fn sync_github(
     spec: &str,
-    store: &ItemStore,
-    prefix: &str,
+    store: &dyn Store,
     policy: ConflictPolicy,
     sync_comments: bool,
     dry_run: bool,
@@ -119,7 +114,7 @@ pub fn sync_github(
 
     let apply_result = rt.block_on(async {
         let crab = build_client()?;
-        let outcome = apply_plan(&crab, &owner, &repo, plan, store, prefix, &mut state).await?;
+        let outcome = apply_plan(&crab, &owner, &repo, plan, store, &mut state).await?;
         let mut report = outcome.report;
         // Comment sync is inherently two-way and its per-issue fingerprints are
         // coupled to the skip optimization, so it runs only for a full `Both`
@@ -199,11 +194,11 @@ fn open_sync_lock(
 /// stale GitHub assignee as a human-added extra and keep it, leaving both the old
 /// and new assignee on the issue.
 fn record_synced_assignees(
-    store: &ItemStore,
+    store: &dyn Store,
     state: &mut SyncState,
     reconciled: &std::collections::HashSet<String>,
 ) -> Result<(), ImportError> {
-    let (frontmatters, _errors) = store.scan_frontmatter()?;
+    let frontmatters = store.scan_frontmatter()?;
     for fm in frontmatters {
         if let Some(external_ref) = &fm.external_ref {
             if external_ref.starts_with("gh-") && reconciled.contains(external_ref) {
@@ -219,8 +214,8 @@ fn record_synced_assignees(
 /// Build the local side of the diff: one object per item, its serialized
 /// frontmatter plus `body` (the exact fields [`plan_sync`] / `build_export_item`
 /// read). Errors if any item file fails to parse (see below).
-fn local_objects(store: &ItemStore) -> Result<Vec<Map<String, Value>>, ImportError> {
-    let (items, errors) = store.scan()?;
+fn local_objects(store: &dyn Store) -> Result<Vec<Map<String, Value>>, ImportError> {
+    let crate::store::Scan { items, errors } = store.scan()?;
     // Refuse to sync when any local item file fails to parse. A dropped item is
     // invisible to the planner, so its linked remote issue would be seen as having
     // no local counterpart and pull-created as a DUPLICATE local item carrying the
@@ -228,11 +223,12 @@ fn local_objects(store: &ItemStore) -> Result<Vec<Map<String, Value>>, ImportErr
     // the user repairs the file first (`clove doctor` lists the broken ones).
     if let Some(err) = errors.first() {
         return Err(ImportError::Source {
-            path: err.path().to_owned(),
+            path: camino::Utf8PathBuf::from(&err.path),
             message: format!(
                 "{} local item file(s) failed to parse; fix them before syncing \
-                 (see `clove doctor`): {err}",
-                errors.len()
+                 (see `clove doctor`): {}",
+                errors.len(),
+                err.message
             ),
         });
     }
@@ -263,8 +259,7 @@ async fn apply_plan(
     owner: &str,
     repo: &str,
     plan: SyncPlan,
-    store: &ItemStore,
-    prefix: &str,
+    store: &dyn Store,
     state: &mut SyncState,
 ) -> Result<ApplyOutcome, ImportError> {
     let mut report = SyncReport {
@@ -289,7 +284,7 @@ async fn apply_plan(
 
     // --- Pulls (remote → local), through the unified write path. ---
     for pull in &plan.pull_create {
-        pull_create(store, prefix, &pull.staged, state)?;
+        pull_create(store, &pull.staged, state)?;
         reconciled.insert(pull.staged.external_ref.clone());
         report.pulled_created += 1;
     }
@@ -317,13 +312,12 @@ async fn apply_plan(
 /// Create a brand-new local item from a remote issue (mirrors the importer's
 /// write path), then record the sync fingerprint.
 fn pull_create(
-    store: &ItemStore,
-    prefix: &str,
+    store: &dyn Store,
     staged: &StagedIssue,
     state: &mut SyncState,
 ) -> Result<(), ImportError> {
     let now = truncate(Utc::now());
-    let id = new_id(prefix, store.issues_dir())?;
+    let id = store.new_id()?;
     let frontmatter = ItemFrontmatter {
         schema: CURRENT_SCHEMA_VERSION,
         id: id.clone(),
@@ -352,7 +346,7 @@ fn pull_create(
         frontmatter,
         body: staged.body.clone(),
     };
-    write_item_file(&item, &store.path_for(&id))?;
+    store.create_item(&item)?;
     state.record(&staged.external_ref, staged.updated_at, now);
     state.record_content_hash(
         &staged.external_ref,
@@ -364,7 +358,7 @@ fn pull_create(
 /// Apply remote edits to an existing local item via the unified `apply_edit`
 /// path, then record the post-edit fingerprint.
 fn pull_update(
-    store: &ItemStore,
+    store: &dyn Store,
     pull: &PullUpdate,
     state: &mut SyncState,
 ) -> Result<(), ImportError> {
@@ -415,14 +409,14 @@ fn pull_update(
         let want: std::collections::BTreeSet<&CloveId> = remote_deps.iter().collect();
         let have: std::collections::BTreeSet<&CloveId> = current.frontmatter.deps.iter().collect();
         for dep in want.difference(&have) {
-            let _ = clove_core::ops::dep_add(store, &pull.clove_id, dep, now);
+            let _ = store.dep_add(&pull.clove_id, dep);
         }
         for dep in have.difference(&want) {
-            let _ = clove_core::ops::dep_remove(store, &pull.clove_id, dep, now);
+            let _ = store.dep_remove(&pull.clove_id, dep);
         }
     }
 
-    let value = apply_edit(store, &pull.clove_id, &req, now)?;
+    let value = store.apply_edit(&pull.clove_id, &req)?;
     let local_updated = value_updated(&value).unwrap_or_else(|| truncate(now));
     state.record(&staged.external_ref, staged.updated_at, local_updated);
     state.record_content_hash(
@@ -440,7 +434,7 @@ async fn push_create(
     owner: &str,
     repo: &str,
     push: &PushCreate,
-    store: &ItemStore,
+    store: &dyn Store,
     state: &mut SyncState,
 ) -> Result<String, ImportError> {
     let item = &push.item;
@@ -626,7 +620,7 @@ async fn sync_all_comments(
     crab: &Octocrab,
     owner: &str,
     repo: &str,
-    store: &ItemStore,
+    store: &dyn Store,
     state: &mut SyncState,
     remote_comment_counts: &std::collections::HashMap<String, u64>,
 ) -> Result<(usize, usize), ImportError> {
@@ -646,7 +640,8 @@ async fn sync_all_comments(
             continue;
         };
 
-        let local: Vec<LocalComment> = list_comments(store.issues_dir(), id)?
+        let local: Vec<LocalComment> = store
+            .comments(id)?
             .into_iter()
             .map(|c| LocalComment {
                 author: c.author,
@@ -685,7 +680,7 @@ async fn sync_all_comments(
             } else {
                 comment.author.clone()
             };
-            add_comment_at(store.issues_dir(), id, &author, &comment.body, when)?;
+            store.add_comment(id, &author, &comment.body, when)?;
             entry.gh_comment_ids.insert(comment.id);
             entry.record_comment_hash(body_hash(&comment.body));
             pulled += 1;
@@ -770,19 +765,14 @@ async fn fetch_comments(
 /// clobbered edit is lost entirely. The per-repo `.clove/sync/<repo>.lock` this
 /// runs under does not help: it excludes other *syncs*, not other writers.
 fn link_local(
-    store: &ItemStore,
+    store: &dyn Store,
     clove_id: &str,
     external_ref: &str,
 ) -> Result<DateTime<Utc>, ImportError> {
     let id = CloveId::new(clove_id).map_err(|e| ImportError::Record {
         message: format!("invalid local id `{clove_id}`: {e}"),
     })?;
-    let saved = store.update_with(&id, Utc::now(), |item| {
-        item.frontmatter.source_system = Some(SOURCE_GITHUB.to_owned());
-        item.frontmatter.external_ref = Some(external_ref.to_owned());
-        Ok(())
-    })?;
-    Ok(saved.frontmatter.updated)
+    store.link_external(&id, SOURCE_GITHUB, external_ref)
 }
 
 /// Parse the `updated` field out of an `apply_edit` result object.

@@ -23,6 +23,7 @@
 mod clap_util;
 mod context;
 mod envelope;
+mod host;
 mod run;
 pub mod stdout;
 
@@ -30,12 +31,17 @@ pub mod stdout;
 pub use clap_util::{clap_exit_code, parse_format};
 pub use context::{PluginColor, PluginContext, PluginEnvError};
 pub use envelope::{emit_error, emit_success, emit_success_with_meta, ENVELOPE_VERSION};
+pub use host::{HostClient, HostError, HostInfo, HOST_API};
 pub use run::{
     info_requested, run, run_with_info, unsupported_capability, PluginArgs, PluginInfo,
     CLOVE_PLUGIN_API,
 };
 
 // Re-exported so a plugin's closure signature can name them without adding
-// clove-core/clove-types to its own dependency list for the common case.
-pub use clove_core::{CloveConfig, ItemStore, OutputFormat};
-pub use clove_types::CloveError;
+// clove-types to its own dependency list for the common case. This crate never
+// depends on clove-core: it is the permissively licensed (MIT OR Apache-2.0)
+// plugin SDK, and clove-core is AGPL. A plugin that opens the store itself
+// depends on clove-core directly (and is then a combined work under the AGPL).
+/// The host IPC call arguments (the MCP tool arguments), for [`HostClient`].
+pub use clove_types::tool;
+pub use clove_types::{CloveError, OutputFormat};

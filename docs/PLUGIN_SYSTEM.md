@@ -162,9 +162,9 @@ returns the first that resolves:
 | `export` | `export` → `sync` → `import` | dedicated exporter, else a two-way `sync` binary (push is one view), else the cross-sibling importer |
 | `sync`   | `sync` | **no fallback** — a one-way import/export binary cannot serve a two-way reconcile |
 
-The order is **load-bearing**: because dispatch `exec`s the first *existing*
-binary and cannot fall through to a later candidate once one is found (§6.1,
-exec-no-retry), the most-correct binary must come first — the dedicated
+The order is **load-bearing**: because dispatch runs the first *existing*
+binary and does not fall through to a later candidate once one is found (§6.1,
+no retry), the most-correct binary must come first — the dedicated
 `clove-<mux>-<provider>` always leads, so an explicitly-installed one wins over
 the umbrella (this preserves the §4.3 precedence rule). Resolution is purely
 **structural / probe-free** on the hot path: `resolve_mux` is the same cheap
@@ -236,12 +236,40 @@ construction, path search, `resolve(name) -> Option<Utf8PathBuf>`, and
 
 ### 6.1 Invocation
 
-The host **replaces its own process image** where possible (`exec` on Unix via
-`std::os::unix::process::CommandExt::exec`; spawn-and-wait, propagating the exit
-code, on Windows). Rationale: a plugin like `clove tui`-style or an interactive
-auth flow needs the real tty, and streaming output must not be buffered by the
-host. For `sync`/`import`/`export` where the host wants to *post-process* the
-plugin's result (rare), it spawns and pipes instead — but the default is exec.
+The host **spawns the plugin and waits for it** on every platform
+(`crates/clove/src/plugin_child.rs`). It stays alive so it can serve the
+plugin's host IPC channel (§6.6). Until 0.2.0 the host `exec`'d the plugin on
+Unix, replacing its own image; the rules below keep the visible behavior the
+same:
+
+- **stdio is inherited**, never piped: a `clove tui`-style plugin or an
+  interactive auth flow gets the real tty, and output is not buffered by the host.
+- **Ctrl-C / Ctrl-\** go to the whole foreground process group, so the plugin
+  receives them directly. The host catches SIGINT/SIGQUIT with a no-op handler
+  so it outlives the plugin. A caught signal resets to its default on exec, so
+  the plugin keeps default behavior (an `SIG_IGN` would be inherited). An
+  inherited `SIG_IGN` (`nohup`, a background job) is left in place for both.
+- **Signals sent by another process to the host pid** (`kill`, `timeout`,
+  service managers) are forwarded to the plugin, whose pid is no longer the
+  one the user started. On Linux this covers SIGINT, SIGQUIT, SIGTERM and
+  SIGHUP: `si_code` tells a `kill` from a terminal-generated signal, which the
+  plugin already received. Elsewhere only SIGTERM and SIGHUP are forwarded, so
+  Ctrl-C is never delivered twice; there a `kill -INT <host pid>` is absorbed.
+- A signal that a process sends to the **whole process group** (`kill -TERM
+  -<pgid>`, `timeout` without `--foreground`) reaches the plugin twice: once
+  directly and once forwarded. A plugin that treats a second signal as "force
+  quit" should allow for this.
+- Forwarding stops when the plugin exits, before the host reaps it, so a
+  recycled pid is never signalled. If the plugin cannot be spawned, the host
+  removes its IPC socket directory and reports an I/O error.
+- **Exit status:** the host exits with the plugin's exit code. If the plugin dies
+  of a signal, the host resets that signal to its default and raises it on
+  itself (with core dumps off), so the caller sees the same signal death.
+- **Windows:** the host registers a console control handler function that
+  ignores Ctrl-C/Ctrl-Break while it waits (not `SetConsoleCtrlHandler(NULL,
+  TRUE)`, which the plugin would inherit), and exits with the plugin's exit code.
+- The plugin's pid differs from the host's. A plugin that needs the pid the user
+  started should not assume `getppid()` is a shell.
 
 argv passed to the plugin (cargo-compatible):
 
@@ -295,6 +323,13 @@ paths are absolute. The plugin inherits the rest of the environment too, so
 | `CLOVE_QUIET` | `0` \| `1` — suppress informational stderr. |
 | `CLOVE_NO_INDEX` | `0` \| `1` — the `--no-index` global flag. |
 | `CLOVE_DEEP` | `0` \| `1` — the `--deep` staleness flag. |
+
+**Host IPC channel** (§6.6; since 0.2.0)
+
+| Var | Meaning |
+|-----|---------|
+| `CLOVE_HOST_SOCKET` | The host's local socket: a filesystem path on Unix, a `\\.\pipe\…` path on Windows. Omitted when the channel could not start (the host then also removes any inherited value, so a nested `clove` never passes on an outer host's socket). |
+| `CLOVE_HOST_TOKEN` | 64 hex digits (256 bits) that authenticate to that socket. Valid until the plugin exits; any process the plugin starts may use it. |
 
 Rules: booleans are exactly `0`/`1`; enums are the lowercase wire spelling; a var
 whose value is logically absent (e.g. `CLOVE_PROVIDER` for a generic plugin) is
@@ -375,9 +410,107 @@ splitting `sync_net.rs` — which today interleaves fetch → apply → `externa
 write-back → comment reconcile — into a plan phase and an apply phase with the
 process boundary between them. More work, deferred (§10).
 
-Recommendation: **ship (A)**; keep (B) as a future hardening step if untrusted
-third-party plugins ever become a goal (a fat plugin runs arbitrary code with the
-host's store access — see §7).
+Since 0.2.0 a third way exists, and **all plugins use it**, the first-party
+ones included:
+
+**(C) Host IPC — the host applies, live.** The plugin calls the host over the
+host IPC channel (§6.6) with the MCP tool arguments; the host runs each call
+through `clove-service` (the same engine as the MCP server), so every write uses
+the unified write path in the host (the `cloved` daemon when one runs). The
+plugin links only the permissively licensed SDK, so it may use any license
+(§12). The first-party plugins (`clove-import-tk`, `clove-import-beads`,
+`clove-sync-github`) reach the store only through it: their logic in
+`clove-import` is written against the `clove_import::Store` trait, and the
+plugins pass `HostStore` (the `store.*` tier). (A) remains possible but no
+shipped plugin uses it.
+
+### 6.6 Host IPC channel
+
+While a plugin runs, the host serves the clove tool surface to it
+(`crates/clove/src/plugin_host.rs`; client: `clove_plugin::HostClient`, via
+`PluginContext::host()`).
+
+**Transport.** One local socket per invocation, through `interprocess` (sync
+API, std threads; no tokio runtime on the server threads).
+
+- Unix: a socket `s` inside a fresh `0700` directory `$TMPDIR/clove-plugin-<rand>/`
+  (falls back to `/tmp` when the path would exceed `sun_path`). The directory is
+  removed after the plugin exits.
+- Windows: a named pipe `\\.\pipe\clove-plugin-<pid>-<rand>` with an
+  owner-only security descriptor.
+- Both sides name it with `to_fs_name::<GenericFilePath>()`.
+
+**Authentication.** Unix checks the peer uid at accept; Windows checks the
+client SID after the first message. The first message must be `hello` with the
+token from `$CLOVE_HOST_TOKEN` (compared in constant time). On Unix the whole
+`hello` line must arrive within 5 seconds (one deadline, not a per-read
+timeout) and be at most 64 KiB; otherwise, or with a wrong token, the host
+answers `-32001` and closes the connection. Windows named pipes have no
+receive timeout in `interprocess`, so there an idle unauthenticated connection
+(only this user can open one) holds its thread until the plugin exits. The
+token is reusable for the whole invocation.
+
+**Framing.** Newline-delimited JSON-RPC 2.0: one request object per line, UTF-8.
+A request line over 16 MiB is read to its end, answered with `-32600`, and the
+connection is closed. Responses are not capped: page large reads with `limit`/`offset`.
+Batches (arrays) are rejected with `-32600`. A request without `id` is a
+notification: it runs and gets no reply. Each connection has its own thread and
+answers its requests in order; there is no cancellation and no host timeout.
+
+**Methods** (`host_api = 1`):
+
+| Method | Params | Result |
+|---|---|---|
+| `hello` | `{token, plugin_api, client: {name}}` | `{host_api, host_version, schema, clove_dir, methods}` |
+| `config` | — | `{id_prefix, default_type, types, statuses, priorities}` |
+| `list`, `ready`, `blocked`, `show`, `search`, `comments`, `dep_tree`, `stats` | the MCP tool arguments (`clove_types::tool`) | the MCP tool result (`mcp-item-page.json`, …) |
+| `create`, `set_status`, `edit`, `comment`, `dep_add`, `dep_remove`, `set_parent` | as above | as above |
+| `store.scan` | — | `{items: [{frontmatter, body}], errors: [{path, message}]}` |
+| `store.scan_frontmatter` | — | `{frontmatters, errors}` |
+| `store.get` | `{id}` | `{frontmatter, body}` |
+| `store.new_id` | — | `{id}` (a fresh id with the repository prefix) |
+| `store.create_item` | `{item: {frontmatter, body}}` | `{id}` |
+| `store.apply_edit` | `{id, request: EditRequest}` | the edited item |
+| `store.dep_add`, `store.dep_remove` | `{id, dep}` | the edited item |
+| `store.link_external` | `{id, source_system, external_ref}` | `{updated}` |
+| `store.comments` | `{id}` | `[{timestamp, author, body}]` |
+| `store.add_comment` | `{id, author, body, timestamp}` | `{id, path}` |
+
+The **store tier** (`store.*`, types in `clove_types::tool`) is what an
+importer or a sync engine needs to mirror another tracker: whole items with
+their own timestamps and `external_ref`, ids minted by the host, comments with
+their original author and time. Every write goes through the validated ops in
+`clove_core::ops`: `store.create_item` is `create_item` (the field checks of
+`create`, and it never overwrites an existing id; an existing id is
+`VALIDATION_ERROR`), `store.apply_edit` is `apply_edit`, the dependency methods
+are the cycle-checked `dep_add`/`dep_remove`, `store.link_external` is
+`link_external`, and `store.add_comment` is `comment_at`. Like the tools, these
+writes run in the `cloved` daemon when one serves the project, and in the host
+process otherwise. The writer stamps `updated`; no write takes a time from the
+plugin, except a comment's own `timestamp`. The store tier is not exposed over
+MCP. `clove_import::HostStore` implements
+`clove_import::Store` on top of it.
+
+The method names are the MCP tool names without `clove_` (`clove_new` is
+`create`, `clove_status` is `set_status`). Reads honour the host's `--no-index`
+and `--deep`. The SDK checks that `hello`'s `clove_dir` equals `$CLOVE_DIR`.
+
+**Errors.** `-32700` parse error, `-32601` unknown method, `-32602` invalid
+params (`data.clove_code = "VALIDATION_ERROR"`), and `-32000` for a tool that ran
+and failed, with `data: {clove_code, exit}` — the code and exit status a built-in
+command reports for the same failure (`ITEM_NOT_FOUND` / 2, …). The SDK turns
+that into a `CloveError`, so a plugin exits the way the built-in would.
+
+**Versioning.** `host_api` is bumped only on a breaking change to a method's
+params or result; new methods are additive, so check `methods` (or
+`HostClient::supports`) before calling a newer one. `CLOVE_PLUGIN_API` stays `1`:
+the channel is an addition to that contract. A plugin that needs the channel
+keeps `min_clove_plugin_api = 1` and fails at run time with
+`HostError::Unavailable` under an older host or when run directly.
+
+**Lifetime.** The server stops when the host exits, right after the plugin. A
+helper process the plugin started and that is still connected loses its
+connection then.
 
 ### 6.5 `PluginContext` — materializing the env into a typed struct
 
@@ -412,6 +545,9 @@ pub struct PluginContext {
     pub quiet: bool,                // $CLOVE_QUIET
     pub no_index: bool,             // $CLOVE_NO_INDEX
     pub deep: bool,                 // $CLOVE_DEEP
+    // host IPC channel (§6.6)
+    pub host_socket: Option<String>, // $CLOVE_HOST_SOCKET
+    pub host_token: Option<String>,  // $CLOVE_HOST_TOKEN
 }
 
 impl PluginContext {
@@ -419,14 +555,14 @@ impl PluginContext {
     /// error that maps onto the standard error envelope + exit code, so a plugin
     /// launched outside `clove` fails loudly and legibly.
     pub fn from_env() -> Result<Self, PluginEnvError>;
-
-    /// Open the file store the fat-plugin way (§6.4A): `ItemStore::new(root)`.
-    /// Keeps the plugin on the unified write path with one call.
-    pub fn open_store(&self) -> ItemStore;
-    /// Load `config.toml` (the host already validated it; this re-reads it).
-    pub fn load_config(&self) -> Result<CloveConfig, CloveError>;
 }
 ```
+
+`clove-plugin` does not open the store and does not depend on `clove-core`. It
+is the permissively licensed SDK (MIT OR Apache-2.0); `clove-core` is AGPL. A
+fat plugin (§6.4A) depends on `clove-core` itself and opens the store with
+`clove_core::ItemStore::new(cx.root.clone())`; that plugin is then a combined
+work under the AGPL (see §12).
 
 Ergonomics: the crate also re-exports the §6.3 envelope helpers so a whole plugin
 `main` is roughly:
@@ -434,7 +570,7 @@ Ergonomics: the crate also re-exports the §6.3 envelope helpers so a whole plug
 ```rust
 fn main() -> std::process::ExitCode {
     clove_plugin::run(|cx: &PluginContext, args: PluginArgs| {
-        let store = cx.open_store();
+        let store = clove_core::ItemStore::new(cx.root.clone()); // fat plugin
         // …do the provider work through clove_core::apply_edit…
         Ok(json!({ "pulled_created": n /* … */ }))   // wrapped into the {v,ok,data} envelope
     })
@@ -574,7 +710,11 @@ because the boundary is a subprocess.
 
 ## 10. Security, versioning, open questions
 
-- **Trust.** `clove` will exec any `clove-*` on `PATH`, exactly like cargo/git/
+- **Host IPC.** The channel (§6.6) is reachable only by this user (socket
+  directory mode / pipe DACL, plus a uid/SID check) and only with the
+  per-invocation token, which lives in the plugin's environment (readable by the
+  same user, who can already edit `.clove/` directly).
+- **Trust.** `clove` will run any `clove-*` on `PATH`, exactly like cargo/git/
   kubectl. A fat plugin (§6.4A) runs with full store write access. This is the
   same trust model as any `cargo install`ed subcommand; document it. If untrusted
   third-party plugins ever matter, the thin plan-only boundary (§6.4B) plus a
@@ -583,9 +723,8 @@ because the boundary is a subprocess.
   change to the env/argv/envelope contract; the JSON envelope stays `v:1`
   independently. A plugin that sees an unknown `CLOVE_PLUGIN_API` should still
   attempt to run and warn, not hard-fail (forward-compat).
-- **Windows exec.** No `execvp`; spawn-and-wait propagating the child exit code,
-  and forward Ctrl-C. Interactive plugins get the real console since the host
-  isn't holding the pipes.
+- **Process model.** Spawn-and-wait on every platform (§6.1); interactive
+  plugins get the real console since the host does not hold the pipes.
 - **Decided:** clove's own serialization is built-in; foreign-tracker providers
   are external plugins (§4.2). `import`/`export` both keep native `json`/`jsonl`
   built-in (inverse round-trip); `sync` (github) and the foreign import providers
@@ -643,3 +782,24 @@ because the boundary is a subprocess.
 
 Steps 1–2 are independently valuable (they unlock *any* third-party subcommand)
 and carry no risk to existing github behavior; 3–6 are the github migration.
+
+## 12. Licensing of plugins
+
+clove is AGPL-3.0-only with an additional permission for plugins
+(`LICENSE-PLUGIN-EXCEPTION`, an AGPL section 7 permission). The plugin SDK crates
+(`clove-types`, `clove-plugin`, `clove-plugin-echo`) are MIT OR Apache-2.0.
+
+- **Thin plugin** (any license): it links only the SDK crates and talks to clove
+  only through the plugin interface — argv, the `CLOVE_*` environment (§6.2), the
+  output envelope and exit codes (§6.3), and the host IPC protocol (§6.6). The
+  exception lets you convey it under terms of your choice, also together with
+  clove.
+- **AGPL plugin**: it links `clove-core`, `clove-import` or any other AGPL clove
+  crate (for example to open the store directly, §6.4A). It is a combined work
+  under AGPL-3.0-only. The first-party plugins (`clove-sync-github`,
+  `clove-import-tk`, `clove-import-beads`) are AGPL because they link
+  `clove-import` for the tracker mappings; they still read and write only
+  through the host channel.
+
+`clove-plugin` never depends on `clove-core`; CI checks the SDK's dependency
+tree for copyleft licenses on every push.

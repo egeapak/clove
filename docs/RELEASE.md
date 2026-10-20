@@ -1,4 +1,4 @@
-# Release runbook — clove v0.1.5
+# Release runbook — clove v0.2.0
 
 The owner-only steps to cut a clove release: publish the workspace to crates.io
 **and** ship pre-built binaries via a GitHub Release + Homebrew tap. Tracks
@@ -13,8 +13,8 @@ the whole runbook once before running any `cargo publish`.
 > still `clove` — `[[bin]] name = "clove"`). The ten core crate names were
 > verified **free** on crates.io on 2026-07-18; the four crates the plugin system
 > added (`clove-plugin` + the three `clove-{sync-github,import-tk,import-beads}`
-> plugins) and `clove-engine` (the read tier, added after that check) must be
-> re-verified too. Re-verify all fifteen at publish time (step 2).
+> plugins), `clove-engine` (the read tier, added after that check) and
+> `clove-service` (the tool engine, added in 0.2.0) must be re-verified too. Re-verify all sixteen at publish time (step 2).
 
 > **Order of operations.** The crates download the web UI from the GitHub Release
 > at build time, so the release has to exist before the crates do:
@@ -56,7 +56,7 @@ cargo test --workspace --all-features
 ( cd crates/clove-web/web && npm ci && npm run check && npm run test )
 ```
 
-Rehearse the publish before tagging. The dry run packages and verifies all fifteen
+Rehearse the publish before tagging. The dry run packages and verifies all sixteen
 crates against each other, with `clove-web` taking the SPA from your checkout
 (the GitHub Release does not exist yet); it needs a built web UI and a clean
 tracked tree:
@@ -81,11 +81,11 @@ Names can be claimed by anyone at any time. Right before publishing:
 
 ```sh
 # The User-Agent is mandatory: crates.io answers 403 to anonymous API requests
-# for *every* crate, so without `-A` this loop reports TAKEN for all fifteen —
+# for *every* crate, so without `-A` this loop reports TAKEN for all sixteen —
 # including the ones that are genuinely free.
 UA="clove-release-check (+https://github.com/egeapak/clove)"
 for c in clove-types clove-core clove-plugin clove-index clove-import clove-ipc \
-         clove-tui clove-engine clove-mcp clove-web cloved clove-cli \
+         clove-tui clove-engine clove-service clove-mcp clove-web cloved clove-cli \
          clove-sync-github clove-import-tk clove-import-beads; do
   code=$(curl -s -A "$UA" -o /dev/null -w '%{http_code}' "https://crates.io/api/v1/crates/$c")
   case "$code" in
@@ -100,7 +100,7 @@ done
 Any status other than 200/404 means the check itself failed and tells you
 **nothing** about availability — resolve that before reading the results.
 
-All fifteen must report **FREE (404)** for a first release. If any is TAKEN,
+All sixteen must report **FREE (404)** for a first release. If any is TAKEN,
 **stop** — resolve the collision (rename that crate, or contact the owner)
 before continuing, exactly as was done for `clove` → `clove-cli`.
 
@@ -152,19 +152,20 @@ build against the registry. The workspace's internal edges are:
 ```
 clove-types        → (none)
 clove-core         → clove-types
-clove-plugin       → clove-types, clove-core
+clove-plugin       → clove-types
 clove-index        → clove-types, clove-core
-clove-import       → clove-types, clove-core
+clove-import       → clove-types, clove-core, clove-plugin
 clove-ipc          → clove-types, clove-core
 clove-tui          → clove-types, clove-core
 clove-engine       → clove-types, clove-core, clove-index, clove-ipc
-clove-mcp          → clove-types, clove-core, clove-ipc, clove-engine
+clove-service      → clove-types, clove-core, clove-ipc, clove-engine
+clove-mcp          → clove-types, clove-core, clove-ipc, clove-engine, clove-service
 clove-web          → clove-types, clove-core, clove-index, clove-engine
 cloved             → clove-types, clove-core, clove-index, clove-ipc, clove-web
-clove-cli          → clove-types, clove-core, clove-plugin, clove-index, clove-import, clove-ipc, clove-engine, clove-mcp, clove-tui, clove-web
-clove-sync-github  → clove-types, clove-core, clove-plugin, clove-import (github)
-clove-import-tk    → clove-types, clove-core, clove-plugin, clove-import
-clove-import-beads → clove-types, clove-core, clove-plugin, clove-import
+clove-cli          → clove-types, clove-core, clove-plugin, clove-index, clove-import, clove-ipc, clove-engine, clove-service, clove-mcp, clove-tui, clove-web
+clove-sync-github  → clove-types, clove-plugin, clove-import (github)
+clove-import-tk    → clove-types, clove-plugin, clove-import
+clove-import-beads → clove-types, clove-plugin, clove-import
 ```
 
 > Regenerate this table from the source of truth rather than editing it by hand
@@ -190,14 +191,15 @@ A valid topological publish order:
 5. `clove-import`
 6. `clove-ipc`
 7. `clove-tui`
-8. `clove-engine`         ← must precede `clove-mcp`, `clove-web`, and `clove-cli`
-9. `clove-mcp`
-10. `clove-web`
-11. `cloved`
-12. `clove-sync-github`   ← name-reservation gate (§2a)
-13. `clove-import-tk`     ← name-reservation gate (§2a)
-14. `clove-import-beads`  ← name-reservation gate (§2a)
-15. `clove-cli`
+8. `clove-engine`         ← must precede `clove-service`, `clove-mcp`, `clove-web`, and `clove-cli`
+9. `clove-service`        ← must precede `clove-mcp` and `clove-cli`
+10. `clove-mcp`
+11. `clove-web`
+12. `cloved`
+13. `clove-sync-github`   ← name-reservation gate (§2a)
+14. `clove-import-tk`     ← name-reservation gate (§2a)
+15. `clove-import-beads`  ← name-reservation gate (§2a)
+16. `clove-cli`
 
 > `xtask` (`publish = false`), the `clove-plugin-echo` test fixture
 > (`publish = false`), and the `fuzz/` crate (a separate excluded workspace) are
@@ -212,7 +214,7 @@ A valid topological publish order:
 > `clove plugin install sync-github`, and that shorthand must not be live before
 > the name it resolves to is ours.
 
-Internal deps already declare both `path` **and** `version = "0.1.5"` (see
+Internal deps already declare both `path` **and** `version = "0.2.0"` (see
 `[workspace.dependencies]` in the root `Cargo.toml`), which is exactly what
 crates.io requires — no Cargo.toml surgery is needed before publishing.
 
@@ -297,12 +299,12 @@ UA="clove-release-check (+https://github.com/egeapak/clove)"
 
 # 1. Every crate is live at the released version.
 for c in clove-types clove-core clove-plugin clove-index clove-import clove-ipc \
-         clove-tui clove-engine clove-mcp clove-web cloved clove-cli \
+         clove-tui clove-engine clove-service clove-mcp clove-web cloved clove-cli \
          clove-sync-github clove-import-tk clove-import-beads; do
   v=$(curl -s -A "$UA" "https://crates.io/api/v1/crates/$c" \
       | grep -o '"max_version":"[^"]*"' | head -1)
   echo "$c -> ${v:-MISSING}"
-done            # expect max_version 0.1.5 for all fifteen
+done            # expect max_version 0.2.0 for all sixteen
 ```
 
 Then check the two registry behaviours `clove plugin` depends on
@@ -349,14 +351,14 @@ crate, stop and investigate before announcing.
 
 ## 5. Tag the release
 
-Version is already `0.1.5` (inherited via `[workspace.package]`). Tag the
+Version is already `0.2.0` (inherited via `[workspace.package]`). Tag the
 released commit and push — this drives the binary and web UI asset builds in
 step 6, and it must happen **before** any crate is published: `publish.sh`
 refuses to run unless `HEAD` is the tagged commit.
 
 ```sh
-git tag -a v0.1.5 -m "clove v0.1.5"
-git push origin v0.1.5
+git tag -a v0.2.0 -m "clove v0.2.0"
+git push origin v0.2.0
 ```
 
 ---
@@ -387,7 +389,7 @@ a separate `cargo install`:
 After the tag push:
 
 1. Watch the run: `gh run watch` (or the Actions tab).
-2. Confirm the GitHub Release for `v0.1.5` has all platform archives + `.sha256`
+2. Confirm the GitHub Release for `v0.2.0` has all platform archives + `.sha256`
    files attached.
 3. Run the manual release checklist, [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md),
    against the draft's binaries; resolve or explicitly accept every finding.
@@ -409,11 +411,11 @@ tarball + its published SHA256:
 class Clove < Formula
   desc "Fast, git-native, dependency-aware work-item tracker"
   homepage "https://github.com/egeapak/clove"
-  version "0.1.5"
-  license "MIT OR Apache-2.0"
+  version "0.2.0"
+  license "AGPL-3.0-only"
 
   on_macos do
-    url "https://github.com/egeapak/clove/releases/download/v0.1.5/clove-v0.1.5-macos-universal2.tar.gz"
+    url "https://github.com/egeapak/clove/releases/download/v0.2.0/clove-v0.2.0-macos-universal2.tar.gz"
     sha256 "PASTE_FROM_THE_RELEASE_.sha256_FILE"
   end
 
@@ -454,7 +456,7 @@ every future release.
 
 ## Rollback / mistakes
 
-- **Bad version already published?** `cargo yank --version 0.1.5 clove-cli`
+- **Bad version already published?** `cargo yank --version 0.2.0 clove-cli`
   (repeat per crate). Yanking prevents *new* dependents from selecting it but
   does **not** delete it — existing `Cargo.lock`s still resolve. There is no
   un-publish; fix forward with `0.1.6`.
@@ -463,7 +465,7 @@ every future release.
   them, so removing them breaks it permanently (yanking does not help existing
   users); the checksum is the only guard, so a replaced asset fails the build.
 - **Wrong tag?** Before any crate is published, delete and re-push, or cut a new tag:
-  `git tag -d v0.1.5 && git push origin :refs/tags/v0.1.5`.
+  `git tag -d v0.2.0 && git push origin :refs/tags/v0.2.0`.
 
 ---
 

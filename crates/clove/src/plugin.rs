@@ -11,9 +11,10 @@
 //! - the **environment contract** ([`export_env`]) — every `CLOVE_*` var the
 //!   plugin-side `clove_plugin::PluginContext::from_env` reads, written from one
 //!   place (§6.2);
-//! - the **invocation** ([`run_plugin`]) — `exec` on Unix (the host replaces its
-//!   own image so the plugin gets the real tty and unbuffered stdio),
-//!   spawn-and-wait propagating the exit code on Windows (§6.1).
+//! - the **invocation** ([`run_plugin`]) — spawn-and-wait on every platform
+//!   (stdio inherited, so the plugin gets the real tty and unbuffered output),
+//!   exiting the way the plugin exited; signal handling lives in
+//!   [`crate::plugin_child`] (§6.1).
 
 use std::process::Command;
 
@@ -48,7 +49,7 @@ pub struct PluginGlobals {
 }
 
 /// A resolvable plugin: its subcommand name (the `clove-` prefix and executable
-/// suffix stripped) and the absolute path that would be exec'd.
+/// suffix stripped) and the absolute path that would be run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginInfo {
     /// The subcommand name, e.g. `sync-github` for `clove-sync-github`.
@@ -191,8 +192,8 @@ fn mux_candidates(mux: &str) -> &'static [&'static str] {
 /// first existing executable. Purely structural — no `--clove-plugin-info` probe,
 /// no exec — so it stays on the same cheap `stat`-only hot path as [`resolve`].
 ///
-/// The candidate order is load-bearing: because dispatch `exec`s the first
-/// *existing* binary (it cannot fall through to a later candidate once one is
+/// The candidate order is load-bearing: because dispatch runs the first
+/// *existing* binary (it does not fall through to a later candidate once one is
 /// found), the order must put the most-correct binary first. A binary reached for
 /// a capability it does not implement is expected to reject the request itself
 /// (`clove_plugin::unsupported_capability`, exit 2).
@@ -601,10 +602,11 @@ pub fn export_env(
 ///
 /// The plugin is called cargo-style: `subcommand_name_echo` (e.g. `["sync",
 /// "github"]` or `["echo"]`) is pushed as leading args, then `argv_after_name` —
-/// so the same binary also works when invoked directly. On Unix the host
-/// **replaces its own process image** with [`CommandExt::exec`], which only
-/// returns on failure (mapped to an I/O error). On Windows it spawns and waits,
-/// propagating the child's exit code via [`std::process::exit`].
+/// so the same binary also works when invoked directly. The host spawns it with
+/// inherited stdio, waits, and exits with the plugin's exit status (a plugin
+/// killed by a signal kills the host with the same signal); see
+/// [`crate::plugin_child`]. It returns only if the spawn itself failed (mapped to
+/// an I/O error).
 pub fn run_plugin(
     path: &Utf8Path,
     argv_after_name: &[String],
@@ -620,25 +622,26 @@ pub fn run_plugin(
     }
     cmd.args(argv_after_name);
     export_env(&mut cmd, ctx, globals, command, provider);
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        // `exec` replaces this image; it returns only if the exec itself failed.
-        let err = cmd.exec();
-        Err(CloveError::Io {
-            path: path.to_owned(),
-            source: err,
-        })
-    }
-    #[cfg(not(unix))]
-    {
-        let status = cmd.status().map_err(|source| CloveError::Io {
-            path: path.to_owned(),
-            source,
-        })?;
-        std::process::exit(status.code().unwrap_or(1));
-    }
+    // The host IPC channel (§6.6). A failure to bind is not fatal: the plugin
+    // runs without it and its SDK reports `HostError::Unavailable` if it asks.
+    let host = match crate::plugin_host::HostServer::start(ctx, globals) {
+        Ok(host) => {
+            host.export(&mut cmd);
+            Some(host)
+        }
+        Err(e) => {
+            crate::plugin_host::clear_env(&mut cmd);
+            if !globals.quiet {
+                eprintln!("warning: plugin host channel unavailable: {e}");
+            }
+            None
+        }
+    };
+    Err(crate::plugin_child::run_and_exit(&mut cmd, path, || {
+        if let Some(host) = &host {
+            host.cleanup();
+        }
+    }))
 }
 
 #[cfg(test)]

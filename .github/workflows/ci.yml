@@ -10,9 +10,25 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  dco:
+    # Developer Certificate of Origin: every commit of a pull request carries a
+    # Signed-off-by trailer for its author (CONTRIBUTING.md).
+    name: DCO sign-off
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Every commit is signed off
+        run: scripts/ci/check-dco.sh "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}"
+
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # A hung test fails the job instead of holding the runner for 6 hours.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -158,6 +174,34 @@ jobs:
           fi
       - name: clove and cloved with the web feature
         run: cargo check -p clove-cli -p cloved --features clove-cli/web,cloved/web
+      # The plugin SDK (clove-types, clove-plugin, clove-plugin-echo) is MIT OR
+      # Apache-2.0 while the rest of clove is AGPL-3.0-only, so a plugin built on
+      # the SDK alone can use any license. Workspace builds unify features across
+      # every crate, which would hide an SDK that only compiles with an AGPL crate
+      # in the graph, so the SDK is linted and tested on its own (`-p`), and its
+      # dependency tree (default and --all-features, every target, normal + build
+      # edges) must carry no copyleft license. The positive control fails the step
+      # if cargo tree stops printing the expected rows, so it cannot pass vacuously.
+      - name: SDK builds alone
+        run: |
+          cargo clippy -p clove-types -p clove-plugin -p clove-plugin-echo --all-targets -- -D warnings
+          cargo test -p clove-types -p clove-plugin
+      - name: SDK license guard (no copyleft dependency)
+        run: |
+          set -uo pipefail
+          for p in clove-types clove-plugin clove-plugin-echo; do
+            for f in "" --all-features; do
+              out=$(cargo tree -p "$p" $f -e normal,build --target all --prefix none --format '{p} {l}') || exit 1
+              if ! printf '%s\n' "$out" | grep -q '^clove-types v.* MIT OR Apache-2.0$'; then
+                echo "guard broken: clove-types row missing for $p $f" >&2
+                exit 1
+              fi
+              if printf '%s\n' "$out" | grep -i 'GPL'; then
+                echo "$p ($f) depends on a copyleft-licensed crate" >&2
+                exit 1
+              fi
+            done
+          done
       # The registry client (ureq -> rustls) must stay on `ring`. A rustls with
       # default features unifies the tree onto aws-lc-sys and triples the binary,
       # so the workspace pins `ring` explicitly (root Cargo.toml).

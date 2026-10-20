@@ -2,14 +2,34 @@
 
 Guidance for working in this repo. `clove` is a Cargo workspace (`crates/*`):
 `clove-types` (pure shared data types: model/id/error/validation + the
-create/edit request types), `clove-core` (file store/graph/high-level ops on top
+create/edit request types + the tool argument types), `clove-core` (file store/graph/high-level ops on top
 of `clove-types`), `clove-engine` (the **read tier**: one daemon → index → files
-cascade behind every read surface), `clove-tui` (the terminal browser + add/edit
-form), `clove-web` (the web UI server + embedded SvelteKit SPA, `clove serve`),
+cascade behind every read surface), `clove-service` (the transport-independent tool
+engine behind `clove-mcp` and the plugin host IPC), `clove-tui` (the terminal
+browser + add/edit form), `clove-web` (the web UI server + embedded SvelteKit SPA, `clove serve`),
 plus `clove` (CLI), `cloved`, `clove-index`, `clove-ipc`, `clove-import`,
 `clove-mcp`, `clove-plugin` (cargo-style subcommand-plugin support), the
 installable plugins `clove-sync-github` / `clove-import-tk` / `clove-import-beads`,
 and the `clove-plugin-echo` test fixture.
+
+## Licensing (two licenses — keep the split intact)
+
+clove is **AGPL-3.0-only** (`LICENSE`) with a plugin exception
+(`LICENSE-PLUGIN-EXCEPTION`). The **plugin SDK** — `clove-types`, `clove-plugin`,
+`clove-plugin-echo` — is **MIT OR Apache-2.0**, so a plugin built on it alone can
+use any license. Rules:
+
+- The SDK crates must never depend on an AGPL crate (`clove-core`,
+  `clove-engine`, …) in any feature combination. CI enforces it ("SDK license
+  guard" in `ci.yml`); `clove-plugin` therefore does not open the store — a fat
+  plugin depends on `clove-core` itself.
+- Moving code from an AGPL crate into an SDK crate relicenses it. That is only
+  allowed while Ege Apak is the sole copyright holder of the moved code.
+- Every published crate carries real copies of its license files;
+  `xtask/tests/license_files.rs` pins them. A new AGPL crate also needs a
+  `[[licenses.exceptions]]` line in `deny.toml`.
+- New third-party dependencies must be permissive (`deny.toml` `allow`).
+- Every commit needs a DCO sign-off (`git commit -s`; `CONTRIBUTING.md`).
 
 ## Plugin system (cargo-style external subcommands)
 
@@ -103,6 +123,17 @@ layer:
 - `clove_import::sync_net` (`github` feature) — the apply: octocrab create/update,
   local writes through the unified write path (`apply_edit`), `external_ref`
   write-back, comment reconciliation, and state persistence, with bounded retry.
+
+All importer and sync store access goes through the `clove_import::Store` trait.
+The plugins pass `HostStore`, which calls the host over the IPC channel's
+`store.*` tier (`PLUGIN_SYSTEM.md` §6.6), so the shipped plugins exercise that
+channel end to end; `DirectStore` wraps an `ItemStore` for unit tests. When an
+importer or sync needs a new kind of store access, add it to the trait, to
+`clove_service::StoreService`, to the host dispatch (`plugin_host.rs`), and to
+`HostClient` — never open the store from a plugin. A new **write** also needs a
+`clove_core::ops` function and a daemon RPC (`clove-ipc` service + client,
+`cloved` hub + dispatcher, a `PROTOCOL_VERSION` bump): `StoreService` writes
+through a running `cloved` and falls back to the op in the host.
 
 When adding a synced field, add it to the mapping in one place (`map_issue` /
 `build_export_item`) and to `content_equal`/the `EditRequest` in `sync_net`.

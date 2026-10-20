@@ -24,6 +24,9 @@ test-knobs = []
 [dependencies]
 clove-types.workspace = true
 clove-core.workspace = true
+# The host IPC client (`store::HostStore`): the shipped plugins read and write
+# through the `clove` that runs them.
+clove-plugin.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_norway.workspace = true

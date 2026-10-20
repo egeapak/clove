@@ -15,6 +15,8 @@ mod item_json;
 mod mux_help;
 mod output;
 mod plugin;
+mod plugin_child;
+mod plugin_host;
 mod registry;
 mod util;
 

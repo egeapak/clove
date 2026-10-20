@@ -40,35 +40,7 @@ pub const GITIGNORE_ENTRIES: [&str; 10] = [
 /// configurable (see the deprecated `id_length` config field).
 pub const ID_SUFFIX_LENGTH: u8 = 8;
 
-/// Output format for CLI responses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum OutputFormat {
-    #[default]
-    Human,
-    Json,
-    Jsonl,
-}
-
-impl OutputFormat {
-    /// Parse a format name (used for `CLOVE_FORMAT` and the `--format` flag).
-    pub fn parse(value: &str) -> Option<OutputFormat> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "human" => Some(OutputFormat::Human),
-            "json" => Some(OutputFormat::Json),
-            "jsonl" => Some(OutputFormat::Jsonl),
-            _ => None,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            OutputFormat::Human => "human",
-            OutputFormat::Json => "json",
-            OutputFormat::Jsonl => "jsonl",
-        }
-    }
-}
+pub use clove_types::OutputFormat;
 
 /// `[index]` configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

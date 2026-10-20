@@ -17,6 +17,9 @@ pub fn run(format: OutputFormat) -> Result<(), CloveError> {
         "schema": CURRENT_SCHEMA_VERSION,
         "git_hash": option_env!("CLOVE_GIT_HASH"),
         "build_date": option_env!("CLOVE_BUILD_DATE"),
+        "license": clove_core::source::LICENSE,
+        // The AGPL-3.0 section 13 source offer (`CLOVE_SOURCE_URL` at build time).
+        "source": clove_core::source::source_url(),
     });
 
     match format {
@@ -25,6 +28,11 @@ pub fn run(format: OutputFormat) -> Result<(), CloveError> {
         }
         OutputFormat::Human => {
             outln!("clove {version}");
+            outln!(
+                "license: {}; source: {}",
+                clove_core::source::LICENSE,
+                clove_core::source::source_url()
+            );
         }
     }
     Ok(())

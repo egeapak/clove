@@ -195,6 +195,21 @@ impl Session {
     }
 }
 
+/// The full `tools/list` answer — every tool's name, description, and published
+/// `inputSchema`/`outputSchema` — pinned byte for byte. The argument structs are
+/// shared with the plugin host IPC (`clove_types::tool`), so a change there must
+/// show up here as a deliberate snapshot update, never as silent schema drift.
+#[test]
+fn tools_list_schemas_are_pinned() {
+    let dir = init_repo();
+    let mut s = Session::start(dir.path());
+    let resp = s.request(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
+    let mut tools = resp["result"]["tools"].as_array().unwrap().clone();
+    tools.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    insta::assert_json_snapshot!("mcp_tools_list", tools);
+    s.shutdown();
+}
+
 #[test]
 fn handshake_and_tools_list() {
     let dir = init_repo();

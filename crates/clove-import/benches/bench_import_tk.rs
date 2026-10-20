@@ -8,7 +8,7 @@
 use camino::Utf8PathBuf;
 use chrono::Utc;
 use clove_core::ItemStore;
-use clove_import::{ImportCtx, Importer, TkImporter};
+use clove_import::{DirectStore, ImportCtx, Importer, TkImporter};
 use criterion::{criterion_group, criterion_main, Criterion};
 
 /// Write `n` deterministic tk-style tickets into `dir`.
@@ -39,9 +39,9 @@ fn bench_import_tk(c: &mut Criterion) {
             let store_tmp = tempfile::tempdir().unwrap();
             let root = Utf8PathBuf::from_path_buf(store_tmp.path().to_path_buf()).unwrap();
             std::fs::create_dir_all(root.join(".clove").join("issues")).unwrap();
-            let store = ItemStore::new(root);
+            let store = DirectStore::new(ItemStore::new(root), "proj");
 
-            let importer = TkImporter::new("proj", Utc::now());
+            let importer = TkImporter::new(Utc::now());
             let ctx = ImportCtx::new(&store, false).unwrap();
             let plan = importer.plan(&src, &ctx).unwrap();
             let report = importer.apply(plan, &store).unwrap();

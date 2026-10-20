@@ -306,3 +306,268 @@ fn plugin_output_to_a_closed_pipe_exits_quietly() {
     );
     assert!(!stderr.contains("panicked"), "plugin panicked: {stderr}");
 }
+
+/// The host spawns the plugin and exits with the plugin's own exit code
+/// (PLUGIN_SYSTEM.md §6.1), not a generic failure.
+#[test]
+fn the_plugin_exit_code_is_the_host_exit_code() {
+    let (plugin_dir, _echo) = install_echo();
+    let repo = init_repo("proj");
+    let out = clove(repo.path())
+        .env("CLOVE_PLUGIN_PATH", plugin_dir.path())
+        .args(["echo", "--exit-code", "3"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3), "{out:?}");
+}
+
+/// Signal handling while the host waits for its plugin (PLUGIN_SYSTEM.md §6.1).
+#[cfg(unix)]
+mod signals {
+    use super::*;
+    use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
+    use std::time::{Duration, Instant};
+
+    /// Start `clove echo --wait-for-signal` in its own process group and return
+    /// the host child and the plugin's pid (read from the pid file it writes).
+    // The caller owns the returned child and always waits on it; clippy cannot
+    // see across the return.
+    #[allow(clippy::zombie_processes)]
+    fn start(repo: &Path, plugin_dir: &Path) -> (std::process::Child, i32) {
+        let pid_file = repo.join("plugin.pid");
+        let mut host = clove(repo)
+            .env("CLOVE_PLUGIN_PATH", plugin_dir)
+            .args(["echo", "--wait-for-signal"])
+            .arg(&pid_file)
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Ok(text) = std::fs::read_to_string(&pid_file) {
+                if let Ok(pid) = text.trim().parse() {
+                    return (host, pid);
+                }
+            }
+            if Instant::now() >= deadline {
+                let _ = host.kill();
+                let _ = host.wait();
+                panic!("the plugin never started");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn alive(pid: i32) -> bool {
+        // SAFETY: signal 0 only checks that the process exists.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    fn wait_gone(pid: i32) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while alive(pid) {
+            assert!(Instant::now() < deadline, "plugin {pid} is still running");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Ctrl-C in a terminal signals the whole foreground group: the plugin dies
+    /// of SIGINT, and the host — which survived it — dies of the same signal, so
+    /// the shell sees what it would have seen without the host in between.
+    #[test]
+    fn ctrl_c_to_the_group_ends_both_with_sigint() {
+        let (plugin_dir, _echo) = install_echo();
+        let repo = init_repo("proj");
+        let (mut host, plugin) = start(repo.path(), plugin_dir.path());
+        // SAFETY: signalling the test's own child process group.
+        unsafe { libc::kill(-(host.id() as i32), libc::SIGINT) };
+        let status = host.wait().unwrap();
+        assert_eq!(status.signal(), Some(libc::SIGINT), "{status:?}");
+        wait_gone(plugin);
+    }
+
+    /// SIGTERM sent to the host pid alone (`kill`, `timeout`, a service
+    /// manager) is forwarded to the plugin, and the host then dies of the
+    /// plugin's SIGTERM.
+    #[test]
+    fn sigterm_to_the_host_reaches_the_plugin() {
+        let (plugin_dir, _echo) = install_echo();
+        let repo = init_repo("proj");
+        let (mut host, plugin) = start(repo.path(), plugin_dir.path());
+        // SAFETY: signalling the test's own child.
+        unsafe { libc::kill(host.id() as i32, libc::SIGTERM) };
+        let status = host.wait().unwrap();
+        assert_eq!(status.signal(), Some(libc::SIGTERM), "{status:?}");
+        wait_gone(plugin);
+    }
+
+    /// SIGINT sent to the host pid alone by another process: on Linux it is
+    /// forwarded like SIGTERM (`si_code` tells it from a terminal's Ctrl-C);
+    /// elsewhere the host absorbs it and the plugin keeps running.
+    #[test]
+    fn sigint_to_the_host_alone() {
+        let (plugin_dir, _echo) = install_echo();
+        let repo = init_repo("proj");
+        let (mut host, plugin) = start(repo.path(), plugin_dir.path());
+        let host_pid = host.id() as i32;
+        // SAFETY: signalling the test's own child.
+        unsafe { libc::kill(host_pid, libc::SIGINT) };
+        if cfg!(target_os = "linux") {
+            let status = host.wait().unwrap();
+            assert_eq!(status.signal(), Some(libc::SIGINT), "{status:?}");
+            wait_gone(plugin);
+        } else {
+            std::thread::sleep(Duration::from_millis(300));
+            assert!(
+                host.try_wait().unwrap().is_none(),
+                "the host died of SIGINT"
+            );
+            assert!(alive(plugin), "SIGINT to the host alone reached the plugin");
+            // SAFETY: as above.
+            unsafe { libc::kill(host_pid, libc::SIGTERM) };
+            let status = host.wait().unwrap();
+            assert_eq!(status.signal(), Some(libc::SIGTERM), "{status:?}");
+            wait_gone(plugin);
+        }
+    }
+}
+
+/// Run `clove --format json echo <args>` in `repo` and return the plugin's
+/// `data`.
+fn echo_json(repo: &Path, plugin_dir: &Path, args: &[&str]) -> Value {
+    let out = clove(repo)
+        .env("CLOVE_PLUGIN_PATH", plugin_dir)
+        .args(["--format", "json", "echo"])
+        .args(args)
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("stdout is not JSON ({e}): {out:?}"));
+    assert_eq!(
+        v["ok"],
+        true,
+        "{v}; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    v["data"].clone()
+}
+
+/// A published v1 schema, compiled.
+fn published_schema(name: &str) -> jsonschema::Validator {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/json-schema/v1")
+        .join(name);
+    let value: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    jsonschema::validator_for(&value).expect("valid schema")
+}
+
+/// The host IPC channel (PLUGIN_SYSTEM.md §6.6), end to end: a plugin built on
+/// the SDK alone creates, reads, edits, and lists items through the host, which
+/// writes them through the unified write path; results have the MCP shapes, and
+/// a tool failure carries the code a built-in reports.
+#[test]
+fn a_plugin_reads_and_writes_items_over_the_host_channel() {
+    let (plugin_dir, _echo) = install_echo();
+    let repo = init_repo("proj");
+    let data = echo_json(repo.path(), plugin_dir.path(), &["--host-roundtrip"]);
+
+    assert_eq!(data["hello"]["host_api"], 1);
+    let clove_dir = data["hello"]["clove_dir"].as_str().unwrap();
+    assert!(clove_dir.ends_with(".clove"), "{clove_dir}");
+    let methods = data["hello"]["methods"].as_array().unwrap();
+    for m in ["list", "show", "create", "edit", "set_status", "comment"] {
+        assert!(methods.iter().any(|x| x == m), "missing {m}: {methods:?}");
+    }
+
+    let id = data["created"]["id"].as_str().expect("created id");
+    assert!(id.starts_with("proj-"), "{id}");
+    assert_eq!(data["shown"]["title"], "Made over the host channel");
+    assert_eq!(data["shown"]["type"], "bug");
+    assert_eq!(data["edited"]["status"], "in_progress");
+
+    // The write went to the store: the CLI sees it.
+    let out = clove(repo.path())
+        .args(["--format", "json", "show", id])
+        .output()
+        .unwrap();
+    let shown: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(shown["data"]["status"], "in_progress", "{shown}");
+
+    // `list` is the MCP item page.
+    let page = &data["listed"];
+    if let Err(e) = published_schema("mcp-item-page.json").validate(page) {
+        panic!("schema violation: {e} in {page}");
+    }
+    assert_eq!(page["total"], 1, "{page}");
+
+    // A missing id fails as `clove show` would.
+    assert_eq!(
+        data["missing_code"],
+        serde_json::json!({ "clove_code": "ITEM_NOT_FOUND", "exit": 2 })
+    );
+}
+
+/// A connection that does not present the token is refused.
+#[test]
+fn the_host_channel_refuses_a_wrong_token() {
+    let (plugin_dir, _echo) = install_echo();
+    let repo = init_repo("proj");
+    let data = echo_json(repo.path(), plugin_dir.path(), &["--host-bad-token"]);
+    let refused = data["refused"]
+        .as_str()
+        .expect("the connection was refused");
+    assert!(refused.contains("bad token"), "{refused}");
+}
+
+/// A request line over the 16 MiB cap is answered with an error and the
+/// connection is closed.
+#[test]
+fn the_host_channel_rejects_an_oversized_request() {
+    let (plugin_dir, _echo) = install_echo();
+    let repo = init_repo("proj");
+    let data = echo_json(repo.path(), plugin_dir.path(), &["--host-oversize"]);
+    let oversize = data["oversize"].as_str().expect("the request failed");
+    // The host reads the rest of the line, answers with the reason, then
+    // closes. Answering mid-line deadlocked on Windows, where the host's flush
+    // waits for a client that is still writing.
+    assert!(oversize.contains("16 MiB"), "{oversize}");
+    assert!(
+        data["after"].is_string(),
+        "the connection stayed open: {data}"
+    );
+}
+
+/// The host's private socket directory is gone once the plugin exits.
+#[cfg(unix)]
+#[test]
+fn the_host_socket_is_removed_after_the_plugin_exits() {
+    let (plugin_dir, _echo) = install_echo();
+    let repo = init_repo("proj");
+    let tmp = tempfile::tempdir().unwrap();
+    let out = clove(repo.path())
+        .env("CLOVE_PLUGIN_PATH", plugin_dir.path())
+        .env("TMPDIR", tmp.path())
+        .args(["echo", "hello"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let left: Vec<_> = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert!(left.is_empty(), "left behind: {left:?}");
+}
+
+/// A connection that never sends `hello` is answered and closed after the
+/// 5-second deadline (Unix; Windows named pipes have no receive timeout).
+#[cfg(unix)]
+#[test]
+fn the_host_channel_drops_a_silent_connection() {
+    let (plugin_dir, _echo) = install_echo();
+    let repo = init_repo("proj");
+    let data = echo_json(repo.path(), plugin_dir.path(), &["--host-silent"]);
+    let reply = data["reply"].as_str().unwrap();
+    assert!(reply.contains("no hello within 5 seconds"), "{reply}");
+    let waited = data["waited_ms"].as_u64().unwrap();
+    assert!((4_000..30_000).contains(&waited), "waited {waited} ms");
+}

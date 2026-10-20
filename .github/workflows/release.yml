@@ -62,6 +62,10 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install cargo-about
+        # Pinned; generates THIRD_PARTY_LICENSES.txt (about.toml / about.hbs).
+        run: cargo install cargo-about --version 0.9.2 --features cli --locked
+
       - name: Build release binaries
         env:
           CLOVE_SKIP_WEB_BUILD: "1"   # embed the dist built above; never run npm
@@ -89,7 +93,11 @@ jobs:
               cp "target/${{ matrix.target }}/release/$b" "$stage/"
             done
           fi
-          cp README.md LICENSE-MIT LICENSE-APACHE "$stage/"
+          # The notices the linked crates' licenses require, for the exact
+          # target and feature set built above.
+          cargo about generate --fail --target ${{ matrix.target }} \
+            --features "clove-cli/full,cloved/full" about.hbs > "$stage/THIRD_PARTY_LICENSES.txt"
+          cp README.md LICENSE LICENSE-PLUGIN-EXCEPTION LICENSE-MIT LICENSE-APACHE "$stage/"
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
             7z a "$stage.zip" "$stage" >/dev/null
             sha256sum "$stage.zip" > "$stage.zip.sha256"

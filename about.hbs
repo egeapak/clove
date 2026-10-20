@@ -1,0 +1,26 @@
+Third-party software linked into the clove binaries
+===================================================
+
+clove itself is licensed under AGPL-3.0-only (see LICENSE and
+LICENSE-PLUGIN-EXCEPTION). The crates below are used under the licenses shown.
+The web UI's bundled npm packages are listed separately in the web UI's own
+THIRD_PARTY_LICENSES.txt (served at /THIRD_PARTY_LICENSES.txt by `clove serve`).
+
+Overview
+--------
+{{#each overview}}
+{{{name}}} ({{count}})
+{{/each}}
+
+{{#each licenses}}
+------------------------------------------------------------------------------
+{{{name}}} ({{{id}}})
+
+Used by:
+{{#each used_by}}
+  - {{{crate.name}}} {{crate.version}}
+{{/each}}
+
+{{{text}}}
+
+{{/each}}

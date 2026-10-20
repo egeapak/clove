@@ -28,12 +28,20 @@ caught, add the step in the same change (see `CLAUDE.md`).
       — drafts are not anonymously downloadable) into a scratch dir, and verify
       every `.sha256` (`shasum -a 256 -c`). Extract; each archive has `clove`,
       `cloved`, `clove-sync-github`, `clove-import-tk`, `clove-import-beads`
-      (`.exe` on Windows) plus licenses/README.
+      (`.exe` on Windows) plus `README.md`, `LICENSE` (AGPL-3.0),
+      `LICENSE-PLUGIN-EXCEPTION`, `LICENSE-MIT`, `LICENSE-APACHE` and
+      `THIRD_PARTY_LICENSES.txt` (the Rust dependency notices; spot-check that
+      it lists e.g. `tokio` and `serde` with their license texts).
 - [ ] `file` each binary: macOS arm64 / x86_64 Mach-O, Linux x86-64 ELF, Windows PE32+.
 - [ ] **Web UI assets** — the Release also carries `clove-web-dist-vX.Y.Z.tar.gz`
       and `.sha256` (what a published `clove-web` downloads at build time). Verify
-      the checksum, then `tar -tzf` it: `index.html` and `_app/` at the root, no
-      `._*` files, and more than a handful of files. After the Release is
+      the checksum, then `tar -tzf` it: `index.html`, `_app/` and
+      `THIRD_PARTY_LICENSES.txt` (the bundled npm packages' notices) at the root,
+      no `._*` files, and more than a handful of files.
+- [ ] **Source offer (AGPL-3.0 §13)** — `clove version` prints
+      `license: AGPL-3.0-only; source: https://github.com/egeapak/clove/tree/vX.Y.Z`,
+      that URL opens, and the web UI's top bar shows the source link (`</>`)
+      pointing at the same URL. After the Release is
       published, both URLs must download without authentication (`curl -fsSIL`).
 
 ## 1. Packaged-binary smoke (every platform)
@@ -83,6 +91,9 @@ TMPDIR=/tmp CLOVE_HOME=$(mktemp -d /tmp/cvd.XXXX)/h scripts/ci/daemon-smoke.sh <
       the hub pid, project, web URL and log path.
 - [ ] `.clove/daemon.token` is `0600` and git-ignored (`git check-ignore`).
 - [ ] `clove -f json ls|ready|blocked` report `_meta.source == "daemon"`.
+- [ ] In a scratch project with the daemon serving it, `clove import tk <.tickets>`
+      raises `writes_applied` in `clove -f json daemon status` by at least the
+      number of imported items (plugin writes go through the daemon).
 - [ ] A second (scratch) project attached with `clove daemon start` shares the same
       hub pid; `clove daemon stop` in it detaches only it.
 - [ ] The release `cloved` ignores the test knobs (#61): with a scratch `CLOVE_HOME`,
@@ -160,6 +171,14 @@ Everything `release-smoke.sh` does not already cover:
       via `query` JSON and the web `?synced=` / `?parent=`) agree with the files; against
       a stale (older-protocol) daemon they still answer, falling back.
 - [ ] `clove edit <id>` with `$EDITOR` set to a real editor command.
+- [ ] Plugin process model (the host now spawns plugins instead of `exec`):
+      Ctrl-C during `clove sync github … --dry-run` stops it at once with no
+      leftover `clove-sync-github` process (`pgrep -f clove-sync-github`);
+      `timeout 1 clove sync github …` exits 124 likewise; `clove import tk
+      <missing-dir>; echo $?` prints the plugin's exit code. On Unix, no
+      `$TMPDIR/clove-plugin-*` directory is left behind. (The host IPC channel
+      itself is exercised on all three platforms by `plugin_dispatch.rs` in CI;
+      the shipped plugins do not use it yet.)
 
 ## 9. Close out
 

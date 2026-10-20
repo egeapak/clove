@@ -51,9 +51,6 @@ use std::collections::HashSet;
 use camino::Utf8Path;
 use chrono::{DateTime, Utc};
 use clove_core::contains_yaml_anchor_or_alias;
-use clove_core::write::write_item_file;
-use clove_core::ItemStore;
-use clove_types::id::new_id;
 use clove_types::model::CURRENT_SCHEMA_VERSION;
 use clove_types::{CloveId, Item, ItemFrontmatter, ItemStatus, ItemType, Priority};
 use serde::Deserialize;
@@ -64,6 +61,7 @@ use crate::map::{
     MAX_IMPORT_UNIT_BYTES,
 };
 use crate::plan::{ImportPlan, ImportReport, PlanItem, SkipItem};
+use crate::store::Store;
 use crate::{ImportCtx, Importer};
 
 /// The tolerant deserialization view of a tk ticket's YAML frontmatter.
@@ -121,23 +119,20 @@ struct StagedTicket {
 
 /// The tk importer.
 ///
-/// Constructed with the id `prefix` (so [`apply`](TkImporter::apply) can mint
-/// fresh [`CloveId`]s) and a clock for the `created`/`updated` stamps. Planning
+/// Constructed with a clock for the `created`/`updated` stamps; [`apply`](TkImporter::apply)
+/// takes fresh ids from the [`Store`]. Planning
 /// stashes mapped tickets in `staged` and any title-fallback `warnings`.
 #[derive(Debug)]
 pub struct TkImporter {
-    prefix: String,
     now: DateTime<Utc>,
     staged: RefCell<Vec<StagedTicket>>,
     warnings: RefCell<Vec<String>>,
 }
 
 impl TkImporter {
-    /// Build an importer that mints ids under `prefix` and stamps timestamps at
-    /// `now`.
-    pub fn new(prefix: impl Into<String>, now: DateTime<Utc>) -> Self {
+    /// Build an importer that stamps timestamps at `now`.
+    pub fn new(now: DateTime<Utc>) -> Self {
         Self {
-            prefix: prefix.into(),
             now,
             staged: RefCell::new(Vec::new()),
             warnings: RefCell::new(Vec::new()),
@@ -316,7 +311,7 @@ impl Importer for TkImporter {
         Ok(plan)
     }
 
-    fn apply(&self, plan: ImportPlan, store: &ItemStore) -> Result<ImportReport, ImportError> {
+    fn apply(&self, plan: ImportPlan, store: &dyn Store) -> Result<ImportReport, ImportError> {
         let staged = self.staged.borrow();
         let mut created = 0usize;
 
@@ -326,7 +321,7 @@ impl Importer for TkImporter {
         // with its own data — a shared source id can no longer collapse two
         // records onto the first one.
         for ticket in staged.iter() {
-            let id = new_id(&self.prefix, store.issues_dir())?;
+            let id = store.new_id()?;
             let closed = if ticket.status == ItemStatus::Closed {
                 Some(self.now)
             } else {
@@ -356,7 +351,7 @@ impl Importer for TkImporter {
                 frontmatter,
                 body: ticket.body.clone(),
             };
-            write_item_file(&new_item, &store.path_for(&id))?;
+            store.create_item(&new_item)?;
             created += 1;
         }
 

@@ -23,7 +23,6 @@ path = "src/main.rs"
 
 [dependencies]
 clove-plugin = { workspace = true, features = ["clap"] }
-clove-core.workspace = true
 clove-types.workspace = true
 # Pure file-format layer only (no `github` feature): the tk importer + render.
 clove-import = { workspace = true, default-features = false }

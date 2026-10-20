@@ -8,8 +8,8 @@
 //! the single classification shared with the host and the web API. Human
 //! narrative goes to stderr and is suppressed by `CLOVE_QUIET`.
 
-use clove_core::OutputFormat;
 use clove_types::CloveError;
+use clove_types::OutputFormat;
 use serde_json::{json, Value};
 
 /// The envelope schema version (the `v` field). Matches the host's

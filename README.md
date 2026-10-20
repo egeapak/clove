@@ -1,7 +1,7 @@
 # clove
 
 [![CI](https://github.com/egeapak/clove/actions/workflows/ci.yml/badge.svg)](https://github.com/egeapak/clove/actions/workflows/ci.yml)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-blue.svg)](#license)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](rust-toolchain.toml)
 
 A fast, git-native, **dependency-aware** work-item tracker for AI coding agents and humans.
@@ -112,6 +112,13 @@ clove plugin install <mux>-<provider>` error (exit 4); installing it lights the
 command up with no core rebuild. The daemon's periodic sync spawns the same `clove sync github`,
 so it needs the plugin too. See [`docs/PLUGIN_SYSTEM.md`](docs/PLUGIN_SYSTEM.md) for
 the dispatch/discovery/env contract.
+
+**Writing a plugin.** Build it on the `clove-plugin` SDK (MIT OR Apache-2.0).
+While `clove` runs your plugin, the plugin can read and write items through the
+host: `cx.host()?.create(…)`, `.list(…)`, `.edit(…)` take the same arguments as
+the MCP tools, and every write goes through clove's own validation. A plugin
+that uses only the SDK and this channel can use any license (see
+[License](#license)).
 
 `clove plugin list` shows what is installed and whether each plugin is compatible
 with this clove; `clove plugin list --all` and `clove plugin search <text>` also
@@ -318,13 +325,33 @@ unified write path / the GitHub mapping) rather than per surface — see
 
 ## License
 
-Licensed under either of
+clove is licensed under the GNU Affero General Public License, version 3 only
+([LICENSE](LICENSE), SPDX `AGPL-3.0-only`), with an additional permission for
+plugins ([LICENSE-PLUGIN-EXCEPTION](LICENSE-PLUGIN-EXCEPTION)).
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
-- MIT license ([LICENSE-MIT](LICENSE-MIT))
+The plugin SDK is licensed under either of the Apache License, Version 2.0
+([LICENSE-APACHE](LICENSE-APACHE)) or the MIT license
+([LICENSE-MIT](LICENSE-MIT)), at your option. The SDK is these crates:
 
-at your option.
+- `clove-types` (the shared data types)
+- `clove-plugin` (the plugin context, output envelope and host IPC client)
+- `clove-plugin-echo` (the example plugin)
 
-Unless you explicitly state otherwise, any contribution intentionally submitted
-for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
-dual-licensed as above, without any additional terms or conditions.
+What this means for a plugin (a separate `clove-<name>` program that `clove`
+runs, see [`docs/PLUGIN_SYSTEM.md`](docs/PLUGIN_SYSTEM.md)):
+
+- A plugin that uses only the SDK crates and the documented plugin interface
+  can use any license, including a proprietary one.
+- A plugin that links any other clove crate (for example `clove-core`) is a
+  combined work under the AGPL.
+
+Versions 0.1.5 and earlier were released under "MIT OR Apache-2.0"; those
+releases keep that license. The AGPL applies from version 0.2.0.
+
+If you run a modified clove and let other people use it over a network (for
+example `clove serve` behind a proxy), section 13 of the AGPL requires you to
+offer them the source of your version. Set `CLOVE_SOURCE_URL` when you build
+it, so the web UI and `clove version` point to your source.
+
+Contributions are licensed under the license of the files they change, and
+every commit needs a DCO sign-off. See [CONTRIBUTING.md](CONTRIBUTING.md).

@@ -1,6 +1,6 @@
 //! Shaping for read-tool results: field projection and null/empty compaction.
 //!
-//! Applied only here, at the MCP boundary. `clove_core::view::frontmatter_object`
+//! Applied only here, at the tool-surface boundary (MCP and plugin host IPC). `clove_core::view::frontmatter_object`
 //! is untouched, so the CLI's renderer, the web DTOs, `export json`, and the
 //! GitHub sync fingerprints — all of which serialize `ItemFrontmatter`
 //! independently — keep the full-key shape they depend on.

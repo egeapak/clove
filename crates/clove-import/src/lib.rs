@@ -1,8 +1,9 @@
 //! clove importers/exporters (M2+).
 //!
-//! File-based importers (beads, tk) use only `clove-core`; the GitHub
-//! importer/exporter uses `tokio` + `octocrab` behind the `github` cargo
-//! feature. This crate provides the shared scaffolding — the [`Importer`] trait,
+//! Importers and the GitHub sync read and write through the [`Store`] trait:
+//! the shipped plugins pass [`HostStore`] (the host IPC channel), unit tests
+//! pass [`DirectStore`]. The GitHub importer/exporter uses `tokio` + `octocrab`
+//! behind the `github` cargo feature. This crate provides the shared scaffolding — the [`Importer`] trait,
 //! the [`ImportPlan`]/[`ImportReport`] planning types, the field-mapping helpers
 //! in [`map`], and the `external_ref` idempotency index — that every concrete
 //! importer reuses. See DESIGN.md §11.
@@ -17,6 +18,7 @@ pub mod merge;
 pub mod plan;
 pub mod render;
 pub mod restore;
+pub mod store;
 pub mod sync;
 #[cfg(feature = "github")]
 pub mod sync_net;
@@ -25,7 +27,6 @@ pub mod tk;
 use std::collections::{HashMap, HashSet};
 
 use camino::Utf8Path;
-use clove_core::ItemStore;
 use clove_types::{CloveId, ItemStatus, Priority};
 
 pub use beads::BeadsImporter;
@@ -37,6 +38,7 @@ pub use restore::{
     apply_restore, parse_export_json, parse_export_jsonl, plan_restore, RestorePlan, RestoreReport,
     EXPORT_FORMAT_VERSION,
 };
+pub use store::{DirectStore, HostStore, Scan, Store};
 pub use sync::{
     plan_sync, ConflictPolicy, Direction, SyncConflict, SyncPlan, SyncReport, SyncState,
     SyncSummary,
@@ -66,7 +68,7 @@ pub struct ImportCtx {
 
 impl ImportCtx {
     /// Build a context by scanning `store` for existing `external_ref`s and ids.
-    pub fn new(store: &ItemStore, dry_run: bool) -> Result<Self, ImportError> {
+    pub fn new(store: &dyn Store, dry_run: bool) -> Result<Self, ImportError> {
         Ok(Self {
             external_refs: build_external_ref_index(store)?,
             store_ids: build_store_id_set(store)?,
@@ -105,13 +107,13 @@ impl ImportCtx {
 /// A source-specific importer.
 ///
 /// [`plan`](Importer::plan) is pure (no writes) and drives `--dry-run`;
-/// [`apply`](Importer::apply) performs the writes through the existing
-/// [`ItemStore`] atomic write path. The CLI runs `plan` always, and additionally
+/// [`apply`](Importer::apply) performs the writes through a [`Store`] (the host
+/// IPC channel in the shipped plugins). The CLI runs `plan` always, and additionally
 /// `apply` when not in dry-run.
 pub trait Importer {
     /// Compute the write-free plan for importing from `src`.
     fn plan(&self, src: &Utf8Path, ctx: &ImportCtx) -> Result<ImportPlan, ImportError>;
 
     /// Apply a previously computed `plan`, writing items into `store`.
-    fn apply(&self, plan: ImportPlan, store: &ItemStore) -> Result<ImportReport, ImportError>;
+    fn apply(&self, plan: ImportPlan, store: &dyn Store) -> Result<ImportReport, ImportError>;
 }

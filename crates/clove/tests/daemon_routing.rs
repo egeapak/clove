@@ -472,6 +472,60 @@ fn no_index_bypasses_a_live_daemon() {
     drop(daemon);
 }
 
+/// The daemon's count of writes it applied for this project.
+fn writes_applied(root: &std::path::Path) -> u64 {
+    let out = run_in(root, &["daemon", "status", "-f", "json"]);
+    let status: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    status["data"]["writes_applied"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("no writes_applied in {status}"))
+}
+
+/// A plugin's `store.*` writes go through a running daemon, like every other
+/// write: `clove import tk` creates each ticket in the daemon, which counts it.
+/// Without the daemon these writes happen in the host instead; the
+/// `import_tk` suite covers that path.
+#[test]
+fn plugin_store_writes_route_through_the_daemon() {
+    let bin = cloved_bin();
+    let plugin = escargot::CargoBuild::new()
+        .package("clove-import-tk")
+        .bin("clove-import-tk")
+        .run()
+        .expect("build clove-import-tk plugin");
+    let plugin_dir = plugin.path().parent().unwrap().to_owned();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    assert!(run_in(root, &["init"]).status.success());
+    let daemon = spawn_daemon(&root.join(".clove"), &bin);
+    let before = writes_applied(root);
+
+    let tickets =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tk/.tickets");
+    let out = clove()
+        .current_dir(root)
+        .env("CLOVE_HOME", TEST_CLOVE_HOME)
+        .env("CLOVE_RUNTIME_DIR", runtime_dir(root))
+        .env("CLOVE_PLUGIN_PATH", &plugin_dir)
+        .args(["import", "tk"])
+        .arg(&tickets)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+
+    let (mut ids, _) = ids_and_source(&run_in(root, &["--no-index", "ls", "-f", "json"]).stdout);
+    ids.sort();
+    assert_eq!(ids.len(), 5, "every fixture ticket is imported");
+    let routed = writes_applied(root) - before;
+    assert!(
+        routed >= ids.len() as u64,
+        "each created item is a daemon write; the daemon counted {routed}"
+    );
+
+    drop(daemon);
+}
+
 /// The daemon's socket for the repo holding `clove_dir`.
 fn daemon_sock(clove_dir: &std::path::Path) -> PathBuf {
     runtime_dir(clove_dir.parent().unwrap()).join("hub.sock")

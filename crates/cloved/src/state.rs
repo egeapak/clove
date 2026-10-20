@@ -44,6 +44,7 @@ pub struct DaemonState {
     watcher_state: WatcherState,
     last_event_at: Option<Instant>,
     batches_applied: u64,
+    writes_applied: u64,
     ping_count: u64,
     last_ping_at: Option<Instant>,
     web_addr: Option<String>,
@@ -59,6 +60,7 @@ impl DaemonState {
             watcher_state: WatcherState::Idle,
             last_event_at: None,
             batches_applied: 0,
+            writes_applied: 0,
             ping_count: 0,
             last_ping_at: None,
             web_addr: None,
@@ -96,6 +98,11 @@ impl DaemonState {
         self.batches_applied += 1;
     }
 
+    /// Record one write applied for a client.
+    pub fn inc_writes(&mut self) {
+        self.writes_applied += 1;
+    }
+
     /// How long since the last watcher/IPC activity (or since startup if none).
     /// Drives idle self-shutdown (DESIGN §8.8 `idle_shutdown_min`).
     pub fn idle_for(&self) -> std::time::Duration {
@@ -124,6 +131,7 @@ impl DaemonState {
             watcher_state: self.watcher_state.as_str().to_owned(),
             last_event_ms: self.last_event_at.map(|t| t.elapsed().as_millis() as u64),
             batches_applied: self.batches_applied,
+            writes_applied: self.writes_applied,
             ping_count: self.ping_count,
             last_ping_ms: self.last_ping_at.map(|t| t.elapsed().as_millis() as u64),
             web_addr: self.web_addr.clone(),

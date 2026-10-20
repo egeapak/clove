@@ -10,8 +10,10 @@ pub mod fields;
 pub mod id;
 pub mod limits;
 pub mod model;
+pub mod output;
 pub mod request;
 pub mod time;
+pub mod tool;
 pub mod validate;
 
 pub use error::{error_code, CloveError};
@@ -19,6 +21,7 @@ pub use id::{generate_id, new_id, CloveId};
 pub use model::{
     normalize_label, Item, ItemFrontmatter, ItemStatus, ItemType, Priority, CURRENT_SCHEMA_VERSION,
 };
+pub use output::OutputFormat;
 pub use request::{apply_assignments, normalize_body, set_status, EditRequest, LabelEdit, NewSpec};
 pub use time::{canonical_rfc3339, canonicalize_rfc3339, parse_rfc3339, truncate_to_millis};
 pub use validate::{validate_item, ValidationError};

@@ -61,7 +61,13 @@ use serde::{Deserialize, Serialize};
 /// v9 client's query, drop both, and answer the wider list without a word. The
 /// handshake turns that into a refusal and the client answers from the index or
 /// the files.
-pub const PROTOCOL_VERSION: u32 = 9;
+///
+/// **v10 adds the import/sync writes** — `create_item`, `link_external` and
+/// `add_comment_at` — so a plugin's `store.*` writes reach the daemon like every
+/// other write, and `StatusResponse::writes_applied`. A v9 daemon has none of
+/// the three methods, so the handshake must refuse it rather than let the call
+/// fail mid-import.
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// A dependency-graph query (DESIGN §8.4 extension for `blocked`/`dep`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -194,6 +200,10 @@ pub struct StatusResponse {
     /// shim + liveness probes). A health/liveness observable (M4).
     #[serde(default)]
     pub ping_count: u64,
+    /// Count of writes this daemon applied for its clients (every mutation
+    /// routed through it, from the CLI, MCP, web, or a plugin's `store.*`).
+    #[serde(default)]
+    pub writes_applied: u64,
     /// Milliseconds since the last `ping`, or `None` if none yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_ping_ms: Option<u64>,
@@ -312,6 +322,7 @@ mod tests {
             last_event_ms: Some(1200),
             batches_applied: 3,
             ping_count: 12,
+            writes_applied: 4,
             last_ping_ms: Some(800),
             web_addr: Some("127.0.0.1:7373".to_owned()),
             web_url: Some("http://127.0.0.1:7373/p/clove/".to_owned()),
@@ -395,6 +406,19 @@ mod tests {
             assert!(
                 PROTOCOL_VERSION >= 6,
                 "the service method set changed (search removed); bump the version"
+            )
+        };
+    }
+
+    /// Why v10 is a version bump: a v9 daemon has no `create_item`,
+    /// `link_external` or `add_comment_at`, so an import routed to it would fail
+    /// part-way instead of being refused at the handshake.
+    #[test]
+    fn the_import_writes_moved_the_protocol_version() {
+        const {
+            assert!(
+                PROTOCOL_VERSION >= 10,
+                "the service method set grew; the handshake must reject a v9 peer"
             )
         };
     }

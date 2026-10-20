@@ -7,6 +7,7 @@
   import { theme } from '$lib/theme.svelte';
   import { store, startLive } from '$lib/store.svelte';
   import ThemeSwitcher from '$lib/components/ThemeSwitcher.svelte';
+  import SourceLink from '$lib/components/SourceLink.svelte';
   import ProjectSwitcher from '$lib/components/ProjectSwitcher.svelte';
   import { api } from '$lib/api';
   import { projectSlug } from '$lib/urls';
@@ -131,6 +132,7 @@
     <span class="live-label">{connLabel}</span>
   </div>
   <ThemeSwitcher />
+  <SourceLink />
   <button class="btn primary new" aria-label="New item" onclick={() => (showNew = true)}>
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"
       ><path d="M12 5v14M5 12h14" /></svg

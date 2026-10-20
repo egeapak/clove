@@ -1,0 +1,30 @@
+[package]
+name = "clove-service"
+description = "clove tool surface: the transport-independent read/write engine behind the MCP server and the plugin host IPC"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+# One sync method per tool (list/ready/blocked/show/search/comments/dep_tree/
+# stats + create/set_status/edit/comment/dep_add/dep_remove/set_parent), shared
+# by clove-mcp (MCP stdio) and the clove host (plugin IPC). Reads tier through
+# clove-engine; writes prefer the cloved daemon (clove-ipc) and fall back to
+# clove-core ops. No rmcp, no tokio runtime of its own: callers run it on a
+# blocking task or a plain thread.
+[dependencies]
+clove-types.workspace = true
+clove-core.workspace = true
+clove-ipc.workspace = true
+clove-engine.workspace = true
+serde_json.workspace = true
+camino.workspace = true
+chrono.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

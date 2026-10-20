@@ -7,6 +7,7 @@ members = [
     "crates/clove-import",
     "crates/clove-ipc",
     "crates/clove-engine",
+    "crates/clove-service",
     "crates/clove-mcp",
     "crates/clove-tui",
     "crates/clove-web",
@@ -25,8 +26,8 @@ exclude = ["fuzz"]
 
 [workspace.package]
 edition = "2021"
-version = "0.1.5"
-license = "MIT OR Apache-2.0"
+version = "0.2.0"
+license = "AGPL-3.0-only"
 authors = ["Ege Apak"]
 repository = "https://github.com/egeapak/clove"
 homepage = "https://github.com/egeapak/clove"
@@ -100,6 +101,7 @@ unicode-width = "0.2"           # display-column widths for TUI truncation/wrapp
 pulldown-cmark = { version = "0.13", default-features = false }  # Markdown body rendering in `clove tui`
 # M4 MCP server: rmcp for the MCP (JSON-RPC stdio) surface; tarpc for the typed
 # CLI<->daemon RPC seam (replaces the hand-rolled clove-ipc frame/protocol).
+schemars = "1"                  # JsonSchema for the shared tool args (clove-types `schemars` feature); same major as rmcp's
 rmcp = { version = "1.7", default-features = false, features = ["server", "macros", "transport-io", "schemars"] }
 tarpc = { version = "0.37", features = ["serde1", "serde-transport", "serde-transport-json", "tokio1", "unix"] }
 futures = { version = "0.3", default-features = false, features = ["std"] }  # StreamExt only (cloved); drop default executor/async-await-macro
@@ -121,16 +123,17 @@ base64 = "0.22"                 # CSP hash encoding
 
 # Internal crates (explicit version keeps them off cargo-deny's wildcard list
 # and is required for publishing clove-core to crates.io — PRD §13).
-clove-types = { path = "crates/clove-types", version = "0.1.5" }
-clove-core = { path = "crates/clove-core", version = "0.1.5" }
-clove-index = { path = "crates/clove-index", version = "0.1.5" }
-clove-import = { path = "crates/clove-import", version = "0.1.5", default-features = false }
-clove-ipc = { path = "crates/clove-ipc", version = "0.1.5" }
-clove-engine = { path = "crates/clove-engine", version = "0.1.5" }
-clove-mcp = { path = "crates/clove-mcp", version = "0.1.5" }
-clove-tui = { path = "crates/clove-tui", version = "0.1.5" }
-clove-web = { path = "crates/clove-web", version = "0.1.5" }
-clove-plugin = { path = "crates/clove-plugin", version = "0.1.5" }
+clove-types = { path = "crates/clove-types", version = "0.2.0" }
+clove-core = { path = "crates/clove-core", version = "0.2.0" }
+clove-index = { path = "crates/clove-index", version = "0.2.0" }
+clove-import = { path = "crates/clove-import", version = "0.2.0", default-features = false }
+clove-ipc = { path = "crates/clove-ipc", version = "0.2.0" }
+clove-engine = { path = "crates/clove-engine", version = "0.2.0" }
+clove-service = { path = "crates/clove-service", version = "0.2.0" }
+clove-mcp = { path = "crates/clove-mcp", version = "0.2.0" }
+clove-tui = { path = "crates/clove-tui", version = "0.2.0" }
+clove-web = { path = "crates/clove-web", version = "0.2.0" }
+clove-plugin = { path = "crates/clove-plugin", version = "0.2.0" }
 
 # Debug-build size controls. `target/` was 2.5 GB for a plain `cargo build
 # --workspace`, nearly all of it DWARF. Line tables keep `RUST_BACKTRACE` frames

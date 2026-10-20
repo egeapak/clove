@@ -8,8 +8,7 @@
 //! host about where the repo is or which envelope the user asked for.
 
 use camino::Utf8PathBuf;
-use clove_core::{CloveConfig, ItemStore, OutputFormat};
-use clove_types::CloveError;
+use clove_types::{CloveError, OutputFormat};
 
 /// Terminal color preference (`$CLOVE_COLOR`).
 ///
@@ -90,6 +89,13 @@ pub struct PluginContext {
     pub no_index: bool,
     /// The `--deep` staleness flag (`$CLOVE_DEEP`).
     pub deep: bool,
+    // host IPC channel (§6.6)
+    /// The host IPC socket (`$CLOVE_HOST_SOCKET`); `None` when the plugin was
+    /// not started by a `clove` that serves one. Use [`PluginContext::host`].
+    pub host_socket: Option<String>,
+    /// The token that authenticates to [`host_socket`](Self::host_socket)
+    /// (`$CLOVE_HOST_TOKEN`).
+    pub host_token: Option<String>,
 }
 
 /// A failure to materialize the §6.2 environment into a [`PluginContext`].
@@ -175,7 +181,27 @@ impl PluginContext {
             quiet: req_bool("CLOVE_QUIET")?,
             no_index: req_bool("CLOVE_NO_INDEX")?,
             deep: req_bool("CLOVE_DEEP")?,
+            host_socket: opt("CLOVE_HOST_SOCKET"),
+            host_token: opt("CLOVE_HOST_TOKEN"),
         })
+    }
+
+    /// Open the host IPC channel (§6.6): read and write items through the
+    /// `clove` that started this plugin, with the MCP tool arguments.
+    ///
+    /// [`HostError::Unavailable`](crate::HostError::Unavailable) when this
+    /// plugin was run directly or by a `clove` older than 0.2.0. A plugin that
+    /// needs the channel should fail with that error (its message says what to
+    /// do) rather than raise its minimum plugin API.
+    pub fn host(&self) -> Result<crate::HostClient, crate::HostError> {
+        let (Some(socket), Some(token)) = (&self.host_socket, &self.host_token) else {
+            return Err(crate::HostError::Unavailable);
+        };
+        let client_name = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+            .unwrap_or_default();
+        crate::HostClient::connect(socket, token, &client_name, Some(self.clove_dir.as_str()))
     }
 
     /// The capability this dispatch reached the plugin for, as a `provides` token:
@@ -188,20 +214,6 @@ impl PluginContext {
             Some(provider) => format!("{}:{}", self.command, provider),
             None => self.command.clone(),
         }
-    }
-
-    /// Open the file store the fat-plugin way (§6.4A): `ItemStore::new(root)`.
-    ///
-    /// Keeps the plugin on the unified write path (mutating through
-    /// `clove_core::apply_edit`) with one call.
-    pub fn open_store(&self) -> ItemStore {
-        ItemStore::new(self.root.clone())
-    }
-
-    /// Re-read and validate `config.toml`. The host already validated it; this
-    /// re-loads it from [`self.root`](Self::root).
-    pub fn load_config(&self) -> Result<CloveConfig, CloveError> {
-        clove_core::load_config(&self.root)
     }
 }
 
@@ -284,6 +296,8 @@ mod tests {
         ("CLOVE_QUIET", "1"),
         ("CLOVE_NO_INDEX", "0"),
         ("CLOVE_DEEP", "1"),
+        ("CLOVE_HOST_SOCKET", "/tmp/clove-plugin-x/s"),
+        ("CLOVE_HOST_TOKEN", "00ff"),
     ];
 
     const ALL_VARS: &[&str] = &[
@@ -305,6 +319,8 @@ mod tests {
         "CLOVE_QUIET",
         "CLOVE_NO_INDEX",
         "CLOVE_DEEP",
+        "CLOVE_HOST_SOCKET",
+        "CLOVE_HOST_TOKEN",
     ];
 
     fn clear_all() {
@@ -318,6 +334,20 @@ mod tests {
         for (name, value) in pairs {
             std::env::set_var(name, value);
         }
+    }
+
+    #[test]
+    fn without_a_host_channel_host_is_unavailable() {
+        let _guard = env_lock();
+        let pairs: Vec<(&str, &str)> = FULL_ENV
+            .iter()
+            .copied()
+            .filter(|(name, _)| !name.starts_with("CLOVE_HOST_"))
+            .collect();
+        install(&pairs);
+        let cx = PluginContext::from_env().expect("the host vars are optional");
+        assert!(cx.host_socket.is_none() && cx.host_token.is_none());
+        assert!(matches!(cx.host(), Err(crate::HostError::Unavailable)));
     }
 
     #[test]
@@ -343,6 +373,8 @@ mod tests {
         assert_eq!(cx.id_prefix, "clove");
         assert_eq!(cx.format, OutputFormat::Json);
         assert_eq!(cx.color, PluginColor::Never);
+        assert_eq!(cx.host_socket.as_deref(), Some("/tmp/clove-plugin-x/s"));
+        assert_eq!(cx.host_token.as_deref(), Some("00ff"));
         assert!(cx.quiet);
         assert!(!cx.no_index);
         assert!(cx.deep);

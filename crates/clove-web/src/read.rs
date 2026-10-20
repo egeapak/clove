@@ -746,6 +746,8 @@ pub async fn get_meta(State(state): State<AppState>) -> ApiResult {
         "daemon": { "running": state.daemon_running, "web_addr": Value::Null },
         "sync": crate::sync::targets(&state.clove_dir()),
         "source": state.source,
+        // The AGPL-3.0 section 13 source offer, linked from the SPA's top bar.
+        "source_code": clove_core::source::source_json(),
     });
     Ok(ok_data(data))
 }

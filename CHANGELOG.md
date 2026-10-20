@@ -4,6 +4,71 @@ All notable changes to clove are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - Unreleased
+
+### Changed
+
+- **License:** clove is now licensed under **AGPL-3.0-only** (`LICENSE`), with
+  an additional permission for plugins (`LICENSE-PLUGIN-EXCEPTION`). The plugin
+  SDK crates (`clove-types`, `clove-plugin`, `clove-plugin-echo`) stay
+  **MIT OR Apache-2.0**. Releases up to and including 0.1.5 keep their
+  "MIT OR Apache-2.0" license.
+- Release archives now include `LICENSE`, `LICENSE-PLUGIN-EXCEPTION`,
+  `LICENSE-MIT`, `LICENSE-APACHE` and `THIRD_PARTY_LICENSES.txt` (notices of the
+  linked Rust crates); the web UI serves the notices of its bundled npm packages
+  at `/THIRD_PARTY_LICENSES.txt`. Every published crate now carries its
+  license text.
+- Contributions need a DCO sign-off (`CONTRIBUTING.md`).
+- **Plugin process model:** `clove <plugin>` now spawns the plugin and waits for
+  it on every platform (Unix used to `exec` it). Stdio is inherited; Ctrl-C
+  reaches the plugin as before; signals another process sends to the host pid
+  are forwarded (SIGINT/SIGQUIT/SIGTERM/SIGHUP on Linux, SIGTERM/SIGHUP
+  elsewhere);
+  the host exits with the plugin's exit code, or dies of the same signal. The
+  plugin no longer has the pid the user started.
+
+### Added
+
+- **The shipped plugins use the host IPC channel:** `clove-import-tk`,
+  `clove-import-beads` and `clove-sync-github` no longer open the store; every
+  read and write goes through the `clove` that runs them, via the new `store.*`
+  tier of the channel (whole items with their own timestamps, host-minted ids,
+  comments with original author and time). Imported and pulled items are now
+  validated like `create` before they are written. `clove-import` code takes a
+  `clove_import::Store` (`HostStore` / `DirectStore`). **Breaking (library):**
+  `TkImporter::new` / `BeadsImporter::new` no longer take an id prefix, and
+  `sync_net::sync_github` no longer takes one (the host mints ids). Like every
+  other write, `store.*` writes go through a running `cloved`, and through the
+  host only when no daemon runs.
+- Daemon IPC protocol 10: the daemon applies imported items, external links and
+  timestamped comments (`create_item`, `link_external`, `add_comment_at`), and
+  `clove daemon status` reports `writes_applied`. A 0.1.x daemon is not used
+  until it is restarted on 0.2.0; writes fall back to the host.
+
+- **Host IPC channel for plugins** (`PLUGIN_SYSTEM.md` §6.6): while `clove
+  <plugin>` runs, the host serves the clove tool surface (the MCP tools'
+  arguments and results) over a per-invocation local socket, authenticated with a
+  token (`CLOVE_HOST_SOCKET`, `CLOVE_HOST_TOKEN`). The SDK client is
+  `PluginContext::host()` → `clove_plugin::HostClient`. Writes go through the
+  unified write path in the host; a plugin that uses only this channel and the
+  SDK links no AGPL code.
+
+- New crate **`clove-service`**: the transport-independent tool engine (moved
+  out of `clove-mcp`), shared by the MCP server and the plugin host IPC. The
+  tool argument types moved to `clove_types::tool` (serde, with `JsonSchema`
+  behind `clove-types`' optional `schemars` feature). MCP tool schemas and
+  error texts are unchanged (pinned by a `tools/list` snapshot).
+
+- **Source offer (AGPL-3.0 section 13):** the web UI links to the source of the
+  running build (`/api/v1/meta` → `source_code`), and `clove version` prints the
+  license and source URL. A fork sets `CLOVE_SOURCE_URL` at build time.
+
+- **Breaking (plugin SDK):** `clove-plugin` no longer depends on `clove-core`.
+  `PluginContext::open_store` / `load_config` and the `ItemStore` / `CloveConfig`
+  re-exports are removed; a plugin that opens the store depends on `clove-core`
+  and calls `ItemStore::new(cx.root.clone())`. `OutputFormat` moved to
+  `clove-types` (still re-exported by `clove-core` and `clove-plugin`).
+
 ## [0.1.5] - 2026-10-18
 
 ### Changed

@@ -67,6 +67,20 @@ export interface Meta {
   source: string;
   /** Repositories the project syncs with (empty or absent: none). */
   sync?: SyncTarget[];
+  /**
+   * Where to get the source of the running clove (AGPL-3.0 section 13). Absent
+   * from an older server.
+   */
+  source_code?: SourceCode;
+}
+
+/** The source offer of the running clove build. */
+export interface SourceCode {
+  /** The source of this exact version (a fork sets `CLOVE_SOURCE_URL`). */
+  url: string;
+  version: string;
+  /** SPDX license id, e.g. `AGPL-3.0-only`. */
+  license: string;
 }
 
 /** One `clove sync` target, from the sync state under `.clove/sync/`. */

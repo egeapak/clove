@@ -15,7 +15,15 @@
         "clove": { "type": "string" },
         "schema": { "type": "integer" },
         "build_date": { "type": ["string", "null"] },
-        "git_hash": { "type": ["string", "null"] }
+        "git_hash": { "type": ["string", "null"] },
+        "license": {
+          "description": "SPDX id of clove's license (AGPL-3.0-only).",
+          "type": "string"
+        },
+        "source": {
+          "description": "Where to get the source of this build (AGPL-3.0 section 13): the CLOVE_SOURCE_URL it was built with, or the upstream tree of its version tag.",
+          "type": "string"
+        }
       },
       "additionalProperties": false
     },

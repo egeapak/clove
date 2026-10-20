@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use clove_core::ItemStore;
+use crate::store::Store;
 use clove_types::limits::{MAX_BODY_BYTES, MAX_DEP_ARRAY_LEN, MAX_FRONTMATTER_BYTES};
 use clove_types::{normalize_label, CloveId, ItemStatus, ItemType, Priority};
 
@@ -207,9 +207,9 @@ impl ExistingItem {
 /// wins; per-file parse failures are ignored here (they surface through the
 /// normal `doctor`/scan paths).
 pub fn build_external_ref_index(
-    store: &ItemStore,
+    store: &dyn Store,
 ) -> Result<HashMap<String, ExistingItem>, ImportError> {
-    let (frontmatters, _scan_errors) = store.scan_frontmatter()?;
+    let frontmatters = store.scan_frontmatter()?;
     let mut index = HashMap::new();
     for fm in frontmatters {
         if let Some(external_ref) = fm.external_ref {
@@ -229,8 +229,8 @@ pub fn build_external_ref_index(
 /// neither this set nor the current import batch is reported as dangling.
 /// Per-file parse failures are ignored here (they surface through the normal
 /// scan/doctor paths).
-pub fn build_store_id_set(store: &ItemStore) -> Result<HashSet<CloveId>, ImportError> {
-    let (frontmatters, _scan_errors) = store.scan_frontmatter()?;
+pub fn build_store_id_set(store: &dyn Store) -> Result<HashSet<CloveId>, ImportError> {
+    let frontmatters = store.scan_frontmatter()?;
     Ok(frontmatters.into_iter().map(|fm| fm.id).collect())
 }
 

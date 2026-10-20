@@ -27,11 +27,11 @@ use clove_plugin::outln;
 use std::process::ExitCode;
 
 use clap::Parser;
-use clove_core::OutputFormat;
 use clove_plugin::{
     clap_exit_code, emit_error, emit_success, parse_format, PluginArgs, PluginContext, PluginInfo,
 };
 use clove_types::CloveError;
+use clove_types::OutputFormat;
 use serde_json::json;
 
 /// The metadata `clove plugin list` / `--clove-plugin-info` reports. Emitted via
@@ -162,8 +162,9 @@ fn run(
 
     let (summary, report) = clove_import::sync_net::sync_github(
         &cli.target,
-        &cx.open_store(),
-        &cx.id_prefix,
+        // Every read and write goes through the `clove` that runs this plugin
+        // (the host IPC channel, PLUGIN_SYSTEM.md §6.6).
+        &clove_import::HostStore::connect(cx)?,
         policy,
         !cli.no_comments,
         cli.dry_run,

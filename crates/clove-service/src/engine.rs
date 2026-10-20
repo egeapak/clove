@@ -1,4 +1,6 @@
-//! The MCP tool engine: one sync method per tool, decoupled from rmcp.
+//! The tool engine: one sync method per tool of the clove tool surface,
+//! decoupled from any transport. `clove-mcp` serves it over MCP stdio and the
+//! `clove` host serves it to plugins over the host IPC channel.
 //!
 //! Topology B: **writes** prefer the single `cloved` daemon (which serializes
 //! them and keeps its index/graph coherent) and fall back to direct `clove-core`
@@ -10,13 +12,11 @@
 //! filtering, ordering, and counting happen in SQL) and only the returned page
 //! is read from disk.
 //!
-//! Every method returns the §7.4 JSON shape or a human-readable error string for
-//! the tool result, now with a `source` key naming the tier that answered — the
-//! `_meta.source` of the CLI and web, carried as a plain key because the MCP
-//! page has no `_meta`. Methods are blocking and meant to run on a blocking
-//! task.
-
-use std::sync::{Arc, Mutex};
+//! Every method returns the §7.4 JSON shape or a [`ToolError`], now with a
+//! `source` key naming the tier that answered — the `_meta.source` of the CLI
+//! and web, carried as a plain key because the MCP page has no `_meta`. Methods
+//! are blocking: run them on a blocking task or a plain thread, never inside a
+//! tokio runtime (the daemon client calls `block_on`).
 
 use camino::Utf8PathBuf;
 use chrono::Utc;
@@ -27,7 +27,10 @@ use clove_ipc::{ClientError, DaemonClient};
 use clove_types::{CloveId, ItemStatus, ItemType, NewSpec};
 use serde_json::Value;
 
-use crate::args::*;
+use clove_types::tool::*;
+
+use crate::daemon::Daemon;
+use crate::error::ToolError;
 use crate::shape::{self, Shape};
 use clove_core::view::defaults::{DEP_TREE_DEPTH, STATS_TOP};
 use clove_core::view::{Order, Page, SearchOrder};
@@ -42,12 +45,8 @@ pub struct Engine {
     /// Id prefix + default type for `create` (from `.clove/config`).
     pub id_prefix: String,
     pub default_type: ItemType,
-    /// The cached daemon write coordinator. A probe builds a tokio runtime,
-    /// connects, and pings — far too heavy to repeat on every tool call of a
-    /// long-lived server — so the client is kept and only its (cheap, on the
-    /// open connection) `ping` is repeated per call; a dead/restarted daemon
-    /// drops the cache and re-probes.
-    daemon: Arc<Mutex<Option<DaemonClient>>>,
+    /// The daemon write coordinator (see [`Daemon`]).
+    daemon: Daemon,
     /// The read tier. Holds its own cached daemon connection for the same
     /// reason: this server is long-lived and re-probing per tool call would
     /// cost more than the read it accelerates.
@@ -60,23 +59,21 @@ impl Engine {
         repo_root: Utf8PathBuf,
         id_prefix: String,
         default_type: ItemType,
+        tiers: clove_engine::Tiers,
     ) -> Self {
-        let reads = clove_engine::Engine::new(
-            ItemStore::new(repo_root.clone()),
-            clove_dir.clone(),
-            // Every tier, fast staleness check: the MCP server has no
-            // `--no-index` equivalent, and `--deep` is a CLI diagnostic. But
-            // `index.auto_refresh` is the repo's policy, not the surface's —
-            // hardcoding it made an MCP *read* write to `index.db` in a repo
-            // that had asked reads not to.
-            clove_engine::Tiers::for_repo(&repo_root),
-        );
+        // The caller picks the read tiers: the MCP server passes
+        // `Tiers::for_repo` (every tier, fast staleness check, the repo's
+        // `index.auto_refresh` policy); the plugin host derives them from its
+        // own `--no-index` / `--deep` flags so a plugin's reads honour them.
+        let reads =
+            clove_engine::Engine::new(ItemStore::new(repo_root.clone()), clove_dir.clone(), tiers);
+        let daemon = Daemon::new(clove_dir.clone());
         Self {
             clove_dir,
             repo_root,
             id_prefix,
             default_type,
-            daemon: Arc::new(Mutex::new(None)),
+            daemon,
             reads,
         }
     }
@@ -85,41 +82,25 @@ impl Engine {
         ItemStore::new(self.repo_root.clone())
     }
 
-    /// Run `call` against the daemon write coordinator, if one is reachable.
-    ///
-    /// `None` → no daemon (caller falls back to direct ops). The call itself
-    /// is attempted exactly ONCE (a failed write RPC must surface, never be
-    /// blindly retried — the daemon may have applied it before the response
-    /// was lost); only the *liveness check* re-probes.
+    /// Run `call` against the daemon write coordinator, if one is reachable;
+    /// see [`Daemon::with`].
     fn with_daemon<T>(
         &self,
         call: impl FnOnce(&mut DaemonClient) -> Result<T, ClientError>,
-    ) -> Option<Result<T, String>> {
-        let mut guard = self.daemon.lock().unwrap_or_else(|e| e.into_inner());
-        // Validate the cached connection first: one ping on the already-open
-        // connection, no runtime construction.
-        if let Some(client) = guard.as_mut() {
-            if client.ping().is_err() {
-                *guard = None;
-            }
-        }
-        if guard.is_none() {
-            *guard = DaemonClient::probe(&self.clove_dir);
-        }
-        let client = guard.as_mut()?;
-        Some(call(client).map_err(stringify))
+    ) -> Option<Result<T, ToolError>> {
+        self.daemon.with(call)
     }
 
     // ---- Read tools (tiered through clove-engine) ---------------------------
 
-    pub fn ready(&self, a: FilterArgs) -> Result<Value, String> {
-        let filters = a.to_filters()?;
-        let order = a.to_order()?;
+    pub fn ready(&self, a: FilterArgs) -> Result<Value, ToolError> {
+        let filters = filters_of(&a)?;
+        let order = order_of(&a)?;
         let window = window(a.offset, a.limit);
         let answer = self
             .reads
             .ready(&filters, order, window, Projection::Full)
-            .map_err(stringify_core)?;
+            .map_err(ToolError::Core)?;
         Ok(shape::apply(
             page_of(
                 &answer,
@@ -132,14 +113,14 @@ impl Engine {
         ))
     }
 
-    pub fn blocked(&self, a: BlockedArgs) -> Result<Value, String> {
-        let filters = a.filter.to_filters()?;
-        let order = a.filter.to_order()?;
+    pub fn blocked(&self, a: BlockedArgs) -> Result<Value, ToolError> {
+        let filters = filters_of(&a.filter)?;
+        let order = order_of(&a.filter)?;
         let window = window(a.filter.offset, a.filter.limit);
         let answer = self
             .reads
             .blocked(&filters, order, window, Projection::Full)
-            .map_err(stringify_core)?;
+            .map_err(ToolError::Core)?;
         Ok(shape::apply(
             page_of(
                 &answer,
@@ -152,14 +133,14 @@ impl Engine {
         ))
     }
 
-    pub fn list(&self, a: ListArgs) -> Result<Value, String> {
-        let filters = a.filter.to_filters()?;
-        let order = a.filter.to_order()?;
+    pub fn list(&self, a: ListArgs) -> Result<Value, ToolError> {
+        let filters = filters_of(&a.filter)?;
+        let order = order_of(&a.filter)?;
         let window = window(a.filter.offset, a.filter.limit);
         let answer = self
             .reads
             .list(&filters, order, window, Projection::Full)
-            .map_err(stringify_core)?;
+            .map_err(ToolError::Core)?;
         Ok(shape::apply(
             page_of(
                 &answer,
@@ -172,23 +153,23 @@ impl Engine {
         ))
     }
 
-    pub fn show(&self, a: IdArgs) -> Result<Value, String> {
+    pub fn show(&self, a: IdArgs) -> Result<Value, ToolError> {
         let id = parse_id(&a.id)?;
         let shaping = shaping(&a.shape);
         self.reads
             .show(&id)
             .map(|answer| shape::apply(answer.value, &shaping))
-            .map_err(stringify_core)
+            .map_err(ToolError::Core)
     }
 
-    pub fn search(&self, a: SearchArgs) -> Result<Value, String> {
+    pub fn search(&self, a: SearchArgs) -> Result<Value, ToolError> {
         let order =
-            SearchOrder::parse(a.sort.as_deref(), dir_of(a.desc)).map_err(stringify_core)?;
+            SearchOrder::parse(a.sort.as_deref(), dir_of(a.desc)).map_err(ToolError::Core)?;
         let window = window(a.offset, a.limit);
         let answer = self
             .reads
             .search(&a.text, order, window)
-            .map_err(stringify_core)?;
+            .map_err(ToolError::Core)?;
         Ok(shape::apply(
             // No `filters` echo: `search` takes no field filters, and an empty
             // object would advertise a surface the tool does not have.
@@ -203,15 +184,15 @@ impl Engine {
         ))
     }
 
-    pub fn comments(&self, a: CommentsArgs) -> Result<Value, String> {
+    pub fn comments(&self, a: CommentsArgs) -> Result<Value, ToolError> {
         let id = parse_id(&a.id)?;
         self.reads
             .comments(&id, window(a.skip_newest, a.limit))
             .map(|answer| answer.value)
-            .map_err(stringify_core)
+            .map_err(ToolError::Core)
     }
 
-    pub fn dep_tree(&self, a: DepTreeArgs) -> Result<Value, String> {
+    pub fn dep_tree(&self, a: DepTreeArgs) -> Result<Value, ToolError> {
         let id = parse_id(&a.id)?;
         // Deliberately unshaped: `dep-tree.json` lists `children` as *required*
         // on every node, so compaction — which recurses and would drop the empty
@@ -228,10 +209,10 @@ impl Engine {
         self.reads
             .dep_tree(&id, depth)
             .map(|answer| answer.value)
-            .map_err(stringify_core)
+            .map_err(ToolError::Core)
     }
 
-    pub fn stats(&self, a: StatsArgs) -> Result<Value, String> {
+    pub fn stats(&self, a: StatsArgs) -> Result<Value, ToolError> {
         self.reads
             .stats(
                 a.top.unwrap_or(STATS_TOP as u64) as usize,
@@ -239,12 +220,12 @@ impl Engine {
                 Utc::now(),
             )
             .map(|answer| answer.value)
-            .map_err(stringify_core)
+            .map_err(ToolError::Core)
     }
 
     // ---- Write tools (daemon-preferred, ops fallback) -----------------------
 
-    pub fn create(&self, a: NewArgs) -> Result<Value, String> {
+    pub fn create(&self, a: NewArgs) -> Result<Value, ToolError> {
         let spec = NewSpec {
             title: a.title,
             item_type: a.item_type,
@@ -264,69 +245,70 @@ impl Engine {
                 spec,
                 Utc::now(),
             )
-            .map_err(stringify_core),
+            .map_err(ToolError::Core),
         }
     }
 
-    pub fn set_status(&self, a: StatusArgs) -> Result<Value, String> {
-        let status = ItemStatus::parse(&a.status).map_err(stringify_core)?;
+    pub fn set_status(&self, a: StatusArgs) -> Result<Value, ToolError> {
+        let status = ItemStatus::parse(&a.status).map_err(ToolError::Core)?;
         match self.with_daemon(|d| d.set_status(a.id.clone(), status)) {
             Some(result) => result,
             None => {
                 let id = parse_id(&a.id)?;
-                ops::transition(&self.store(), &id, status, Utc::now()).map_err(stringify_core)
+                ops::transition(&self.store(), &id, status, Utc::now()).map_err(ToolError::Core)
             }
         }
     }
 
-    pub fn edit(&self, a: EditArgs) -> Result<Value, String> {
-        let req = a.to_request().map_err(stringify_core)?;
+    pub fn edit(&self, a: EditArgs) -> Result<Value, ToolError> {
+        let req = a.to_request().map_err(ToolError::Core)?;
         if req.is_empty() {
-            return Err("no fields to edit".to_owned());
+            return Err(ToolError::Usage("no fields to edit".to_owned()));
         }
         match self.with_daemon(|d| d.apply_edit(a.id.clone(), req.clone())) {
             Some(result) => result,
             None => {
                 let id = parse_id(&a.id)?;
-                clove_core::apply_edit(&self.store(), &id, &req, Utc::now()).map_err(stringify_core)
+                clove_core::apply_edit(&self.store(), &id, &req, Utc::now())
+                    .map_err(ToolError::Core)
             }
         }
     }
 
-    pub fn comment(&self, a: CommentArgs) -> Result<Value, String> {
+    pub fn comment(&self, a: CommentArgs) -> Result<Value, ToolError> {
         let author = clove_core::comments::comment_author(&self.repo_root);
         match self.with_daemon(|d| d.add_comment(a.id.clone(), author.clone(), a.message.clone())) {
             Some(result) => result,
             None => {
                 let id = parse_id(&a.id)?;
-                ops::comment(&self.store(), &id, &author, &a.message).map_err(stringify_core)
+                ops::comment(&self.store(), &id, &author, &a.message).map_err(ToolError::Core)
             }
         }
     }
 
-    pub fn dep_add(&self, a: DepAddArgs) -> Result<Value, String> {
+    pub fn dep_add(&self, a: DepAddArgs) -> Result<Value, ToolError> {
         match self.with_daemon(|d| d.dep_add(a.id.clone(), a.dep_id.clone())) {
             Some(result) => result,
             None => {
                 let id = parse_id(&a.id)?;
                 let dep = parse_id(&a.dep_id)?;
-                ops::dep_add(&self.store(), &id, &dep, Utc::now()).map_err(stringify_core)
+                ops::dep_add(&self.store(), &id, &dep, Utc::now()).map_err(ToolError::Core)
             }
         }
     }
 
-    pub fn dep_remove(&self, a: DepAddArgs) -> Result<Value, String> {
+    pub fn dep_remove(&self, a: DepAddArgs) -> Result<Value, ToolError> {
         match self.with_daemon(|d| d.dep_remove(a.id.clone(), a.dep_id.clone())) {
             Some(result) => result,
             None => {
                 let id = parse_id(&a.id)?;
                 let dep = parse_id(&a.dep_id)?;
-                ops::dep_remove(&self.store(), &id, &dep, Utc::now()).map_err(stringify_core)
+                ops::dep_remove(&self.store(), &id, &dep, Utc::now()).map_err(ToolError::Core)
             }
         }
     }
 
-    pub fn set_parent(&self, a: SetParentArgs) -> Result<Value, String> {
+    pub fn set_parent(&self, a: SetParentArgs) -> Result<Value, ToolError> {
         match self.with_daemon(|d| d.set_parent(a.id.clone(), a.parent.clone())) {
             Some(result) => result,
             None => {
@@ -336,7 +318,7 @@ impl Engine {
                     None => None,
                 };
                 ops::set_parent(&self.store(), &id, parent.as_ref(), Utc::now())
-                    .map_err(stringify_core)
+                    .map_err(ToolError::Core)
             }
         }
     }
@@ -412,26 +394,8 @@ fn window(offset: Option<u64>, limit: Option<u64>) -> Page {
     )
 }
 
-fn parse_id(raw: &str) -> Result<CloveId, String> {
-    CloveId::new(raw).map_err(stringify_core)
-}
-
-fn stringify<E: std::fmt::Display>(e: E) -> String {
-    e.to_string()
-}
-
-/// Render a local `CloveError` the way the daemon renders a remote one:
-/// `CODE: message`.
-///
-/// Read tools never reach the daemon and write tools fall back to local ops
-/// when none is running, so without this the *same* failure read
-/// `ITEM_NOT_FOUND: no item with id X` or `no item with id X` depending on
-/// whether a daemon happened to be up — and within one session `clove_show` and
-/// `clove_status` disagreed on the same missing id. The classification was
-/// already shared; only the rendering was not.
-fn stringify_core(e: clove_types::CloveError) -> String {
-    let (code, _exit) = clove_types::error_code(&e);
-    format!("{code}: {e}")
+fn parse_id(raw: &str) -> Result<CloveId, ToolError> {
+    CloveId::new(raw).map_err(ToolError::Core)
 }
 
 /// `desc: true` → the shared `dir` word; `false`/absent → no direction (ascending).
@@ -439,24 +403,22 @@ fn dir_of(desc: Option<bool>) -> Option<&'static str> {
     desc.unwrap_or(false).then_some("desc")
 }
 
-impl FilterArgs {
-    fn to_filters(&self) -> Result<Filters, String> {
-        let mut filters = Filters::parse_multi(
-            &OneOrMany::values(&self.status),
-            &OneOrMany::values(&self.item_type),
-            &OneOrMany::values(&self.label),
-            self.assignee.as_deref(),
-            &Priorities::values(&self.priority),
-            self.q.as_deref(),
-        )
-        .map_err(stringify_core)?;
-        filters.synced = self.synced;
-        filters.parent = Filters::parse_parent(self.parent.as_deref()).map_err(stringify_core)?;
-        Ok(filters)
-    }
+/// The filter arguments as store filters.
+fn filters_of(a: &FilterArgs) -> Result<Filters, ToolError> {
+    let mut filters = Filters::parse_multi(
+        &OneOrMany::values(&a.status),
+        &OneOrMany::values(&a.item_type),
+        &OneOrMany::values(&a.label),
+        a.assignee.as_deref(),
+        &Priorities::values(&a.priority),
+        a.q.as_deref(),
+    )?;
+    filters.synced = a.synced;
+    filters.parent = Filters::parse_parent(a.parent.as_deref())?;
+    Ok(filters)
+}
 
-    /// The requested ordering, through the same parser the CLI and web use.
-    fn to_order(&self) -> Result<Order, String> {
-        Order::parse(self.sort.as_deref(), dir_of(self.desc)).map_err(stringify_core)
-    }
+/// The requested ordering, through the same parser the CLI and web use.
+fn order_of(a: &FilterArgs) -> Result<Order, ToolError> {
+    Ok(Order::parse(a.sort.as_deref(), dir_of(a.desc))?)
 }

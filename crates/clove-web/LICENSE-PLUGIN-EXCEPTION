@@ -1,0 +1,66 @@
+clove plugin exception
+======================
+
+Preface (explanatory, not part of the permission)
+-------------------------------------------------
+
+clove is licensed under the GNU Affero General Public License, version 3 only
+(AGPL-3.0-only), with the additional permission below. clove is extended by
+plugins: separate programs named `clove-<name>` that `clove` runs as
+subcommands. The copyright holder intends that a plugin which talks to clove
+only through the documented plugin interface, or which builds only on the
+permissively licensed plugin SDK, can use any license. The FSF's general view
+is that programs that communicate at arm's length are separate works, but the
+plugin interface exchanges structured item data, so this permission states the
+intent explicitly rather than leaving it to interpretation.
+
+Additional permission under GNU AGPL version 3 section 7
+--------------------------------------------------------
+
+Copyright (C) 2026 Ege Apak
+
+1. Definitions.
+
+   "clove" means the program in this repository and every work based on it
+   that is licensed under the GNU Affero General Public License, version 3
+   only, with this additional permission.
+
+   The "Plugin Interface" means the following means of interaction between
+   clove and another program, as documented in `docs/PLUGIN_SYSTEM.md` of the
+   clove version in question:
+     (a) clove running the other program as a separate process, with
+         command-line arguments and the `CLOVE_*` environment variables;
+     (b) the other program's standard input, output and error streams, its
+         exit status, and the JSON output envelope those streams carry;
+     (c) the host IPC protocol: the messages exchanged over the local socket
+         or named pipe that clove opens for the other program.
+
+   The "Plugin SDK" means the crates `clove-types` and `clove-plugin`, which
+   are licensed under "MIT OR Apache-2.0" and not under the AGPL.
+
+   A "Plugin" is a program that interacts with clove only through the Plugin
+   Interface, and that does not contain, link (statically or dynamically) or
+   otherwise incorporate any part of clove other than the Plugin SDK.
+
+2. Permission.
+
+   You may create, modify, use and convey a Plugin under terms of your choice,
+   including proprietary terms, and you may convey a Plugin together with
+   clove (for example in the same archive or installer). The AGPL does not
+   apply to the Plugin because of its interaction with clove through the
+   Plugin Interface or because of its use of the Plugin SDK.
+
+3. Limits.
+
+   This permission does not change the license of clove itself. clove, and
+   every modified version of clove, remains under AGPL-3.0-only, including
+   section 13 (remote network interaction). A program that links or
+   incorporates any part of clove other than the Plugin SDK (for example
+   `clove-core`, `clove-engine` or `clove-import`) is not a Plugin and is
+   covered by the AGPL.
+
+4. Modified versions.
+
+   If you modify clove, you may extend this additional permission to your
+   version, but you are not required to. If you do not wish to, delete this
+   additional permission from your version, as section 7 of the AGPL allows.
