@@ -3,7 +3,7 @@
 //! never touch the user's real one).
 #![allow(dead_code)]
 
-use std::process::{Child, Command, ExitStatus};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -112,6 +112,25 @@ impl TestHub {
         if let Some(dir) = clove_dir {
             hub.load(dir).expect("the hub serves the project");
         }
+        hub
+    }
+
+    /// A hub whose stderr reader is gone before it prints anything — as with
+    /// `cloved run 2>&1 | head -1` — serving `clove_dir`.
+    pub fn spawn_with_closed_stderr(clove_dir: &Utf8Path) -> TestHub {
+        let (run, paths) = runtime_dir();
+        let mut child = command(&paths, &[("CLOVED_DISABLE_WEB", "1")])
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn cloved");
+        drop(child.stderr.take());
+        let hub = TestHub {
+            paths,
+            child,
+            _run: Some(run),
+        };
+        hub.wait_ready(HANG_GUARD);
+        hub.load(clove_dir).expect("the hub serves the project");
         hub
     }
 

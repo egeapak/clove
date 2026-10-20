@@ -159,3 +159,27 @@ fn a_hub_stopped_mid_load_is_gone_when_its_pid_file_is() {
     assert!(hub_lock_free, "the hub lock is still held");
     assert!(project_lock_free, "the project's lock is still held");
 }
+
+#[test]
+fn a_hub_whose_stderr_reader_is_gone_keeps_serving() {
+    // Every status line (serving, stopped serving, exiting) goes to stderr.
+    // With no reader left those writes fail; they must not panic the hub —
+    // release builds abort on a panic.
+    let (_tmp, clove_dir) = init_clove_dir();
+    let mut hub = TestHub::spawn_with_closed_stderr(&clove_dir);
+    hub.client(&clove_dir)
+        .status()
+        .expect("served after `serving` was printed");
+    hub.detach(&clove_dir);
+    assert!(
+        hub.projects().is_empty(),
+        "still answers after `stopped serving`"
+    );
+
+    hub.signal(SIGTERM);
+    let status = hub.wait_exit(HANG_GUARD).expect("hub exited");
+    assert!(
+        status.success(),
+        "clean exit despite the closed stderr: {status:?}"
+    );
+}

@@ -6,6 +6,17 @@
 //! each subcommand under [`cmd`].
 #![deny(clippy::print_stdout)] // print via `outln!`/`out!` (see `clove_plugin::stdout`)
 
+/// `eprintln!` for a long-running process's status lines: if whoever read our
+/// stderr has gone away (`clove serve 2>&1 | head -1`), the write fails and is
+/// dropped instead of panicking and taking the server down with it.
+#[cfg(feature = "web")]
+macro_rules! status {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), $($arg)*);
+    }};
+}
+
 mod cli;
 mod clove_home;
 mod cmd;

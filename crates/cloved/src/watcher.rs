@@ -134,13 +134,13 @@ pub async fn run(
     let armed = match arm_on_own_thread(issues_dir.clone()).await {
         Ok(armed) => armed,
         Err(why) => {
-            eprintln!("cloved: {issues_dir}: {why}");
+            status!("cloved: {issues_dir}: {why}");
             return;
         }
     };
     let took = arming.elapsed();
     if took > Duration::from_secs(1) {
-        eprintln!("cloved: {issues_dir}: the file watch took {took:.1?} to set up");
+        status!("cloved: {issues_dir}: the file watch took {took:.1?} to set up");
     }
     let (dir, index_c, state_c, graph_c) = (
         issues_dir.clone(),
@@ -155,7 +155,7 @@ pub async fn run(
     })
     .await;
     if caught_up.is_err() {
-        eprintln!("cloved: {issues_dir}: the sweep after arming the watcher panicked");
+        status!("cloved: {issues_dir}: the sweep after arming the watcher panicked");
         return;
     }
     watch(armed, issues_dir, index, state, debounce, options, graph).await;
@@ -230,7 +230,7 @@ async fn watch(
         })
         .await;
         if done.is_err() {
-            eprintln!("cloved: watcher batch task panicked");
+            status!("cloved: watcher batch task panicked");
         }
     }
 }

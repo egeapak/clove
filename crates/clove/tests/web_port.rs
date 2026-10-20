@@ -338,3 +338,39 @@ fn a_bad_host_fails_even_with_a_daemon_running() {
         assert!(stderr.contains("host"), "{stderr}");
     }
 }
+
+#[test]
+fn serve_keeps_serving_after_its_stderr_reader_is_gone() {
+    // `clove serve 2>&1 | head -1`: the status lines after the URL hit a closed
+    // stderr. Those writes must be dropped, not panic the server.
+    let held = TcpListener::bind("127.0.0.1:0").unwrap();
+    let repo = repo_with_web_port(held.local_addr().unwrap().port());
+    let free = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = free.local_addr().unwrap().port();
+    drop(free);
+
+    let mut child = clove(repo.path())
+        .args(["serve", "--port", &port.to_string()])
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stderr.take());
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut serves = false;
+    while std::time::Instant::now() < deadline && child.try_wait().unwrap().is_none() {
+        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            serves = serves_repo(port, "/", repo.path());
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let exited = child.try_wait().unwrap();
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(
+        exited.is_none(),
+        "serve died with no stderr reader: {exited:?}"
+    );
+    assert!(serves, "port {port} does not serve this repo");
+}

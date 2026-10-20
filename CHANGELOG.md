@@ -113,6 +113,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   errors still abort. `sync_net::sync_github`'s `SyncReport` gains `skipped` and
   `warnings`.
 
+- `clove serve` and `cloved` keep running when nothing reads their stderr any
+  more (`clove serve 2>&1 | head -1`): a status line that cannot be written is
+  dropped instead of panicking, which the release build turned into an abort.
+
 - `clove edit` runs an `EDITOR`/`VISUAL`/`CLOVE_EDITOR` value that carries
   arguments (`code --wait`, `emacsclient -t`) the way git does, and a failure to
   start the editor names the editor instead of reporting "No such file" on the

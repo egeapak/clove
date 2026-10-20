@@ -46,7 +46,7 @@ pub fn run(paths: &HubPaths) -> anyhow::Result<()> {
     let lock = clove_core::fs_safe::open_lock_file(&paths.lock())
         .with_context(|| format!("opening {}", paths.lock()))?;
     if !take_hub_lock(&lock).with_context(|| format!("locking {}", paths.lock()))? {
-        eprintln!("cloved: a daemon is already running in {}", paths.dir());
+        status!("cloved: a daemon is already running in {}", paths.dir());
         std::process::exit(1);
     }
 
@@ -82,7 +82,7 @@ pub fn run(paths: &HubPaths) -> anyhow::Result<()> {
         let mut shutdown =
             ShutdownSignal::install(paths).context("installing the shutdown signal")?;
         write_pid(paths).context("writing pid file")?;
-        eprintln!(
+        status!(
             "cloved: hub pid {} serving from {} (protocol {})",
             std::process::id(),
             paths.dir(),
@@ -98,7 +98,7 @@ pub fn run(paths: &HubPaths) -> anyhow::Result<()> {
         }
         hub.shutdown().cancel();
         hub.unload_all().await;
-        eprintln!("cloved: hub pid {} exiting", std::process::id());
+        status!("cloved: hub pid {} exiting", std::process::id());
         Ok(())
     });
 
@@ -148,7 +148,7 @@ async fn orphaned(paths: &HubPaths) {
         #[cfg(windows)]
         let gone = !paths.pid().exists();
         if gone {
-            eprintln!("cloved: {} is gone; exiting", paths.dir());
+            status!("cloved: {} is gone; exiting", paths.dir());
             return;
         }
     }

@@ -66,11 +66,11 @@ pub fn github_sync_once(clove_dir: &Utf8Path, repo_spec: &str) -> bool {
     match status {
         Ok(status) if status.success() => true,
         Ok(status) => {
-            eprintln!("github-sync {repo_spec}: `clove sync github` exited with {status}");
+            status!("github-sync {repo_spec}: `clove sync github` exited with {status}");
             false
         }
         Err(err) => {
-            eprintln!("github-sync {repo_spec}: failed to spawn `{clove}` ({err})");
+            status!("github-sync {repo_spec}: failed to spawn `{clove}` ({err})");
             false
         }
     }

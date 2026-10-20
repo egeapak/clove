@@ -325,7 +325,7 @@ impl Hub {
         let slot = match loaded {
             Ok(slot) => slot,
             Err(e) => {
-                eprintln!("cloved: could not serve {key}: {}", e.message);
+                status!("cloved: could not serve {key}: {}", e.message);
                 let mut table = self.table();
                 if table
                     .slots
@@ -358,7 +358,7 @@ impl Hub {
 
     /// Mount the slot on the web listener and start its supervised tasks.
     async fn start(&self, slot: &Arc<Slot>) {
-        eprintln!("cloved: serving {}", slot.clove_dir);
+        status!("cloved: serving {}", slot.clove_dir);
         #[cfg(feature = "web")]
         self.mount_web(slot).await;
         tokio::spawn(self.clone().supervise(Arc::clone(slot), slot.tasks()));
@@ -424,19 +424,19 @@ impl Hub {
                 let listener = match clove_web::bind_or_free_port(wanted).await {
                     Ok(listener) => listener,
                     Err(e) => {
-                        eprintln!("cloved: web server bind error ({wanted}): {e}");
+                        status!("cloved: web server bind error ({wanted}): {e}");
                         return None;
                     }
                 };
                 let addr = listener.local_addr().unwrap_or(wanted);
                 if port != 0 && addr.port() != port {
-                    eprintln!("cloved: web UI port {wanted} in use; serving on {addr}");
+                    status!("cloved: web UI port {wanted} in use; serving on {addr}");
                 }
                 let web = clove_web::HubWeb::new();
                 let server = web.clone();
                 tokio::spawn(async move {
                     if let Err(e) = server.serve(listener).await {
-                        eprintln!("cloved: web server error ({addr}): {e}");
+                        status!("cloved: web server error ({addr}): {e}");
                     }
                 });
                 Some(WebSite { web, addr })
@@ -456,16 +456,16 @@ impl Hub {
         match ended {
             None => {}
             Some(Ok(SlotTask::Idle)) => {
-                eprintln!("cloved: {} idle; unloading it", slot.clove_dir);
+                status!("cloved: {} idle; unloading it", slot.clove_dir);
             }
             Some(Ok(task)) => {
-                eprintln!(
+                status!(
                     "cloved: {}: {task:?} stopped; unloading the project",
                     slot.clove_dir
                 );
             }
             Some(Err(e)) => {
-                eprintln!(
+                status!(
                     "cloved: {}: a background task failed ({e}); unloading the project",
                     slot.clove_dir
                 );
@@ -484,7 +484,7 @@ impl Hub {
         // stopped on a thread of its own).
         let (hub, forgotten) = (self.clone(), Arc::clone(&slot));
         let _ = tokio::task::spawn_blocking(move || hub.forget(&forgotten)).await;
-        eprintln!("cloved: stopped serving {}", slot.clove_dir);
+        status!("cloved: stopped serving {}", slot.clove_dir);
         slot.done.cancel();
     }
 
@@ -675,7 +675,7 @@ impl Hub {
                     tokio::spawn(self.clone().serve_connection(stream));
                 }
                 Err(e) => {
-                    eprintln!("cloved: accept error: {e}");
+                    status!("cloved: accept error: {e}");
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
             }

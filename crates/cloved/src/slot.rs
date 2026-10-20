@@ -145,7 +145,7 @@ pub fn open(clove_dir: &Utf8Path, cancel: CancellationToken) -> Result<Slot, Loa
     let index = match Index::open_or_rebuild(&db_path, &issues_dir) {
         Ok(index) => index,
         Err(e) => {
-            eprintln!(
+            status!(
                 "cloved: {clove_dir}: could not rebuild the index ({e}); starting with what is there"
             );
             Index::open_or_create(&db_path)
@@ -195,14 +195,14 @@ fn settings(config: Option<&clove_core::CloveConfig>) -> Settings {
     let daemon = config.map_or(&defaults.daemon, |c| &c.daemon);
     let git_sync = daemon.git_sync;
     if git_sync && !cfg!(feature = "git-sync") {
-        eprintln!(
+        status!(
             "cloved: [daemon] git_sync = true but this binary was built without \
              git-sync support; auto-commit is disabled"
         );
     }
     #[cfg(not(feature = "github-sync"))]
     if daemon.github_sync_repo.is_some() || daemon.github_sync_interval_min > 0 {
-        eprintln!(
+        status!(
             "cloved: [daemon] github sync is configured but this binary was \
              built without github-sync support; periodic GitHub sync is disabled"
         );
@@ -272,7 +272,7 @@ impl Slot {
                 match crate::github_remote::check_sync_target(&self.repo_root, &spec) {
                     Ok(repo) => Some(repo),
                     Err(why) => {
-                        eprintln!("cloved: {}: not syncing with GitHub: {why}", self.clove_dir);
+                        status!("cloved: {}: not syncing with GitHub: {why}", self.clove_dir);
                         None
                     }
                 }
