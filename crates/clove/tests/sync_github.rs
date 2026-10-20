@@ -27,7 +27,6 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
 
 use assert_cmd::prelude::*;
 use serde_json::{json, Value};
@@ -914,6 +913,21 @@ fn sync(dir: &Path, addr: SocketAddr, extra: &[&str]) -> Value {
     serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("bad json: {e}\n{out:?}"))
 }
 
+/// Move every recorded `local_updated` an hour into the past, so a local edit
+/// made next is strictly newer than the last sync regardless of the clock's
+/// resolution (instead of sleeping past a second boundary).
+fn backdate_sync_baseline(dir: &Path) {
+    let path = dir.join(".clove/sync/github/owner_repo.json");
+    let mut state: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    for entry in state["entries"].as_object_mut().unwrap().values_mut() {
+        let recorded =
+            chrono::DateTime::parse_from_rfc3339(entry["local_updated"].as_str().unwrap()).unwrap();
+        entry["local_updated"] = json!((recorded - chrono::Duration::hours(1))
+            .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true));
+    }
+    std::fs::write(&path, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
+}
+
 /// Run `clove sync github <repo>` allowing failure; returns the raw process output.
 fn sync_raw(dir: &Path, addr: SocketAddr, extra: &[&str]) -> std::process::Output {
     let mut args = vec!["sync", "--format", "json", "github", "owner/repo"];
@@ -1132,8 +1146,8 @@ fn push_update_applies_local_edit() {
     sync(dir.path(), mock.addr, &[]); // push-create gh-1
     let id = only_item_id(dir.path(), mock.addr);
 
-    // A new wall-clock second so the local `updated` strictly advances.
-    std::thread::sleep(Duration::from_millis(1100));
+    // Local edits must look newer than the last sync.
+    backdate_sync_baseline(dir.path());
     clove(dir.path(), mock.addr)
         .args(["set", &id, "title=Local edit"])
         .assert()
@@ -1157,7 +1171,7 @@ fn conflict_newer_remote_wins() {
 
     // Edit BOTH sides since the last sync. The remote tick is in 2030 (always
     // newer than the local 2026 wall clock), so "newer" resolves to remote.
-    std::thread::sleep(Duration::from_millis(1100));
+    backdate_sync_baseline(dir.path());
     clove(dir.path(), mock.addr)
         .args(["set", &id, "title=Local change"])
         .assert()
@@ -1183,7 +1197,7 @@ fn conflict_prefer_local_pushes_local() {
     sync(dir.path(), mock.addr, &[]);
     let id = only_item_id(dir.path(), mock.addr);
 
-    std::thread::sleep(Duration::from_millis(1100));
+    backdate_sync_baseline(dir.path());
     clove(dir.path(), mock.addr)
         .args(["set", &id, "title=Local wins"])
         .assert()
@@ -1400,7 +1414,7 @@ fn push_preserves_human_added_assignee() {
     sync(dir.path(), mock.addr, &[]);
 
     // A local-only edit triggers a push. clove must keep bob, not reset to [alice].
-    std::thread::sleep(Duration::from_millis(1100));
+    backdate_sync_baseline(dir.path());
     clove(dir.path(), mock.addr)
         .args(["set", &id, "title=Renamed"])
         .assert()
@@ -1431,7 +1445,7 @@ fn push_preserves_not_planned_close_reason() {
 
     // A local-only edit (still closed) triggers a push. The push must preserve the
     // not_planned reason rather than resetting it to completed.
-    std::thread::sleep(Duration::from_millis(1100));
+    backdate_sync_baseline(dir.path());
     clove(dir.path(), mock.addr)
         .args(["set", &id, "title=Won't fix, renamed"])
         .assert()
@@ -1619,7 +1633,7 @@ fn unassign_locally_clears_the_github_assignee() {
     assert_eq!(mock.assignee_logins(1), vec!["alice".to_owned()]);
 
     // Unassign locally; the next push must clear the assignee on GitHub.
-    std::thread::sleep(Duration::from_millis(1100));
+    backdate_sync_baseline(dir.path());
     clove(dir.path(), mock.addr)
         .args(["assign", &id, "--clear"])
         .assert()
@@ -1704,7 +1718,7 @@ fn pull_update_preserves_local_in_progress() {
 
     // Mark it in_progress locally and sync so both sides are in sync again (the
     // GitHub issue stays "open" — there is no in_progress there).
-    std::thread::sleep(Duration::from_millis(1100));
+    backdate_sync_baseline(dir.path());
     clove(dir.path(), mock.addr)
         .args(["start", &id])
         .assert()
@@ -1847,7 +1861,7 @@ fn push_clears_last_local_label() {
     assert_eq!(mock.label_names(1), vec!["area:core".to_owned()]);
     let id = only_item_id(dir.path(), mock.addr);
 
-    std::thread::sleep(Duration::from_millis(1100));
+    backdate_sync_baseline(dir.path());
     clove(dir.path(), mock.addr)
         .args(["label", &id, "rm", "area:core"])
         .assert()
@@ -1898,7 +1912,7 @@ fn idempotent_update_is_not_retried_on_4xx() {
         .success();
     sync(dir.path(), mock.addr, &[]); // push-create gh-1 (open → no PATCH)
     let id = only_item_id(dir.path(), mock.addr);
-    std::thread::sleep(Duration::from_millis(1100));
+    backdate_sync_baseline(dir.path());
     clove(dir.path(), mock.addr)
         .args(["set", &id, "title=Renamed"])
         .assert()
@@ -1926,7 +1940,7 @@ fn idempotent_update_retries_transient_5xx() {
         .success();
     sync(dir.path(), mock.addr, &[]); // push-create gh-1
     let id = only_item_id(dir.path(), mock.addr);
-    std::thread::sleep(Duration::from_millis(1100));
+    backdate_sync_baseline(dir.path());
     clove(dir.path(), mock.addr)
         .args(["set", &id, "title=Renamed"])
         .assert()
@@ -1987,7 +2001,7 @@ fn manual_skipped_conflict_does_not_restamp_assignee() {
     assert_eq!(mock.assignee_logins(1), vec!["alice".to_owned()]);
 
     // Reassign locally to bob AND change the issue remotely → a both-sides conflict.
-    std::thread::sleep(Duration::from_millis(1100));
+    backdate_sync_baseline(dir.path());
     clove(dir.path(), mock.addr)
         .args(["assign", &id, "bob"])
         .assert()
@@ -2176,7 +2190,7 @@ fn rejected_assignee_on_update_is_dropped_and_extras_kept() {
     mock.set_assignees(1, &["octocat"]);
 
     mock.reject_assignee("dogfood-tui");
-    std::thread::sleep(Duration::from_millis(1100));
+    backdate_sync_baseline(dir.path());
     clove(dir.path(), mock.addr)
         .args(["assign", &id, "dogfood-tui"])
         .assert()
@@ -2262,7 +2276,7 @@ fn a_rejected_update_is_skipped_and_the_other_update_lands() {
     sync(dir.path(), mock.addr, &[]);
 
     mock.reject_title("First renamed");
-    std::thread::sleep(Duration::from_millis(1100));
+    backdate_sync_baseline(dir.path());
     for (old, new) in [("First", "First renamed"), ("Second", "Second renamed")] {
         let list = clove(dir.path(), mock.addr)
             .args(["ls", "--format", "json"])
@@ -2318,7 +2332,7 @@ fn a_server_error_still_aborts_the_run() {
         .success();
     sync(dir.path(), mock.addr, &[]);
     let id = only_item_id(dir.path(), mock.addr);
-    std::thread::sleep(Duration::from_millis(1100));
+    backdate_sync_baseline(dir.path());
     clove(dir.path(), mock.addr)
         .args(["edit", &id, "--field", "title=Renamed"])
         .assert()
