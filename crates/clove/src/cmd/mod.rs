@@ -17,6 +17,7 @@ pub mod ls;
 pub mod mcp;
 pub mod merge_driver;
 pub mod new;
+pub mod parent;
 pub mod plugin;
 pub mod plugin_install;
 pub mod priority;

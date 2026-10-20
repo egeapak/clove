@@ -81,6 +81,8 @@ pub enum Commands {
     Label(LabelArgs),
     /// Set or clear the assignee.
     Assign(AssignArgs),
+    /// Set or clear the parent (cycle-checked).
+    Parent(ParentArgs),
     /// Set the priority (0–4).
     Priority(PriorityArgs),
     /// Manage dependencies.
@@ -483,6 +485,17 @@ pub struct AssignArgs {
     /// The assignee (omit with `--clear` to unset).
     pub assignee: Option<String>,
     /// Clear the assignee.
+    #[arg(long)]
+    pub clear: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ParentArgs {
+    /// The item id.
+    pub id: String,
+    /// The new parent's id (omit with `--clear` to unset).
+    pub parent: Option<String>,
+    /// Clear the parent.
     #[arg(long)]
     pub clear: bool,
 }

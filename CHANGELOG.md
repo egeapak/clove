@@ -69,6 +69,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and calls `ItemStore::new(cx.root.clone())`. `OutputFormat` moved to
   `clove-types` (still re-exported by `clove-core` and `clove-plugin`).
 
+- `clove parent <id> <parent-id>` / `clove parent <id> --clear` sets or clears
+  an existing item's parent from the CLI, through the same cycle-checked op as
+  the web UI and MCP `clove_set_parent` (#72).
+
+### Fixed
+
+- `clove edit` runs an `EDITOR`/`VISUAL`/`CLOVE_EDITOR` value that carries
+  arguments (`code --wait`, `emacsclient -t`) the way git does, and a failure to
+  start the editor names the editor instead of reporting "No such file" on the
+  item (#73).
+
 ## [0.1.5] - 2026-10-18
 
 ### Changed
