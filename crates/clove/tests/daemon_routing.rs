@@ -18,11 +18,7 @@ const TEST_CLOVE_HOME: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target
 /// The `cloved` binary, built on demand so these tests can never pass by
 /// skipping.
 fn cloved_bin() -> PathBuf {
-    support::cloved_build()
-        .run()
-        .expect("build cloved for the daemon routing tests")
-        .path()
-        .to_path_buf()
+    support::cloved("").to_path_buf()
 }
 
 fn clove() -> Command {
@@ -492,12 +488,8 @@ fn writes_applied(root: &std::path::Path) -> u64 {
 #[test]
 fn plugin_store_writes_route_through_the_daemon() {
     let bin = cloved_bin();
-    let plugin = escargot::CargoBuild::new()
-        .package("clove-import-tk")
-        .bin("clove-import-tk")
-        .run()
-        .expect("build clove-import-tk plugin");
-    let plugin_dir = plugin.path().parent().unwrap().to_owned();
+    let plugin = support::plugin("clove-import-tk", "clove-import-tk", "");
+    let plugin_dir = plugin.parent().unwrap().to_owned();
 
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();

@@ -22,11 +22,13 @@
 //! (see the `clove()` harness); the plugin emits byte-identical JSON to the old
 //! built-in, so every assertion below holds unchanged.
 
+mod support;
+
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::process::Command;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use assert_cmd::prelude::*;
 use serde_json::{json, Value};
@@ -853,20 +855,10 @@ fn make_issue(
 /// sibling can win. If escargot's output dir ever diverged from the test binary's
 /// dir, a stale sibling could take precedence.
 fn plugin_dir() -> &'static Path {
-    static DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
-    DIR.get_or_init(|| {
-        let run = escargot::CargoBuild::new()
-            .package("clove-sync-github")
-            .bin("clove-sync-github")
-            // `CLOVE_GITHUB_RETRY_MS` (below) only exists in a `test-knobs` build.
-            .features("test-knobs")
-            .run()
-            .expect("build clove-sync-github plugin");
-        run.path()
-            .parent()
-            .expect("plugin binary has a parent dir")
-            .to_owned()
-    })
+    // `CLOVE_GITHUB_RETRY_MS` (below) only exists in a `test-knobs` build.
+    support::plugin("clove-sync-github", "clove-sync-github", "test-knobs")
+        .parent()
+        .expect("plugin binary has a parent dir")
 }
 
 fn clove(dir: &Path, addr: SocketAddr) -> Command {

@@ -7,6 +7,8 @@
 //! plugin reflects back; `plugin_list_reports_the_plugin` proves `clove plugin
 //! list` enumerates it.
 
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -27,16 +29,7 @@ fn install_echo() -> (TempDir, PathBuf) {
 /// same reflect-everything binary can stand in for `clove-sync-echo`,
 /// `clove-import-echo`, … to exercise the umbrella fallback). Returns the dest path.
 fn install_echo_as(dir: &Path, name: &str) -> PathBuf {
-    static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    let built = BUILT.get_or_init(|| {
-        escargot::CargoBuild::new()
-            .package("clove-plugin-echo")
-            .bin("clove-echo")
-            .run()
-            .expect("build clove-echo fixture")
-            .path()
-            .to_path_buf()
-    });
+    let built = support::plugin("clove-plugin-echo", "clove-echo", "");
     // The host resolver looks for `clove-<provider>{EXE_SUFFIX}`, so the renamed
     // copy must carry the platform executable suffix (`.exe` on Windows).
     let dest = dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
@@ -237,18 +230,14 @@ fn dedicated_binary_wins_over_umbrella() {
 /// `export tk` cross-sibling dispatch must be refused cleanly.
 #[test]
 fn unsupported_capability_is_exit_2() {
-    let built = escargot::CargoBuild::new()
-        .package("clove-import-tk")
-        .bin("clove-import-tk")
-        .run()
-        .expect("build clove-import-tk");
+    let built = support::plugin("clove-import-tk", "clove-import-tk", "");
     let plugin_dir = tempfile::tempdir().unwrap();
     // The renamed copy must carry the platform executable suffix (`.exe` on Windows)
     // for the host resolver to find it.
     let dest = plugin_dir
         .path()
         .join(format!("clove-import-tk{}", std::env::consts::EXE_SUFFIX));
-    std::fs::copy(built.path(), &dest).unwrap();
+    std::fs::copy(built, &dest).unwrap();
     let repo = init_repo("proj");
 
     let assert = clove(repo.path())

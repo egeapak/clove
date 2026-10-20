@@ -20,15 +20,7 @@ const TEST_CLOVE_HOME: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target
 /// The `cloved` binary, built on demand so the daemon cases can never pass by
 /// skipping.
 fn cloved() -> &'static Path {
-    static BIN: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
-    BIN.get_or_init(|| {
-        support::cloved_build()
-            .features("web")
-            .run()
-            .expect("build cloved for the web-port tests")
-            .path()
-            .to_path_buf()
-    })
+    support::cloved("web")
 }
 
 fn clove(dir: &Path) -> Command {

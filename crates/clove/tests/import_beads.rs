@@ -8,9 +8,10 @@
 //! idempotent re-import. The round-trip test exports a real repo to JSONL and
 //! re-imports it into a fresh repo, then re-imports again to prove idempotency.
 
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
 
 use assert_cmd::prelude::*;
 use serde_json::Value;
@@ -26,18 +27,9 @@ use tempfile::TempDir;
 /// freshly-rebuilt file. The plugin emits byte-identical output to the old
 /// built-in, so every assertion holds.
 fn plugin_dir() -> &'static Path {
-    static DIR: OnceLock<PathBuf> = OnceLock::new();
-    DIR.get_or_init(|| {
-        let run = escargot::CargoBuild::new()
-            .package("clove-import-beads")
-            .bin("clove-import-beads")
-            .run()
-            .expect("build clove-import-beads plugin");
-        run.path()
-            .parent()
-            .expect("plugin binary has a parent dir")
-            .to_owned()
-    })
+    support::plugin("clove-import-beads", "clove-import-beads", "")
+        .parent()
+        .expect("plugin binary has a parent dir")
 }
 
 fn clove(dir: &Path) -> Command {

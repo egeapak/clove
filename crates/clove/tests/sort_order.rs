@@ -472,11 +472,7 @@ mod daemon {
     /// dev-dependency here and is used the same way in `mcp.rs`, so the test can
     /// simply guarantee its own precondition.
     fn cloved_bin() -> PathBuf {
-        crate::support::cloved_build()
-            .run()
-            .expect("build cloved for the daemon ordering comparison")
-            .path()
-            .to_path_buf()
+        crate::support::cloved("").to_path_buf()
     }
 
     /// A spawned `cloved` that dies with the test, however the test ends.

@@ -385,10 +385,10 @@ fn no_repo_does_not_spawn_daemon_or_create_clove_dir() {
 
     // Build `cloved` and point `CLOVED_PATH` at it, so that if the guard were
     // broken the server WOULD find a daemon to spawn (and create `.clove/`).
-    let cloved = support::cloved_build().run().expect("build cloved");
+    let cloved = support::cloved("");
 
     let mut cmd = clove(dir.path()); // daemon enabled (no CLOVE_MCP_NO_DAEMON)
-    cmd.env("CLOVED_PATH", cloved.path())
+    cmd.env("CLOVED_PATH", cloved)
         .env("CLOVED_DISABLE_WEB", "1")
         .env("CLOVE_MCP_HEARTBEAT_MS", "100");
     let mut s = Session::start_cmd(cmd); // handshake still succeeds
@@ -603,12 +603,10 @@ fn daemon_routed_comment_author_is_resolved_by_the_caller() {
     git_init(dir.path());
     git_config_local(dir.path(), "user.email", "cfg@example.com");
     let _stop = StopDaemon(runtime_dir(dir.path()));
-    let cloved = support::cloved_build()
-        .run()
-        .expect("build cloved for the author test");
+    let cloved = support::cloved("");
 
     let mut cmd = authorless_cmd(dir.path(), "login-user");
-    cmd.env("CLOVED_PATH", cloved.path())
+    cmd.env("CLOVED_PATH", cloved)
         .env("CLOVED_DISABLE_WEB", "1");
     let s = Session::start_cmd(cmd);
     // Up and watching before the write, so it routes to the hub rather than
@@ -905,14 +903,12 @@ fn auto_starts_daemon_and_heartbeats() {
     // `cloved` crate, so under a scoped run the daemon could never spawn (a 6s
     // timeout). Build `cloved` on demand and point `CLOVED_PATH` at it so the
     // test is self-sufficient under any invocation (`-p clove` or `--workspace`).
-    let cloved = support::cloved_build()
-        .run()
-        .expect("build cloved for the daemon auto-start test");
+    let cloved = support::cloved("");
 
     // Daemon auto-start enabled; web disabled (avoid port contention) and a fast
     // heartbeat so the test observes pings accruing without a long wait.
     let mut cmd = clove(dir.path());
-    cmd.env("CLOVED_PATH", cloved.path())
+    cmd.env("CLOVED_PATH", cloved)
         .env("CLOVED_DISABLE_WEB", "1")
         .env("CLOVE_MCP_HEARTBEAT_MS", "150");
     let mut s = Session::start_cmd(cmd);
@@ -981,11 +977,9 @@ fn a_killed_daemon_is_respawned_by_the_mcp_heartbeat() {
     let dir = init_repo();
     let run = runtime_dir(dir.path());
     let _stop = StopDaemon(run.clone());
-    let cloved = support::cloved_build()
-        .run()
-        .expect("build cloved for the daemon respawn test");
+    let cloved = support::cloved("");
     let mut cmd = clove(dir.path());
-    cmd.env("CLOVED_PATH", cloved.path())
+    cmd.env("CLOVED_PATH", cloved)
         .env("CLOVED_DISABLE_WEB", "1")
         .env("CLOVE_MCP_HEARTBEAT_MS", "150");
     let mut s = Session::start_cmd(cmd);
@@ -1035,12 +1029,10 @@ fn a_killed_daemon_is_respawned_by_the_mcp_heartbeat() {
 fn daemon_rejected_write_carries_the_shared_error_code() {
     let dir = init_repo();
     let _stop = StopDaemon(runtime_dir(dir.path()));
-    let cloved = support::cloved_build()
-        .run()
-        .expect("build cloved for the error-classification test");
+    let cloved = support::cloved("");
 
     let mut cmd = clove(dir.path());
-    cmd.env("CLOVED_PATH", cloved.path())
+    cmd.env("CLOVED_PATH", cloved)
         .env("CLOVED_DISABLE_WEB", "1");
     let mut s = Session::start_cmd(cmd);
 
@@ -1074,13 +1066,11 @@ fn subscribed_resource_updated_on_mutation() {
 
     let dir = init_repo();
     let _stop = StopDaemon(runtime_dir(dir.path()));
-    let cloved = support::cloved_build()
-        .run()
-        .expect("build cloved for the push-notification test");
+    let cloved = support::cloved("");
 
     let mut child = clove(dir.path())
         .arg("mcp")
-        .env("CLOVED_PATH", cloved.path())
+        .env("CLOVED_PATH", cloved)
         .env("CLOVED_DISABLE_WEB", "1")
         .env("CLOVE_MCP_NOTIFY_MS", "50") // poll fast so the test doesn't wait
         .stdin(Stdio::piped())
@@ -1574,8 +1564,8 @@ fn read_tools_use_the_daemon_tier_and_agree_with_the_files() {
     };
     assert_eq!(want.len(), 3);
 
-    let cloved = support::cloved_build().run().expect("build cloved");
-    let mut daemon = std::process::Command::new(cloved.path())
+    let cloved = support::cloved("");
+    let mut daemon = std::process::Command::new(cloved)
         .env("CLOVE_HOME", TEST_CLOVE_HOME)
         .env("CLOVE_RUNTIME_DIR", runtime_dir(dir.path()))
         .env("CLOVED_DISABLE_WEB", "1")
@@ -1854,11 +1844,7 @@ fn published_output_schemas_validate_the_tool_results() {
 /// Build `cloved` for the daemon-backed tests below.
 #[cfg(unix)]
 fn cloved_bin() -> std::path::PathBuf {
-    support::cloved_build()
-        .run()
-        .expect("build cloved")
-        .path()
-        .to_path_buf()
+    support::cloved("").to_path_buf()
 }
 
 /// A relative `--clove-dir` given to `clove mcp` means the caller's own

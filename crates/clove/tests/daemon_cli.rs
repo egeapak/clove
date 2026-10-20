@@ -10,7 +10,6 @@ mod support;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
@@ -24,22 +23,14 @@ const TEST_CLOVE_HOME: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target
 
 /// The `cloved` binary, built on demand rather than hoped for in `target/`.
 fn cloved() -> &'static Path {
-    static BIN: OnceLock<PathBuf> = OnceLock::new();
-    BIN.get_or_init(|| {
-        // The `CLOVED_*` delay knobs only exist in a `test-knobs` build, and the
-        // web-server cases need a daemon that has one.
-        let features = if cfg!(feature = "web") {
-            "test-knobs web"
-        } else {
-            "test-knobs"
-        };
-        support::cloved_build()
-            .features(features)
-            .run()
-            .expect("build cloved for the daemon CLI tests")
-            .path()
-            .to_path_buf()
-    })
+    // The `CLOVED_*` delay knobs only exist in a `test-knobs` build, and the
+    // web-server cases need a daemon that has one.
+    let features = if cfg!(feature = "web") {
+        "test-knobs web"
+    } else {
+        "test-knobs"
+    };
+    support::cloved(features)
 }
 
 /// `clove` in `dir`, talking to the hub rooted at `run`.
