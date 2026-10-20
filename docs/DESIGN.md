@@ -659,9 +659,11 @@ cache-only artifact (M4).
 Because that table is durable, it is the one place where rows written by *different clove
 versions* coexist indefinitely — a schema bump would not migrate it, since it is preserved
 verbatim across the rebuild. `captured_at` is therefore written canonically (§2.2),
-canonicalized again on read, and both the `ORDER BY` and the `--since` bound compare
-`substr(captured_at, 1, 19)` — the second-precision prefix every RFC 3339 spelling of a UTC
-instant shares — rather than resting on the byte order of the suffix. Rows an older clove
+canonicalized again on read, and both the history order (newest first) and the `--since`
+bound compare the *parsed* instant (`clove_types::parse_rfc3339`) in memory rather than any
+byte order of the stored text, so every RFC 3339 spelling of a UTC instant sorts and filters
+alike; rows whose `captured_at` does not parse sort last (ties broken by row id) instead of
+being dropped. The table holds one row per `--snapshot`, so reading it whole is cheap. Rows an older clove
 wrote are re-spelled in place on the next `--snapshot` ("rewrite on the next mutation").
 
 ### 6.2 Staleness Detection (Two-Level)
@@ -857,6 +859,7 @@ clove close <id>                            # alias: status closed
 clove label <id> add <label>
 clove label <id> rm <label>
 clove assign <id> <assignee>
+clove parent <id> <parent-id> | --clear     # cycle-checked, like dep add
 clove priority <id> <0-4>
 clove dep add <id> <dep-id>
 clove dep rm <id> <dep-id>

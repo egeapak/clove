@@ -162,10 +162,11 @@ read with `tmux capture-pane -p`.
 
 Everything `release-smoke.sh` does not already cover:
 
-- [ ] `set`, `edit --field`, `status`, `start`, `label add|rm`, `assign`, `priority`,
+- [ ] `set`, `edit --field`, `edit` with `EDITOR='<editor> --wait'`, `status`, `start`,
+      `label add|rm`, `assign`, `parent <id> <parent>` / `--clear`, `priority`,
       `dep add|rm|cycle`, `query` (stdin + `--filter`), `ls --fields id,created`
       (file tier), `comments --limit`, `export jsonl` → `import jsonl`,
-      `init --merge-driver` (driver + `.gitattributes`), `-q`, no-repo error,
+      `init --merge-driver` (driver + `.gitattributes`), `--quiet`, no-repo error,
       `version -f json`, `setup --help`.
 - [ ] List filters on every tier: `ls --synced`, `--unsynced`, `--parent <id>` (also
       via `query` JSON and the web `?synced=` / `?parent=`) agree with the files; against
