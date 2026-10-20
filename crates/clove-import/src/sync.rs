@@ -683,6 +683,8 @@ pub struct CommentSummary {
     pub delete_local: Vec<CommentRef>,
     /// GitHub comments deleted because the local file was deleted.
     pub delete_remote: Vec<CommentRef>,
+    /// Local deletions not propagated to GitHub (it needs `--delete-remote-comments`).
+    pub pending_remote_delete: Vec<CommentRef>,
     pub conflicts: Vec<CommentConflictRef>,
 }
 
@@ -703,6 +705,8 @@ impl CommentSummary {
             .extend(plan.delete_local.iter().map(removal));
         self.delete_remote
             .extend(plan.delete_remote.iter().map(removal));
+        self.pending_remote_delete
+            .extend(plan.pending_remote_delete.iter().map(removal));
         self.conflicts
             .extend(plan.conflicts.iter().map(|c| CommentConflictRef {
                 clove_id: clove_id.to_owned(),
@@ -852,6 +856,10 @@ pub struct CommentPlan {
     pub delete_local: Vec<CommentRemoval>,
     /// GitHub comments to delete: their local comment was deleted, unedited there.
     pub delete_remote: Vec<CommentRemoval>,
+    /// Local deletions left unpropagated because deleting on GitHub is opt-in.
+    /// The link is kept, so the comment is neither re-pulled nor forgotten, and
+    /// it is listed again each run until the file returns or the opt-in is given.
+    pub pending_remote_delete: Vec<CommentRemoval>,
     /// Links whose both comments are gone.
     pub unlink: Vec<u64>,
     /// Both-sides edits and how they resolve.
@@ -1060,6 +1068,11 @@ pub fn comment_thread_idle(
 ///   compare the comment is left as it is and reported);
 /// - one side gone → delete the other **only if it was not edited since**; an
 ///   edited survivor is re-created on the side that lost it, never deleted.
+///   A GitHub deletion always deletes the local file (git can restore it). A
+///   local deletion deletes the GitHub comment only with `delete_remote`; a
+///   removed file is also what checking out a branch without the comment looks
+///   like, so otherwise it stays pending with its link kept (the file coming
+///   back is then a no-op).
 ///
 /// Whatever no link covers falls back on the pre-link bookkeeping, so a state
 /// file written by 0.1.x neither duplicates nor re-pushes anything: a GitHub
@@ -1074,6 +1087,7 @@ pub fn plan_comments(
     local: &[LocalComment],
     entry: &SyncEntry,
     policy: ConflictPolicy,
+    delete_remote: bool,
 ) -> CommentPlan {
     let mut plan = CommentPlan::default();
     let mut gh_claimed: HashSet<u64> = HashSet::new();
@@ -1126,8 +1140,10 @@ pub fn plan_comments(
                 gh_claimed.insert(remote.id);
                 if remote_edited {
                     plan.pull.push(remote.clone());
-                } else {
+                } else if delete_remote {
                     plan.delete_remote.push(removal(link, &remote.body));
+                } else {
+                    plan.pending_remote_delete.push(removal(link, &remote.body));
                 }
             }
             (None, Some(here)) => {
@@ -2429,7 +2445,7 @@ mod tests {
     }
 
     fn plan(gh: &[GhComment], local: &[LocalComment], entry: &SyncEntry) -> CommentPlan {
-        plan_comments(gh, local, entry, ConflictPolicy::Newer)
+        plan_comments(gh, local, entry, ConflictPolicy::Newer, true)
     }
 
     #[test]
@@ -2544,7 +2560,7 @@ mod tests {
         assert!(entry.local_comment_hashes.is_empty());
         assert_eq!(entry.comment_links.len(), 2);
         // ... and the next sync is a no-op.
-        let again = super::plan_comments(&gh, &local[..2], &entry, ConflictPolicy::Newer);
+        let again = super::plan_comments(&gh, &local[..2], &entry, ConflictPolicy::Newer, true);
         assert!(again.is_empty(), "{again:?}");
     }
 
@@ -2650,7 +2666,7 @@ mod tests {
             "2026-06-03T00:00:00Z",
         )];
         let entry = linked_entry("v1");
-        let resolve = |policy| plan_comments(&gh, &local, &entry, policy);
+        let resolve = |policy| plan_comments(&gh, &local, &entry, policy, true);
 
         let p = resolve(ConflictPolicy::PreferLocal);
         assert_eq!(p.update_remote.len(), 1);
@@ -2676,13 +2692,13 @@ mod tests {
             "local edit",
             "2026-06-01T12:00:00Z",
         )];
-        let p = plan_comments(&gh, &older_local, &entry, ConflictPolicy::Newer);
+        let p = plan_comments(&gh, &older_local, &entry, ConflictPolicy::Newer, true);
         assert_eq!(p.conflicts[0].resolution, "remote_wins");
         assert_eq!(p.update_local[0].body, "remote edit");
 
         // Newer with no local timestamp to compare changes nothing.
         let unknown = [local_comment("a.md", "local edit")];
-        let p = plan_comments(&gh, &unknown, &entry, ConflictPolicy::Newer);
+        let p = plan_comments(&gh, &unknown, &entry, ConflictPolicy::Newer, true);
         assert_eq!(p.conflicts[0].resolution, "skipped");
         assert!(p.update_local.is_empty() && p.update_remote.is_empty());
     }
@@ -2722,6 +2738,80 @@ mod tests {
     }
 
     #[test]
+    fn a_local_deletion_stays_pending_unless_remote_deletion_is_opted_into() {
+        let entry = linked_entry("v1");
+        let gh = [gh_comment(10, "v1")];
+        let off = plan_comments(&gh, &[], &entry, ConflictPolicy::Newer, false);
+        assert!(off.delete_remote.is_empty(), "{off:?}");
+        assert_eq!(off.pending_remote_delete.len(), 1);
+        assert_eq!(off.pending_remote_delete[0].gh_id, 10);
+        assert!(off.pull.is_empty(), "a pending deletion is not re-pulled");
+        assert!(off.unlink.is_empty(), "the link is kept");
+
+        // Every later run stays pending; the plan is the same.
+        let again = plan_comments(&gh, &[], &entry, ConflictPolicy::Newer, false);
+        assert_eq!(again, off);
+
+        let on = plan_comments(&gh, &[], &entry, ConflictPolicy::Newer, true);
+        assert_eq!(on.delete_remote.len(), 1);
+        assert!(on.pending_remote_delete.is_empty());
+    }
+
+    #[test]
+    fn a_pending_deletion_is_a_no_op_once_the_file_returns() {
+        let plan = plan_comments(
+            &[gh_comment(10, "v1")],
+            &[local_comment("a.md", "v1")],
+            &linked_entry("v1"),
+            ConflictPolicy::Newer,
+            false,
+        );
+        assert!(plan.is_empty(), "{plan:?}");
+    }
+
+    #[test]
+    fn an_edited_remote_survivor_is_recreated_even_without_the_opt_in() {
+        let plan = plan_comments(
+            &[gh_comment(10, "v2")],
+            &[],
+            &linked_entry("v1"),
+            ConflictPolicy::Newer,
+            false,
+        );
+        assert_eq!(plan.pull.len(), 1);
+        assert!(plan.pending_remote_delete.is_empty() && plan.delete_remote.is_empty());
+    }
+
+    #[test]
+    fn a_github_deletion_is_applied_locally_regardless_of_the_opt_in() {
+        let plan = plan_comments(
+            &[],
+            &[local_comment("a.md", "v1")],
+            &linked_entry("v1"),
+            ConflictPolicy::Newer,
+            false,
+        );
+        assert_eq!(plan.delete_local.len(), 1);
+    }
+
+    #[test]
+    fn the_summary_lists_pending_remote_deletions() {
+        let plan = CommentPlan {
+            pending_remote_delete: vec![CommentRemoval {
+                gh_id: 7,
+                key: "a.md".to_owned(),
+                body: "kept".to_owned(),
+            }],
+            ..CommentPlan::default()
+        };
+        let mut summary = CommentSummary::default();
+        summary.add_plan("proj-AAAAAAAA", "gh-3", &plan);
+        assert!(!summary.is_empty());
+        assert_eq!(summary.pending_remote_delete[0].preview, "kept");
+        assert!(summary.delete_remote.is_empty());
+    }
+
+    #[test]
     fn an_edited_survivor_is_recreated_not_deleted() {
         // Deleted on GitHub, edited locally: the local text goes back up as a new
         // comment.
@@ -2736,6 +2826,7 @@ mod tests {
             &[],
             &linked_entry("v1"),
             ConflictPolicy::Newer,
+            true,
         );
         assert!(plan.delete_remote.is_empty());
         assert_eq!(plan.pull.len(), 1);

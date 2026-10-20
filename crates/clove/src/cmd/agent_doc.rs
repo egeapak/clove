@@ -125,7 +125,8 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
   `clove-import-tk` plugin; `clove plugin install import-tk`).\n\
 - `clove import beads <issues.jsonl> [--dry-run]` — import a Beads JSONL export\n\
   (needs the `clove-import-beads` plugin).\n\
-- `clove sync github <owner/repo> [--dry-run] [--prefer P] [--no-comments]` —\n\
+- `clove sync github <owner/repo> [--dry-run] [--prefer P] [--no-comments]\n\
+  [--delete-remote-comments]` —\n\
   two-way GitHub sync (pull + push + comments in one pass; conflict policy\n\
   `newer|local|remote|manual`). Needs the `clove-sync-github` plugin\n\
   (`clove plugin install sync-github`) + a token via `GITHUB_TOKEN` or\n\
