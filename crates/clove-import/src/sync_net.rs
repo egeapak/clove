@@ -31,7 +31,7 @@ use crate::map::build_external_ref_index;
 use crate::store::Store;
 use crate::sync::{
     body_hash, plan_comments, plan_sync, ConflictPolicy, Direction, GhComment, LocalComment,
-    PullUpdate, PushCreate, PushUpdate, SyncPlan, SyncReport, SyncState, SyncSummary,
+    PullUpdate, PushCreate, PushUpdate, SkippedItem, SyncPlan, SyncReport, SyncState, SyncSummary,
 };
 
 /// The marker `source_system` value stamped on synced items.
@@ -295,18 +295,41 @@ async fn apply_plan(
     }
 
     // --- Pushes (local → remote), writing the link back locally. ---
+    // GitHub rejecting one item (a 4xx about it) skips that item, not the run: it
+    // is left out of `reconciled` and its fingerprint is not recorded, so the next
+    // run retries it.
     for push in &plan.push_create {
-        let external_ref = push_create(crab, owner, repo, push, store, state).await?;
-        reconciled.insert(external_ref);
-        report.pushed_created += 1;
+        match push_create(crab, owner, repo, push, store, state, &mut report).await? {
+            PushOutcome::Done(external_ref) => {
+                reconciled.insert(external_ref);
+                report.pushed_created += 1;
+            }
+            PushOutcome::Skipped { item, created } => {
+                report.pushed_created += usize::from(created);
+                report.skipped.push(item);
+            }
+        }
     }
     for push in &plan.push_update {
-        push_update(crab, owner, repo, push, state).await?;
-        reconciled.insert(crate::github::external_ref_for(push.number));
-        report.pushed_updated += 1;
+        match push_update(crab, owner, repo, push, state, &mut report).await? {
+            PushOutcome::Done(external_ref) => {
+                reconciled.insert(external_ref);
+                report.pushed_updated += 1;
+            }
+            PushOutcome::Skipped { item, .. } => report.skipped.push(item),
+        }
     }
 
     Ok(ApplyOutcome { report, reconciled })
+}
+
+/// How a push to GitHub ended for one item.
+enum PushOutcome {
+    /// Pushed; carries the item's `external_ref`.
+    Done(String),
+    /// GitHub rejected the item. `created` is whether the issue nevertheless
+    /// exists (a create whose follow-up close was rejected).
+    Skipped { item: SkippedItem, created: bool },
 }
 
 /// Create a brand-new local item from a remote issue (mirrors the importer's
@@ -436,24 +459,46 @@ async fn push_create(
     push: &PushCreate,
     store: &dyn Store,
     state: &mut SyncState,
-) -> Result<String, ImportError> {
+    report: &mut SyncReport,
+) -> Result<PushOutcome, ImportError> {
     let item = &push.item;
     let handler = crab.issues(owner, repo);
-    let created: Issue = with_retry(
-        false,
-        &format!("issue create for {}", push.clove_id),
-        || {
+    let create_operation = format!("issue create for {}", push.clove_id);
+    let mut send_assignee = item.assignee.is_some();
+    let created: Issue = loop {
+        let attempt = call_item(false, &create_operation, || {
             let mut builder = handler.create(&item.title).body(item.body.clone());
             if !item.labels.is_empty() {
                 builder = builder.labels(item.labels.clone());
             }
-            if let Some(assignee) = &item.assignee {
+            if let (true, Some(assignee)) = (send_assignee, &item.assignee) {
                 builder = builder.assignees(vec![assignee.clone()]);
             }
             builder.send()
-        },
-    )
-    .await?;
+        })
+        .await;
+        match attempt {
+            Ok(created) => break created,
+            // Nothing was created, so retrying without the assignee is safe.
+            Err(CallFailure::Rejected {
+                assignees: Some(_), ..
+            }) if send_assignee => {
+                send_assignee = false;
+                report.warnings.push(format!(
+                    "GitHub rejected the assignee `{}` of {}; created the issue without it",
+                    item.assignee.as_deref().unwrap_or_default(),
+                    push.clove_id
+                ));
+            }
+            Err(CallFailure::Rejected { error, .. }) => {
+                return Ok(PushOutcome::Skipped {
+                    item: skipped_item(&push.clove_id, None, &error),
+                    created: false,
+                });
+            }
+            Err(CallFailure::Fatal(error)) => return Err(error),
+        }
+    };
 
     // Link the local item to the new issue *before* anything else can fail: the
     // write-back of `external_ref` (plus the recorded fingerprint) is what makes
@@ -482,7 +527,7 @@ async fn push_create(
             issue_label(created.number),
             push.clove_id
         );
-        match with_retry(true, &operation, || {
+        match call_item(true, &operation, || {
             handler
                 .update(created.number)
                 .state(octocrab::models::IssueState::Closed)
@@ -495,7 +540,7 @@ async fn push_create(
                 state.record(&external_ref, Some(closed.updated_at), local_updated);
                 state.record_content_hash(&external_ref, crate::sync::export_fingerprint(item));
             }
-            Err(err) => {
+            Err(failure) => {
                 // The pair is linked but the remote is still OPEN while the
                 // local item is closed. With accurate clocks the next sync
                 // would call that pair in_sync forever — backdate the recorded
@@ -506,12 +551,18 @@ async fn push_create(
                     Some(created.updated_at),
                     crate::sync::epoch(),
                 );
-                return Err(err);
+                return match failure {
+                    CallFailure::Rejected { error, .. } => Ok(PushOutcome::Skipped {
+                        item: skipped_item(&push.clove_id, Some(&external_ref), &error),
+                        created: true,
+                    }),
+                    CallFailure::Fatal(error) => Err(error),
+                };
             }
         }
     }
 
-    Ok(external_ref)
+    Ok(PushOutcome::Done(external_ref))
 }
 
 /// Update an existing GitHub issue from local fields, then record the fingerprint.
@@ -521,7 +572,8 @@ async fn push_update(
     repo: &str,
     push: &PushUpdate,
     state: &mut SyncState,
-) -> Result<(), ImportError> {
+    report: &mut SyncReport,
+) -> Result<PushOutcome, ImportError> {
     let item = &push.item;
     let external_ref = crate::github::external_ref_for(push.number);
     let handler = crab.issues(owner, repo);
@@ -535,6 +587,7 @@ async fn push_update(
         .entries
         .get(&external_ref)
         .and_then(|e| e.synced_assignee.clone());
+    let mut dropped_assignee = false;
     let mut assignees: Vec<String> = Vec::new();
     if let Some(primary) = &item.assignee {
         assignees.push(primary.clone());
@@ -562,36 +615,73 @@ async fn push_update(
         issue_label(push.number),
         push.clove_id
     );
-    let updated: Issue = with_retry(true, &operation, || {
-        let state_param = if want_closed {
-            octocrab::models::IssueState::Closed
-        } else {
-            octocrab::models::IssueState::Open
-        };
-        let mut builder = handler
-            .update(push.number)
-            .title(&item.title)
-            .body(&item.body)
-            .state(state_param);
-        // Always send labels on update — clove's label set is authoritative on
-        // push (a pull mirrors GitHub's labels down via `LabelEdit::Set`). Sending
-        // an empty list is what clears the last label; skipping the field would
-        // leave a removed label stranded on GitHub forever, and the fresh
-        // fingerprint would then mark the pair as synced so it is never re-examined.
-        builder = builder.labels(&item.labels);
-        if touch_assignees {
-            builder = builder.assignees(&assignees);
+    let updated: Issue = loop {
+        let attempt = call_item(true, &operation, || {
+            let state_param = if want_closed {
+                octocrab::models::IssueState::Closed
+            } else {
+                octocrab::models::IssueState::Open
+            };
+            let mut builder = handler
+                .update(push.number)
+                .title(&item.title)
+                .body(&item.body)
+                .state(state_param);
+            // Always send labels on update — clove's label set is authoritative on
+            // push (a pull mirrors GitHub's labels down via `LabelEdit::Set`). Sending
+            // an empty list is what clears the last label; skipping the field would
+            // leave a removed label stranded on GitHub forever, and the fresh
+            // fingerprint would then mark the pair as synced so it is never re-examined.
+            builder = builder.labels(&item.labels);
+            if touch_assignees {
+                builder = builder.assignees(&assignees);
+            }
+            if let Some(reason) = &preserved_reason {
+                builder = builder.state_reason(reason.clone());
+            }
+            builder.send()
+        })
+        .await;
+        match attempt {
+            Ok(updated) => break updated,
+            // Retry once without the logins GitHub named (clove's own assignee
+            // when it named none), keeping the rest of the assignee list.
+            Err(CallFailure::Rejected {
+                assignees: Some(refused),
+                ..
+            }) if touch_assignees && !dropped_assignee => {
+                dropped_assignee = true;
+                let before = assignees.len();
+                assignees.retain(|login| !refused.contains(login));
+                if assignees.len() == before {
+                    if let Some(primary) = &item.assignee {
+                        assignees.retain(|login| login != primary);
+                    }
+                }
+                report.warnings.push(format!(
+                    "GitHub rejected an assignee of {} on {}; updated the issue without {}",
+                    push.clove_id,
+                    issue_label(push.number),
+                    if refused.is_empty() {
+                        "it".to_owned()
+                    } else {
+                        format!("`{}`", refused.join("`, `"))
+                    }
+                ));
+            }
+            Err(CallFailure::Rejected { error, .. }) => {
+                return Ok(PushOutcome::Skipped {
+                    item: skipped_item(&push.clove_id, Some(&external_ref), &error),
+                    created: false,
+                });
+            }
+            Err(CallFailure::Fatal(error)) => return Err(error),
         }
-        if let Some(reason) = &preserved_reason {
-            builder = builder.state_reason(reason.clone());
-        }
-        builder.send()
-    })
-    .await?;
+    };
 
     state.record(&external_ref, Some(updated.updated_at), push.local_updated);
     state.record_content_hash(&external_ref, crate::sync::export_fingerprint(item));
-    Ok(())
+    Ok(PushOutcome::Done(external_ref))
 }
 
 /// How an error names a GitHub issue: `#3 (gh-3)`, the number and the
@@ -835,11 +925,86 @@ fn is_transient(err: &octocrab::Error) -> bool {
 /// regardless (see [`is_transient`]).
 ///
 /// `operation` names the call and its item for the error (see [`net_err`]).
-async fn with_retry<T, F, Fut>(
+async fn with_retry<T, F, Fut>(idempotent: bool, operation: &str, op: F) -> Result<T, ImportError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, octocrab::Error>>,
+{
+    call_item(idempotent, operation, op)
+        .await
+        .map_err(CallFailure::into_error)
+}
+
+/// Why an item-scoped call failed for good.
+enum CallFailure {
+    /// GitHub refused this one request (a 4xx about the item, see
+    /// [`is_item_rejection`]); the rest of the sync can proceed. `assignees` is
+    /// `Some` with the logins GitHub named when the validation error is about the
+    /// `assignees` field.
+    Rejected {
+        error: ImportError,
+        assignees: Option<Vec<String>>,
+    },
+    /// Anything that should abort the run: auth, rate limit, 5xx, network.
+    Fatal(ImportError),
+}
+
+impl CallFailure {
+    fn into_error(self) -> ImportError {
+        match self {
+            CallFailure::Rejected { error, .. } | CallFailure::Fatal(error) => error,
+        }
+    }
+}
+
+/// A 4xx that condemns only the one item it was about. Auth (401, 403) and
+/// throttling (408, 429) say the whole run is failing, so they stay fatal.
+fn is_item_rejection(status: u16) -> bool {
+    (400..=499).contains(&status) && ![401, 403, 408, 429].contains(&status)
+}
+
+fn classify_failure(operation: &str, err: &octocrab::Error) -> CallFailure {
+    let error = net_err(operation, err);
+    let octocrab::Error::GitHub { source, .. } = err else {
+        return CallFailure::Fatal(error);
+    };
+    if !is_item_rejection(source.status_code.as_u16()) {
+        return CallFailure::Fatal(error);
+    }
+    let mut assignee_errors = source
+        .errors
+        .iter()
+        .flatten()
+        .filter(|entry| entry.get("field").and_then(Value::as_str) == Some("assignees"))
+        .peekable();
+    let assignees = assignee_errors.peek().is_some().then(|| {
+        assignee_errors
+            .filter_map(|entry| {
+                entry
+                    .get("value")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .collect()
+    });
+    CallFailure::Rejected { error, assignees }
+}
+
+fn skipped_item(clove_id: &str, external_ref: Option<&str>, error: &ImportError) -> SkippedItem {
+    SkippedItem {
+        clove_id: clove_id.to_owned(),
+        external_ref: external_ref.map(str::to_owned),
+        reason: error.to_string(),
+    }
+}
+
+/// [`with_retry`] that keeps a per-item GitHub rejection distinguishable from a
+/// run-aborting failure.
+async fn call_item<T, F, Fut>(
     idempotent: bool,
     operation: &str,
     mut op: F,
-) -> Result<T, ImportError>
+) -> Result<T, CallFailure>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T, octocrab::Error>>,
@@ -853,7 +1018,7 @@ where
             Err(err) => {
                 attempt += 1;
                 if attempt >= MAX_ATTEMPTS || !idempotent || !is_transient(&err) {
-                    return Err(net_err(operation, &err));
+                    return Err(classify_failure(operation, &err));
                 }
                 tokio::time::sleep(delay).await;
                 delay = delay.saturating_mul(2);

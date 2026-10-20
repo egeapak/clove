@@ -578,6 +578,22 @@ pub struct SyncReport {
     pub comments_pulled: usize,
     /// Local comments pushed to GitHub.
     pub comments_pushed: usize,
+    /// Items GitHub rejected (a 4xx about that one item). They are left
+    /// unrecorded in the sync state, so the next run retries them.
+    pub skipped: Vec<SkippedItem>,
+    /// Non-fatal notes, e.g. an assignee GitHub refused and the push dropped.
+    pub warnings: Vec<String>,
+}
+
+/// One item a sync run could not push because GitHub rejected it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SkippedItem {
+    /// The local item.
+    pub clove_id: String,
+    /// The GitHub issue it is linked to (`gh-N`), `None` for a failed create.
+    pub external_ref: Option<String>,
+    /// The failed operation and GitHub's reason, as in a fatal sync error.
+    pub reason: String,
 }
 
 // ---------------------------------------------------------------------------

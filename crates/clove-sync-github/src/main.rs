@@ -28,7 +28,8 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use clove_plugin::{
-    clap_exit_code, emit_error, emit_success, parse_format, PluginArgs, PluginContext, PluginInfo,
+    clap_exit_code, emit_error, emit_success, emit_success_with_meta, parse_format, PluginArgs,
+    PluginContext, PluginInfo,
 };
 use clove_types::CloveError;
 use clove_types::OutputFormat;
@@ -134,7 +135,7 @@ fn main() -> ExitCode {
     //    env-provided one (§6.3), for both success and error output.
     let format = cli.format.unwrap_or(cx.format);
     match run(&cx, cli, format, direction) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => ExitCode::from(code),
         Err(err) => ExitCode::from(emit_error(format, &err, cx.quiet)),
     }
 }
@@ -142,14 +143,15 @@ fn main() -> ExitCode {
 /// Drive the reconcile in `direction` and render its result exactly as the host's
 /// `cmd/sync.rs` did (`sync`), or as a one-way pull/push (`import`/`export`).
 ///
-/// Emits the success envelope / human summary itself and returns `Ok(())`; any
-/// `Err` (a bad `--prefer` value or a sync failure) is rendered by the caller.
+/// Emits the success envelope / human summary itself and returns the exit code: 0,
+/// or 5 when GitHub rejected some items and the run skipped them. Any `Err` (a bad
+/// `--prefer` value or a sync failure) is rendered by the caller.
 fn run(
     cx: &PluginContext,
     cli: Cli,
     format: OutputFormat,
     direction: clove_import::Direction,
-) -> Result<(), CloveError> {
+) -> Result<u8, CloveError> {
     use clove_import::ConflictPolicy;
 
     let policy = match &cli.prefer {
@@ -172,9 +174,13 @@ fn run(
     )
     .map_err(sync_err)?;
 
+    let exit_code = match &report {
+        Some(report) if !report.skipped.is_empty() => SKIPPED_EXIT_CODE,
+        _ => 0,
+    };
     match (format, report) {
         // Applied: emit the action counts (and any conflicts) the run produced.
-        (OutputFormat::Json | OutputFormat::Jsonl, Some(report)) => emit_success(
+        (OutputFormat::Json | OutputFormat::Jsonl, Some(report)) => emit_success_with_meta(
             format,
             json!({
                 "pulled_created": report.pulled_created,
@@ -187,7 +193,9 @@ fn run(
                 "conflicts": summary.conflicts,
                 "remote_missing": summary.remote_missing,
                 "foreign": summary.foreign,
+                "skipped": report.skipped,
             }),
+            json!({ "warnings": run_warnings(&report) }),
         ),
         // Dry run: emit the full write-free plan.
         (OutputFormat::Json | OutputFormat::Jsonl, None) => emit_success(
@@ -209,6 +217,9 @@ fn run(
             );
             print_conflicts(&summary);
             print_remote_missing(&summary);
+            for warning in run_warnings(&report) {
+                eprintln!("warning: {warning}");
+            }
         }
         (OutputFormat::Human, None) => {
             outln!(
@@ -225,7 +236,23 @@ fn run(
             print_remote_missing(&summary);
         }
     }
-    Ok(())
+    Ok(exit_code)
+}
+
+/// Exit code when GitHub rejected items the run then skipped: the `IoError` class
+/// (5), as for any other GitHub failure, though the run itself completed.
+const SKIPPED_EXIT_CODE: u8 = 5;
+
+/// Everything the run wants the user to know: dropped assignees, then each
+/// skipped item with GitHub's reason.
+fn run_warnings(report: &clove_import::SyncReport) -> Vec<String> {
+    let skipped = report.skipped.iter().map(|item| {
+        format!(
+            "skipped {} (will retry next sync): {}",
+            item.clove_id, item.reason
+        )
+    });
+    report.warnings.iter().cloned().chain(skipped).collect()
 }
 
 /// The human summary prefix for an applied run. `Both` reproduces the former

@@ -40,8 +40,8 @@ pub use restore::{
 };
 pub use store::{DirectStore, HostStore, Scan, Store};
 pub use sync::{
-    plan_sync, ConflictPolicy, Direction, SyncConflict, SyncPlan, SyncReport, SyncState,
-    SyncSummary,
+    plan_sync, ConflictPolicy, Direction, SkippedItem, SyncConflict, SyncPlan, SyncReport,
+    SyncState, SyncSummary,
 };
 pub use tk::TkImporter;
 
