@@ -445,7 +445,10 @@ client SID after the first message. The first message must be `hello` with the
 token from `$CLOVE_HOST_TOKEN` (compared in constant time). On Unix the whole
 `hello` line must arrive within 5 seconds (one deadline, not a per-read
 timeout) and be at most 64 KiB; otherwise, or with a wrong token, the host
-answers `-32001` and closes the connection. Windows named pipes have no
+answers `-32001` and closes the connection. (The 5 seconds, and the 500 ms
+`--clove-plugin-info` probe deadline, are overridable by `CLOVE_PLUGIN_HELLO_MS`
+/ `CLOVE_PLUGIN_PROBE_MS` in a `test-knobs` build only; released binaries ignore
+them.) Windows named pipes have no
 receive timeout in `interprocess`, so there an idle unauthenticated connection
 (only this user can open one) holds its thread until the plugin exits. The
 token is reusable for the whole invocation.

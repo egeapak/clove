@@ -1847,7 +1847,9 @@ from whichever client started the hub; `clove daemon stop --all` and a restart
 picks up new ones. Only `CLOVED_DISABLE_WEB` and `CLOVED_WEB_PORT` are honoured
 by every daemon: the timer overrides and delay injectors (and
 `CLOVE_GITHUB_RETRY_MS`) are read only by a build with the **`test-knobs`**
-feature (`cloved`, `clove-web`, `clove-import`/`clove-sync-github`), which is
+feature (`cloved`, `clove-web`, `clove-import`/`clove-sync-github`, and `clove`
+itself for `CLOVE_PLUGIN_PROBE_MS`, `CLOVE_PLUGIN_HELLO_MS` and
+`CLOVE_REINDEX_WAIT_MARKER`), which is
 never in `default` or `full`, so a released or `cargo install`ed daemon ignores
 them (#61).
 

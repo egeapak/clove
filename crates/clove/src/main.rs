@@ -12,6 +12,7 @@ mod cmd;
 mod context;
 mod exit;
 mod item_json;
+mod knobs;
 mod mux_help;
 mod output;
 mod plugin;
