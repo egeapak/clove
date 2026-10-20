@@ -41,6 +41,10 @@ mcp = ["dep:clove-mcp"]
 # `clove-web` fetches its built SPA at build time (see docs/RELEASE.md). Without
 # it `clove serve` errors cleanly. `full` (the release artifacts) includes it.
 web = ["dep:clove-web"]
+# Honours the `CLOVE_*` test knobs in `src/knobs.rs` (plugin probe/hello
+# timeouts, the reindex-wait marker). **Test-only**: never in `default` or
+# `full`, so a released or `cargo install`ed `clove` ignores them (#61).
+test-knobs = []
 
 [dependencies]
 clove-types.workspace = true

@@ -487,6 +487,11 @@ fn isolated_clove() -> &'static Path {
 impl Env {
     fn clove(&self) -> Command {
         let mut cmd = Command::new(isolated_clove());
+        // Generous plugin timeouts (honoured only by a `test-knobs` build): a slow
+        // plugin start under load must not flip a result. The tests that target a
+        // timeout set a small value of their own.
+        cmd.env("CLOVE_PLUGIN_PROBE_MS", "60000");
+        cmd.env("CLOVE_PLUGIN_HELLO_MS", "60000");
         cmd.env_remove("CLOVE_FORMAT");
         // Reaches the probed plugin by plain inheritance: harness -> clove ->
         // the freshly "installed" binary.

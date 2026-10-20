@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `clove` gains a `test-knobs` feature (never in `default` or `full`): the test-only `CLOVE_PLUGIN_PROBE_MS`, `CLOVE_PLUGIN_HELLO_MS` and `CLOVE_REINDEX_WAIT_MARKER` are honoured only by such a build; released and `cargo install`ed binaries ignore them and keep the 500 ms probe and 5 s hello deadlines
 - **License:** clove is now licensed under **AGPL-3.0-only** (`LICENSE`), with
   an additional permission for plugins (`LICENSE-PLUGIN-EXCEPTION`). The plugin
   SDK crates (`clove-types`, `clove-plugin`, `clove-plugin-echo`) stay
