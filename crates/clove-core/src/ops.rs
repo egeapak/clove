@@ -168,6 +168,29 @@ pub fn comment_at(
     Ok(comment_result(store, id, path))
 }
 
+/// Replace the body of comment file `name` (a synced edit); returns `{ id, path }`.
+pub fn comment_update(
+    store: &ItemStore,
+    id: &CloveId,
+    name: &str,
+    body: &str,
+) -> Result<Value, CloveError> {
+    if !store.exists(id) {
+        return Err(CloveError::NotFound { id: id.to_string() });
+    }
+    let path = crate::comments::update_comment(store.issues_dir(), id, name, body)?;
+    Ok(comment_result(store, id, path))
+}
+
+/// Remove comment file `name` (a synced deletion); returns `{ id, path }`.
+pub fn comment_delete(store: &ItemStore, id: &CloveId, name: &str) -> Result<Value, CloveError> {
+    if !store.exists(id) {
+        return Err(CloveError::NotFound { id: id.to_string() });
+    }
+    let path = crate::comments::delete_comment(store.issues_dir(), id, name)?;
+    Ok(comment_result(store, id, path))
+}
+
 fn comment_result(store: &ItemStore, id: &CloveId, path: camino::Utf8PathBuf) -> Value {
     let rel = path
         .strip_prefix(store.repo_root())

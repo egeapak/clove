@@ -2123,7 +2123,8 @@ served by the *same* `clove-sync-github` binary as directional projections of th
 one reconcile (`PLUGIN_SYSTEM.md` §4.2, the umbrella fallback): `import github`
 runs it **pull-only** (remote → local), `export github` **push-only** (local →
 remote), and the full `sync github` is both. Issue **comments only sync under the
-full `sync github`** — a one-way `import`/`export github` reconciles items only.
+full `sync github`** — a one-way `import`/`export github` reconciles items only
+(no comment edits or deletions either).
 The plugin picks the direction from `$CLOVE_COMMAND`, so all three share one
 reconcile planner and one code path; there is no separate one-way importer to
 drift.
@@ -2159,10 +2160,39 @@ via GitHub `updated_at` vs the item's `updated`); `local`/`remote` force a side,
 `manual` reports without applying. Every conflict is reported regardless. With no
 prior sync for an already-linked pair, the planner falls back to a content
 comparison so a first sync never silently clobbers a side. Pulls/updates go
-through the unified write path (`apply_edit`); comment dedup uses GitHub comment
-ids (pull) and stable body hashes (push). `--dry-run` plans without touching
+through the unified write path (`apply_edit`). `--dry-run` plans without touching
 either side; `--no-comments` skips comment reconciliation. A running daemon can
 run the sync on a timer (`[daemon] github_sync_interval_min` + `github_sync_repo`).
+
+**Comments** are reconciled per linked issue. A local comment (a file under
+`.clove/issues/<id>/comments/`, identified by its file name) and its GitHub
+comment are *paired* by a link in the sync state (`comment_links`: GitHub id,
+local file name, and a hash of the body both sides held at the last sync). A side
+whose body no longer matches that hash has been edited since:
+
+| GitHub comment | local comment | action |
+|---|---|---|
+| edited | unchanged | rewrite the local file |
+| unchanged | edited | `PATCH` the GitHub comment in place |
+| edited | edited (different text) | `--prefer` policy (`newer` compares the comment's `updated_at` with the file's mtime; no timestamp, or `manual`: neither side is touched, reported every run) |
+| deleted | unchanged | delete the local file |
+| unchanged | deleted | delete the GitHub comment |
+| deleted | edited | post the local text again as a new comment |
+| edited | deleted | pull the GitHub text again as a new local comment |
+
+Deletions propagate automatically, but only when the surviving side is unchanged
+since the last sync; an edited comment is never deleted. Every deletion is listed
+in the `--dry-run` plan and in the run's output (`data.comments.delete_local` /
+`delete_remote`, and a `deleted` count in the summary line). Local edits and
+deletions are made by editing or removing the comment file. A comment with no link
+is new: a GitHub comment is pulled, a local one pushed, except that an identical
+unlinked pair is *adopted* as one comment, which is also how a fresh clone (the
+state is git-ignored) and a state file written by 0.1.x are upgraded without
+duplicates. `comments_checked_at` in the state lets the next sync ask GitHub which
+comments changed since and re-fetch only those issues' threads. Because the state
+is per clone and a local deletion is "the file is gone", checking out a branch that
+lacks comments another branch added reads as a local deletion on the next
+`clove sync`; use `--dry-run` first when switching branches.
 
 Fields clove's model can't represent are still preserved on push (using the live
 issue + sync state, so no item-schema change): extra GitHub **assignees** a human

@@ -30,8 +30,9 @@ use crate::github::{parse_gh_number, StagedIssue};
 use crate::map::build_external_ref_index;
 use crate::store::Store;
 use crate::sync::{
-    body_hash, plan_comments, plan_sync, ConflictPolicy, Direction, GhComment, LocalComment,
-    PullUpdate, PushCreate, PushUpdate, SkippedItem, SyncPlan, SyncReport, SyncState, SyncSummary,
+    comment_thread_idle, link_hash, plan_comments, plan_sync, CommentConflictRef, CommentLink,
+    CommentPlan, CommentRef, ConflictPolicy, Direction, GhComment, LocalComment, PullUpdate,
+    PushCreate, PushUpdate, SkippedItem, SyncPlan, SyncReport, SyncState, SyncSummary,
 };
 
 /// The marker `source_system` value stamped on synced items.
@@ -76,6 +77,10 @@ pub fn sync_github(
     let local = local_objects(store)?;
 
     let mut state = SyncState::load(&state_path, spec);
+    // Taken before anything is fetched, so a comment edited while this run is in
+    // flight is still "since" the next one.
+    let sync_started = Utc::now();
+    let sync_comments = sync_comments && direction == Direction::Both;
 
     // Fetch remote issues. Even a dry run needs the current remote state to plan
     // a meaningful diff.
@@ -94,13 +99,9 @@ pub fn sync_github(
     // only pulls, `export github` only pushes, `sync github` both. Done before
     // `summary()` so a directional `--dry-run` reports only its own side.
     plan.restrict_to(direction);
-    let summary = plan.summary();
+    let mut summary = plan.summary();
 
-    if dry_run {
-        return Ok((summary, None));
-    }
-
-    // Remote comment counts from the issues list, for the comment-sync skip.
+    // Remote comment counts from the issues list, for the idle-thread check.
     let remote_comment_counts: std::collections::HashMap<String, u64> = issues
         .iter()
         .filter(|issue| issue.pull_request.is_none())
@@ -112,26 +113,66 @@ pub fn sync_github(
         })
         .collect();
 
+    if dry_run {
+        // Comment threads are planned against the items linked today; a thread
+        // of an issue this run would create or link has nothing to reconcile yet.
+        if sync_comments {
+            let threads = rt.block_on(async {
+                let crab = build_client()?;
+                plan_comment_threads(
+                    &crab,
+                    &owner,
+                    &repo,
+                    store,
+                    &state,
+                    &remote_comment_counts,
+                    policy,
+                )
+                .await
+            })?;
+            for thread in &threads {
+                summary.comments.add_plan(
+                    thread.clove_id.as_str(),
+                    &thread.external_ref,
+                    &thread.plan,
+                );
+            }
+        }
+        return Ok((summary, None));
+    }
+
     let apply_result = rt.block_on(async {
         let crab = build_client()?;
         let outcome = apply_plan(&crab, &owner, &repo, plan, store, &mut state).await?;
         let mut report = outcome.report;
         // Comment sync is inherently two-way and its per-issue fingerprints are
-        // coupled to the skip optimization, so it runs only for a full `Both`
+        // coupled to the idle-thread check, so it runs only for a full `Both`
         // reconcile. A one-way `import`/`export github` syncs items only (documented
         // in PLUGIN_SYSTEM.md §4.2); use `clove sync github` for comments.
-        if sync_comments && direction == Direction::Both {
-            let (pulled, pushed) = sync_all_comments(
+        if sync_comments {
+            let threads = plan_comment_threads(
+                &crab,
+                &owner,
+                &repo,
+                store,
+                &state,
+                &remote_comment_counts,
+                policy,
+            )
+            .await?;
+            let all_applied = apply_comment_threads(
                 &crab,
                 &owner,
                 &repo,
                 store,
                 &mut state,
-                &remote_comment_counts,
+                threads,
+                &mut report,
             )
             .await?;
-            report.comments_pulled = pulled;
-            report.comments_pushed = pushed;
+            if all_applied {
+                state.comments_checked_at = Some(sync_started);
+            }
         }
         Ok::<(SyncReport, std::collections::HashSet<String>), ImportError>((
             report,
@@ -702,66 +743,278 @@ fn parse_state_reason(raw: &str) -> Option<octocrab::models::issues::IssueStateR
     }
 }
 
-/// Reconcile comment threads for every issue linked to a local item, after the
-/// main item apply has run. Iterates the *post-apply* `external_ref` index (a
-/// fresh store scan), so issues just created on either side — which are absent
-/// from the pre-apply fetch — are still covered. Returns `(pulled, pushed)`.
-async fn sync_all_comments(
+/// The linked GitHub issues of the store as `(external_ref, local id)`, sorted by
+/// ref for a deterministic order of API calls. A fresh scan, so items a run just
+/// created on either side are included.
+fn linked_issues(store: &dyn Store) -> Result<Vec<(String, CloveId)>, ImportError> {
+    let mut linked: Vec<(String, CloveId)> = build_external_ref_index(store)?
+        .into_iter()
+        .filter_map(|(ext, existing)| ext.starts_with("gh-").then_some((ext, existing.id)))
+        .collect();
+    linked.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(linked)
+}
+
+/// One linked issue's fetched comment thread and what the sync would do to it.
+struct ThreadPlan {
+    clove_id: CloveId,
+    external_ref: String,
+    number: u64,
+    gh: Vec<GhComment>,
+    local_count: usize,
+    plan: CommentPlan,
+}
+
+/// Plan the comment thread of every linked issue that is not provably idle (see
+/// [`comment_thread_idle`]), fetching GitHub's side but writing nothing. Shared
+/// by `--dry-run` and the apply.
+async fn plan_comment_threads(
+    crab: &Octocrab,
+    owner: &str,
+    repo: &str,
+    store: &dyn Store,
+    state: &SyncState,
+    remote_comment_counts: &std::collections::HashMap<String, u64>,
+    policy: ConflictPolicy,
+) -> Result<Vec<ThreadPlan>, ImportError> {
+    let touched = touched_issue_numbers(crab, owner, repo, state).await?;
+    let mut threads = Vec::new();
+    for (external_ref, id) in linked_issues(store)? {
+        let Some(number) = parse_gh_number(&external_ref) else {
+            continue;
+        };
+        let local: Vec<LocalComment> = store
+            .comments(&id)?
+            .into_iter()
+            .map(|c| LocalComment {
+                key: c.key,
+                author: c.author,
+                body: c.body,
+                modified: c.modified,
+            })
+            .collect();
+
+        let entry = state.entries.get(&external_ref);
+        if let Some(entry) = entry {
+            let remote_touched = touched.as_ref().is_none_or(|set| set.contains(&number));
+            let remote_count = remote_comment_counts.get(&external_ref).copied();
+            if comment_thread_idle(entry, &local, remote_count, remote_touched) {
+                continue;
+            }
+        }
+
+        let gh = fetch_comments(crab, owner, repo, number, &id).await?;
+        let fallback;
+        let entry = match entry {
+            Some(entry) => entry,
+            None => {
+                fallback = default_entry();
+                &fallback
+            }
+        };
+        let plan = plan_comments(&gh, &local, entry, policy);
+        threads.push(ThreadPlan {
+            clove_id: id,
+            external_ref,
+            number,
+            gh,
+            local_count: local.len(),
+            plan,
+        });
+    }
+    Ok(threads)
+}
+
+/// The numbers of issues carrying a comment that someone other than this sync
+/// created or edited since the last comment sync, from one repo-wide listing of
+/// recently updated comments. `None` when there is no earlier sync to measure
+/// from (or GitHub omitted an issue url), meaning every thread must be checked.
+async fn touched_issue_numbers(
+    crab: &Octocrab,
+    owner: &str,
+    repo: &str,
+    state: &SyncState,
+) -> Result<Option<std::collections::HashSet<u64>>, ImportError> {
+    const PAGE_SIZE: usize = 100;
+    let Some(checked_at) = state.comments_checked_at else {
+        return Ok(None);
+    };
+    // Generous: re-checking a thread is cheap, missing an edit is not.
+    let since = (checked_at - chrono::Duration::minutes(5))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let route = format!("/repos/{owner}/{repo}/issues/comments");
+    let operation = format!("recent comment listing of {owner}/{repo}");
+    let mut touched = std::collections::HashSet::new();
+    for page in 1u32.. {
+        let query = serde_json::json!({ "since": since, "per_page": PAGE_SIZE, "page": page });
+        let batch: Vec<Value> =
+            with_retry(true, &operation, || crab.get(&route, Some(&query))).await?;
+        for comment in &batch {
+            let number = comment
+                .get("issue_url")
+                .and_then(Value::as_str)
+                .and_then(|url| url.rsplit('/').next())
+                .and_then(|tail| tail.parse::<u64>().ok());
+            let (Some(comment_id), Some(number)) =
+                (comment.get("id").and_then(Value::as_u64), number)
+            else {
+                return Ok(None);
+            };
+            let updated_at = comment
+                .get("updated_at")
+                .and_then(Value::as_str)
+                .and_then(clove_types::parse_rfc3339);
+            let ours = state
+                .entries
+                .get(&crate::github::external_ref_for(number))
+                .is_some_and(|entry| {
+                    entry.comment_links.iter().any(|link| {
+                        link.gh_id == comment_id
+                            && updated_at.is_some()
+                            && link.gh_updated_at == updated_at
+                    })
+                });
+            if !ours {
+                touched.insert(number);
+            }
+        }
+        if batch.len() < PAGE_SIZE {
+            break;
+        }
+    }
+    Ok(Some(touched))
+}
+
+/// Apply the planned comment writes of every thread, recording each pair as it
+/// is made so a mid-run failure never loses a link. A write GitHub rejects skips
+/// that comment (listed in `report.skipped`, retried next sync) instead of
+/// aborting. Returns whether every write went through.
+async fn apply_comment_threads(
     crab: &Octocrab,
     owner: &str,
     repo: &str,
     store: &dyn Store,
     state: &mut SyncState,
-    remote_comment_counts: &std::collections::HashMap<String, u64>,
-) -> Result<(usize, usize), ImportError> {
-    // Re-scan so freshly pull-created / push-created items are included. Sort by
-    // ref for a deterministic order of API calls.
-    let mut linked: Vec<(String, clove_types::CloveId)> = build_external_ref_index(store)?
-        .into_iter()
-        .filter_map(|(ext, existing)| ext.starts_with("gh-").then_some((ext, existing.id)))
-        .collect();
-    linked.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let mut pulled = 0;
-    let mut pushed = 0;
-
-    for (external_ref, id) in &linked {
-        let Some(number) = parse_gh_number(external_ref) else {
-            continue;
-        };
-
-        let local: Vec<LocalComment> = store
-            .comments(id)?
-            .into_iter()
-            .map(|c| LocalComment {
-                author: c.author,
-                body: c.body,
-            })
-            .collect();
-
-        // Skip the per-issue comments GET when neither side moved since the
-        // last comment sync: the issues list already told us the remote count,
-        // and the local count is a cheap directory read. Issues created this
-        // run (absent from the pre-apply fetch) always fall through to a fetch.
-        if let Some(entry) = state.entries.get(external_ref) {
-            if let (Some(synced_gh), Some(synced_local)) =
-                (entry.synced_gh_comments, entry.synced_local_comments)
-            {
-                if remote_comment_counts.get(external_ref) == Some(&synced_gh)
-                    && local.len() as u64 == synced_local
-                {
-                    continue;
-                }
-            }
-        }
-
-        let gh = fetch_comments(crab, owner, repo, number, id).await?;
-
+    threads: Vec<ThreadPlan>,
+    report: &mut SyncReport,
+) -> Result<bool, ImportError> {
+    let mut all_applied = true;
+    for thread in threads {
+        let ThreadPlan {
+            clove_id: id,
+            external_ref,
+            number,
+            gh,
+            local_count,
+            plan,
+        } = thread;
+        let handler = crab.issues(owner, repo);
         let entry = state
             .entries
             .entry(external_ref.clone())
             .or_insert_with(default_entry);
-        let plan = plan_comments(&gh, &local, entry);
+        let gh_updated = |gh_id: u64| gh.iter().find(|c| c.id == gh_id).and_then(|c| c.updated_at);
+        let skip = |report: &mut SyncReport, error: &ImportError| {
+            report
+                .skipped
+                .push(skipped_item(id.as_str(), Some(&external_ref), error));
+        };
+        let mut pulled = 0usize;
+        let mut pushed = 0usize;
+        let mut deleted_local = 0usize;
+        let mut deleted_remote = 0usize;
+        let mut thread_applied = true;
+
+        for conflict in &plan.conflicts {
+            report.comments.conflicts.push(CommentConflictRef {
+                clove_id: id.to_string(),
+                external_ref: external_ref.clone(),
+                gh_comment_id: conflict.gh_id,
+                comment: conflict.key.clone(),
+                resolution: conflict.resolution.clone(),
+            });
+        }
+        for relink in &plan.relink {
+            if let Some(hash) = relink.legacy_hash {
+                entry.release_comment_hash(hash);
+            }
+            entry.set_comment_link(relink.link.clone());
+        }
+        for gh_id in &plan.unlink {
+            entry.drop_comment_link(*gh_id);
+        }
+
+        for edit in &plan.update_local {
+            store.update_comment(&id, &edit.key, &edit.body)?;
+            entry.set_comment_link(CommentLink {
+                gh_id: edit.gh_id,
+                local_key: edit.key.clone(),
+                base_hash: link_hash(&edit.body),
+                gh_updated_at: gh_updated(edit.gh_id),
+            });
+            report.comments.update_local += 1;
+        }
+        for edit in &plan.update_remote {
+            let operation = format!("comment edit on {} for {id}", issue_label(number));
+            // octocrab's `update_comment` POSTs; the edit endpoint is a PATCH.
+            let route = format!("/repos/{owner}/{repo}/issues/comments/{}", edit.gh_id);
+            let payload = serde_json::json!({ "body": edit.body });
+            let sent = call_item(true, &operation, || {
+                crab.patch::<octocrab::models::issues::Comment, _, _>(&route, Some(&payload))
+            })
+            .await;
+            match sent {
+                Ok(updated) => {
+                    entry.set_comment_link(CommentLink {
+                        gh_id: edit.gh_id,
+                        local_key: edit.key.clone(),
+                        base_hash: link_hash(&edit.body),
+                        gh_updated_at: updated.updated_at,
+                    });
+                    advance_remote_clock(entry, updated.updated_at);
+                    report.comments.update_remote += 1;
+                }
+                Err(CallFailure::Rejected { error, .. }) => {
+                    skip(report, &error);
+                    thread_applied = false;
+                }
+                Err(CallFailure::Fatal(error)) => return Err(error),
+            }
+        }
+
+        for removal in &plan.delete_local {
+            store.delete_comment(&id, &removal.key)?;
+            entry.drop_comment_link(removal.gh_id);
+            report
+                .comments
+                .delete_local
+                .push(CommentRef::new(id.as_str(), &external_ref, removal));
+            deleted_local += 1;
+        }
+        for removal in &plan.delete_remote {
+            let operation = format!("comment delete on {} for {id}", issue_label(number));
+            let sent = call_item(true, &operation, || {
+                handler.delete_comment(removal.gh_id.into())
+            })
+            .await;
+            match sent {
+                // A retry after a lost response finds the comment already gone.
+                Ok(()) | Err(CallFailure::Rejected { status: 404, .. }) => {
+                    entry.drop_comment_link(removal.gh_id);
+                    report.comments.delete_remote.push(CommentRef::new(
+                        id.as_str(),
+                        &external_ref,
+                        removal,
+                    ));
+                    deleted_remote += 1;
+                }
+                Err(CallFailure::Rejected { error, .. }) => {
+                    skip(report, &error);
+                    thread_applied = false;
+                }
+                Err(CallFailure::Fatal(error)) => return Err(error),
+            }
+        }
 
         for comment in &plan.pull {
             let when = comment.created_at.unwrap_or_else(Utc::now);
@@ -770,42 +1023,76 @@ async fn sync_all_comments(
             } else {
                 comment.author.clone()
             };
-            store.add_comment(id, &author, &comment.body, when)?;
-            entry.gh_comment_ids.insert(comment.id);
-            entry.record_comment_hash(body_hash(&comment.body));
+            let key = store.add_comment(&id, &author, &comment.body, when)?;
+            entry.set_comment_link(CommentLink {
+                gh_id: comment.id,
+                local_key: key,
+                base_hash: link_hash(&comment.body),
+                gh_updated_at: comment.updated_at,
+            });
             pulled += 1;
         }
         for comment in &plan.push {
-            let handler = crab.issues(owner, repo);
             let body = comment.body.clone();
             // A comment create is non-idempotent — a retry on a lost response would
             // post a duplicate — so it is never retried (see `with_retry`).
             let operation = format!("comment post on {} for {id}", issue_label(number));
-            let created = with_retry(false, &operation, || {
+            let sent = call_item(false, &operation, || {
                 handler.create_comment(number, body.clone())
             })
-            .await?;
-            entry.gh_comment_ids.insert(created.id.into_inner());
-            entry.record_comment_hash(body_hash(&comment.body));
-            // Posting a comment bumps the issue's `updated_at` on GitHub. Advance
-            // the recorded remote fingerprint to the new comment's timestamp so the
-            // next sync doesn't see a spurious remote change and pull-update (or
-            // false-conflict) the item whose only "remote change" was clove's own
-            // comment push.
-            let created_at = created.created_at;
-            if entry.gh_updated_at.is_none_or(|cur| created_at > cur) {
-                entry.gh_updated_at = Some(created_at);
+            .await;
+            match sent {
+                Ok(created) => {
+                    entry.set_comment_link(CommentLink {
+                        gh_id: created.id.into_inner(),
+                        local_key: comment.key.clone(),
+                        base_hash: link_hash(&comment.body),
+                        gh_updated_at: created.updated_at.or(Some(created.created_at)),
+                    });
+                    // Posting a comment bumps the issue's `updated_at` on GitHub.
+                    // Advance the recorded remote fingerprint to the new comment's
+                    // timestamp so the next sync doesn't see a spurious remote
+                    // change and pull-update (or false-conflict) the item whose
+                    // only "remote change" was clove's own comment push.
+                    advance_remote_clock(entry, Some(created.created_at));
+                    pushed += 1;
+                }
+                Err(CallFailure::Rejected { error, .. }) => {
+                    skip(report, &error);
+                    thread_applied = false;
+                }
+                Err(CallFailure::Fatal(error)) => return Err(error),
             }
-            pushed += 1;
         }
 
-        // Both plans applied fully: record the counts each side now has, which
-        // is what the next sync's skip check compares against. Set only on
-        // full success (an early `?` above leaves them stale → re-fetch).
-        entry.synced_gh_comments = Some((gh.len() + plan.push.len()) as u64);
-        entry.synced_local_comments = Some((local.len() + plan.pull.len()) as u64);
+        report.comments.pull += pulled;
+        report.comments.push += pushed;
+        report.comments_pulled += pulled;
+        report.comments_pushed += pushed;
+
+        // Set only when every write landed (an early `?` above leaves them stale
+        // too): the next sync's idle check compares against what each side now
+        // holds, and a skipped write must make it look again.
+        if thread_applied {
+            entry.synced_gh_comments = Some((gh.len() + pushed - deleted_remote) as u64);
+            entry.synced_local_comments = Some((local_count + pulled - deleted_local) as u64);
+        } else {
+            entry.synced_gh_comments = None;
+            entry.synced_local_comments = None;
+            all_applied = false;
+        }
     }
-    Ok((pulled, pushed))
+    Ok(all_applied)
+}
+
+/// Move the recorded remote clock forward to `at`: a comment write bumps the
+/// issue's `updated_at` on GitHub.
+fn advance_remote_clock(entry: &mut crate::sync::SyncEntry, at: Option<DateTime<Utc>>) {
+    if let Some(at) = at {
+        if entry.gh_updated_at.is_none_or(|cur| at > cur) {
+            entry.gh_updated_at = Some(at);
+        }
+    }
 }
 
 /// A default [`crate::sync::SyncEntry`] for an issue that somehow lacks a
@@ -841,6 +1128,7 @@ async fn fetch_comments(
             author: c.user.login,
             body: c.body.unwrap_or_default(),
             created_at: Some(c.created_at),
+            updated_at: c.updated_at,
         })
         .collect())
 }
@@ -943,6 +1231,7 @@ enum CallFailure {
     /// `assignees` field.
     Rejected {
         error: ImportError,
+        status: u16,
         assignees: Option<Vec<String>>,
     },
     /// Anything that should abort the run: auth, rate limit, 5xx, network.
@@ -987,7 +1276,11 @@ fn classify_failure(operation: &str, err: &octocrab::Error) -> CallFailure {
             })
             .collect()
     });
-    CallFailure::Rejected { error, assignees }
+    CallFailure::Rejected {
+        error,
+        status: source.status_code.as_u16(),
+        assignees,
+    }
 }
 
 fn skipped_item(clove_id: &str, external_ref: Option<&str>, error: &ImportError) -> SkippedItem {

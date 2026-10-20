@@ -61,14 +61,28 @@ pub trait Store {
     ) -> Result<DateTime<Utc>, ImportError>;
     /// An item's comments, oldest first.
     fn comments(&self, id: &CloveId) -> Result<Vec<CommentPayload>, ImportError>;
-    /// Append a comment with its original author and time.
+    /// Append a comment with its original author and time; returns the new
+    /// comment's key ([`CommentPayload::key`]).
     fn add_comment(
         &self,
         id: &CloveId,
         author: &str,
         body: &str,
         timestamp: DateTime<Utc>,
-    ) -> Result<(), ImportError>;
+    ) -> Result<String, ImportError>;
+    /// Replace the body of the comment `key`, keeping its author and time.
+    fn update_comment(&self, id: &CloveId, key: &str, body: &str) -> Result<(), ImportError>;
+    /// Remove the comment `key`.
+    fn delete_comment(&self, id: &CloveId, key: &str) -> Result<(), ImportError>;
+}
+
+/// The key (file name) in an `ops::comment*` result's repo-relative `path`.
+fn comment_key(saved: &Value) -> String {
+    saved["path"]
+        .as_str()
+        .and_then(|path| path.rsplit(['/', '\\']).next())
+        .unwrap_or_default()
+        .to_owned()
 }
 
 /// Direct access. `new_id` uses the prefix the store was opened with.
@@ -163,9 +177,11 @@ impl Store for DirectStore {
             clove_core::comments::list_comments(self.store.issues_dir(), id)?
                 .into_iter()
                 .map(|c| CommentPayload {
+                    key: c.name,
                     timestamp: c.timestamp,
                     author: c.author,
                     body: c.body,
+                    modified: c.modified,
                 })
                 .collect(),
         )
@@ -177,8 +193,18 @@ impl Store for DirectStore {
         author: &str,
         body: &str,
         timestamp: DateTime<Utc>,
-    ) -> Result<(), ImportError> {
-        ops::comment_at(&self.store, id, author, body, timestamp)?;
+    ) -> Result<String, ImportError> {
+        let saved = ops::comment_at(&self.store, id, author, body, timestamp)?;
+        Ok(comment_key(&saved))
+    }
+
+    fn update_comment(&self, id: &CloveId, key: &str, body: &str) -> Result<(), ImportError> {
+        ops::comment_update(&self.store, id, key, body)?;
+        Ok(())
+    }
+
+    fn delete_comment(&self, id: &CloveId, key: &str) -> Result<(), ImportError> {
+        ops::comment_delete(&self.store, id, key)?;
         Ok(())
     }
 }
@@ -277,7 +303,15 @@ impl Store for HostStore {
         author: &str,
         body: &str,
         timestamp: DateTime<Utc>,
-    ) -> Result<(), ImportError> {
+    ) -> Result<String, ImportError> {
         self.with(|c| c.store_add_comment(id.as_str(), author, body, timestamp))
+    }
+
+    fn update_comment(&self, id: &CloveId, key: &str, body: &str) -> Result<(), ImportError> {
+        self.with(|c| c.store_update_comment(id.as_str(), key, body))
+    }
+
+    fn delete_comment(&self, id: &CloveId, key: &str) -> Result<(), ImportError> {
+        self.with(|c| c.store_delete_comment(id.as_str(), key))
     }
 }

@@ -84,6 +84,8 @@ const METHODS: &[&str] = &[
     "store.link_external",
     "store.comments",
     "store.add_comment",
+    "store.update_comment",
+    "store.delete_comment",
 ];
 
 /// JSON-RPC error codes.
@@ -506,6 +508,12 @@ fn dispatch(shared: &Shared, method: &str, params: Value) -> Result<Value, RpcFa
         }),
         "store.comments" => call(params, |p: StoreIdParams| shared.store().comments(p)),
         "store.add_comment" => call(params, |p: AddCommentParams| shared.store().add_comment(p)),
+        "store.update_comment" => call(params, |p: UpdateCommentParams| {
+            shared.store().update_comment(p)
+        }),
+        "store.delete_comment" => call(params, |p: DeleteCommentParams| {
+            shared.store().delete_comment(p)
+        }),
         other => Err(RpcFailure {
             code: METHOD_NOT_FOUND,
             message: format!("unknown method `{other}`"),

@@ -189,6 +189,11 @@ fn run(
                 "pushed_updated": report.pushed_updated,
                 "comments_pulled": report.comments_pulled,
                 "comments_pushed": report.comments_pushed,
+                "comments_updated_local": report.comments.update_local,
+                "comments_updated_remote": report.comments.update_remote,
+                "comments_deleted_local": report.comments.delete_local.len(),
+                "comments_deleted_remote": report.comments.delete_remote.len(),
+                "comments": report.comments,
                 "in_sync": report.in_sync,
                 "conflicts": summary.conflicts,
                 "remote_missing": summary.remote_missing,
@@ -204,7 +209,7 @@ fn run(
         ),
         (OutputFormat::Human, Some(report)) => {
             outln!(
-                "{}: pulled {} new / {} updated, pushed {} new / {} updated, comments {} pulled / {} pushed, {} in sync, {} conflicts",
+                "{}: pulled {} new / {} updated, pushed {} new / {} updated, comments {} pulled / {} pushed / {} edited / {} deleted, {} in sync, {} conflicts",
                 applied_label(direction, &cli.target),
                 report.pulled_created,
                 report.pulled_updated,
@@ -212,10 +217,13 @@ fn run(
                 report.pushed_updated,
                 report.comments_pulled,
                 report.comments_pushed,
+                report.comments.update_local + report.comments.update_remote,
+                report.comments.delete_local.len() + report.comments.delete_remote.len(),
                 report.in_sync,
                 report.conflicts,
             );
             print_conflicts(&summary);
+            print_comment_changes(&report.comments, "deleted");
             print_remote_missing(&summary);
             for warning in run_warnings(&report) {
                 eprintln!("warning: {warning}");
@@ -234,6 +242,19 @@ fn run(
             );
             print_conflicts(&summary);
             print_remote_missing(&summary);
+            if !summary.comments.is_empty() {
+                let comments = &summary.comments;
+                outln!(
+                    "  comments: pull {} / push {} / edit {} local, {} remote / delete {} local, {} remote",
+                    comments.pull,
+                    comments.push,
+                    comments.update_local,
+                    comments.update_remote,
+                    comments.delete_local.len(),
+                    comments.delete_remote.len(),
+                );
+                print_comment_changes(comments, "would delete");
+            }
         }
     }
     Ok(exit_code)
@@ -285,6 +306,35 @@ fn print_conflicts(summary: &clove_import::SyncSummary) {
             conflict.external_ref,
             conflict.clove_id,
             conflict.title,
+            conflict.resolution
+        );
+    }
+}
+
+/// Print one line per comment deletion and per comment edited on both sides, so
+/// a run (or its dry-run plan) never deletes anything unannounced.
+fn print_comment_changes(comments: &clove_import::sync::CommentSummary, verb: &str) {
+    let deletions = [
+        ("local", &comments.delete_local),
+        ("GitHub", &comments.delete_remote),
+    ];
+    for (side, refs) in deletions {
+        for comment in refs {
+            outln!(
+                "  {verb} {side} comment {} on {} ({}): {}",
+                comment.comment,
+                comment.clove_id,
+                comment.external_ref,
+                comment.preview
+            );
+        }
+    }
+    for conflict in &comments.conflicts {
+        outln!(
+            "  comment conflict {} on {} ({}) -> {}",
+            conflict.comment,
+            conflict.clove_id,
+            conflict.external_ref,
             conflict.resolution
         );
     }

@@ -401,21 +401,56 @@ impl HostClient {
         decode(self.call("store.comments", json!({ "id": id }))?)
     }
 
-    /// Append a comment with its original author and time.
+    /// Append a comment with its original author and time; returns its key
+    /// (the name [`CommentPayload::key`] reports for it).
     pub fn store_add_comment(
         &mut self,
         id: &str,
         author: &str,
         body: &str,
         timestamp: DateTime<Utc>,
-    ) -> Result<(), HostError> {
-        self.typed(
+    ) -> Result<String, HostError> {
+        let reply = self.typed(
             "store.add_comment",
             &AddCommentParams {
                 id: id.to_owned(),
                 author: author.to_owned(),
                 body: body.to_owned(),
                 timestamp,
+            },
+        )?;
+        reply["path"]
+            .as_str()
+            .and_then(|path| path.rsplit(['/', '\\']).next())
+            .map(str::to_owned)
+            .ok_or_else(|| HostError::Protocol("add_comment reply without a path".to_owned()))
+    }
+
+    /// Replace the body of the comment `key` of item `id`.
+    pub fn store_update_comment(
+        &mut self,
+        id: &str,
+        key: &str,
+        body: &str,
+    ) -> Result<(), HostError> {
+        self.typed(
+            "store.update_comment",
+            &UpdateCommentParams {
+                id: id.to_owned(),
+                key: key.to_owned(),
+                body: body.to_owned(),
+            },
+        )
+        .map(drop)
+    }
+
+    /// Remove the comment `key` of item `id`.
+    pub fn store_delete_comment(&mut self, id: &str, key: &str) -> Result<(), HostError> {
+        self.typed(
+            "store.delete_comment",
+            &DeleteCommentParams {
+                id: id.to_owned(),
+                key: key.to_owned(),
             },
         )
         .map(drop)

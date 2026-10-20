@@ -11,12 +11,15 @@
 //! - `apply_edit` → [`clove_core::apply_edit`],
 //! - `dep_add`/`dep_remove` → [`clove_core::ops`] (cycle-checked),
 //! - `link_external` → [`clove_core::ops::link_external`],
-//! - `add_comment` → [`clove_core::ops::comment_at`].
+//! - `add_comment` → [`clove_core::ops::comment_at`],
+//! - `update_comment` / `delete_comment` → [`clove_core::ops::comment_update`] /
+//!   [`clove_core::ops::comment_delete`] (a synced edit or deletion).
 //!
 //! Like every other write, these prefer the running `cloved` (which applies the
 //! same op, serialized with every other client's writes, and keeps its index and
 //! graph coherent) and fall back to the op in this process when no daemon is
-//! reachable. The writer stamps the time: the daemon's clock or this one.
+//! reachable (comment edits and deletions always run in this process: comments
+//! are not indexed, so there is no daemon state to keep coherent). The writer stamps the time: the daemon's clock or this one.
 //! Reads (`scan`, `get`, `comments`) read the files.
 
 use camino::Utf8PathBuf;
@@ -24,8 +27,9 @@ use chrono::Utc;
 use clove_core::comments::list_comments;
 use clove_core::{ops, ItemStore, ScanError};
 use clove_types::tool::{
-    AddCommentParams, ApplyEditParams, CommentPayload, CreateItemParams, FrontmatterScanPayload,
-    ItemPayload, LinkExternalParams, ScanErrorPayload, ScanPayload, StoreDepParams, StoreIdParams,
+    AddCommentParams, ApplyEditParams, CommentPayload, CreateItemParams, DeleteCommentParams,
+    FrontmatterScanPayload, ItemPayload, LinkExternalParams, ScanErrorPayload, ScanPayload,
+    StoreDepParams, StoreIdParams, UpdateCommentParams,
 };
 use clove_types::{CloveId, Item};
 use serde_json::{json, Value};
@@ -164,9 +168,11 @@ impl StoreService {
             comments
                 .into_iter()
                 .map(|c| CommentPayload {
+                    key: c.name,
                     timestamp: c.timestamp,
                     author: c.author,
                     body: c.body,
+                    modified: c.modified,
                 })
                 .collect::<Vec<_>>(),
         )
@@ -187,6 +193,21 @@ impl StoreService {
                 p.timestamp,
             )?),
         }
+    }
+
+    /// Replace the body of an existing comment (a synced edit).
+    pub fn update_comment(&self, p: UpdateCommentParams) -> Result<Value, ToolError> {
+        Ok(ops::comment_update(
+            &self.store,
+            &id(&p.id)?,
+            &p.key,
+            &p.body,
+        )?)
+    }
+
+    /// Remove an existing comment (a synced deletion).
+    pub fn delete_comment(&self, p: DeleteCommentParams) -> Result<Value, ToolError> {
+        Ok(ops::comment_delete(&self.store, &id(&p.id)?, &p.key)?)
     }
 }
 
@@ -321,10 +342,40 @@ mod tests {
             timestamp: when,
         })
         .unwrap();
-        let comments: Vec<CommentPayload> =
-            serde_json::from_value(svc.comments(StoreIdParams { id: idb }).unwrap()).unwrap();
+        let read = |svc: &StoreService| -> Vec<CommentPayload> {
+            serde_json::from_value(svc.comments(StoreIdParams { id: idb.clone() }).unwrap())
+                .unwrap()
+        };
+        let comments = read(&svc);
         assert_eq!(comments.len(), 1);
         assert_eq!(comments[0].author, "octocat");
         assert_eq!(comments[0].timestamp, when);
+        assert!(comments[0].key.ends_with(".md") && comments[0].modified.is_some());
+
+        let key = comments[0].key.clone();
+        svc.update_comment(UpdateCommentParams {
+            id: idb.clone(),
+            key: key.clone(),
+            body: "edited on GitHub".to_owned(),
+        })
+        .unwrap();
+        let comments = read(&svc);
+        assert_eq!(comments[0].body, "edited on GitHub");
+        assert_eq!(comments[0].key, key, "the key survives an edit");
+        assert_eq!(comments[0].timestamp, when);
+
+        let escape = svc
+            .delete_comment(DeleteCommentParams {
+                id: idb.clone(),
+                key: "../../x.md".to_owned(),
+            })
+            .unwrap_err();
+        assert_eq!(escape.code(), ("VALIDATION_ERROR", 4));
+        svc.delete_comment(DeleteCommentParams {
+            id: idb.clone(),
+            key,
+        })
+        .unwrap();
+        assert!(read(&svc).is_empty());
     }
 }
