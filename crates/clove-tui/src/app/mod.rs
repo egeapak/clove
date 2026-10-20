@@ -1089,10 +1089,11 @@ mod tests {
         assert_eq!(app.tick_interval(), Duration::from_millis(100));
     }
 
-    /// Drain a background scan with a bounded wait so a stuck worker fails the
-    /// test fast instead of blocking forever.
+    /// Drain a background scan; the deadline is only a hang guard so a stuck
+    /// worker fails the test instead of blocking forever.
     fn drain_refresh(app: &mut App) -> bool {
-        for _ in 0..500 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
             if app.poll_refresh() {
                 return true;
             }
