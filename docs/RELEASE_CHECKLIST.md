@@ -132,6 +132,11 @@ Drive with a real browser (Playwright MCP is fine). Check the console on every p
 - [ ] Navigate **from every view** to an item's detail page: board card, **list row
       (click and Enter)**, **timeline bar** — each lands on `/p/<slug>/items/<id>`.
 - [ ] Timeline throughput: the 30d/90d/All ranges show days, not snapshots.
+- [ ] Timeline hover guide: moving the pointer over the plot draws a vertical guide
+      line with a date chip on the top axis showing the date under the cursor
+      (legible in a light and a dark theme, chip stays inside the plot at both
+      edges, bar tooltips and bar clicks still work); it disappears when the
+      pointer leaves the plot or enters the label column.
 - [ ] Write path: add a label in the detail sidebar → it lands in the item file.
 - [ ] Live push: change the item from the CLI while (a) the List view and (b) its
       detail page — opened **both** from the board **and** by direct URL/refresh — is

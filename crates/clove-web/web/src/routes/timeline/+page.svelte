@@ -9,6 +9,7 @@
   import { shortId, typeIcon, statusGlyph, statusColorVar, statusLabel } from '$lib/glyphs';
   import { dailyHistory, lastDays } from '$lib/history';
   import { tooltip } from '$lib/tooltip';
+  import { dateAtFraction, formatAxisDate, fractionAtX } from '$lib/timeline';
   import { tick } from 'svelte';
 
   let history = $state<StatsHistoryPoint[]>([]);
@@ -122,11 +123,33 @@
       const t = min + ((max - min) * k) / n;
       out.push({
         left: (k / n) * 100,
-        label: new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(new Date(t))
+        label: formatAxisDate(t)
       });
     }
     return out;
   });
+
+  // Hover guide: the pointer's fraction across the plot (axis/track column), or
+  // null when it is elsewhere. Pointer events cover mouse, touch and pen.
+  let axisEl = $state<HTMLDivElement | undefined>();
+  let cursorFraction = $state<number | null>(null);
+  const cursorLabel = $derived(
+    cursorFraction === null ? '' : formatAxisDate(dateAtFraction(domain.min, domain.max, cursorFraction))
+  );
+
+  function trackCursor(e: PointerEvent) {
+    const overLabels = e.target instanceof Element && e.target.closest('.tl-corner, .tl-labels');
+    if (!axisEl || overLabels) {
+      cursorFraction = null;
+      return;
+    }
+    const plot = axisEl.getBoundingClientRect();
+    const outside = e.clientX < plot.left || e.clientX > plot.right;
+    cursorFraction = outside ? null : fractionAtX(e.clientX, plot.left, plot.width);
+  }
+  function clearCursor() {
+    cursorFraction = null;
+  }
 
   // map id -> row index (for dep arrows)
   const rowIndex = $derived(new Map(rows.map((r, i) => [r.id, i])));
@@ -175,12 +198,30 @@
 
 <div class="tl panel">
 <div class="tl-scroll" bind:this={scrollEl}>
-<div class="tl-grid" style="--track-w:{trackW}px">
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div
+  class="tl-grid"
+  style="--track-w:{trackW}px"
+  onpointermove={trackCursor}
+  onpointerdown={trackCursor}
+  onpointerleave={clearCursor}
+  onpointercancel={clearCursor}
+>
   <div class="tl-corner"></div>
-  <div class="tl-axis">
+  <div class="tl-axis" bind:this={axisEl}>
     {#each ticks as t (t.left)}
       <div class="tick mono" style="left:{t.left}%">{t.label}</div>
     {/each}
+    {#if cursorFraction !== null}
+      <div class="cursor-line" style="left:{cursorFraction * 100}%"></div>
+      <div
+        class="cursor-chip mono"
+        data-testid="timeline-cursor-chip"
+        style="left:clamp(var(--chip-half), {cursorFraction * 100}%, calc(100% - var(--chip-half)))"
+      >
+        {cursorLabel}
+      </div>
+    {/if}
   </div>
 
   <div class="tl-labels">
@@ -206,6 +247,9 @@
     {#each ticks as t (t.left)}
       <div class="grid-line" style="left:{t.left}%"></div>
     {/each}
+    {#if cursorFraction !== null}
+      <div class="cursor-line" data-testid="timeline-cursor-line" style="left:{cursorFraction * 100}%"></div>
+    {/if}
     <!-- today -->
     <div class="today" style="left:{pct(domain.now)}%"><span>today</span></div>
     <!-- dep arrows -->
@@ -347,6 +391,36 @@
     color: var(--text-dim);
     transform: translateX(-50%);
     white-space: nowrap;
+  }
+  .cursor-line {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 0;
+    border-left: 1px solid var(--border-strong);
+    z-index: 5;
+    pointer-events: none;
+  }
+  /* Themed like .clove-tooltip; clamped inline so the chip stays inside the plot. */
+  .cursor-chip {
+    --chip-half: 36px;
+    position: absolute;
+    top: 6px;
+    z-index: 5;
+    box-sizing: border-box;
+    width: calc(var(--chip-half) * 2);
+    transform: translateX(-50%);
+    text-align: center;
+    padding: 3px 0;
+    font-size: 11px;
+    line-height: 1.2;
+    white-space: nowrap;
+    color: var(--text);
+    background: linear-gradient(var(--surface-3), var(--surface-3)), var(--surface-app);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    box-shadow: var(--shadow-pop);
+    pointer-events: none;
   }
   .rowlabel {
     height: 38px;
