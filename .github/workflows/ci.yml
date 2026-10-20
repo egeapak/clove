@@ -27,6 +27,8 @@ jobs:
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # A hung test fails the job instead of holding the runner for 6 hours.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:

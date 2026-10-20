@@ -527,12 +527,10 @@ fn the_host_channel_rejects_an_oversized_request() {
     let repo = init_repo("proj");
     let data = echo_json(repo.path(), plugin_dir.path(), &["--host-oversize"]);
     let oversize = data["oversize"].as_str().expect("the request failed");
-    // The host answers with the reason before closing; a platform that drops
-    // unread pipe data on close may surface only the close.
-    assert!(
-        oversize.contains("16 MiB") || oversize.contains("closed the connection"),
-        "{oversize}"
-    );
+    // The host reads the rest of the line, answers with the reason, then
+    // closes. Answering mid-line deadlocked on Windows, where the host's flush
+    // waits for a client that is still writing.
+    assert!(oversize.contains("16 MiB"), "{oversize}");
     assert!(
         data["after"].is_string(),
         "the connection stayed open: {data}"

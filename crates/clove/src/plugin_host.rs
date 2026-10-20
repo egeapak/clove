@@ -240,6 +240,7 @@ fn serve(conn: Stream, shared: &Shared) {
                     return;
                 }
                 HelloRead::TooLarge => {
+                    drain_line(&mut reader, Some(deadline));
                     let _ = send(
                         &mut writer,
                         &error(Value::Null, UNAUTHORIZED, "hello larger than 64 KiB", None),
@@ -257,6 +258,9 @@ fn serve(conn: Stream, shared: &Shared) {
             }
         }
         if line.len() as u64 > MAX_REQUEST {
+            if !line.ends_with(b"\n") {
+                drain_line(&mut reader, None);
+            }
             let _ = send(
                 &mut writer,
                 &error(
@@ -383,6 +387,37 @@ fn read_hello_line(
         }
         if done {
             return HelloRead::Line;
+        }
+    }
+}
+
+/// Read and drop the rest of a refused line, until its newline, the end of
+/// the stream, or `deadline`.
+///
+/// The client is still writing that line. On Windows, `flush` waits until the
+/// client has read the reply, and the client reads only once its write is done,
+/// so answering before the line is consumed deadlocks both sides.
+fn drain_line(reader: &mut BufReader<&Stream>, deadline: Option<Instant>) {
+    loop {
+        if let Some(deadline) = deadline {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return;
+            }
+            let _ = reader.get_ref().set_recv_timeout(Some(left));
+        }
+        let (take, done) = match reader.fill_buf() {
+            Ok([]) => return,
+            Ok(chunk) => match chunk.iter().position(|&b| b == b'\n') {
+                Some(at) => (at + 1, true),
+                None => (chunk.len(), false),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return,
+        };
+        reader.consume(take);
+        if done {
+            return;
         }
     }
 }

@@ -451,8 +451,8 @@ receive timeout in `interprocess`, so there an idle unauthenticated connection
 token is reusable for the whole invocation.
 
 **Framing.** Newline-delimited JSON-RPC 2.0: one request object per line, UTF-8.
-A request line over 16 MiB is answered with `-32600` and the connection is
-closed. Responses are not capped: page large reads with `limit`/`offset`.
+A request line over 16 MiB is read to its end, answered with `-32600`, and the
+connection is closed. Responses are not capped: page large reads with `limit`/`offset`.
 Batches (arrays) are rejected with `-32600`. A request without `id` is a
 notification: it runs and gets no reply. Each connection has its own thread and
 answers its requests in order; there is no cancellation and no host timeout.
