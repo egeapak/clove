@@ -28,6 +28,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the host exits with the plugin's exit code, or dies of the same signal. The
   plugin no longer has the pid the user started.
 
+- `rustls-webpki` 0.103.16, `webpki-roots` / `webpki-root-certs` 1.0.10
+  (RUSTSEC-2026-0381, RUSTSEC-2026-0382, RUSTSEC-2026-0383)
+
 ### Added
 
 - **Web timeline hover guide:** moving the pointer over the timeline shows a
