@@ -242,9 +242,10 @@ the daemon does not inherit your shell's `GITHUB_TOKEN`. Requires the
 
 `clove mcp` runs an MCP server (stdio) that exposes clove's items to AI agents as
 native tools — list/search/show, dependency tree and ready/blocked, stats, and
-create/edit/transition plus dep/parent/comment writes. Reads compute from the
-file store; writes prefer the auto-started `cloved` daemon (and fall back to
-direct file access), so concurrent agents stay coherent.
+create/edit/transition plus dep/parent/comment writes. Reads are answered by a
+running `cloved`, else the index, else a file scan; writes prefer the
+auto-started `cloved` daemon (and fall back to direct file access), so
+concurrent agents stay coherent.
 
 For **any MCP client** (not just Claude Code), register `clove mcp` as a stdio
 server with command `clove` and args `["mcp"]`, run from inside the repository.

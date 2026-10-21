@@ -18,7 +18,9 @@ the whole runbook once before running any `cargo publish`.
 
 > **Order of operations.** The crates download the web UI from the GitHub Release
 > at build time, so the release has to exist before the crates do:
-> 1. Prepare: bump the version, CHANGELOG, PR, merge (§1).
+> 1. Prepare: bump the version (the workspace `Cargo.toml` **and**
+>    `.claude-plugin/plugin.json`; `xtask/tests/claude_plugin.rs` fails until they
+>    match), CHANGELOG, PR, merge (§1).
 > 2. Tag `v<version>` (§5) — `release.yml` builds the binaries **and** the web UI
 >    assets (`clove-web-dist-v<version>.tar.gz` + `.sha256`) into a draft Release (§6).
 > 3. Run [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md) against the draft, then
