@@ -63,6 +63,15 @@ single, dependency-light, cross-platform binary.
 [GitHub Release](https://github.com/egeapak/clove/releases) for Linux, macOS
 (arm64 + x86_64) and Windows: `clove`, `cloved` and the integration plugins.
 
+**Homebrew** (macOS, Linux x86_64) installs those same binaries, with the plugins
+as separate formulae:
+
+```sh
+brew tap egeapak/tap
+brew install clove                 # clove + cloved
+brew install clove-sync-github     # optional: clove-import-tk, clove-import-beads
+```
+
 **From source**, the default install is the lean core — CLI, TUI, MCP server and
 the optional daemon, with **no web server and no web UI**:
 
