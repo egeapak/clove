@@ -163,6 +163,12 @@ pub struct SyncEntry {
     pub synced_gh_comments: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub synced_local_comments: Option<u64>,
+    /// The stable local-comment ↔ GitHub-comment pairs, which is what lets an
+    /// edit or a deletion on one side find its counterpart on the other. State
+    /// files written before links existed simply have none; the first comment
+    /// sync adopts the pairs it can recognize by body (see [`plan_comments`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comment_links: Vec<CommentLink>,
     /// Fingerprint of the remote issue's *synced content* at the last sync
     /// (see [`staged_fingerprint`]). With it, "remote changed" requires the
     /// mapped content to actually differ, not just `updated_at` to move — a
@@ -186,6 +192,7 @@ impl SyncEntry {
             local_comment_hash_counts: HashMap::new(),
             synced_gh_comments: None,
             synced_local_comments: None,
+            comment_links: Vec::new(),
             synced_assignee: None,
             gh_content_hash: None,
         }
@@ -212,6 +219,49 @@ impl SyncEntry {
         *self.local_comment_hash_counts.entry(hash).or_insert(0) += 1;
         self.local_comment_hashes.insert(hash);
     }
+
+    /// Give up one synced occurrence of a comment body hash: the comment it
+    /// stood for now has a [`CommentLink`], which tracks it from here on.
+    pub fn release_comment_hash(&mut self, hash: u64) {
+        let mut counts = self.comment_hash_counts();
+        match counts.get_mut(&hash) {
+            Some(count) if *count > 1 => *count -= 1,
+            _ => {
+                counts.remove(&hash);
+                self.local_comment_hashes.remove(&hash);
+            }
+        }
+        self.local_comment_hash_counts = counts;
+    }
+
+    /// Record `link`, replacing any link that names the same GitHub comment or
+    /// the same local comment (a re-created side supersedes the old pair).
+    pub fn set_comment_link(&mut self, link: CommentLink) {
+        self.comment_links
+            .retain(|old| old.gh_id != link.gh_id && old.local_key != link.local_key);
+        self.comment_links.push(link);
+    }
+
+    /// Forget the link to GitHub comment `gh_id`.
+    pub fn drop_comment_link(&mut self, gh_id: u64) {
+        self.comment_links.retain(|link| link.gh_id != gh_id);
+    }
+}
+
+/// One local comment paired with its GitHub comment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommentLink {
+    /// The GitHub comment id.
+    pub gh_id: u64,
+    /// The local comment's key (its file name; stable across body edits).
+    pub local_key: String,
+    /// [`link_hash`] of the body both sides held at the last sync. A side whose
+    /// body no longer hashes to it has been edited since.
+    pub base_hash: u64,
+    /// The GitHub comment's `updated_at` at the last sync, so the sync can tell
+    /// an edit someone else made from one of its own writes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gh_updated_at: Option<DateTime<Utc>>,
 }
 
 /// The current schema version of the persisted sync-state file.
@@ -236,6 +286,12 @@ pub struct SyncState {
     /// `external_ref` (`"gh-<number>"`) → last-sync fingerprint.
     #[serde(default)]
     pub entries: HashMap<String, SyncEntry>,
+    /// When the last fully successful comment sync started. A comment edited on
+    /// GitHub changes neither its issue's comment count nor (reliably) its
+    /// `updated_at`, so the next sync asks GitHub which comments were updated
+    /// since this instant and re-fetches only those issues' threads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comments_checked_at: Option<DateTime<Utc>>,
 }
 
 impl SyncState {
@@ -245,6 +301,7 @@ impl SyncState {
             version: SYNC_STATE_VERSION,
             repo: repo.to_owned(),
             entries: HashMap::new(),
+            comments_checked_at: None,
         }
     }
 
@@ -530,6 +587,7 @@ impl SyncPlan {
             in_sync: self.in_sync.len(),
             remote_missing: self.remote_missing.clone(),
             foreign: self.foreign.clone(),
+            comments: CommentSummary::default(),
         }
     }
 }
@@ -555,6 +613,109 @@ pub struct SyncSummary {
     pub remote_missing: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub foreign: Vec<String>,
+    /// The comment threads' plan; absent when comment sync is off or nothing
+    /// would change.
+    #[serde(default, skip_serializing_if = "CommentSummary::is_empty")]
+    pub comments: CommentSummary,
+}
+
+/// One comment a sync deletes (or deleted) on one side.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CommentRef {
+    /// The local item the comment belongs to.
+    pub clove_id: String,
+    /// The linked GitHub issue (`gh-<number>`).
+    pub external_ref: String,
+    /// The GitHub comment id.
+    pub gh_comment_id: u64,
+    /// The local comment's key (its file name).
+    pub comment: String,
+    /// The start of the deleted body, on one line.
+    pub preview: String,
+}
+
+impl CommentRef {
+    pub fn new(clove_id: &str, external_ref: &str, removal: &CommentRemoval) -> Self {
+        let line = removal
+            .body
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let preview = if line.chars().count() > 60 {
+            format!("{}...", line.chars().take(60).collect::<String>())
+        } else {
+            line
+        };
+        CommentRef {
+            clove_id: clove_id.to_owned(),
+            external_ref: external_ref.to_owned(),
+            gh_comment_id: removal.gh_id,
+            comment: removal.key.clone(),
+            preview,
+        }
+    }
+}
+
+/// A comment edited on both sides and how it resolves.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CommentConflictRef {
+    pub clove_id: String,
+    pub external_ref: String,
+    pub gh_comment_id: u64,
+    pub comment: String,
+    /// `"remote_wins"`, `"local_wins"`, or `"skipped"`.
+    pub resolution: String,
+}
+
+/// The comment half of a [`SyncSummary`] (the plan) or [`SyncReport`] (what was
+/// applied). Deletions are listed one by one; the rest are counts.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct CommentSummary {
+    /// GitHub comments added locally.
+    pub pull: usize,
+    /// Local comments posted to GitHub.
+    pub push: usize,
+    /// Local comments rewritten from an edit on GitHub.
+    pub update_local: usize,
+    /// GitHub comments edited from a local edit.
+    pub update_remote: usize,
+    /// Local comments deleted because GitHub deleted theirs.
+    pub delete_local: Vec<CommentRef>,
+    /// GitHub comments deleted because the local file was deleted.
+    pub delete_remote: Vec<CommentRef>,
+    /// Local deletions not propagated to GitHub (it needs `--delete-remote-comments`).
+    pub pending_remote_delete: Vec<CommentRef>,
+    pub conflicts: Vec<CommentConflictRef>,
+}
+
+impl CommentSummary {
+    pub fn is_empty(&self) -> bool {
+        *self == CommentSummary::default()
+    }
+
+    /// Fold in everything `plan` would do to the thread of `clove_id` /
+    /// `external_ref`.
+    pub fn add_plan(&mut self, clove_id: &str, external_ref: &str, plan: &CommentPlan) {
+        self.pull += plan.pull.len();
+        self.push += plan.push.len();
+        self.update_local += plan.update_local.len();
+        self.update_remote += plan.update_remote.len();
+        let removal = |r: &CommentRemoval| CommentRef::new(clove_id, external_ref, r);
+        self.delete_local
+            .extend(plan.delete_local.iter().map(removal));
+        self.delete_remote
+            .extend(plan.delete_remote.iter().map(removal));
+        self.pending_remote_delete
+            .extend(plan.pending_remote_delete.iter().map(removal));
+        self.conflicts
+            .extend(plan.conflicts.iter().map(|c| CommentConflictRef {
+                clove_id: clove_id.to_owned(),
+                external_ref: external_ref.to_owned(),
+                gh_comment_id: c.gh_id,
+                comment: c.key.clone(),
+                resolution: c.resolution.clone(),
+            }));
+    }
 }
 
 /// What a sync `apply` run actually pushed/pulled.
@@ -578,6 +739,25 @@ pub struct SyncReport {
     pub comments_pulled: usize,
     /// Local comments pushed to GitHub.
     pub comments_pushed: usize,
+    /// Every comment write the run applied, edits and deletions included
+    /// (`comments_pulled`/`comments_pushed` repeat its `pull`/`push`).
+    pub comments: CommentSummary,
+    /// Items GitHub rejected (a 4xx about that one item). They are left
+    /// unrecorded in the sync state, so the next run retries them.
+    pub skipped: Vec<SkippedItem>,
+    /// Non-fatal notes, e.g. an assignee GitHub refused and the push dropped.
+    pub warnings: Vec<String>,
+}
+
+/// One item a sync run could not push because GitHub rejected it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SkippedItem {
+    /// The local item.
+    pub clove_id: String,
+    /// The GitHub issue it is linked to (`gh-N`), `None` for a failed create.
+    pub external_ref: Option<String>,
+    /// The failed operation and GitHub's reason, as in a fatal sync error.
+    pub reason: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -587,7 +767,7 @@ pub struct SyncReport {
 /// A GitHub issue comment, reduced to what the sync needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GhComment {
-    /// The GitHub comment id (the pull-dedup key).
+    /// The GitHub comment id.
     pub id: u64,
     /// The commenter's login.
     pub author: String,
@@ -595,24 +775,102 @@ pub struct GhComment {
     pub body: String,
     /// When GitHub recorded the comment.
     pub created_at: Option<DateTime<Utc>>,
+    /// When the comment was last edited on GitHub.
+    pub updated_at: Option<DateTime<Utc>>,
 }
 
 /// A local sidecar comment, reduced to what the sync needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalComment {
+    /// The comment's stable name within its item (its file name).
+    pub key: String,
     /// The comment author.
     pub author: String,
     /// The comment body.
     pub body: String,
+    /// When the comment's file was last written, if known.
+    pub modified: Option<DateTime<Utc>>,
 }
 
-/// Which comments to pull (GitHub → local) and push (local → GitHub).
+/// A comment body to carry across to the paired comment on the other side.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentEdit {
+    /// The GitHub comment id of the pair.
+    pub gh_id: u64,
+    /// The local comment key of the pair.
+    pub key: String,
+    /// The body to write to the destination side.
+    pub body: String,
+}
+
+/// A comment to delete because its pair is gone and it was not edited since.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentRemoval {
+    /// The GitHub comment id of the pair.
+    pub gh_id: u64,
+    /// The local comment key of the pair.
+    pub key: String,
+    /// The body being deleted (for the plan's preview).
+    pub body: String,
+}
+
+/// A pair to (re)record without touching either side: a recognized twin, or two
+/// edits that converged on the same text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentRelink {
+    /// The pair, with the body hash both sides now share.
+    pub link: CommentLink,
+    /// The legacy [`body_hash`] occurrence this pair supersedes, if it was
+    /// already counted in [`SyncEntry::comment_hash_counts`].
+    pub legacy_hash: Option<u64>,
+}
+
+/// A comment edited on both sides to different text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentConflict {
+    /// The GitHub comment id of the pair.
+    pub gh_id: u64,
+    /// The local comment key of the pair.
+    pub key: String,
+    /// `"remote_wins"`, `"local_wins"`, or `"skipped"` (manual policy, or a
+    /// `newer` policy with no timestamp to compare).
+    pub resolution: String,
+}
+
+/// What to do to one issue's comment thread.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CommentPlan {
-    /// GitHub comments to add as local sidecar comments.
+    /// GitHub comments to add as local sidecar comments (including a GitHub
+    /// comment edited after its local copy was deleted: re-created, not lost).
     pub pull: Vec<GhComment>,
-    /// Local comments to post on the GitHub issue.
+    /// Local comments to post on the GitHub issue (including a local comment
+    /// edited after its GitHub copy was deleted).
     pub push: Vec<LocalComment>,
+    /// Pairs to record with no write.
+    pub relink: Vec<CommentRelink>,
+    /// GitHub edits to write into the paired local comments.
+    pub update_local: Vec<CommentEdit>,
+    /// Local edits to PATCH onto the paired GitHub comments.
+    pub update_remote: Vec<CommentEdit>,
+    /// Local comments to delete: their GitHub comment was deleted, unedited here.
+    pub delete_local: Vec<CommentRemoval>,
+    /// GitHub comments to delete: their local comment was deleted, unedited there.
+    pub delete_remote: Vec<CommentRemoval>,
+    /// Local deletions left unpropagated because deleting on GitHub is opt-in.
+    /// The link is kept, so the comment is neither re-pulled nor forgotten, and
+    /// it is listed again each run until the file returns or the opt-in is given.
+    pub pending_remote_delete: Vec<CommentRemoval>,
+    /// Links whose both comments are gone.
+    pub unlink: Vec<u64>,
+    /// Both-sides edits and how they resolve.
+    pub conflicts: Vec<CommentConflict>,
+}
+
+impl CommentPlan {
+    /// Whether the plan would change nothing on either side or in the links.
+    pub fn is_empty(&self) -> bool {
+        *self == CommentPlan::default()
+    }
 }
 
 /// A stable hash of a comment body (the push-dedup key), reproducible across
@@ -737,35 +995,273 @@ pub fn export_fingerprint(item: &ExportItem) -> u64 {
     )
 }
 
+/// The fingerprint a [`CommentLink`] keeps for a comment body: [`body_hash`] of
+/// the body with line endings normalized, because GitHub may hand a body back
+/// with CRLF line breaks that the local file (and the PATCH that wrote it) never
+/// had. Persisted in [`CommentLink::base_hash`], so it must stay fixed.
+pub fn link_hash(body: &str) -> u64 {
+    body_hash(&body.replace("\r\n", "\n"))
+}
+
+/// Whether the local half of an issue's comment thread changed since the last
+/// sync, judged from the files alone: a linked comment edited or gone, or a
+/// comment no link (nor a legacy synced-body count) accounts for.
+pub fn local_comments_dirty(entry: &SyncEntry, local: &[LocalComment]) -> bool {
+    let mut legacy = entry.comment_hash_counts();
+    for comment in local {
+        match entry
+            .comment_links
+            .iter()
+            .find(|link| link.local_key == comment.key)
+        {
+            Some(link) => {
+                if link_hash(&comment.body) != link.base_hash {
+                    return true;
+                }
+            }
+            None => match legacy.get_mut(&body_hash(&comment.body)) {
+                Some(remaining) if *remaining > 0 => *remaining -= 1,
+                _ => return true,
+            },
+        }
+    }
+    entry
+        .comment_links
+        .iter()
+        .any(|link| !local.iter().any(|comment| comment.key == link.local_key))
+}
+
+/// Whether an issue's comment thread can be left alone this sync, without
+/// fetching it. Needs the last sync's comment counts on both sides to still
+/// hold, no local comment edited, added or removed since, and `remote_touched`
+/// false: GitHub reports no comment on the issue created or edited by anyone
+/// but this sync since (an edit changes no count, so the count alone cannot
+/// say).
+pub fn comment_thread_idle(
+    entry: &SyncEntry,
+    local: &[LocalComment],
+    remote_count: Option<u64>,
+    remote_touched: bool,
+) -> bool {
+    let (Some(synced_gh), Some(synced_local)) =
+        (entry.synced_gh_comments, entry.synced_local_comments)
+    else {
+        return false;
+    };
+    !remote_touched
+        && remote_count == Some(synced_gh)
+        && local.len() as u64 == synced_local
+        && !local_comments_dirty(entry, local)
+}
+
 /// Reconcile an issue's GitHub comments against its local sidecar comments,
 /// given the prior per-issue bookkeeping in `entry`.
 ///
-/// A GitHub comment is pulled unless its id was already seen. Local comments
-/// are pushed by a **multiset** diff on body hashes: each already-synced
-/// occurrence of a body (previously pushed, or just pulled — the fresh local
-/// copy must not echo back) consumes one matching local comment, and only the
-/// surplus is pushed. A plain set would collapse repeats: a user commenting
-/// the same text twice would never get the second one pushed.
-pub fn plan_comments(gh: &[GhComment], local: &[LocalComment], entry: &SyncEntry) -> CommentPlan {
-    let mut seen_gh = entry.gh_comment_ids.clone();
-    let mut synced = entry.comment_hash_counts();
+/// Comments are paired by the entry's [`CommentLink`]s. For a linked pair, a
+/// side counts as edited when its body no longer hashes to the link's
+/// `base_hash`:
+///
+/// - one side edited → carry that body to the other;
+/// - both edited to different text → `policy` picks the winner (the same
+///   `--prefer` rule as item fields; `Newer` compares GitHub's `updated_at`
+///   against the local file's modification time, and with no timestamp to
+///   compare the comment is left as it is and reported);
+/// - one side gone → delete the other **only if it was not edited since**; an
+///   edited survivor is re-created on the side that lost it, never deleted.
+///   A GitHub deletion always deletes the local file (git can restore it). A
+///   local deletion deletes the GitHub comment only with `delete_remote`; a
+///   removed file is also what checking out a branch without the comment looks
+///   like, so otherwise it stays pending with its link kept (the file coming
+///   back is then a no-op).
+///
+/// Whatever no link covers falls back on the pre-link bookkeeping, so a state
+/// file written by 0.1.x neither duplicates nor re-pushes anything: a GitHub
+/// comment already in `gh_comment_ids` is adopted by the local comment of the
+/// same body, a local comment whose body hash is still counted in
+/// [`SyncEntry::comment_hash_counts`] is treated as already on GitHub, and a
+/// never-seen GitHub comment with an identical, uncounted local twin (a fresh
+/// clone, which has no state at all) is adopted instead of pulled-and-pushed.
+/// The rest is new: GitHub comments are pulled, local ones pushed.
+pub fn plan_comments(
+    gh: &[GhComment],
+    local: &[LocalComment],
+    entry: &SyncEntry,
+    policy: ConflictPolicy,
+    delete_remote: bool,
+) -> CommentPlan {
     let mut plan = CommentPlan::default();
+    let mut gh_claimed: HashSet<u64> = HashSet::new();
+    let mut local_claimed: HashSet<&str> = HashSet::new();
 
-    for comment in gh {
-        if seen_gh.insert(comment.id) {
-            *synced.entry(body_hash(&comment.body)).or_insert(0) += 1;
-            plan.pull.push(comment.clone());
+    for link in &entry.comment_links {
+        let remote = gh.iter().find(|c| c.id == link.gh_id);
+        let here = local.iter().find(|c| c.key == link.local_key);
+        let remote_edited = remote.is_some_and(|c| link_hash(&c.body) != link.base_hash);
+        let local_edited = here.is_some_and(|c| link_hash(&c.body) != link.base_hash);
+        match (remote, here) {
+            (Some(remote), Some(here)) => {
+                gh_claimed.insert(remote.id);
+                local_claimed.insert(&here.key);
+                match (remote_edited, local_edited) {
+                    (false, false) => {}
+                    (true, false) => plan.update_local.push(edit(link, &remote.body)),
+                    (false, true) => plan.update_remote.push(edit(link, &here.body)),
+                    (true, true) if link_hash(&remote.body) == link_hash(&here.body) => {
+                        plan.relink.push(CommentRelink {
+                            link: CommentLink {
+                                base_hash: link_hash(&here.body),
+                                gh_updated_at: remote.updated_at,
+                                ..link.clone()
+                            },
+                            legacy_hash: None,
+                        });
+                    }
+                    (true, true) => {
+                        let resolution = match resolve_comment_conflict(policy, remote, here) {
+                            Some(true) => {
+                                plan.update_remote.push(edit(link, &here.body));
+                                "local_wins"
+                            }
+                            Some(false) => {
+                                plan.update_local.push(edit(link, &remote.body));
+                                "remote_wins"
+                            }
+                            None => "skipped",
+                        };
+                        plan.conflicts.push(CommentConflict {
+                            gh_id: link.gh_id,
+                            key: link.local_key.clone(),
+                            resolution: resolution.to_owned(),
+                        });
+                    }
+                }
+            }
+            (Some(remote), None) => {
+                gh_claimed.insert(remote.id);
+                if remote_edited {
+                    plan.pull.push(remote.clone());
+                } else if delete_remote {
+                    plan.delete_remote.push(removal(link, &remote.body));
+                } else {
+                    plan.pending_remote_delete.push(removal(link, &remote.body));
+                }
+            }
+            (None, Some(here)) => {
+                local_claimed.insert(&here.key);
+                if local_edited {
+                    plan.push.push(here.clone());
+                } else {
+                    plan.delete_local.push(removal(link, &here.body));
+                }
+            }
+            (None, None) => plan.unlink.push(link.gh_id),
+        }
+    }
+
+    let mut legacy = entry.comment_hash_counts();
+    let unclaimed_twin = |claimed: &HashSet<&str>, hash: u64| -> Option<&LocalComment> {
+        local
+            .iter()
+            .find(|c| !claimed.contains(c.key.as_str()) && body_hash(&c.body) == hash)
+    };
+
+    // GitHub comments a 0.1.x state already knows: adopt the local copy.
+    for remote in gh {
+        if gh_claimed.contains(&remote.id) || !entry.gh_comment_ids.contains(&remote.id) {
+            continue;
+        }
+        gh_claimed.insert(remote.id);
+        let hash = body_hash(&remote.body);
+        if let Some(twin) = unclaimed_twin(&local_claimed, hash) {
+            local_claimed.insert(&twin.key);
+            if let Some(remaining) = legacy.get_mut(&hash) {
+                *remaining = remaining.saturating_sub(1);
+            }
+            plan.relink.push(CommentRelink {
+                link: CommentLink {
+                    gh_id: remote.id,
+                    local_key: twin.key.clone(),
+                    base_hash: link_hash(&twin.body),
+                    gh_updated_at: remote.updated_at,
+                },
+                legacy_hash: Some(hash),
+            });
+        }
+    }
+
+    // Local comments the pre-link bookkeeping already counts as on GitHub.
+    for comment in local {
+        if local_claimed.contains(comment.key.as_str()) {
+            continue;
+        }
+        if let Some(remaining) = legacy.get_mut(&body_hash(&comment.body)) {
+            if *remaining > 0 {
+                *remaining -= 1;
+                local_claimed.insert(&comment.key);
+            }
+        }
+    }
+
+    for remote in gh {
+        if gh_claimed.contains(&remote.id) {
+            continue;
+        }
+        match unclaimed_twin(&local_claimed, body_hash(&remote.body)) {
+            Some(twin) => {
+                local_claimed.insert(&twin.key);
+                plan.relink.push(CommentRelink {
+                    link: CommentLink {
+                        gh_id: remote.id,
+                        local_key: twin.key.clone(),
+                        base_hash: link_hash(&twin.body),
+                        gh_updated_at: remote.updated_at,
+                    },
+                    legacy_hash: None,
+                });
+            }
+            None => plan.pull.push(remote.clone()),
         }
     }
     for comment in local {
-        let remaining = synced.entry(body_hash(&comment.body)).or_insert(0);
-        if *remaining > 0 {
-            *remaining -= 1;
-        } else {
+        if !local_claimed.contains(comment.key.as_str()) {
             plan.push.push(comment.clone());
         }
     }
     plan
+}
+
+fn edit(link: &CommentLink, body: &str) -> CommentEdit {
+    CommentEdit {
+        gh_id: link.gh_id,
+        key: link.local_key.clone(),
+        body: body.to_owned(),
+    }
+}
+
+fn removal(link: &CommentLink, body: &str) -> CommentRemoval {
+    CommentRemoval {
+        gh_id: link.gh_id,
+        key: link.local_key.clone(),
+        body: body.to_owned(),
+    }
+}
+
+/// Which side wins a comment edited on both sides: `Some(true)` local,
+/// `Some(false)` remote, `None` neither (leave both as they are).
+fn resolve_comment_conflict(
+    policy: ConflictPolicy,
+    remote: &GhComment,
+    local: &LocalComment,
+) -> Option<bool> {
+    match policy {
+        ConflictPolicy::PreferLocal => Some(true),
+        ConflictPolicy::PreferRemote => Some(false),
+        ConflictPolicy::Manual => None,
+        ConflictPolicy::Newer => match (remote.updated_at.or(remote.created_at), local.modified) {
+            (Some(remote_at), Some(local_at)) => Some(local_at > remote_at),
+            _ => None,
+        },
+    }
 }
 
 /// The Unix epoch as a UTC datetime — the "infinitely old" fallback for a
@@ -1905,23 +2401,59 @@ mod tests {
             author: "octocat".to_owned(),
             body: body.to_owned(),
             created_at: Some(ts("2026-06-01T00:00:00Z")),
+            updated_at: Some(ts("2026-06-01T00:00:00Z")),
         }
     }
 
-    fn local_comment(body: &str) -> LocalComment {
+    fn gh_comment_at(id: u64, body: &str, updated_at: &str) -> GhComment {
+        GhComment {
+            updated_at: Some(ts(updated_at)),
+            ..gh_comment(id, body)
+        }
+    }
+
+    fn local_comment(key: &str, body: &str) -> LocalComment {
         LocalComment {
+            key: key.to_owned(),
             author: "tester".to_owned(),
             body: body.to_owned(),
+            modified: None,
         }
+    }
+
+    fn local_comment_at(key: &str, body: &str, modified: &str) -> LocalComment {
+        LocalComment {
+            modified: Some(ts(modified)),
+            ..local_comment(key, body)
+        }
+    }
+
+    fn fresh_entry() -> SyncEntry {
+        SyncEntry::new(None, ts("2026-06-01T00:00:00Z"))
+    }
+
+    /// An entry whose comment `a` (GitHub id 10) was last synced with `body`.
+    fn linked_entry(body: &str) -> SyncEntry {
+        let mut entry = fresh_entry();
+        entry.set_comment_link(CommentLink {
+            gh_id: 10,
+            local_key: "a.md".to_owned(),
+            base_hash: link_hash(body),
+            gh_updated_at: Some(ts("2026-06-01T00:00:00Z")),
+        });
+        entry
+    }
+
+    fn plan(gh: &[GhComment], local: &[LocalComment], entry: &SyncEntry) -> CommentPlan {
+        plan_comments(gh, local, entry, ConflictPolicy::Newer, true)
     }
 
     #[test]
     fn first_comment_sync_pulls_remote_and_pushes_local() {
-        let entry = SyncEntry::new(None, ts("2026-06-01T00:00:00Z"));
-        let plan = plan_comments(
+        let plan = plan(
             &[gh_comment(10, "from github")],
-            &[local_comment("from clove")],
-            &entry,
+            &[local_comment("a.md", "from clove")],
+            &fresh_entry(),
         );
         assert_eq!(plan.pull.len(), 1);
         assert_eq!(plan.pull[0].id, 10);
@@ -1930,30 +2462,19 @@ mod tests {
     }
 
     #[test]
-    fn already_synced_comments_are_skipped() {
-        let mut entry = SyncEntry::new(None, ts("2026-06-01T00:00:00Z"));
-        entry.gh_comment_ids.insert(10);
-        entry.local_comment_hashes.insert(body_hash("from clove"));
-        let plan = plan_comments(
-            &[gh_comment(10, "from github")],
-            &[local_comment("from clove")],
-            &entry,
-        );
-        assert!(plan.pull.is_empty() && plan.push.is_empty());
-    }
-
-    #[test]
-    fn pulled_comment_is_not_pushed_back() {
-        // A GitHub comment whose body matches a not-yet-seen local comment is
-        // pulled; the identical local one must NOT then be pushed (no echo).
-        let entry = SyncEntry::new(None, ts("2026-06-01T00:00:00Z"));
-        let plan = plan_comments(
+    fn a_fresh_state_adopts_an_identical_twin_instead_of_duplicating_it() {
+        // A fresh clone has the comment files (from git) and no state: the
+        // GitHub comment and its local copy are one comment, not two.
+        let plan = plan(
             &[gh_comment(10, "same text")],
-            &[local_comment("same text")],
-            &entry,
+            &[local_comment("a.md", "same text")],
+            &fresh_entry(),
         );
-        assert_eq!(plan.pull.len(), 1);
-        assert!(plan.push.is_empty(), "identical body must not echo back");
+        assert!(plan.pull.is_empty() && plan.push.is_empty(), "{plan:?}");
+        assert_eq!(plan.relink.len(), 1);
+        assert_eq!(plan.relink[0].link.gh_id, 10);
+        assert_eq!(plan.relink[0].link.local_key, "a.md");
+        assert_eq!(plan.relink[0].legacy_hash, None);
     }
 
     #[test]
@@ -1961,11 +2482,14 @@ mod tests {
         // "done." was pushed months ago (recorded once); the user comments
         // "done." again. The surplus occurrence must push — a plain hash set
         // dropped it forever.
-        let mut entry = SyncEntry::new(None, ts("2026-06-01T00:00:00Z"));
+        let mut entry = fresh_entry();
         entry.record_comment_hash(body_hash("done."));
-        let plan = plan_comments(
+        let plan = plan(
             &[],
-            &[local_comment("done."), local_comment("done.")],
+            &[
+                local_comment("a.md", "done."),
+                local_comment("b.md", "done."),
+            ],
             &entry,
         );
         assert_eq!(plan.push.len(), 1, "only the surplus occurrence pushes");
@@ -1973,8 +2497,11 @@ mod tests {
 
     #[test]
     fn two_new_identical_local_comments_both_push() {
-        let entry = SyncEntry::new(None, ts("2026-06-01T00:00:00Z"));
-        let plan = plan_comments(&[], &[local_comment("same"), local_comment("same")], &entry);
+        let plan = plan(
+            &[],
+            &[local_comment("a.md", "same"), local_comment("b.md", "same")],
+            &fresh_entry(),
+        );
         assert_eq!(plan.push.len(), 2);
     }
 
@@ -1982,14 +2509,414 @@ mod tests {
     fn legacy_set_only_state_counts_as_one_occurrence() {
         // A pre-multiset state file has the hash only in the legacy set: it
         // must satisfy exactly one local occurrence, not all of them.
-        let mut entry = SyncEntry::new(None, ts("2026-06-01T00:00:00Z"));
+        let mut entry = fresh_entry();
         entry.local_comment_hashes.insert(body_hash("hi"));
-        let plan = plan_comments(&[], &[local_comment("hi"), local_comment("hi")], &entry);
+        let plan = plan(
+            &[],
+            &[local_comment("a.md", "hi"), local_comment("b.md", "hi")],
+            &entry,
+        );
         assert_eq!(plan.push.len(), 1);
 
         // And recording on top of the legacy set composes (1 legacy + 1 new).
         entry.record_comment_hash(body_hash("hi"));
         assert_eq!(entry.comment_hash_counts()[&body_hash("hi")], 2);
+    }
+
+    #[test]
+    fn a_0_1_x_state_upgrades_without_duplicates_or_repushes() {
+        // What 0.1.x wrote: GitHub ids seen, body hashes counted, no links. One
+        // pulled comment, one pushed comment, and a local comment (after the
+        // last sync) that is genuinely new.
+        let mut entry = fresh_entry();
+        entry.gh_comment_ids.extend([10, 11]);
+        entry.record_comment_hash(body_hash("pulled"));
+        entry.record_comment_hash(body_hash("pushed"));
+        let gh = [gh_comment(10, "pulled"), gh_comment(11, "pushed")];
+        let local = [
+            local_comment("a.md", "pulled"),
+            local_comment("b.md", "pushed"),
+            local_comment("c.md", "typed since"),
+        ];
+        let plan = plan(&gh, &local, &entry);
+        assert!(plan.pull.is_empty(), "{plan:?}");
+        assert_eq!(
+            plan.push.iter().map(|c| c.key.as_str()).collect::<Vec<_>>(),
+            ["c.md"],
+            "only the new comment pushes"
+        );
+        assert_eq!(plan.relink.len(), 2, "both known pairs are adopted");
+        assert!(plan
+            .relink
+            .iter()
+            .all(|r| r.legacy_hash.is_some() && r.link.gh_id >= 10));
+
+        // Applying the adoptions retires the legacy counts they stood for.
+        for relink in &plan.relink {
+            entry.release_comment_hash(relink.legacy_hash.unwrap());
+            entry.set_comment_link(relink.link.clone());
+        }
+        assert!(entry.comment_hash_counts().is_empty());
+        assert!(entry.local_comment_hashes.is_empty());
+        assert_eq!(entry.comment_links.len(), 2);
+        // ... and the next sync is a no-op.
+        let again = super::plan_comments(&gh, &local[..2], &entry, ConflictPolicy::Newer, true);
+        assert!(again.is_empty(), "{again:?}");
+    }
+
+    #[test]
+    fn a_0_1_x_comment_edited_on_github_is_left_alone_not_duplicated() {
+        // The pulled comment was edited on GitHub after the 0.1.x sync: its id is
+        // known but its body matches no local file, and the local copy is still
+        // counted. Nothing can pair them, but nothing is pulled or pushed either.
+        let mut entry = fresh_entry();
+        entry.gh_comment_ids.insert(10);
+        entry.record_comment_hash(body_hash("original"));
+        let plan = plan(
+            &[gh_comment(10, "edited on github")],
+            &[local_comment("a.md", "original")],
+            &entry,
+        );
+        assert!(plan.is_empty(), "{plan:?}");
+    }
+
+    #[test]
+    fn an_old_state_file_without_links_still_loads() {
+        let json = r#"{"version":1,"repo":"o/r","entries":{"gh-1":{
+            "local_updated":"2026-06-01T00:00:00Z","gh_comment_ids":[10],
+            "local_comment_hashes":[5],"synced_gh_comments":1,"synced_local_comments":1}}}"#;
+        let state: SyncState = serde_json::from_str(json).unwrap();
+        let entry = &state.entries["gh-1"];
+        assert!(entry.comment_links.is_empty());
+        assert_eq!(state.comments_checked_at, None);
+        assert!(entry.gh_comment_ids.contains(&10));
+    }
+
+    #[test]
+    fn links_round_trip_and_replace_by_either_side() {
+        let mut entry = linked_entry("v1");
+        let json = serde_json::to_string(&entry).unwrap();
+        assert_eq!(serde_json::from_str::<SyncEntry>(&json).unwrap(), entry);
+
+        // Re-creating the GitHub side (new id, same local file) supersedes the pair.
+        entry.set_comment_link(CommentLink {
+            gh_id: 77,
+            local_key: "a.md".to_owned(),
+            base_hash: link_hash("v1"),
+            gh_updated_at: None,
+        });
+        assert_eq!(entry.comment_links.len(), 1);
+        assert_eq!(entry.comment_links[0].gh_id, 77);
+        entry.drop_comment_link(77);
+        assert!(entry.comment_links.is_empty());
+    }
+
+    #[test]
+    fn unchanged_linked_comments_are_a_no_op() {
+        let plan = plan(
+            &[gh_comment(10, "v1")],
+            &[local_comment("a.md", "v1")],
+            &linked_entry("v1"),
+        );
+        assert!(plan.is_empty(), "{plan:?}");
+    }
+
+    #[test]
+    fn an_edit_on_github_updates_the_local_comment() {
+        let plan = plan(
+            &[gh_comment(10, "v2")],
+            &[local_comment("a.md", "v1")],
+            &linked_entry("v1"),
+        );
+        assert_eq!(plan.update_local.len(), 1);
+        assert_eq!(plan.update_local[0].key, "a.md");
+        assert_eq!(plan.update_local[0].body, "v2");
+        assert!(plan.update_remote.is_empty() && plan.push.is_empty() && plan.pull.is_empty());
+    }
+
+    #[test]
+    fn an_edit_of_the_local_comment_updates_github_in_place() {
+        let plan = plan(
+            &[gh_comment(10, "v1")],
+            &[local_comment("a.md", "v2")],
+            &linked_entry("v1"),
+        );
+        assert_eq!(plan.update_remote.len(), 1);
+        assert_eq!(plan.update_remote[0].gh_id, 10);
+        assert_eq!(plan.update_remote[0].body, "v2");
+        assert!(plan.push.is_empty(), "an edit is not a new comment");
+    }
+
+    #[test]
+    fn line_ending_normalization_is_not_an_edit() {
+        let plan = plan(
+            &[gh_comment(10, "line one\r\nline two")],
+            &[local_comment("a.md", "line one\nline two")],
+            &linked_entry("line one\nline two"),
+        );
+        assert!(plan.is_empty(), "{plan:?}");
+    }
+
+    #[test]
+    fn both_sides_edited_follow_the_conflict_policy() {
+        let gh = [gh_comment_at(10, "remote edit", "2026-06-02T00:00:00Z")];
+        let local = [local_comment_at(
+            "a.md",
+            "local edit",
+            "2026-06-03T00:00:00Z",
+        )];
+        let entry = linked_entry("v1");
+        let resolve = |policy| plan_comments(&gh, &local, &entry, policy, true);
+
+        let p = resolve(ConflictPolicy::PreferLocal);
+        assert_eq!(p.update_remote.len(), 1);
+        assert!(p.update_local.is_empty());
+        assert_eq!(p.conflicts[0].resolution, "local_wins");
+
+        let p = resolve(ConflictPolicy::PreferRemote);
+        assert_eq!(p.update_local.len(), 1);
+        assert!(p.update_remote.is_empty());
+        assert_eq!(p.conflicts[0].resolution, "remote_wins");
+
+        let p = resolve(ConflictPolicy::Manual);
+        assert!(p.update_local.is_empty() && p.update_remote.is_empty());
+        assert_eq!(p.conflicts[0].resolution, "skipped");
+
+        // Newer: the local file was written after GitHub's edit.
+        let p = resolve(ConflictPolicy::Newer);
+        assert_eq!(p.conflicts[0].resolution, "local_wins");
+        assert_eq!(p.update_remote[0].body, "local edit");
+
+        let older_local = [local_comment_at(
+            "a.md",
+            "local edit",
+            "2026-06-01T12:00:00Z",
+        )];
+        let p = plan_comments(&gh, &older_local, &entry, ConflictPolicy::Newer, true);
+        assert_eq!(p.conflicts[0].resolution, "remote_wins");
+        assert_eq!(p.update_local[0].body, "remote edit");
+
+        // Newer with no local timestamp to compare changes nothing.
+        let unknown = [local_comment("a.md", "local edit")];
+        let p = plan_comments(&gh, &unknown, &entry, ConflictPolicy::Newer, true);
+        assert_eq!(p.conflicts[0].resolution, "skipped");
+        assert!(p.update_local.is_empty() && p.update_remote.is_empty());
+    }
+
+    #[test]
+    fn both_sides_edited_to_the_same_text_just_rebase_the_link() {
+        let plan = plan(
+            &[gh_comment(10, "agreed")],
+            &[local_comment("a.md", "agreed")],
+            &linked_entry("v1"),
+        );
+        assert!(plan.conflicts.is_empty());
+        assert!(plan.update_local.is_empty() && plan.update_remote.is_empty());
+        assert_eq!(plan.relink[0].link.base_hash, link_hash("agreed"));
+    }
+
+    #[test]
+    fn a_comment_deleted_on_github_is_deleted_locally_when_unedited() {
+        let plan = plan(&[], &[local_comment("a.md", "v1")], &linked_entry("v1"));
+        assert_eq!(plan.delete_local.len(), 1);
+        assert_eq!(plan.delete_local[0].key, "a.md");
+        assert!(
+            plan.push.is_empty(),
+            "a deletion is not a new local comment"
+        );
+    }
+
+    #[test]
+    fn a_comment_deleted_locally_is_deleted_on_github_when_unedited() {
+        let plan = plan(&[gh_comment(10, "v1")], &[], &linked_entry("v1"));
+        assert_eq!(plan.delete_remote.len(), 1);
+        assert_eq!(plan.delete_remote[0].gh_id, 10);
+        assert!(
+            plan.pull.is_empty(),
+            "a deletion is not a new GitHub comment"
+        );
+    }
+
+    #[test]
+    fn a_local_deletion_stays_pending_unless_remote_deletion_is_opted_into() {
+        let entry = linked_entry("v1");
+        let gh = [gh_comment(10, "v1")];
+        let off = plan_comments(&gh, &[], &entry, ConflictPolicy::Newer, false);
+        assert!(off.delete_remote.is_empty(), "{off:?}");
+        assert_eq!(off.pending_remote_delete.len(), 1);
+        assert_eq!(off.pending_remote_delete[0].gh_id, 10);
+        assert!(off.pull.is_empty(), "a pending deletion is not re-pulled");
+        assert!(off.unlink.is_empty(), "the link is kept");
+
+        // Every later run stays pending; the plan is the same.
+        let again = plan_comments(&gh, &[], &entry, ConflictPolicy::Newer, false);
+        assert_eq!(again, off);
+
+        let on = plan_comments(&gh, &[], &entry, ConflictPolicy::Newer, true);
+        assert_eq!(on.delete_remote.len(), 1);
+        assert!(on.pending_remote_delete.is_empty());
+    }
+
+    #[test]
+    fn a_pending_deletion_is_a_no_op_once_the_file_returns() {
+        let plan = plan_comments(
+            &[gh_comment(10, "v1")],
+            &[local_comment("a.md", "v1")],
+            &linked_entry("v1"),
+            ConflictPolicy::Newer,
+            false,
+        );
+        assert!(plan.is_empty(), "{plan:?}");
+    }
+
+    #[test]
+    fn an_edited_remote_survivor_is_recreated_even_without_the_opt_in() {
+        let plan = plan_comments(
+            &[gh_comment(10, "v2")],
+            &[],
+            &linked_entry("v1"),
+            ConflictPolicy::Newer,
+            false,
+        );
+        assert_eq!(plan.pull.len(), 1);
+        assert!(plan.pending_remote_delete.is_empty() && plan.delete_remote.is_empty());
+    }
+
+    #[test]
+    fn a_github_deletion_is_applied_locally_regardless_of_the_opt_in() {
+        let plan = plan_comments(
+            &[],
+            &[local_comment("a.md", "v1")],
+            &linked_entry("v1"),
+            ConflictPolicy::Newer,
+            false,
+        );
+        assert_eq!(plan.delete_local.len(), 1);
+    }
+
+    #[test]
+    fn the_summary_lists_pending_remote_deletions() {
+        let plan = CommentPlan {
+            pending_remote_delete: vec![CommentRemoval {
+                gh_id: 7,
+                key: "a.md".to_owned(),
+                body: "kept".to_owned(),
+            }],
+            ..CommentPlan::default()
+        };
+        let mut summary = CommentSummary::default();
+        summary.add_plan("proj-AAAAAAAA", "gh-3", &plan);
+        assert!(!summary.is_empty());
+        assert_eq!(summary.pending_remote_delete[0].preview, "kept");
+        assert!(summary.delete_remote.is_empty());
+    }
+
+    #[test]
+    fn an_edited_survivor_is_recreated_not_deleted() {
+        // Deleted on GitHub, edited locally: the local text goes back up as a new
+        // comment.
+        let plan = plan(&[], &[local_comment("a.md", "v2")], &linked_entry("v1"));
+        assert!(plan.delete_local.is_empty());
+        assert_eq!(plan.push.len(), 1);
+        assert_eq!(plan.push[0].key, "a.md");
+
+        // Deleted locally, edited on GitHub: the GitHub text comes back down.
+        let plan = super::plan_comments(
+            &[gh_comment(10, "v2")],
+            &[],
+            &linked_entry("v1"),
+            ConflictPolicy::Newer,
+            true,
+        );
+        assert!(plan.delete_remote.is_empty());
+        assert_eq!(plan.pull.len(), 1);
+        assert_eq!(plan.pull[0].id, 10);
+    }
+
+    #[test]
+    fn a_link_whose_both_comments_are_gone_is_dropped() {
+        let plan = plan(&[], &[], &linked_entry("v1"));
+        assert_eq!(plan.unlink, [10]);
+        assert!(plan.push.is_empty() && plan.pull.is_empty());
+    }
+
+    #[test]
+    fn a_new_comment_beside_linked_ones_still_syncs() {
+        let plan = plan(
+            &[gh_comment(10, "v1"), gh_comment(11, "new on github")],
+            &[
+                local_comment("a.md", "v1"),
+                local_comment("b.md", "new here"),
+            ],
+            &linked_entry("v1"),
+        );
+        assert_eq!(plan.pull.len(), 1);
+        assert_eq!(plan.pull[0].id, 11);
+        assert_eq!(plan.push.len(), 1);
+        assert_eq!(plan.push[0].key, "b.md");
+    }
+
+    #[test]
+    fn a_thread_is_idle_only_while_nothing_on_either_side_moved() {
+        let mut entry = linked_entry("v1");
+        entry.synced_gh_comments = Some(1);
+        entry.synced_local_comments = Some(1);
+        let local = [local_comment("a.md", "v1")];
+        assert!(comment_thread_idle(&entry, &local, Some(1), false));
+
+        // A comment someone else edited on GitHub (no count change).
+        assert!(!comment_thread_idle(&entry, &local, Some(1), true));
+        // A comment created or deleted on GitHub.
+        assert!(!comment_thread_idle(&entry, &local, Some(2), false));
+        // A local edit (no count change), a local addition, a local deletion.
+        let edited = [local_comment("a.md", "v2")];
+        assert!(!comment_thread_idle(&entry, &edited, Some(1), false));
+        let added = [local_comment("a.md", "v1"), local_comment("b.md", "x")];
+        assert!(!comment_thread_idle(&entry, &added, Some(1), false));
+        assert!(!comment_thread_idle(&entry, &[], Some(1), false));
+        // Swapped for another file: same count, different comment.
+        let swapped = [local_comment("z.md", "other")];
+        assert!(!comment_thread_idle(&entry, &swapped, Some(1), false));
+        // No counts recorded (a 0.1.x state, or an interrupted sync).
+        entry.synced_gh_comments = None;
+        assert!(!comment_thread_idle(&entry, &local, Some(1), false));
+    }
+
+    #[test]
+    fn the_summary_lists_every_deletion_with_its_side_and_a_preview() {
+        let plan = CommentPlan {
+            delete_local: vec![CommentRemoval {
+                gh_id: 10,
+                key: "a.md".to_owned(),
+                body: "first line\n\nsecond line".to_owned(),
+            }],
+            delete_remote: vec![CommentRemoval {
+                gh_id: 11,
+                key: "b.md".to_owned(),
+                body: "x".repeat(100),
+            }],
+            update_local: vec![CommentEdit {
+                gh_id: 12,
+                key: "c.md".to_owned(),
+                body: "new".to_owned(),
+            }],
+            ..CommentPlan::default()
+        };
+        let mut summary = CommentSummary::default();
+        summary.add_plan("proj-AAAAAAAA", "gh-3", &plan);
+        assert_eq!(summary.update_local, 1);
+        assert_eq!(summary.delete_local[0].preview, "first line second line");
+        assert_eq!(summary.delete_local[0].external_ref, "gh-3");
+        assert_eq!(summary.delete_remote[0].gh_comment_id, 11);
+        assert_eq!(summary.delete_remote[0].preview.chars().count(), 63);
+        assert!(!summary.is_empty());
+    }
+
+    #[test]
+    fn link_hash_ignores_line_endings_but_not_content() {
+        assert_eq!(link_hash("a\r\nb"), link_hash("a\nb"));
+        assert_eq!(link_hash("a\n"), link_hash("a"));
+        assert_ne!(link_hash("a"), link_hash("b"));
     }
 
     #[test]

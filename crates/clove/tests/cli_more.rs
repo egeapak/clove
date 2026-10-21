@@ -942,3 +942,71 @@ fn tui_without_a_terminal_fails_cleanly() {
     assert!(stderr.contains("terminal"), "{stderr}");
     assert!(out.stdout.is_empty(), "wrote to stdout: {:?}", out.stdout);
 }
+
+#[cfg(unix)]
+#[test]
+fn edit_runs_an_editor_value_with_arguments() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = init_repo();
+    let id = new_item(dir.path(), "Editor args", &[]);
+    let script = dir.path().join("fake editor.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\n[ \"$1\" = --wait ] || exit 3\nprintf '\\nedited by %s\\n' \"$1\" >> \"$2\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    clove(dir.path())
+        .env_remove("VISUAL")
+        .env("CLOVE_EDITOR", format!("'{}' --wait", script.display()))
+        .args(["edit", &id])
+        .assert()
+        .success();
+    let show = json_ok(clove(dir.path()).args(["show", &id]));
+    assert!(
+        show["data"]["body"]
+            .as_str()
+            .unwrap()
+            .contains("edited by --wait"),
+        "editor did not edit the item: {show}"
+    );
+
+    let out = clove(dir.path())
+        .env("CLOVE_EDITOR", "clove-no-such-editor --wait")
+        .args(["edit", &id])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("clove-no-such-editor --wait"),
+        "error should name the editor: {stderr}"
+    );
+}
+
+#[test]
+fn parent_sets_clears_and_rejects_a_cycle() {
+    let dir = init_repo();
+    let epic = new_item(dir.path(), "Epic", &["--type", "epic"]);
+    let child = new_item(dir.path(), "Child", &[]);
+
+    let set = json_ok(clove(dir.path()).args(["parent", &child, &epic]));
+    assert_eq!(set["data"]["parent"], epic.as_str());
+
+    let cycle = clove(dir.path())
+        .args(["parent", &epic, &child])
+        .output()
+        .unwrap();
+    assert!(!cycle.status.success(), "a parent cycle must be rejected");
+
+    let missing = clove(dir.path()).args(["parent", &child]).output().unwrap();
+    assert!(
+        !missing.status.success(),
+        "no parent and no --clear is an error"
+    );
+
+    let cleared = json_ok(clove(dir.path()).args(["parent", &child, "--clear"]));
+    assert!(cleared["data"].get("parent").is_none_or(Value::is_null));
+}

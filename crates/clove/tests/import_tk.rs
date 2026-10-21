@@ -4,9 +4,10 @@
 //! fresh `clove init` repo and asserts the field mapping, the `--dry-run`
 //! write-free plan, the filename-fallback warning, and idempotent re-import.
 
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
 
 use assert_cmd::prelude::*;
 use serde_json::Value;
@@ -21,18 +22,9 @@ use tempfile::TempDir;
 /// `CLOVE_PLUGIN_PATH` hit are the identical, freshly-rebuilt file. The plugin
 /// emits byte-identical output to the old built-in, so every assertion holds.
 fn plugin_dir() -> &'static Path {
-    static DIR: OnceLock<PathBuf> = OnceLock::new();
-    DIR.get_or_init(|| {
-        let run = escargot::CargoBuild::new()
-            .package("clove-import-tk")
-            .bin("clove-import-tk")
-            .run()
-            .expect("build clove-import-tk plugin");
-        run.path()
-            .parent()
-            .expect("plugin binary has a parent dir")
-            .to_owned()
-    })
+    support::plugin("clove-import-tk", "clove-import-tk", "")
+        .parent()
+        .expect("plugin binary has a parent dir")
 }
 
 fn clove(dir: &Path) -> Command {

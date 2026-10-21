@@ -349,6 +349,11 @@ pub struct EnrichedPlugin {
 /// misbehaving plugin can never wedge `plugin list` / `<mux> --help`.
 const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// [`PROBE_TIMEOUT`], or `CLOVE_PLUGIN_PROBE_MS` in a `test-knobs` build.
+fn probe_timeout() -> std::time::Duration {
+    crate::knobs::duration("CLOVE_PLUGIN_PROBE_MS").unwrap_or(PROBE_TIMEOUT)
+}
+
 /// The poll interval while waiting for the probe child to exit.
 const PROBE_POLL: std::time::Duration = std::time::Duration::from_millis(20);
 
@@ -372,11 +377,12 @@ pub fn probe_info(path: &Utf8Path) -> Option<ProbedInfo> {
         .ok()?;
 
     let start = std::time::Instant::now();
+    let timeout = probe_timeout();
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => {
-                if start.elapsed() >= PROBE_TIMEOUT {
+                if start.elapsed() >= timeout {
                     // Hung/slow plugin: kill it and give up (treat as no_info).
                     let _ = child.kill();
                     let _ = child.wait();

@@ -403,9 +403,8 @@ engine; the engine methods exist and MCP uses all of them (the web still calls
 `store.get` directly for item detail, so it has no daemon tier there), but the
 CLI's renderers for those four differ enough from `ops::show`/`dep_tree` that
 routing them would be a behaviour change, not a refactor. `clove blocked`'s
-daemon tier still fetches every blocked id before filtering (`GraphRequest::
-Blocked` carries no filter or window); giving it one is a protocol bump and was
-out of scope. `clove-tui` reads the store directly and is untouched.
+daemon tier fetched every blocked id before filtering; protocol 10 fixed that
+(§8). `clove-tui` reads the store directly and is untouched.
 
 The original write-up follows.
 
@@ -815,12 +814,16 @@ None of these is a regression from this work — the first two are pre-existing 
   than unifying them, so this is the one place "same query, same answer
   everywhere" is untrue on *shape*. Harmless, but it is an exception, not a
   guarantee.
-- **The daemon tier is slower than the index tier for `blocked`.**
-  `GraphRequest::Blocked` carries no filter or window, so the engine hydrates the
-  whole blocked set before filtering and windowing. Measured at 700 items / 83
-  blocked, `blocked --limit 1`: daemon 29 ms, index 10 ms, files 33 ms — the
-  daemon tier is barely better than a full file scan, and degrades as the blocked
-  set grows. Fixing it is a protocol bump (`QueryKind::Blocked`).
+- ~~**The daemon tier is slower than the index tier for `blocked`.**~~ —
+  **done** in protocol 10 (unreleased at the time, so no further bump).
+  `GraphRequest::Blocked` carried no filter or window, so the engine hydrated the
+  whole blocked set before filtering and windowing (700 items / 83 blocked,
+  `blocked --limit 1`: daemon 29 ms, index 10 ms, files 33 ms). It is now
+  `QueryKind::Blocked` on the `query` RPC: the daemon runs the index's
+  `QueryMode::Blocked` with the pushed-down filters and window, and the engine
+  hydrates only the page — the same path as its index tier. Pinned by
+  `blocked_is_filtered_and_windowed_on_the_daemon` (cloved) and the paged check
+  in `tier1_tier2_commands_route_through_daemon_with_parity`.
 - ~~**`parse_item_file` resolved every path twice**~~ — **done**. It called
   `std::fs::metadata(path)` for the size guard and then `std::fs::read(path)`,
   which opens and `fstat`s the descriptor anyway — so the standalone `metadata`

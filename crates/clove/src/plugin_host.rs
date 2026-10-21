@@ -51,6 +51,11 @@ const MAX_REQUEST: u64 = 16 * 1024 * 1024;
 /// unauthenticated connection holds its thread until the plugin exits).
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// [`HELLO_TIMEOUT`], or `CLOVE_PLUGIN_HELLO_MS` in a `test-knobs` build.
+fn hello_timeout() -> Duration {
+    crate::knobs::duration("CLOVE_PLUGIN_HELLO_MS").unwrap_or(HELLO_TIMEOUT)
+}
+
 /// The largest `hello` line the host reads before authentication.
 const MAX_HELLO: usize = 64 * 1024;
 
@@ -84,6 +89,8 @@ const METHODS: &[&str] = &[
     "store.link_external",
     "store.comments",
     "store.add_comment",
+    "store.update_comment",
+    "store.delete_comment",
 ];
 
 /// JSON-RPC error codes.
@@ -225,7 +232,8 @@ fn serve(conn: Stream, shared: &Shared) {
     let mut writer = &conn;
     let mut authed = false;
     let mut line = Vec::new();
-    let deadline = Instant::now() + HELLO_TIMEOUT;
+    let timeout = hello_timeout();
+    let deadline = Instant::now() + timeout;
     loop {
         line.clear();
         if !authed {
@@ -233,9 +241,14 @@ fn serve(conn: Stream, shared: &Shared) {
                 HelloRead::Line => {}
                 HelloRead::Closed => return,
                 HelloRead::TimedOut => {
+                    let message = if timeout == HELLO_TIMEOUT {
+                        format!("no hello within {} seconds", HELLO_TIMEOUT.as_secs())
+                    } else {
+                        format!("no hello within {} ms", timeout.as_millis())
+                    };
                     let _ = send(
                         &mut writer,
-                        &error(Value::Null, UNAUTHORIZED, "no hello within 5 seconds", None),
+                        &error(Value::Null, UNAUTHORIZED, &message, None),
                     );
                     return;
                 }
@@ -506,6 +519,12 @@ fn dispatch(shared: &Shared, method: &str, params: Value) -> Result<Value, RpcFa
         }),
         "store.comments" => call(params, |p: StoreIdParams| shared.store().comments(p)),
         "store.add_comment" => call(params, |p: AddCommentParams| shared.store().add_comment(p)),
+        "store.update_comment" => call(params, |p: UpdateCommentParams| {
+            shared.store().update_comment(p)
+        }),
+        "store.delete_comment" => call(params, |p: DeleteCommentParams| {
+            shared.store().delete_comment(p)
+        }),
         other => Err(RpcFailure {
             code: METHOD_NOT_FOUND,
             message: format!("unknown method `{other}`"),

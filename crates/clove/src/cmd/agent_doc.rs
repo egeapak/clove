@@ -93,7 +93,7 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
 - `clove show <id> [--fields LIST] [--compact]` — one item. `ready`/`blocked_by` are always computed (`-v` is accepted but no longer needed for them).\n\
 - `clove edit <id> [--field KEY=VALUE]...` / `clove set <id> KEY=VALUE...`\n\
 - `clove status <id> <open|in_progress|closed>` (aliases `start`, `close`).\n\
-- `clove label <id> <add|rm> <label>`, `clove assign <id> <who|--clear>`, `clove priority <id> <0-4>`.\n\
+- `clove label <id> <add|rm> <label>`, `clove assign <id> <who|--clear>`, `clove parent <id> <parent-id|--clear>` (cycle-checked), `clove priority <id> <0-4>`.\n\
 - `clove dep add <id> <dep-id>` / `dep rm` / `dep tree <id> [--depth N|--full] [--flat]` / `dep cycle [--fail-on-cycle]`.\n\
 - `clove ready` / `clove blocked` — work queues (filters: `--status --type --label --assignee --priority --q --synced --unsynced --parent`; also `--sort --desc --limit --offset --fields --compact`).\n\
 - `clove ls` / `clove query [--filter JSON]` — list/query (`--sort`, `--desc`, `--fields`, `--limit`, `--offset`).\n\
@@ -125,7 +125,8 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
   `clove-import-tk` plugin; `clove plugin install import-tk`).\n\
 - `clove import beads <issues.jsonl> [--dry-run]` — import a Beads JSONL export\n\
   (needs the `clove-import-beads` plugin).\n\
-- `clove sync github <owner/repo> [--dry-run] [--prefer P] [--no-comments]` —\n\
+- `clove sync github <owner/repo> [--dry-run] [--prefer P] [--no-comments]\n\
+  [--delete-remote-comments]` —\n\
   two-way GitHub sync (pull + push + comments in one pass; conflict policy\n\
   `newer|local|remote|manual`). Needs the `clove-sync-github` plugin\n\
   (`clove plugin install sync-github`) + a token via `GITHUB_TOKEN` or\n\

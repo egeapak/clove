@@ -342,8 +342,11 @@ fn agent_doc_is_idempotent_and_checks_schema() {
 
 /// A rebuild already running — a daemon's, cut off from its client by a
 /// `clove daemon stop` — holds the reindex lock for a while yet. `clove
-/// reindex` waits for it and then rebuilds, rather than failing (item 5).
+/// reindex` waits for it and then rebuilds, rather than failing (item 5). The
+/// lock is released only once the child has reported (through the test-knob
+/// marker file) that it is blocked on it.
 #[test]
+#[cfg_attr(not(feature = "test-knobs"), ignore = "needs a `test-knobs` clove")]
 fn reindex_waits_for_a_rebuild_already_running() {
     let dir = init_repo();
     new_item(dir.path(), "indexed", &[]);
@@ -355,12 +358,26 @@ fn reindex_waits_for_a_rebuild_already_running() {
         .open(dir.path().join(".clove/reindex.lock"))
         .unwrap();
     lock.lock().unwrap();
-    let release = std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(1500));
-        drop(lock);
-    });
-    let v = json_ok(clove(dir.path()).arg("reindex"));
-    release.join().unwrap();
+    let marker = dir.path().join("reindex-waiting");
+    let child = clove(dir.path())
+        .env("CLOVE_REINDEX_WAIT_MARKER", &marker)
+        .args(["--format", "json", "reindex"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !marker.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "reindex never reported waiting on the held lock"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    drop(lock);
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "reindex failed: {out:?}");
+    let v: Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
     assert_eq!(v["data"]["items_indexed"], 1, "{v}");
 }
 

@@ -78,8 +78,9 @@ fn ping_round_trip_is_fast() {
         })
         .min()
         .unwrap();
+    // Like the other perf gates, the bound is asserted in optimized builds only.
     assert!(
-        best < Duration::from_millis(5),
+        cfg!(debug_assertions) || best < Duration::from_millis(5),
         "best PING round-trip {best:?} exceeds 5ms gate"
     );
 }
@@ -305,7 +306,7 @@ fn stale_socket_recovery_is_fast() {
     let mut hub = TestHub::spawn(Some(&clove_dir));
     // Hard-kill leaves a corpse socket + pid.
     hub.signal(SIGKILL);
-    hub.wait_exit(Duration::from_secs(5)).expect("killed");
+    hub.wait_exit(support::HANG_GUARD).expect("killed");
     assert!(hub.paths.sock().exists());
 
     // The next probe must fail fast (connect timeout + cleanup) and clean up
@@ -315,7 +316,7 @@ fn stale_socket_recovery_is_fast() {
     let elapsed = start.elapsed();
     assert!(client.is_none(), "no live daemon");
     assert!(
-        elapsed < Duration::from_millis(200),
+        cfg!(debug_assertions) || elapsed < Duration::from_millis(200),
         "stale-socket probe {elapsed:?} exceeds 200ms"
     );
     assert!(!hub.paths.sock().exists(), "stale sock cleaned");
@@ -335,20 +336,86 @@ fn graph_over_ipc_and_no_search_rpc() {
     let hub = TestHub::spawn(Some(&clove_dir));
     let mut client = hub.client(&clove_dir);
 
-    // GRAPH: no deps yet → no cycles, nothing blocked.
+    // GRAPH: no deps yet → no cycles.
     match client.graph(GraphRequest::Cycles).unwrap() {
         GraphResponse::Cycles { cycles } => assert!(cycles.is_empty()),
         other => panic!("expected Cycles, got {other:?}"),
     }
-    match client
-        .graph(GraphRequest::Blocked {
-            order: Default::default(),
-        })
-        .unwrap()
-    {
-        GraphResponse::Blocked { ids } => assert!(ids.is_empty(), "nothing blocked"),
-        other => panic!("expected Blocked, got {other:?}"),
+}
+
+/// `blocked` is filtered, counted and windowed on the daemon, like `ls`/`ready`.
+///
+/// It used to be a graph RPC that returned every blocked id, leaving the client
+/// to hydrate the whole set before it could filter or page it — which made the
+/// daemon tier barely faster than a file scan (read-path roadmap §8).
+#[test]
+fn blocked_is_filtered_and_windowed_on_the_daemon() {
+    let (tmp, clove_dir) = init_repo_with_items(0);
+    let store = ItemStore::new(Utf8Path::from_path(tmp.path()).unwrap().to_owned());
+    let new_item = |title: &str, priority: u8, deps: Vec<clove_types::CloveId>| {
+        store
+            .create(
+                "proj",
+                NewItem {
+                    title: title.to_owned(),
+                    item_type: ItemType::Feature,
+                    priority: Priority(priority),
+                    labels: Vec::new(),
+                    deps,
+                    parent: None,
+                    assignee: None,
+                    body: String::new(),
+                },
+                Utc::now(),
+            )
+            .unwrap()
+            .frontmatter
+            .id
+    };
+    let blocker = new_item("blocker", 1, Vec::new());
+    let mut want_p2 = Vec::new();
+    for i in 0..6 {
+        let id = new_item(
+            &format!("waiting {i}"),
+            1 + (i % 2) as u8,
+            vec![blocker.clone()],
+        );
+        if i % 2 == 1 {
+            want_p2.push(id.to_string());
+        }
     }
+    // `create` refuses an unknown dep, so the dangling one is made by deleting it.
+    let gone = new_item("gone", 1, Vec::new());
+    want_p2.push(new_item("dangling", 2, vec![gone.clone()]).to_string());
+    std::fs::remove_file(clove_dir.join("issues").join(format!("{gone}.md"))).unwrap();
+    want_p2.sort();
+    clove_index::reindex(&clove_dir.join("issues"), &clove_dir.join("index.db")).unwrap();
+
+    let hub = TestHub::spawn(Some(&clove_dir));
+    let mut client = hub.client(&clove_dir);
+    let p2 = clove_core::view::Filters::parse(None, None, None, None, Some(2)).unwrap();
+    let request = |offset, limit| QueryRequest {
+        kind: QueryKind::Blocked,
+        filters: p2.clone(),
+        order: Default::default(),
+        offset,
+        limit,
+    };
+
+    let all = client.query_list(request(0, None)).unwrap();
+    let mut ids: Vec<String> = all.rows.iter().map(|r| r.id.clone()).collect();
+    ids.sort();
+    assert_eq!(ids, want_p2, "the p2 blocked set, incl. a missing dep");
+    assert_eq!(all.total, 4);
+
+    let page = client.query_list(request(1, Some(2))).unwrap();
+    assert_eq!(page.total, 4, "total is the pre-window count");
+    let page_ids: Vec<&str> = page.rows.iter().map(|r| r.id.as_str()).collect();
+    let want_prefix: Vec<&str> = all.rows[..3].iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(
+        page_ids, want_prefix,
+        "only `offset + limit` rows cross the wire"
+    );
 }
 
 /// A filter residue must not ship the whole match set over the wire.

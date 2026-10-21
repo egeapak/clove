@@ -20,15 +20,7 @@ const TEST_CLOVE_HOME: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target
 /// The `cloved` binary, built on demand so the daemon cases can never pass by
 /// skipping.
 fn cloved() -> &'static Path {
-    static BIN: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
-    BIN.get_or_init(|| {
-        support::cloved_build()
-            .features("web")
-            .run()
-            .expect("build cloved for the web-port tests")
-            .path()
-            .to_path_buf()
-    })
+    support::cloved("web")
 }
 
 fn clove(dir: &Path) -> Command {
@@ -125,9 +117,15 @@ fn spawn_serve(dir: &Path, args: &[&str]) -> (Child, u16) {
             break Some(port);
         }
     };
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    // Keep draining stderr for the child's lifetime: `serve` prints more lines
+    // after the URL, and writing them to a closed pipe kills it mid-test.
+    std::thread::spawn(move || std::io::copy(&mut stderr, &mut std::io::sink()));
+    // Serving means accepting connections on the announced port, not merely
+    // not having exited yet.
+    let serving =
+        announced.is_some_and(|port| std::net::TcpStream::connect(("127.0.0.1", port)).is_ok());
     match (announced, child.try_wait().unwrap()) {
-        (Some(port), None) => (child, port),
+        (Some(port), None) if serving => (child, port),
         (_, status) => {
             let _ = child.kill();
             let status = status.or_else(|| child.wait().ok());
@@ -339,4 +337,40 @@ fn a_bad_host_fails_even_with_a_daemon_running() {
         assert!(!out.status.success(), "accepted a bad --host: {stderr}");
         assert!(stderr.contains("host"), "{stderr}");
     }
+}
+
+#[test]
+fn serve_keeps_serving_after_its_stderr_reader_is_gone() {
+    // `clove serve 2>&1 | head -1`: the status lines after the URL hit a closed
+    // stderr. Those writes must be dropped, not panic the server.
+    let held = TcpListener::bind("127.0.0.1:0").unwrap();
+    let repo = repo_with_web_port(held.local_addr().unwrap().port());
+    let free = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = free.local_addr().unwrap().port();
+    drop(free);
+
+    let mut child = clove(repo.path())
+        .args(["serve", "--port", &port.to_string()])
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stderr.take());
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut serves = false;
+    while std::time::Instant::now() < deadline && child.try_wait().unwrap().is_none() {
+        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            serves = serves_repo(port, "/", repo.path());
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let exited = child.try_wait().unwrap();
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(
+        exited.is_none(),
+        "serve died with no stderr reader: {exited:?}"
+    );
+    assert!(serves, "port {port} does not serve this repo");
 }

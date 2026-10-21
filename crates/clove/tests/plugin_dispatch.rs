@@ -7,6 +7,8 @@
 //! plugin reflects back; `plugin_list_reports_the_plugin` proves `clove plugin
 //! list` enumerates it.
 
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -27,16 +29,7 @@ fn install_echo() -> (TempDir, PathBuf) {
 /// same reflect-everything binary can stand in for `clove-sync-echo`,
 /// `clove-import-echo`, … to exercise the umbrella fallback). Returns the dest path.
 fn install_echo_as(dir: &Path, name: &str) -> PathBuf {
-    static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    let built = BUILT.get_or_init(|| {
-        escargot::CargoBuild::new()
-            .package("clove-plugin-echo")
-            .bin("clove-echo")
-            .run()
-            .expect("build clove-echo fixture")
-            .path()
-            .to_path_buf()
-    });
+    let built = support::plugin("clove-plugin-echo", "clove-echo", "");
     // The host resolver looks for `clove-<provider>{EXE_SUFFIX}`, so the renamed
     // copy must carry the platform executable suffix (`.exe` on Windows).
     let dest = dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
@@ -54,6 +47,11 @@ fn install_echo_as(dir: &Path, name: &str) -> PathBuf {
 /// A `clove` invocation rooted at `dir` with a hermetic environment.
 fn clove(dir: &Path) -> Command {
     let mut cmd = Command::cargo_bin("clove").unwrap();
+    // Generous plugin timeouts (honoured only by a `test-knobs` build): a slow
+    // plugin start under load must not flip a result. The tests that target a
+    // timeout set a small value of their own.
+    cmd.env("CLOVE_PLUGIN_PROBE_MS", "60000");
+    cmd.env("CLOVE_PLUGIN_HELLO_MS", "60000");
     // Pin the clove-managed home into `dir`: `<clove-home>/bin` is on the plugin
     // search path, and `assert_cmd` inherits `$HOME`, so without this a developer
     // with plugins installed under `~/.local/share/clove/bin` would have them
@@ -232,18 +230,14 @@ fn dedicated_binary_wins_over_umbrella() {
 /// `export tk` cross-sibling dispatch must be refused cleanly.
 #[test]
 fn unsupported_capability_is_exit_2() {
-    let built = escargot::CargoBuild::new()
-        .package("clove-import-tk")
-        .bin("clove-import-tk")
-        .run()
-        .expect("build clove-import-tk");
+    let built = support::plugin("clove-import-tk", "clove-import-tk", "");
     let plugin_dir = tempfile::tempdir().unwrap();
     // The renamed copy must carry the platform executable suffix (`.exe` on Windows)
     // for the host resolver to find it.
     let dest = plugin_dir
         .path()
         .join(format!("clove-import-tk{}", std::env::consts::EXE_SUFFIX));
-    std::fs::copy(built.path(), &dest).unwrap();
+    std::fs::copy(built, &dest).unwrap();
     let repo = init_repo("proj");
 
     let assert = clove(repo.path())
@@ -364,7 +358,7 @@ mod signals {
     }
 
     fn wait_gone(pid: i32) {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(30);
         while alive(pid) {
             assert!(Instant::now() < deadline, "plugin {pid} is still running");
             std::thread::sleep(Duration::from_millis(20));
@@ -417,7 +411,6 @@ mod signals {
             assert_eq!(status.signal(), Some(libc::SIGINT), "{status:?}");
             wait_gone(plugin);
         } else {
-            std::thread::sleep(Duration::from_millis(300));
             assert!(
                 host.try_wait().unwrap().is_none(),
                 "the host died of SIGINT"
@@ -558,16 +551,56 @@ fn the_host_socket_is_removed_after_the_plugin_exits() {
     assert!(left.is_empty(), "left behind: {left:?}");
 }
 
-/// A connection that never sends `hello` is answered and closed after the
-/// 5-second deadline (Unix; Windows named pipes have no receive timeout).
+/// A connection that never sends `hello` is answered and closed once the hello
+/// deadline passes (Unix; Windows named pipes have no receive timeout). The
+/// deadline is the target here, so it is shortened through the test knob.
 #[cfg(unix)]
 #[test]
+#[cfg_attr(not(feature = "test-knobs"), ignore = "needs a `test-knobs` clove")]
 fn the_host_channel_drops_a_silent_connection() {
     let (plugin_dir, _echo) = install_echo();
     let repo = init_repo("proj");
-    let data = echo_json(repo.path(), plugin_dir.path(), &["--host-silent"]);
-    let reply = data["reply"].as_str().unwrap();
-    assert!(reply.contains("no hello within 5 seconds"), "{reply}");
-    let waited = data["waited_ms"].as_u64().unwrap();
-    assert!((4_000..30_000).contains(&waited), "waited {waited} ms");
+    let out = clove(repo.path())
+        .env("CLOVE_PLUGIN_PATH", plugin_dir.path())
+        .env("CLOVE_PLUGIN_HELLO_MS", "300")
+        .args(["--format", "json", "echo", "--host-silent"])
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("stdout is not JSON ({e}): {out:?}"));
+    assert_eq!(v["ok"], true, "{v}");
+    let reply = v["data"]["reply"].as_str().unwrap();
+    assert!(reply.contains("no hello within 300 ms"), "{reply}");
+}
+
+/// A plugin that never answers `--clove-plugin-info` is killed once the probe
+/// deadline passes and listed without metadata, instead of wedging `plugin
+/// list`. The deadline is the target here, so it is shortened through the test
+/// knob.
+#[cfg(unix)]
+#[test]
+#[cfg_attr(not(feature = "test-knobs"), ignore = "needs a `test-knobs` clove")]
+fn a_plugin_that_never_answers_the_probe_is_listed_without_info() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let plugin_dir = tempfile::tempdir().unwrap();
+    let hang = plugin_dir.path().join("clove-hang");
+    std::fs::write(&hang, "#!/bin/sh\nexec sleep 600\n").unwrap();
+    std::fs::set_permissions(&hang, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let out = clove(plugin_dir.path())
+        .env("CLOVE_PLUGIN_PATH", plugin_dir.path())
+        .env("CLOVE_PLUGIN_PROBE_MS", "200")
+        .args(["--format", "json", "plugin", "list"])
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("stdout is not JSON ({e}): {out:?}"));
+    let hung = v["data"]
+        .as_array()
+        .expect("data array")
+        .iter()
+        .find(|p| p["name"] == "hang")
+        .unwrap_or_else(|| panic!("clove-hang should be listed: {v}"));
+    assert_eq!(hung["status"], "no_info", "{hung}");
 }

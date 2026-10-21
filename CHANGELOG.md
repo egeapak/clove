@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `clove` gains a `test-knobs` feature (never in `default` or `full`): the test-only `CLOVE_PLUGIN_PROBE_MS`, `CLOVE_PLUGIN_HELLO_MS` and `CLOVE_REINDEX_WAIT_MARKER` are honoured only by such a build; released and `cargo install`ed binaries ignore them and keep the 500 ms probe and 5 s hello deadlines
 - **License:** clove is now licensed under **AGPL-3.0-only** (`LICENSE`), with
   an additional permission for plugins (`LICENSE-PLUGIN-EXCEPTION`). The plugin
   SDK crates (`clove-types`, `clove-plugin`, `clove-plugin-echo`) stay
@@ -27,8 +28,39 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the host exits with the plugin's exit code, or dies of the same signal. The
   plugin no longer has the pid the user started.
 
+- `rustls-webpki` 0.103.16, `webpki-roots` / `webpki-root-certs` 1.0.10
+  (RUSTSEC-2026-0381, RUSTSEC-2026-0382, RUSTSEC-2026-0383)
+
 ### Added
 
+- **Web timeline hover guide:** moving the pointer over the timeline shows a
+  vertical guide line and a date chip on the top axis with the date under the
+  cursor (mouse, touch and pen; themed like the tooltip) (#84).
+- **`clove sync github` propagates comment edits** (#81): a comment edited on
+  GitHub rewrites its local comment file, and a locally edited comment file is
+  `PATCH`ed onto its GitHub comment in place, instead of being pulled or pushed
+  once and then ignored (or, locally, posted again as a duplicate). A comment
+  edited on both sides follows `--prefer` (`newer` compares GitHub's `updated_at`
+  with the file's mtime; with no timestamp, or `manual`, neither side changes and
+  the conflict is reported). Comment pairs are tracked in the sync state; a state
+  written by 0.1.x, or none at all (a fresh clone), adopts identical pairs without
+  duplicating or re-pushing anything.
+- **`clove sync github` propagates comment deletions** (#80): a comment deleted
+  on GitHub is deleted locally, and a deleted local comment file is deleted on
+  GitHub too when you pass **`--delete-remote-comments`** (opt-in, because a
+  missing file is also what checking out a branch without the comment looks
+  like; without the flag the deletion is only reported as
+  `data.comments.pending_remote_delete` and the comment is not re-pulled). Either
+  way only if the surviving comment was not edited since the last sync (an edited
+  one is re-created instead, never deleted). Every deletion appears in the
+  `--dry-run` plan and in the run's
+  output (`data.comments.delete_local` / `delete_remote`; the summary line gains
+  `edited` and `deleted` counts); `--no-comments` disables all of it. A comment
+  write GitHub rejects is skipped and retried like a rejected item.
+- Plugin host channel: `store.update_comment` and `store.delete_comment`
+  (`clove_import::Store::update_comment` / `delete_comment`), and `store.comments`
+  reports each comment's `key` and modification time. No daemon protocol change
+  (comments are not indexed, so these writes run in the host process).
 - **The shipped plugins use the host IPC channel:** `clove-import-tk`,
   `clove-import-beads` and `clove-sync-github` no longer open the store; every
   read and write goes through the `clove` that runs them, via the new `store.*`
@@ -43,7 +75,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Daemon IPC protocol 10: the daemon applies imported items, external links and
   timestamped comments (`create_item`, `link_external`, `add_comment_at`), and
   `clove daemon status` reports `writes_applied`. A 0.1.x daemon is not used
-  until it is restarted on 0.2.0; writes fall back to the host.
+  until it is restarted on 0.2.0; writes fall back to the host. `blocked` moves
+  from the graph RPC onto `query` (`QueryKind::Blocked`), so the daemon filters,
+  counts and pages it in SQL like `ls`/`ready` instead of returning every
+  blocked id for the client to hydrate.
 
 - **Host IPC channel for plugins** (`PLUGIN_SYSTEM.md` §6.6): while `clove
   <plugin>` runs, the host serves the clove tool surface (the MCP tools'
@@ -68,6 +103,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   re-exports are removed; a plugin that opens the store depends on `clove-core`
   and calls `ItemStore::new(cx.root.clone())`. `OutputFormat` moved to
   `clove-types` (still re-exported by `clove-core` and `clove-plugin`).
+
+- `clove parent <id> <parent-id>` / `clove parent <id> --clear` sets or clears
+  an existing item's parent from the CLI, through the same cycle-checked op as
+  the web UI and MCP `clove_set_parent` (#72).
+
+### Fixed
+
+- **`clove sync github`: one rejected item no longer aborts the run (#76).** An
+  assignee GitHub refuses (not a user) is dropped from that push with a warning,
+  and any other per-item 4xx rejection (e.g. a 422) skips that item: the rest of
+  the run completes and its state is saved, the skipped item is left unrecorded
+  so the next run retries it, and the run lists it under `data.skipped` /
+  `_meta.warnings` and exits 5. Auth (401/403), rate-limit, 5xx and network
+  errors still abort. `sync_net::sync_github`'s `SyncReport` gains `skipped` and
+  `warnings`.
+
+- `clove serve` and `cloved` keep running when nothing reads their stderr any
+  more (`clove serve 2>&1 | head -1`): a status line that cannot be written is
+  dropped instead of panicking, which the release build turned into an abort.
+
+- `clove edit` runs an `EDITOR`/`VISUAL`/`CLOVE_EDITOR` value that carries
+  arguments (`code --wait`, `emacsclient -t`) the way git does, and a failure to
+  start the editor names the editor instead of reporting "No such file" on the
+  item (#73).
 
 ## [0.1.5] - 2026-10-18
 

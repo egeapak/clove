@@ -93,9 +93,15 @@ fn arm(issues_dir: &Utf8Path) -> Result<Armed, String> {
         }
     })
     .map_err(|e| format!("watcher init failed: {e}"))?;
-    // Test knob: a slow arm, as on a loaded machine.
+    // Test knobs: a slow arm, as on a loaded machine — for a fixed time, or
+    // until the project's `CLOVED_WATCH_ARM_HOLD_FILE` is removed.
     if let Some(delay) = crate::knobs::duration("CLOVED_WATCH_ARM_DELAY_MS") {
         std::thread::sleep(delay);
+    }
+    if let Some(clove_dir) = issues_dir.parent() {
+        while crate::knobs::held("CLOVED_WATCH_ARM_HOLD_FILE", clove_dir.as_std_path()) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
     watcher
         .watch(issues_dir.as_std_path(), RecursiveMode::Recursive)
@@ -128,13 +134,13 @@ pub async fn run(
     let armed = match arm_on_own_thread(issues_dir.clone()).await {
         Ok(armed) => armed,
         Err(why) => {
-            eprintln!("cloved: {issues_dir}: {why}");
+            status!("cloved: {issues_dir}: {why}");
             return;
         }
     };
     let took = arming.elapsed();
     if took > Duration::from_secs(1) {
-        eprintln!("cloved: {issues_dir}: the file watch took {took:.1?} to set up");
+        status!("cloved: {issues_dir}: the file watch took {took:.1?} to set up");
     }
     let (dir, index_c, state_c, graph_c) = (
         issues_dir.clone(),
@@ -149,7 +155,7 @@ pub async fn run(
     })
     .await;
     if caught_up.is_err() {
-        eprintln!("cloved: {issues_dir}: the sweep after arming the watcher panicked");
+        status!("cloved: {issues_dir}: the sweep after arming the watcher panicked");
         return;
     }
     watch(armed, issues_dir, index, state, debounce, options, graph).await;
@@ -224,7 +230,7 @@ async fn watch(
         })
         .await;
         if done.is_err() {
-            eprintln!("cloved: watcher batch task panicked");
+            status!("cloved: watcher batch task panicked");
         }
     }
 }
@@ -281,6 +287,30 @@ mod tests {
         let out = collect_burst(&mut rx, first, debounce).await;
         drop(tx);
         out
+    }
+
+    /// M3-G05: `index.db*` is a sibling of the watched `issues/`, so writing it
+    /// (a reindex) queues nothing. The watch delivers events in order, so a
+    /// probe file written after the index writes arrives only after any event
+    /// they would have produced: seeing the probe first proves there were none.
+    #[tokio::test]
+    async fn index_writes_outside_the_issues_dir_queue_no_events() {
+        let tmp = tempfile::tempdir().unwrap();
+        let clove_dir = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let issues = clove_dir.join("issues");
+        std::fs::create_dir_all(&issues).unwrap();
+        let mut armed = arm(&issues).expect("arm the watch");
+
+        for name in ["index.db", "index.db-wal", "index.db-shm"] {
+            std::fs::write(clove_dir.join(name), name).unwrap();
+        }
+        std::fs::write(issues.join("probe.md"), "probe").unwrap();
+
+        let first = tokio::time::timeout(Duration::from_secs(30), armed.events.recv())
+            .await
+            .expect("the probe's event never arrived")
+            .expect("the watch is open");
+        assert_eq!(first.file_name().unwrap(), "probe.md", "{first:?}");
     }
 
     #[tokio::test(start_paused = true)]

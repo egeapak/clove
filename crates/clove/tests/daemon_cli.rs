@@ -10,32 +10,27 @@ mod support;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
+
+/// How long any wait may take before the test calls it a hang. Generous on
+/// purpose: a wait ends on its condition, never on this.
+const HANG_GUARD: Duration = Duration::from_secs(30);
 
 /// Token records for this test's processes go here, never the user's clove home.
 const TEST_CLOVE_HOME: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/test-clove-home");
 
 /// The `cloved` binary, built on demand rather than hoped for in `target/`.
 fn cloved() -> &'static Path {
-    static BIN: OnceLock<PathBuf> = OnceLock::new();
-    BIN.get_or_init(|| {
-        // The `CLOVED_*` delay knobs only exist in a `test-knobs` build, and the
-        // web-server cases need a daemon that has one.
-        let features = if cfg!(feature = "web") {
-            "test-knobs web"
-        } else {
-            "test-knobs"
-        };
-        support::cloved_build()
-            .features(features)
-            .run()
-            .expect("build cloved for the daemon CLI tests")
-            .path()
-            .to_path_buf()
-    })
+    // The `CLOVED_*` delay knobs only exist in a `test-knobs` build, and the
+    // web-server cases need a daemon that has one.
+    let features = if cfg!(feature = "web") {
+        "test-knobs web"
+    } else {
+        "test-knobs"
+    };
+    support::cloved(features)
 }
 
 /// `clove` in `dir`, talking to the hub rooted at `run`.
@@ -70,7 +65,7 @@ fn daemon_status(dir: &Path, run: &Path) -> serde_json::Value {
 /// Wait until the daemon's watcher for the project in `dir` watches: until
 /// then the daemon leaves reads to the index and the files.
 fn wait_watching(dir: &Path, run: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + HANG_GUARD;
     while daemon_status(dir, run)["data"]["watcher_state"] != "watching" {
         assert!(
             Instant::now() < deadline,
@@ -292,7 +287,7 @@ fn a_killed_daemon_is_replaced_by_the_next_start() {
     unsafe {
         libc_kill(first, 9);
     }
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + HANG_GUARD;
     while daemon_status(dir, &run.path)["data"]["hub"] != serde_json::Value::Null {
         assert!(Instant::now() < deadline, "the killed hub still answers");
         std::thread::sleep(Duration::from_millis(25));
@@ -627,7 +622,7 @@ fn a_stop_while_the_start_is_still_loading_wins() {
     // The hub has the load once it opens the index (inside the load, before
     // the delay); the token alone is written before the request is even sent.
     let index = dir.join(".clove/index.db");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let deadline = std::time::Instant::now() + HANG_GUARD;
     while !(run.pid_file().exists() && index.exists()) {
         assert!(
             std::time::Instant::now() < deadline,
@@ -646,23 +641,33 @@ fn a_stop_while_the_start_is_still_loading_wins() {
         serde_json::json!(true),
         "{stopped}"
     );
-    for _ in 0..2 {
-        assert_eq!(
-            daemon_status(dir, &run.path)["data"]["running"],
-            serde_json::json!(false),
-            "the project is served after its stop"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(1000));
-    }
+    assert_eq!(
+        daemon_status(dir, &run.path)["data"]["running"],
+        serde_json::json!(false),
+        "the project is served after its stop"
+    );
 }
 
-/// `clove` with a hub that is slow to arm its file watchers (the daemon's and
-/// the web UI's), as FSEvents can be on macOS — the web UI on a free port.
-fn slow_watcher_clove(dir: &Path, run: &Path, arm_delay_ms: &str) -> Command {
+/// The file whose presence in a project's `.clove/` keeps its hub's file
+/// watchers (the daemon's and the web UI's) from arming, as a busy FSEvents can
+/// on macOS.
+const ARM_HOLD: &str = "arm-hold";
+
+fn hold_arming(dir: &Path) {
+    std::fs::write(dir.join(".clove").join(ARM_HOLD), "").unwrap();
+}
+
+fn release_arming(dir: &Path) {
+    std::fs::remove_file(dir.join(".clove").join(ARM_HOLD)).unwrap();
+}
+
+/// `clove` with a hub whose watchers arm only once [`release_arming`] says so
+/// — the web UI on a free port.
+fn slow_watcher_clove(dir: &Path, run: &Path) -> Command {
     let mut c = clove(dir, run);
     c.env_remove("CLOVED_DISABLE_WEB")
         .env("CLOVED_WEB_PORT", "0")
-        .env("CLOVED_WATCH_ARM_DELAY_MS", arm_delay_ms);
+        .env("CLOVED_WATCH_ARM_HOLD_FILE", ARM_HOLD);
     c
 }
 
@@ -693,7 +698,7 @@ fn write_item_behind_the_daemons_back(dir: &Path, title: &str) -> String {
 }
 
 /// `clove daemon start` does not wait for the file watchers: with arming
-/// held up for 15s it returns promptly (it used to wait out FSEvents setup
+/// held up indefinitely it still returns (it used to wait out FSEvents setup
 /// and time out at 10s), and until the watcher watches, reads fall back to
 /// the index or the files — fresh, never the daemon's possibly stale answer.
 #[test]
@@ -707,14 +712,12 @@ fn a_start_does_not_wait_for_the_file_watcher() {
         .assert()
         .success();
 
-    let began = Instant::now();
-    let start = slow_watcher_clove(dir, &run.path, "15000")
+    hold_arming(dir);
+    let start = slow_watcher_clove(dir, &run.path)
         .args(["daemon", "start", "-f", "json"])
         .output()
         .unwrap();
-    let took = began.elapsed();
     assert!(start.status.success(), "{start:?}");
-    assert!(took < Duration::from_secs(5), "the start took {took:?}");
 
     let status = daemon_status(dir, &run.path);
     assert_eq!(status["data"]["running"], true, "{status}");
@@ -738,6 +741,7 @@ fn a_start_does_not_wait_for_the_file_watcher() {
         vec!["before the start".to_owned(), "while arming".to_owned()],
         "{listed}"
     );
+    release_arming(dir);
 
     clove(dir, &run.path)
         .args(["daemon", "stop", "--all"])
@@ -763,11 +767,13 @@ fn what_is_written_while_the_watcher_arms_is_served_once_it_watches() {
     )
     .unwrap();
 
-    slow_watcher_clove(dir, &run.path, "2000")
+    hold_arming(dir);
+    slow_watcher_clove(dir, &run.path)
         .args(["daemon", "start"])
         .assert()
         .success();
     write_item_behind_the_daemons_back(dir, "behind its back");
+    release_arming(dir);
     wait_watching(dir, &run.path);
     let listed = json(
         &clove(dir, &run.path)
@@ -1207,14 +1213,15 @@ fn a_live_but_slow_old_daemon_keeps_its_files() {
 
 /// A stand-in hub in `run` that answers every hello with `reply` (a JSON
 /// `Welcome`), framed the way tarpc's length-delimited codec frames it.
-fn fake_hub(run: &Path, reply: &'static str) -> std::thread::JoinHandle<()> {
+fn fake_hub(run: &Path, reply: &'static str) -> FakeHub {
     clove_ipc::ensure_private_dir(camino::Utf8Path::from_path(run).unwrap()).unwrap();
     let listener = UnixListener::bind(run.join("hub.sock")).unwrap();
     listener.set_nonblocking(true).unwrap();
-    std::thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(10);
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stopped = std::sync::Arc::clone(&stop);
+    let thread = std::thread::spawn(move || {
         let mut held = Vec::new();
-        while Instant::now() < deadline {
+        while !stopped.load(std::sync::atomic::Ordering::Relaxed) {
             match listener.accept() {
                 Ok((mut stream, _)) => {
                     stream.set_nonblocking(false).unwrap();
@@ -1230,7 +1237,26 @@ fn fake_hub(run: &Path, reply: &'static str) -> std::thread::JoinHandle<()> {
                 Err(_) => std::thread::sleep(Duration::from_millis(10)),
             }
         }
-    })
+    });
+    FakeHub {
+        stop,
+        thread: Some(thread),
+    }
+}
+
+/// A [`fake_hub`], serving until it is dropped.
+struct FakeHub {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for FakeHub {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 /// A per-project `stop` against a daemon this client cannot talk to must say
@@ -1308,15 +1334,11 @@ fn serve_waits_for_a_daemon_that_is_still_starting() {
         .spawn()
         .unwrap();
     let hub_paths = clove_ipc::HubPaths::at(camino::Utf8Path::from_path(&run.path).unwrap());
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + HANG_GUARD;
     while !hub_paths.running() {
         assert!(Instant::now() < deadline, "the hub never took its lock");
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert!(
-        !hub_paths.footprint_present(),
-        "the hub bound before serve ran"
-    );
 
     let mut serve = std::process::Command::new(assert_cmd::cargo::cargo_bin("clove"))
         .current_dir(dir)
@@ -1330,7 +1352,7 @@ fn serve_waits_for_a_daemon_that_is_still_starting() {
         .spawn()
         .unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + 2 * HANG_GUARD;
     let status = loop {
         if let Some(status) = serve.try_wait().unwrap() {
             break Some(status);

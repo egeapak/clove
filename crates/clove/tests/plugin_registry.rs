@@ -7,6 +7,8 @@
 //! copied under the multiplexer-scoped name `clove-import-echo`, and point
 //! `CLOVE_PLUGIN_PATH` at its temp dir so the search path is deterministic.
 
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -17,18 +19,14 @@ use tempfile::TempDir;
 /// Build the `clove-echo` fixture and copy it into a fresh temp dir under `name`
 /// (e.g. `clove-import-echo`), returning `(dir, path)`.
 fn install_echo_as(name: &str) -> (TempDir, PathBuf) {
-    let built = escargot::CargoBuild::new()
-        .package("clove-plugin-echo")
-        .bin("clove-echo")
-        .run()
-        .expect("build clove-echo fixture");
+    let built = support::plugin("clove-plugin-echo", "clove-echo", "");
     let dir = tempfile::tempdir().unwrap();
     // The host resolver looks for `clove-<provider>{EXE_SUFFIX}`, so the renamed
     // copy must carry the platform executable suffix (`.exe` on Windows).
     let dest = dir
         .path()
         .join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
-    std::fs::copy(built.path(), &dest).expect("copy echo fixture into the plugin dir");
+    std::fs::copy(built, &dest).expect("copy echo fixture into the plugin dir");
     (dir, dest)
 }
 
@@ -40,6 +38,11 @@ fn install_echo_as(name: &str) -> (TempDir, PathBuf) {
 /// install root and registry cache.
 fn clove(dir: &Path) -> Command {
     let mut cmd = Command::cargo_bin("clove").unwrap();
+    // Generous plugin timeouts (honoured only by a `test-knobs` build): a slow
+    // plugin start under load must not flip a result. The tests that target a
+    // timeout set a small value of their own.
+    cmd.env("CLOVE_PLUGIN_PROBE_MS", "60000");
+    cmd.env("CLOVE_PLUGIN_HELLO_MS", "60000");
     cmd.current_dir(dir);
     cmd.env_remove("CLOVE_FORMAT");
     cmd.env("CLOVE_AUTHOR", "tester@example.com");
@@ -439,13 +442,9 @@ fn a_plugin_in_the_clove_home_bin_is_resolvable_and_pinnable() {
     let bin = home.path().join("bin");
     std::fs::create_dir_all(&bin).unwrap();
 
-    let built = escargot::CargoBuild::new()
-        .package("clove-plugin-echo")
-        .bin("clove-echo")
-        .run()
-        .expect("build clove-echo fixture");
+    let built = support::plugin("clove-plugin-echo", "clove-echo", "");
     let dest = bin.join(format!("clove-homed{}", std::env::consts::EXE_SUFFIX));
-    std::fs::copy(built.path(), &dest).unwrap();
+    std::fs::copy(built, &dest).unwrap();
 
     let workdir = tempfile::tempdir().unwrap();
 
@@ -496,14 +495,10 @@ fn clove_plugin_path_outranks_the_clove_home_install_root() {
     std::fs::create_dir_all(&home_bin).unwrap();
     let explicit = tempfile::tempdir().unwrap();
 
-    let built = escargot::CargoBuild::new()
-        .package("clove-plugin-echo")
-        .bin("clove-echo")
-        .run()
-        .expect("build clove-echo fixture");
+    let built = support::plugin("clove-plugin-echo", "clove-echo", "");
     let name = format!("clove-contended{}", std::env::consts::EXE_SUFFIX);
-    std::fs::copy(built.path(), home_bin.join(&name)).unwrap();
-    std::fs::copy(built.path(), explicit.path().join(&name)).unwrap();
+    std::fs::copy(built, home_bin.join(&name)).unwrap();
+    std::fs::copy(built, explicit.path().join(&name)).unwrap();
 
     let workdir = tempfile::tempdir().unwrap();
     let assert = clove(workdir.path())

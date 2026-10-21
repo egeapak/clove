@@ -9,6 +9,9 @@
 //!   binary it was asked to install. The real thing would take minutes and reach
 //!   the network; what these tests need to assert is the orchestration — which
 //!   argv is built, what happens after, and what is rolled back.
+
+mod support;
+
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
@@ -263,16 +266,7 @@ fn which_cargo() -> std::path::PathBuf {
 
 /// Build the compiled `fake-cargo` fixture once per test binary.
 fn fake_cargo_bin() -> &'static Path {
-    static BUILT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
-    BUILT.get_or_init(|| {
-        escargot::CargoBuild::new()
-            .package("clove-plugin-echo")
-            .bin("fake-cargo")
-            .run()
-            .expect("build the fake-cargo fixture")
-            .path()
-            .to_path_buf()
-    })
+    support::plugin("clove-plugin-echo", "fake-cargo", "")
 }
 
 /// Install the fake cargo into `dir` under the name `cargo`.
@@ -487,6 +481,11 @@ fn isolated_clove() -> &'static Path {
 impl Env {
     fn clove(&self) -> Command {
         let mut cmd = Command::new(isolated_clove());
+        // Generous plugin timeouts (honoured only by a `test-knobs` build): a slow
+        // plugin start under load must not flip a result. The tests that target a
+        // timeout set a small value of their own.
+        cmd.env("CLOVE_PLUGIN_PROBE_MS", "60000");
+        cmd.env("CLOVE_PLUGIN_HELLO_MS", "60000");
         cmd.env_remove("CLOVE_FORMAT");
         // Reaches the probed plugin by plain inheritance: harness -> clove ->
         // the freshly "installed" binary.

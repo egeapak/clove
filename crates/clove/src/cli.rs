@@ -81,6 +81,8 @@ pub enum Commands {
     Label(LabelArgs),
     /// Set or clear the assignee.
     Assign(AssignArgs),
+    /// Set or clear the parent (cycle-checked).
+    Parent(ParentArgs),
     /// Set the priority (0–4).
     Priority(PriorityArgs),
     /// Manage dependencies.
@@ -135,7 +137,7 @@ There are no built-in sync providers — every provider is an external \
 clove-sync-<provider> plugin. The same clove-sync-github binary also serves the \
 one-way `clove import github` (pull) and `clove export github` (push).\n\
 Form: clove sync [--format json] github <owner/repo> [--dry-run] [--prefer P] \
-[--no-comments].\n\
+[--no-comments] [--delete-remote-comments].\n\
 Note: clove global flags (--format, --color, --quiet, …) must come BEFORE the \
 provider — everything after it is the provider's own arguments.")]
     Sync(SyncArgs),
@@ -488,6 +490,17 @@ pub struct AssignArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct ParentArgs {
+    /// The item id.
+    pub id: String,
+    /// The new parent's id (omit with `--clear` to unset).
+    pub parent: Option<String>,
+    /// Clear the parent.
+    #[arg(long)]
+    pub clear: bool,
+}
+
+#[derive(Debug, Args)]
 pub struct PriorityArgs {
     /// The item id.
     pub id: String,
@@ -824,7 +837,7 @@ pub struct SyncArgs {
     /// `github`).
     pub provider: String,
     /// Everything after the provider — the `owner/repo` and any provider flags
-    /// (`--dry-run`, `--prefer`, `--no-comments`) — forwarded to the plugin.
+    /// (`--dry-run`, `--prefer`, `--no-comments`, `--delete-remote-comments`) — forwarded to the plugin.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub rest: Vec<String>,
 }

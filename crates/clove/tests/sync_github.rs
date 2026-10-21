@@ -22,12 +22,13 @@
 //! (see the `clove()` harness); the plugin emits byte-identical JSON to the old
 //! built-in, so every assertion below holds unchanged.
 
+mod support;
+
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::process::Command;
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
 
 use assert_cmd::prelude::*;
 use serde_json::{json, Value};
@@ -70,9 +71,18 @@ struct State {
     comment_get_count: u64,
     /// Count of issue PATCHes actually received.
     patch_count: u64,
+    /// While `Some`, every comment PATCH/DELETE responds with this HTTP status
+    /// and mutates nothing.
+    comment_write_fail_status: Option<u16>,
+    /// Comment PATCHes and DELETEs actually applied.
+    comment_patch_count: u64,
+    comment_delete_count: u64,
     /// Logins GitHub refuses as assignees: an issue create/PATCH naming one gets
     /// GitHub's real 422 validation-error body and mutates nothing.
     rejected_assignees: Vec<String>,
+    /// Titles GitHub refuses: an issue create/PATCH carrying one gets a 422 on
+    /// the `title` field (a rejection that is not about assignees).
+    rejected_titles: Vec<String>,
 }
 
 impl State {
@@ -108,7 +118,11 @@ impl MockGitHub {
             fail_comment_post_for: None,
             issue_post_count: 0,
             patch_count: 0,
+            comment_write_fail_status: None,
+            comment_patch_count: 0,
+            comment_delete_count: 0,
             rejected_assignees: Vec::new(),
+            rejected_titles: Vec::new(),
         }));
         let thread_state = Arc::clone(&state);
         std::thread::spawn(move || {
@@ -194,6 +208,24 @@ impl MockGitHub {
             .push(login.to_owned());
     }
 
+    /// Make GitHub reject any issue create/PATCH whose title is `title`.
+    fn reject_title(&self, title: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .rejected_titles
+            .push(title.to_owned());
+    }
+
+    /// Stop rejecting `title`.
+    fn accept_title(&self, title: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .rejected_titles
+            .retain(|t| t != title);
+    }
+
     fn issue_post_count(&self) -> u64 {
         self.state.lock().unwrap().issue_post_count
     }
@@ -216,6 +248,43 @@ impl MockGitHub {
             .entry(number)
             .or_default()
             .push(make_comment(id, author, body, &created));
+    }
+
+    /// Edit the comment on issue `number` whose body is `old_body` (simulating a
+    /// GitHub-side edit), bumping the comment's `updated_at`.
+    fn edit_comment(&self, number: u64, old_body: &str, new_body: &str) {
+        let mut s = self.state.lock().unwrap();
+        let updated = s.tick();
+        let comment = s
+            .comments
+            .get_mut(&number)
+            .and_then(|cs| cs.iter_mut().find(|c| c["body"] == json!(old_body)))
+            .expect("seeded comment exists");
+        comment["body"] = json!(new_body);
+        comment["updated_at"] = json!(updated);
+    }
+
+    /// Delete the comment on issue `number` whose body is `body` (simulating a
+    /// GitHub-side delete).
+    fn delete_comment(&self, number: u64, body: &str) {
+        let mut s = self.state.lock().unwrap();
+        let comments = s.comments.get_mut(&number).expect("issue has comments");
+        let before = comments.len();
+        comments.retain(|c| c["body"] != json!(body));
+        assert_eq!(comments.len() + 1, before, "exactly one comment deleted");
+    }
+
+    /// Make comment PATCH/DELETE respond with `status` (no mutation) until cleared.
+    fn set_comment_write_fail_status(&self, status: Option<u16>) {
+        self.state.lock().unwrap().comment_write_fail_status = status;
+    }
+
+    fn comment_patch_count(&self) -> u64 {
+        self.state.lock().unwrap().comment_patch_count
+    }
+
+    fn comment_delete_count(&self) -> u64 {
+        self.state.lock().unwrap().comment_delete_count
     }
 
     /// Set an issue's assignees to `logins` (simulating GitHub-side edits).
@@ -343,13 +412,83 @@ fn handle_conn(mut stream: TcpStream, state: &Arc<Mutex<State>>) {
     let body_json: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
 
     let (status, payload) = route(&method, &target, &body_json, state);
-    let body_str = payload.to_string();
+    let body_str = if status.starts_with("204") {
+        String::new()
+    } else {
+        payload.to_string()
+    };
     let response = format!(
         "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body_str}",
         body_str.len()
     );
     let _ = stream.write_all(response.as_bytes());
     let _ = stream.flush();
+}
+
+/// `/repos/{o}/{r}/issues/comments[/{id}]`: list recently updated comments
+/// (optionally `since`), edit one by id (PATCH), or delete one by id.
+fn route_repo_comment(
+    method: &str,
+    target: &str,
+    comment_id: Option<u64>,
+    body: &Value,
+    s: &mut State,
+) -> (&'static str, Value) {
+    match (method, comment_id) {
+        ("GET", None) => {
+            let since = target
+                .split_once("since=")
+                .map(|(_, rest)| rest.split('&').next().unwrap_or("").replace("%3A", ":"));
+            let mut listed = Vec::new();
+            let mut numbers: Vec<u64> = s.comments.keys().copied().collect();
+            numbers.sort_unstable();
+            for number in numbers {
+                for comment in &s.comments[&number] {
+                    let updated = comment["updated_at"].as_str().unwrap_or("");
+                    if since.as_deref().is_some_and(|since| updated < since) {
+                        continue;
+                    }
+                    let mut comment = comment.clone();
+                    comment["issue_url"] = json!(format!(
+                        "https://example.test/repos/owner/repo/issues/{number}"
+                    ));
+                    listed.push(comment);
+                }
+            }
+            ("200 OK", Value::Array(listed))
+        }
+        ("PATCH" | "DELETE", Some(id)) => {
+            if let Some(status) = s.comment_write_fail_status {
+                return (
+                    status_line(status),
+                    json!({
+                        "message": "Validation Failed",
+                        "errors": [{ "resource": "IssueComment", "code": "invalid", "field": "body" }]
+                    }),
+                );
+            }
+            let updated = s.tick();
+            let found = s.comments.values_mut().find_map(|cs| {
+                cs.iter()
+                    .position(|c| c["id"] == json!(id))
+                    .map(|i| (cs, i))
+            });
+            let Some((comments, index)) = found else {
+                return ("404 Not Found", json!({ "message": "Not Found" }));
+            };
+            if method == "DELETE" {
+                comments.remove(index);
+                s.comment_delete_count += 1;
+                return ("204 No Content", Value::Null);
+            }
+            comments[index]["body"] = json!(body["body"].as_str().unwrap_or(""));
+            comments[index]["updated_at"] = json!(updated);
+            let edited = comments[index].clone();
+            s.comment_patch_count += 1;
+            ("200 OK", edited)
+        }
+        _ => ("404 Not Found", json!({ "message": "unsupported" })),
+    }
 }
 
 /// Route a request to its handler, returning `(status line, json body)`.
@@ -370,6 +509,13 @@ fn route(
     let is_comments = segments.get(5) == Some(&"comments");
 
     let mut s = state.lock().unwrap();
+
+    // /repos/{o}/{r}/issues/comments[/{id}]: the repo-wide listing and the
+    // by-id edit/delete.
+    if segments.get(4) == Some(&"comments") {
+        let comment_id = segments.get(5).and_then(|n| n.parse::<u64>().ok());
+        return route_repo_comment(method, target, comment_id, body, &mut s);
+    }
 
     // /repos/{o}/{r}/issues/{n}/comments
     if is_comments {
@@ -423,7 +569,7 @@ fn route(
         }
         ("POST", None) => {
             s.issue_post_count += 1;
-            if let Some(rejection) = assignee_rejection(&s, body) {
+            if let Some(rejection) = item_rejection(&s, body) {
                 return rejection;
             }
             let number = s.next_number;
@@ -465,7 +611,7 @@ fn route(
             if let Some(code) = s.patch_fail_status {
                 return (status_line(code), json!({ "message": "patch failed" }));
             }
-            if let Some(rejection) = assignee_rejection(&s, body) {
+            if let Some(rejection) = item_rejection(&s, body) {
                 return rejection;
             }
             let updated = s.tick();
@@ -535,6 +681,32 @@ fn assignee_rejection(s: &State, body: &Value) -> Option<(&'static str, Value)> 
             "status": "422"
         }),
     ))
+}
+
+/// GitHub's 422 for a title it refuses.
+fn title_rejection(s: &State, body: &Value) -> Option<(&'static str, Value)> {
+    let title = body.get("title").and_then(Value::as_str)?;
+    s.rejected_titles.iter().any(|t| t == title).then(|| {
+        (
+            status_line(422),
+            json!({
+                "message": "Validation Failed",
+                "errors": [{
+                    "value": title,
+                    "resource": "Issue",
+                    "field": "title",
+                    "code": "invalid"
+                }],
+                "documentation_url": "https://docs.github.com/rest/issues/issues#create-an-issue",
+                "status": "422"
+            }),
+        )
+    })
+}
+
+/// The 422 an issue create/PATCH body earns, if any.
+fn item_rejection(s: &State, body: &Value) -> Option<(&'static str, Value)> {
+    assignee_rejection(s, body).or_else(|| title_rejection(s, body))
 }
 
 /// Map an HTTP status code to a status line for the fault-injection responses.
@@ -683,20 +855,10 @@ fn make_issue(
 /// sibling can win. If escargot's output dir ever diverged from the test binary's
 /// dir, a stale sibling could take precedence.
 fn plugin_dir() -> &'static Path {
-    static DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
-    DIR.get_or_init(|| {
-        let run = escargot::CargoBuild::new()
-            .package("clove-sync-github")
-            .bin("clove-sync-github")
-            // `CLOVE_GITHUB_RETRY_MS` (below) only exists in a `test-knobs` build.
-            .features("test-knobs")
-            .run()
-            .expect("build clove-sync-github plugin");
-        run.path()
-            .parent()
-            .expect("plugin binary has a parent dir")
-            .to_owned()
-    })
+    // `CLOVE_GITHUB_RETRY_MS` (below) only exists in a `test-knobs` build.
+    support::plugin("clove-sync-github", "clove-sync-github", "test-knobs")
+        .parent()
+        .expect("plugin binary has a parent dir")
 }
 
 fn clove(dir: &Path, addr: SocketAddr) -> Command {
@@ -741,6 +903,21 @@ fn sync(dir: &Path, addr: SocketAddr, extra: &[&str]) -> Value {
     let out = clove(dir, addr).args(&args).output().unwrap();
     assert!(out.status.success(), "sync failed: {out:?}");
     serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("bad json: {e}\n{out:?}"))
+}
+
+/// Move every recorded `local_updated` an hour into the past, so a local edit
+/// made next is strictly newer than the last sync regardless of the clock's
+/// resolution (instead of sleeping past a second boundary).
+fn backdate_sync_baseline(dir: &Path) {
+    let path = dir.join(".clove/sync/github/owner_repo.json");
+    let mut state: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    for entry in state["entries"].as_object_mut().unwrap().values_mut() {
+        let recorded =
+            chrono::DateTime::parse_from_rfc3339(entry["local_updated"].as_str().unwrap()).unwrap();
+        entry["local_updated"] = json!((recorded - chrono::Duration::hours(1))
+            .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true));
+    }
+    std::fs::write(&path, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
 }
 
 /// Run `clove sync github <repo>` allowing failure; returns the raw process output.
@@ -961,8 +1138,8 @@ fn push_update_applies_local_edit() {
     sync(dir.path(), mock.addr, &[]); // push-create gh-1
     let id = only_item_id(dir.path(), mock.addr);
 
-    // A new wall-clock second so the local `updated` strictly advances.
-    std::thread::sleep(Duration::from_millis(1100));
+    // Local edits must look newer than the last sync.
+    backdate_sync_baseline(dir.path());
     clove(dir.path(), mock.addr)
         .args(["set", &id, "title=Local edit"])
         .assert()
@@ -986,7 +1163,7 @@ fn conflict_newer_remote_wins() {
 
     // Edit BOTH sides since the last sync. The remote tick is in 2030 (always
     // newer than the local 2026 wall clock), so "newer" resolves to remote.
-    std::thread::sleep(Duration::from_millis(1100));
+    backdate_sync_baseline(dir.path());
     clove(dir.path(), mock.addr)
         .args(["set", &id, "title=Local change"])
         .assert()
@@ -1012,7 +1189,7 @@ fn conflict_prefer_local_pushes_local() {
     sync(dir.path(), mock.addr, &[]);
     let id = only_item_id(dir.path(), mock.addr);
 
-    std::thread::sleep(Duration::from_millis(1100));
+    backdate_sync_baseline(dir.path());
     clove(dir.path(), mock.addr)
         .args(["set", &id, "title=Local wins"])
         .assert()
@@ -1229,7 +1406,7 @@ fn push_preserves_human_added_assignee() {
     sync(dir.path(), mock.addr, &[]);
 
     // A local-only edit triggers a push. clove must keep bob, not reset to [alice].
-    std::thread::sleep(Duration::from_millis(1100));
+    backdate_sync_baseline(dir.path());
     clove(dir.path(), mock.addr)
         .args(["set", &id, "title=Renamed"])
         .assert()
@@ -1260,7 +1437,7 @@ fn push_preserves_not_planned_close_reason() {
 
     // A local-only edit (still closed) triggers a push. The push must preserve the
     // not_planned reason rather than resetting it to completed.
-    std::thread::sleep(Duration::from_millis(1100));
+    backdate_sync_baseline(dir.path());
     clove(dir.path(), mock.addr)
         .args(["set", &id, "title=Won't fix, renamed"])
         .assert()
@@ -1448,7 +1625,7 @@ fn unassign_locally_clears_the_github_assignee() {
     assert_eq!(mock.assignee_logins(1), vec!["alice".to_owned()]);
 
     // Unassign locally; the next push must clear the assignee on GitHub.
-    std::thread::sleep(Duration::from_millis(1100));
+    backdate_sync_baseline(dir.path());
     clove(dir.path(), mock.addr)
         .args(["assign", &id, "--clear"])
         .assert()
@@ -1533,7 +1710,7 @@ fn pull_update_preserves_local_in_progress() {
 
     // Mark it in_progress locally and sync so both sides are in sync again (the
     // GitHub issue stays "open" — there is no in_progress there).
-    std::thread::sleep(Duration::from_millis(1100));
+    backdate_sync_baseline(dir.path());
     clove(dir.path(), mock.addr)
         .args(["start", &id])
         .assert()
@@ -1676,7 +1853,7 @@ fn push_clears_last_local_label() {
     assert_eq!(mock.label_names(1), vec!["area:core".to_owned()]);
     let id = only_item_id(dir.path(), mock.addr);
 
-    std::thread::sleep(Duration::from_millis(1100));
+    backdate_sync_baseline(dir.path());
     clove(dir.path(), mock.addr)
         .args(["label", &id, "rm", "area:core"])
         .assert()
@@ -1727,7 +1904,7 @@ fn idempotent_update_is_not_retried_on_4xx() {
         .success();
     sync(dir.path(), mock.addr, &[]); // push-create gh-1 (open → no PATCH)
     let id = only_item_id(dir.path(), mock.addr);
-    std::thread::sleep(Duration::from_millis(1100));
+    backdate_sync_baseline(dir.path());
     clove(dir.path(), mock.addr)
         .args(["set", &id, "title=Renamed"])
         .assert()
@@ -1755,7 +1932,7 @@ fn idempotent_update_retries_transient_5xx() {
         .success();
     sync(dir.path(), mock.addr, &[]); // push-create gh-1
     let id = only_item_id(dir.path(), mock.addr);
-    std::thread::sleep(Duration::from_millis(1100));
+    backdate_sync_baseline(dir.path());
     clove(dir.path(), mock.addr)
         .args(["set", &id, "title=Renamed"])
         .assert()
@@ -1816,7 +1993,7 @@ fn manual_skipped_conflict_does_not_restamp_assignee() {
     assert_eq!(mock.assignee_logins(1), vec!["alice".to_owned()]);
 
     // Reassign locally to bob AND change the issue remotely → a both-sides conflict.
-    std::thread::sleep(Duration::from_millis(1100));
+    backdate_sync_baseline(dir.path());
     clove(dir.path(), mock.addr)
         .args(["assign", &id, "bob"])
         .assert()
@@ -1953,11 +2130,47 @@ fn a_pulled_item_carries_canonical_timestamps() {
     }
 }
 
-/// A GitHub rejection must say why (status, GitHub's message, the offending
-/// field) and which item and operation it hit — not the bare `GitHub` octocrab's
-/// `Display` gives.
+/// An assignee GitHub refuses (not a user) must not sink the push: the issue is
+/// created without it and the run warns instead of aborting.
 #[test]
-fn rejected_assignee_update_names_the_reason_and_the_item() {
+fn rejected_assignee_on_create_is_dropped_with_a_warning() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    mock.reject_assignee("dogfood-tui");
+    clove(dir.path(), mock.addr)
+        .args(["new", "Bad assignee", "--assignee", "dogfood-tui"])
+        .assert()
+        .success();
+    clove(dir.path(), mock.addr)
+        .args(["new", "Good item"])
+        .assert()
+        .success();
+
+    let out = sync_raw(dir.path(), mock.addr, &[]);
+    assert!(out.status.success(), "{out:?}");
+    let envelope: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(envelope["data"]["pushed_created"], 2, "{envelope}");
+    assert_eq!(envelope["data"]["skipped"], json!([]), "{envelope}");
+    let warnings = envelope["_meta"]["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1, "{envelope}");
+    let warning = warnings[0].as_str().unwrap();
+    assert!(warning.contains("dogfood-tui"), "{warning}");
+
+    assert_eq!(mock.issue_count(), 2);
+    for number in [1, 2] {
+        assert!(mock.assignee_logins(number).is_empty());
+    }
+    assert_eq!(
+        sync(dir.path(), mock.addr, &[])["data"]["pushed_created"],
+        0,
+        "both items are linked"
+    );
+}
+
+/// The update path retries without the refused assignee but keeps the human
+/// assignees GitHub already has.
+#[test]
+fn rejected_assignee_on_update_is_dropped_and_extras_kept() {
     let mock = MockGitHub::start();
     let dir = init_repo();
     clove(dir.path(), mock.addr)
@@ -1966,68 +2179,645 @@ fn rejected_assignee_update_names_the_reason_and_the_item() {
         .success();
     sync(dir.path(), mock.addr, &[]); // push-create gh-1
     let id = only_item_id(dir.path(), mock.addr);
+    mock.set_assignees(1, &["octocat"]);
 
     mock.reject_assignee("dogfood-tui");
-    std::thread::sleep(Duration::from_millis(1100));
+    backdate_sync_baseline(dir.path());
     clove(dir.path(), mock.addr)
         .args(["assign", &id, "dogfood-tui"])
         .assert()
         .success();
 
+    let out = sync_raw(dir.path(), mock.addr, &[]);
+    assert!(out.status.success(), "{out:?}");
+    let envelope: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(envelope["data"]["pushed_updated"], 1, "{envelope}");
+    assert_eq!(envelope["data"]["skipped"], json!([]), "{envelope}");
+    let warning = envelope["_meta"]["warnings"][0].as_str().unwrap();
+    for needle in ["dogfood-tui", "#1", id.as_str()] {
+        assert!(warning.contains(needle), "missing `{needle}` in: {warning}");
+    }
+    assert_eq!(mock.assignee_logins(1), vec!["octocat".to_owned()]);
+}
+
+/// A rejection that is not about assignees skips that one item: the good item is
+/// pushed, the bad one is reported (naming GitHub's reason), the run exits 5, and
+/// the bad one is retried — not forgotten — on the next run.
+#[test]
+fn a_rejected_item_is_skipped_and_retried_next_run() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    mock.reject_title("Bad title");
+    clove(dir.path(), mock.addr)
+        .args(["new", "Bad title"])
+        .assert()
+        .success();
+    clove(dir.path(), mock.addr)
+        .args(["new", "Good title"])
+        .assert()
+        .success();
+
+    let out = sync_raw(dir.path(), mock.addr, &[]);
+    assert_eq!(out.status.code(), Some(5), "{out:?}");
+    let envelope: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(envelope["ok"], true, "{envelope}");
+    assert_eq!(envelope["data"]["pushed_created"], 1, "{envelope}");
+    let skipped = envelope["data"]["skipped"].as_array().unwrap();
+    assert_eq!(skipped.len(), 1, "{envelope}");
+    let reason = skipped[0]["reason"].as_str().unwrap();
+    for needle in ["422", "Validation Failed", "title: invalid", "create"] {
+        assert!(reason.contains(needle), "missing `{needle}` in: {reason}");
+    }
+    assert!(skipped[0]["external_ref"].is_null(), "{envelope}");
+    let warning = envelope["_meta"]["warnings"][0].as_str().unwrap();
+    assert!(
+        warning.contains(skipped[0]["clove_id"].as_str().unwrap()),
+        "{warning}"
+    );
+
+    assert_eq!(mock.issue_count(), 1);
+    assert_eq!(mock.issue(1).unwrap()["title"], "Good title");
     let human = clove(dir.path(), mock.addr)
         .args(["sync", "github", "owner/repo"])
         .output()
         .unwrap();
     assert_eq!(human.status.code(), Some(5), "{human:?}");
     let stderr = String::from_utf8_lossy(&human.stderr);
-    for needle in [
-        "422",
-        "Validation Failed",
-        "assignees: invalid",
-        "dogfood-tui",
-        "update",
-        "#1",
-        "gh-1",
-        id.as_str(),
-    ] {
-        assert!(stderr.contains(needle), "missing `{needle}` in: {stderr}");
+    assert!(stderr.contains("warning: skipped"), "{stderr}");
+    assert!(stderr.contains("title: invalid"), "{stderr}");
+
+    mock.accept_title("Bad title");
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["pushed_created"], 1, "{v}");
+    assert_eq!(v["data"]["skipped"], json!([]), "{v}");
+    assert_eq!(mock.issue_count(), 2, "the good item was not re-created");
+}
+
+/// The same holds on update, and the skipped item's fingerprint stays stale so
+/// the push is retried once GitHub accepts it.
+#[test]
+fn a_rejected_update_is_skipped_and_the_other_update_lands() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    for title in ["First", "Second"] {
+        clove(dir.path(), mock.addr)
+            .args(["new", title])
+            .assert()
+            .success();
     }
-    assert!(
-        !stderr.contains("io error at"),
-        "a GitHub rejection is not a filesystem error: {stderr}"
-    );
+    sync(dir.path(), mock.addr, &[]);
+
+    mock.reject_title("First renamed");
+    backdate_sync_baseline(dir.path());
+    for (old, new) in [("First", "First renamed"), ("Second", "Second renamed")] {
+        let list = clove(dir.path(), mock.addr)
+            .args(["ls", "--format", "json"])
+            .output()
+            .unwrap();
+        let list: Value = serde_json::from_slice(&list.stdout).unwrap();
+        let id = list["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["title"] == old)
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        clove(dir.path(), mock.addr)
+            .args(["edit", &id, "--field", &format!("title={new}")])
+            .assert()
+            .success();
+    }
 
     let out = sync_raw(dir.path(), mock.addr, &[]);
     assert_eq!(out.status.code(), Some(5), "{out:?}");
     let envelope: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(envelope["error"]["code"], "IO_ERROR", "{envelope}");
-    let message = envelope["error"]["message"].as_str().unwrap();
-    for needle in ["422", "Validation Failed", "assignees: invalid", "gh-1"] {
-        assert!(message.contains(needle), "missing `{needle}` in: {message}");
-    }
-    assert!(message.contains(&id), "missing the item id in: {message}");
+    assert_eq!(envelope["data"]["pushed_updated"], 1, "{envelope}");
+    // Items created in the same second get issue numbers in either order.
+    let number_of = |title: &str| {
+        (1..=2)
+            .find(|n| mock.issue(*n).unwrap()["title"] == title)
+            .unwrap()
+    };
+    let first = number_of("First");
+    assert_eq!(
+        envelope["data"]["skipped"][0]["external_ref"],
+        format!("gh-{first}")
+    );
+    assert_eq!(mock.issue(3 - first).unwrap()["title"], "Second renamed");
+
+    mock.accept_title("First renamed");
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["pushed_updated"], 1, "{v}");
+    assert_eq!(mock.issue(first).unwrap()["title"], "First renamed");
 }
 
-/// The create path names the local item it was creating an issue for.
+/// Auth and server failures are not about one item and still abort the run.
 #[test]
-fn rejected_assignee_create_names_the_local_item() {
+fn a_server_error_still_aborts_the_run() {
     let mock = MockGitHub::start();
     let dir = init_repo();
-    mock.reject_assignee("dogfood-tui");
     clove(dir.path(), mock.addr)
-        .args(["new", "Task", "--type", "bug", "--assignee", "dogfood-tui"])
+        .args(["new", "Task"])
         .assert()
         .success();
+    sync(dir.path(), mock.addr, &[]);
     let id = only_item_id(dir.path(), mock.addr);
+    backdate_sync_baseline(dir.path());
+    clove(dir.path(), mock.addr)
+        .args(["edit", &id, "--field", "title=Renamed"])
+        .assert()
+        .success();
+    mock.set_patch_fail_status(Some(500));
 
-    let out = clove(dir.path(), mock.addr)
+    let out = sync_raw(dir.path(), mock.addr, &[]);
+    assert_eq!(out.status.code(), Some(5), "{out:?}");
+    let envelope: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(envelope["ok"], false, "{envelope}");
+}
+
+// ---------------------------------------------------------------------------
+// Comment edits and deletions
+// ---------------------------------------------------------------------------
+
+/// Issue 5 with two comments, both synced and linked: "remote one" came from
+/// GitHub, "local one" from clove. Returns the mock, repo, and local item id.
+fn linked_comment_pair() -> (MockGitHub, TempDir, String) {
+    let mock = MockGitHub::start();
+    mock.seed(5, "Issue", "Body.", "open");
+    mock.seed_comment(5, "octocat", "remote one");
+    let dir = init_repo();
+    sync(dir.path(), mock.addr, &[]);
+    let id = only_item_id(dir.path(), mock.addr);
+    clove(dir.path(), mock.addr)
+        .args(["comment", &id, "local one"])
+        .assert()
+        .success();
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["comments_pushed"], 1, "{v}");
+    assert_eq!(mock.comment_bodies(5).len(), 2);
+    (mock, dir, id)
+}
+
+/// The comment file of item `id` whose body is exactly `body`.
+fn local_comment_file(dir: &Path, id: &str, body: &str) -> std::path::PathBuf {
+    let comments = dir.join(".clove/issues").join(id).join("comments");
+    std::fs::read_dir(comments)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| std::fs::read_to_string(path).is_ok_and(|text| text == body))
+        .unwrap_or_else(|| panic!("no local comment with body `{body}`"))
+}
+
+fn edit_local_comment(dir: &Path, id: &str, old_body: &str, new_body: &str) {
+    std::fs::write(local_comment_file(dir, id, old_body), new_body).unwrap();
+}
+
+fn delete_local_comment(dir: &Path, id: &str, body: &str) {
+    std::fs::remove_file(local_comment_file(dir, id, body)).unwrap();
+}
+
+fn sorted(mut bodies: Vec<String>) -> Vec<String> {
+    bodies.sort();
+    bodies
+}
+
+fn sync_state_file(dir: &Path) -> std::path::PathBuf {
+    dir.join(".clove/sync/github/owner_repo.json")
+}
+
+#[test]
+fn a_comment_edited_on_github_is_updated_locally() {
+    let (mock, dir, id) = linked_comment_pair();
+    mock.edit_comment(5, "remote one", "remote edited");
+
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["comments_updated_local"], 1, "{v}");
+    assert_eq!(v["data"]["comments_pulled"], 0, "{v}");
+    assert_eq!(v["data"]["comments_pushed"], 0, "{v}");
+    assert_eq!(
+        sorted(local_comment_bodies(dir.path(), mock.addr, &id)),
+        ["local one", "remote edited"],
+        "edited in place, not duplicated"
+    );
+    assert_eq!(mock.comment_bodies(5).len(), 2);
+
+    // The write is settled: the next sync neither re-fetches the thread nor
+    // writes anything.
+    let gets = mock.comment_get_count();
+    let again = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(again["data"]["comments_updated_local"], 0, "{again}");
+    assert_eq!(mock.comment_get_count(), gets, "idle thread re-fetched");
+}
+
+#[test]
+fn a_comment_edited_locally_is_patched_on_github_in_place() {
+    let (mock, dir, id) = linked_comment_pair();
+    edit_local_comment(dir.path(), &id, "local one", "local edited");
+
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["comments_updated_remote"], 1, "{v}");
+    assert_eq!(
+        v["data"]["comments_pushed"], 0,
+        "an edit is not a new comment"
+    );
+    assert_eq!(
+        sorted(mock.comment_bodies(5)),
+        ["local edited", "remote one"],
+        "the old GitHub comment was edited, not left behind"
+    );
+    assert_eq!(mock.comment_patch_count(), 1);
+    assert_eq!(local_comment_bodies(dir.path(), mock.addr, &id).len(), 2);
+
+    let gets = mock.comment_get_count();
+    let again = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(again["data"]["comments_updated_remote"], 0, "{again}");
+    assert_eq!(mock.comment_patch_count(), 1);
+    assert_eq!(mock.comment_get_count(), gets, "idle thread re-fetched");
+}
+
+#[test]
+fn a_comment_edited_on_both_sides_follows_prefer() {
+    let (mock, dir, id) = linked_comment_pair();
+    mock.edit_comment(5, "remote one", "gh v2");
+    edit_local_comment(dir.path(), &id, "remote one", "local v2");
+
+    // Manual: neither side is touched, and the conflict is reported every run.
+    for _ in 0..2 {
+        let v = sync(dir.path(), mock.addr, &["--prefer", "manual"]);
+        let conflicts = v["data"]["comments"]["conflicts"].as_array().unwrap();
+        assert_eq!(conflicts.len(), 1, "{v}");
+        assert_eq!(conflicts[0]["resolution"], "skipped", "{v}");
+        assert_eq!(mock.comment_patch_count(), 0);
+        assert!(mock.comment_bodies(5).contains(&"gh v2".to_owned()));
+        assert!(local_comment_bodies(dir.path(), mock.addr, &id).contains(&"local v2".to_owned()));
+    }
+
+    let v = sync(dir.path(), mock.addr, &["--prefer", "local"]);
+    assert_eq!(
+        v["data"]["comments"]["conflicts"][0]["resolution"], "local_wins",
+        "{v}"
+    );
+    assert_eq!(sorted(mock.comment_bodies(5)), ["local one", "local v2"]);
+
+    mock.edit_comment(5, "local v2", "gh v3");
+    edit_local_comment(dir.path(), &id, "local v2", "local v3");
+    let v = sync(dir.path(), mock.addr, &["--prefer", "remote"]);
+    assert_eq!(
+        v["data"]["comments"]["conflicts"][0]["resolution"], "remote_wins",
+        "{v}"
+    );
+    assert_eq!(
+        sorted(local_comment_bodies(dir.path(), mock.addr, &id)),
+        ["gh v3", "local one"]
+    );
+    assert_eq!(sorted(mock.comment_bodies(5)), ["gh v3", "local one"]);
+}
+
+#[test]
+fn a_comment_deleted_on_github_is_deleted_locally() {
+    let (mock, dir, id) = linked_comment_pair();
+    mock.delete_comment(5, "local one");
+
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["comments_deleted_local"], 1, "{v}");
+    assert_eq!(v["data"]["comments_deleted_remote"], 0, "{v}");
+    assert_eq!(
+        v["data"]["comments_pushed"], 0,
+        "a deletion is not re-pushed"
+    );
+    let listed = v["data"]["comments"]["delete_local"].as_array().unwrap();
+    assert_eq!(listed.len(), 1, "{v}");
+    assert_eq!(listed[0]["clove_id"], id.as_str(), "{v}");
+    assert_eq!(listed[0]["external_ref"], "gh-5", "{v}");
+    assert_eq!(listed[0]["preview"], "local one", "{v}");
+    assert_eq!(
+        local_comment_bodies(dir.path(), mock.addr, &id),
+        ["remote one"]
+    );
+    assert_eq!(mock.comment_bodies(5), ["remote one"]);
+
+    let again = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(again["data"]["comments_deleted_local"], 0, "{again}");
+    assert_eq!(again["data"]["comments_pulled"], 0, "{again}");
+}
+
+#[test]
+fn a_comment_deleted_locally_is_deleted_on_github() {
+    let (mock, dir, id) = linked_comment_pair();
+    delete_local_comment(dir.path(), &id, "remote one");
+
+    let v = sync(dir.path(), mock.addr, &["--delete-remote-comments"]);
+    assert_eq!(v["data"]["comments_deleted_remote"], 1, "{v}");
+    assert_eq!(
+        v["data"]["comments_pulled"], 0,
+        "a deletion is not re-pulled"
+    );
+    let listed = v["data"]["comments"]["delete_remote"].as_array().unwrap();
+    assert_eq!(listed[0]["preview"], "remote one", "{v}");
+    assert_eq!(mock.comment_delete_count(), 1);
+    assert_eq!(mock.comment_bodies(5), ["local one"]);
+    assert_eq!(
+        local_comment_bodies(dir.path(), mock.addr, &id),
+        ["local one"]
+    );
+
+    let again = sync(dir.path(), mock.addr, &["--delete-remote-comments"]);
+    assert_eq!(again["data"]["comments_deleted_remote"], 0, "{again}");
+    assert_eq!(mock.comment_delete_count(), 1);
+}
+
+#[test]
+fn a_local_comment_deletion_is_not_propagated_to_github_without_the_flag() {
+    let (mock, dir, id) = linked_comment_pair();
+    delete_local_comment(dir.path(), &id, "remote one");
+
+    // Reported as pending, in the plan and in the run; never deleted or re-pulled.
+    for extra in [&["--dry-run"][..], &[][..], &[][..]] {
+        let v = sync(dir.path(), mock.addr, extra);
+        let comments = &v["data"]["comments"];
+        let pending = comments["pending_remote_delete"].as_array().unwrap();
+        assert_eq!(pending.len(), 1, "{v}");
+        assert_eq!(pending[0]["clove_id"], id.as_str(), "{v}");
+        assert_eq!(pending[0]["external_ref"], "gh-5", "{v}");
+        assert_eq!(pending[0]["preview"], "remote one", "{v}");
+        assert!(comments["delete_remote"].as_array().unwrap().is_empty());
+        assert_eq!(comments["pull"], 0, "{v}");
+    }
+    let human = clove(dir.path(), mock.addr)
         .args(["sync", "github", "owner/repo"])
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(5), "{out:?}");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    for needle in ["422", "assignees: invalid", "create", id.as_str()] {
-        assert!(stderr.contains(needle), "missing `{needle}` in: {stderr}");
+    let stdout = String::from_utf8_lossy(&human.stdout);
+    assert!(
+        stdout.contains("1 local comment deletion(s) not propagated to GitHub; re-run with --delete-remote-comments"),
+        "{stdout}"
+    );
+    assert_eq!(mock.comment_delete_count(), 0);
+    assert_eq!(sorted(mock.comment_bodies(5)), ["local one", "remote one"]);
+    assert_eq!(
+        local_comment_bodies(dir.path(), mock.addr, &id),
+        ["local one"],
+        "not re-pulled as a new local file"
+    );
+
+    // Opting in later deletes it on GitHub.
+    let v = sync(dir.path(), mock.addr, &["--delete-remote-comments"]);
+    assert_eq!(v["data"]["comments_deleted_remote"], 1, "{v}");
+    assert_eq!(mock.comment_bodies(5), ["local one"]);
+}
+
+#[test]
+fn a_comment_file_that_goes_away_and_returns_changes_nothing() {
+    // Switching to a branch without the comment, and back.
+    let (mock, dir, id) = linked_comment_pair();
+    let file = local_comment_file(dir.path(), &id, "remote one");
+    let content = std::fs::read(&file).unwrap();
+    std::fs::remove_file(&file).unwrap();
+
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["comments_pulled"], 0, "{v}");
+    assert_eq!(mock.comment_delete_count(), 0);
+
+    std::fs::write(&file, content).unwrap();
+    let v = sync(dir.path(), mock.addr, &["--delete-remote-comments"]);
+    for counter in [
+        "comments_pulled",
+        "comments_pushed",
+        "comments_updated_local",
+        "comments_updated_remote",
+        "comments_deleted_local",
+        "comments_deleted_remote",
+        "comments_pending_remote_delete",
+    ] {
+        assert_eq!(v["data"][counter], 0, "{counter}: {v}");
     }
-    assert_eq!(mock.issue_count(), 0, "the rejected create made no issue");
+    assert_eq!(mock.comment_delete_count(), 0);
+    assert_eq!(sorted(mock.comment_bodies(5)), ["local one", "remote one"]);
+    assert_eq!(
+        sorted(local_comment_bodies(dir.path(), mock.addr, &id)),
+        ["local one", "remote one"]
+    );
+}
+
+#[test]
+fn an_edited_comment_is_never_deleted_by_the_other_sides_deletion() {
+    let (mock, dir, id) = linked_comment_pair();
+    // Deleted on GitHub but edited here; deleted here but edited on GitHub.
+    mock.delete_comment(5, "remote one");
+    edit_local_comment(dir.path(), &id, "remote one", "kept locally");
+    delete_local_comment(dir.path(), &id, "local one");
+    mock.edit_comment(5, "local one", "kept on github");
+
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["comments_deleted_local"], 0, "{v}");
+    assert_eq!(v["data"]["comments_deleted_remote"], 0, "{v}");
+    assert_eq!(v["data"]["comments_pushed"], 1, "{v}");
+    assert_eq!(v["data"]["comments_pulled"], 1, "{v}");
+    assert_eq!(mock.comment_delete_count(), 0);
+    let expected = ["kept locally", "kept on github"];
+    assert_eq!(sorted(mock.comment_bodies(5)), expected);
+    assert_eq!(
+        sorted(local_comment_bodies(dir.path(), mock.addr, &id)),
+        expected
+    );
+
+    let again = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(again["data"]["comments_pushed"], 0, "{again}");
+    assert_eq!(again["data"]["comments_pulled"], 0, "{again}");
+}
+
+#[test]
+fn dry_run_lists_every_comment_deletion_and_writes_nothing() {
+    let (mock, dir, id) = linked_comment_pair();
+    mock.delete_comment(5, "remote one");
+    delete_local_comment(dir.path(), &id, "local one");
+
+    let out = sync_raw(
+        dir.path(),
+        mock.addr,
+        &["--dry-run", "--delete-remote-comments"],
+    );
+    assert!(out.status.success(), "{out:?}");
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let comments = &v["data"]["comments"];
+    assert_eq!(comments["delete_local"][0]["preview"], "remote one", "{v}");
+    assert_eq!(comments["delete_local"][0]["clove_id"], id.as_str(), "{v}");
+    assert_eq!(comments["delete_remote"][0]["preview"], "local one", "{v}");
+    assert_eq!(comments["delete_remote"][0]["external_ref"], "gh-5", "{v}");
+
+    let human = clove(dir.path(), mock.addr)
+        .args([
+            "sync",
+            "github",
+            "owner/repo",
+            "--dry-run",
+            "--delete-remote-comments",
+        ])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&human.stdout);
+    assert!(stdout.contains("would delete local comment"), "{stdout}");
+    assert!(stdout.contains("would delete GitHub comment"), "{stdout}");
+
+    assert_eq!(mock.comment_delete_count(), 0, "dry-run deleted on GitHub");
+    assert_eq!(mock.comment_bodies(5), ["local one"]);
+    assert_eq!(
+        local_comment_bodies(dir.path(), mock.addr, &id),
+        ["remote one"]
+    );
+
+    // The real run does exactly what the plan listed.
+    let v = sync(dir.path(), mock.addr, &["--delete-remote-comments"]);
+    assert_eq!(v["data"]["comments_deleted_local"], 1, "{v}");
+    assert_eq!(v["data"]["comments_deleted_remote"], 1, "{v}");
+    assert!(mock.comment_bodies(5).is_empty());
+    assert!(local_comment_bodies(dir.path(), mock.addr, &id).is_empty());
+}
+
+#[test]
+fn no_comments_flag_disables_edit_and_delete_propagation() {
+    let (mock, dir, id) = linked_comment_pair();
+    mock.edit_comment(5, "remote one", "remote edited");
+    mock.delete_comment(5, "local one");
+    edit_local_comment(dir.path(), &id, "remote one", "local edited");
+
+    let v = sync(dir.path(), mock.addr, &["--no-comments"]);
+    assert_eq!(v["data"]["comments_updated_local"], 0, "{v}");
+    assert_eq!(v["data"]["comments_deleted_local"], 0, "{v}");
+    assert_eq!(
+        sorted(local_comment_bodies(dir.path(), mock.addr, &id)),
+        ["local edited", "local one"]
+    );
+    assert_eq!(mock.comment_bodies(5), ["remote edited"]);
+    assert_eq!(mock.comment_patch_count() + mock.comment_delete_count(), 0);
+
+    let dry = sync(dir.path(), mock.addr, &["--no-comments", "--dry-run"]);
+    assert!(dry["data"].get("comments").is_none(), "{dry}");
+}
+
+#[test]
+fn a_0_1_x_state_neither_duplicates_nor_repushes_and_then_tracks_edits() {
+    let (mock, dir, id) = linked_comment_pair();
+
+    // Rewrite the state the way 0.1.x wrote it: GitHub ids and body hashes, no
+    // links and no comment-check bookmark.
+    let path = sync_state_file(dir.path());
+    let mut state: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    state.as_object_mut().unwrap().remove("comments_checked_at");
+    let entry = state["entries"]["gh-5"].as_object_mut().unwrap();
+    let links = entry.remove("comment_links").expect("links were recorded");
+    let links = links.as_array().unwrap().clone();
+    entry.remove("synced_gh_comments");
+    entry.remove("synced_local_comments");
+    entry.insert(
+        "gh_comment_ids".into(),
+        json!(links.iter().map(|l| l["gh_id"].clone()).collect::<Vec<_>>()),
+    );
+    entry.insert(
+        "local_comment_hashes".into(),
+        json!(links
+            .iter()
+            .map(|l| l["base_hash"].clone())
+            .collect::<Vec<_>>()),
+    );
+    std::fs::write(&path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+
+    let v = sync(dir.path(), mock.addr, &[]);
+    for counter in [
+        "comments_pulled",
+        "comments_pushed",
+        "comments_updated_local",
+        "comments_updated_remote",
+        "comments_deleted_local",
+        "comments_deleted_remote",
+    ] {
+        assert_eq!(v["data"][counter], 0, "{counter}: {v}");
+    }
+    assert_eq!(
+        mock.comment_bodies(5).len(),
+        2,
+        "no duplicate GitHub comments"
+    );
+    assert_eq!(local_comment_bodies(dir.path(), mock.addr, &id).len(), 2);
+
+    // The pairs were adopted, so edits now propagate.
+    let upgraded: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(
+        upgraded["entries"]["gh-5"]["comment_links"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    mock.edit_comment(5, "local one", "edited after upgrade");
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["comments_updated_local"], 1, "{v}");
+    assert_eq!(
+        sorted(local_comment_bodies(dir.path(), mock.addr, &id)),
+        ["edited after upgrade", "remote one"]
+    );
+}
+
+#[test]
+fn a_lost_state_readopts_identical_comments_instead_of_duplicating_them() {
+    let (mock, dir, id) = linked_comment_pair();
+    std::fs::remove_file(sync_state_file(dir.path())).unwrap();
+
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["comments_pulled"], 0, "{v}");
+    assert_eq!(v["data"]["comments_pushed"], 0, "{v}");
+    assert_eq!(mock.comment_bodies(5).len(), 2);
+    assert_eq!(local_comment_bodies(dir.path(), mock.addr, &id).len(), 2);
+
+    edit_local_comment(dir.path(), &id, "local one", "edited after re-adoption");
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["comments_updated_remote"], 1, "{v}");
+    assert_eq!(
+        sorted(mock.comment_bodies(5)),
+        ["edited after re-adoption", "remote one"]
+    );
+}
+
+#[test]
+fn a_rejected_comment_write_is_skipped_and_retried_next_run() {
+    let (mock, dir, id) = linked_comment_pair();
+    edit_local_comment(dir.path(), &id, "local one", "local edited");
+    delete_local_comment(dir.path(), &id, "remote one");
+    mock.set_comment_write_fail_status(Some(422));
+
+    let out = sync_raw(dir.path(), mock.addr, &["--delete-remote-comments"]);
+    assert_eq!(out.status.code(), Some(5), "{out:?}");
+    let envelope: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(envelope["ok"], true, "{envelope}");
+    let skipped = envelope["data"]["skipped"].as_array().unwrap();
+    assert_eq!(skipped.len(), 2, "{envelope}");
+    assert!(
+        skipped.iter().all(|s| s["external_ref"] == "gh-5"),
+        "{envelope}"
+    );
+    let reasons: Vec<&str> = skipped
+        .iter()
+        .filter_map(|s| s["reason"].as_str())
+        .collect();
+    assert!(
+        reasons
+            .iter()
+            .any(|r| r.contains("comment edit") && r.contains("422")),
+        "{reasons:?}"
+    );
+    assert!(
+        reasons
+            .iter()
+            .any(|r| r.contains("comment delete") && r.contains("422")),
+        "{reasons:?}"
+    );
+    assert_eq!(sorted(mock.comment_bodies(5)), ["local one", "remote one"]);
+
+    mock.set_comment_write_fail_status(None);
+    let v = sync(dir.path(), mock.addr, &["--delete-remote-comments"]);
+    assert_eq!(v["data"]["comments_updated_remote"], 1, "{v}");
+    assert_eq!(v["data"]["comments_deleted_remote"], 1, "{v}");
+    assert_eq!(mock.comment_bodies(5), ["local edited"]);
 }

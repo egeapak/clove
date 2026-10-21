@@ -2,7 +2,7 @@
 
 The owner-only steps to cut a clove release: publish the workspace to crates.io
 **and** ship pre-built binaries via a GitHub Release + Homebrew tap. Tracks
-issue **#22**.
+issue **#105**.
 
 Publishing is a **one-way, mostly-irreversible** action (a version can be
 *yanked* but never re-uploaded, and a name, once taken, is yours forever). Read
@@ -315,18 +315,25 @@ Then check the two registry behaviours `clove plugin` depends on
 #    `clove plugin list` reads exactly this endpoint.
 curl -s -A "$UA" \
   "https://crates.io/api/v1/crates/clove-plugin/reverse_dependencies?per_page=100" \
-  | grep -o '"name":"clove-[a-z-]*"' | sort -u
+  | jq -r '[.versions[].crate] | unique[]'
 #    expect clove-sync-github, clove-import-tk, clove-import-beads
 #    (propagation is not instant — if they are missing, wait a few minutes
 #     and re-run before concluding anything is wrong)
 
 # 3. End-to-end install through the shipped command, in a throwaway root.
+#    `install` (correctly) refuses to shadow a clove-sync-github already on the
+#    plugin search path, so run a copy of clove from an empty dir with
+#    ~/.cargo/bin off PATH.
 export CLOVE_HOME="$(mktemp -d)"
-clove plugin list                       # should show the three, marked available
-clove plugin install sync-github --yes
-clove sync github --help                # dispatch resolves to the installed binary
-clove plugin uninstall sync-github
-rm -rf "$CLOVE_HOME"
+bin=$(mktemp -d) && cp "$(command -v clove)" "$bin/"
+(
+  PATH="$bin:$(printf %s "$PATH" | tr : '\n' | grep -v '/\.cargo/bin$' | paste -sd: -)"
+  clove plugin list                     # should show the three, marked available
+  clove plugin install sync-github --yes
+  clove sync github --help              # dispatch resolves to the installed binary
+  clove plugin uninstall sync-github
+)
+rm -rf "$CLOVE_HOME" "$bin"
 
 # 4. The web feature: the default install has no web server; --features web
 #    fetches the UI from the GitHub Release and serves it.

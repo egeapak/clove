@@ -4,6 +4,7 @@
 //! [`clove_web::AppState`] from the discovered repo, starts a file-watcher (unless
 //! `--no-watch`) for real-time push, and serves the embedded SPA + JSON/WebSocket
 //! API until interrupted.
+#![deny(clippy::print_stderr)] // status lines go through `status!`
 
 use std::net::{IpAddr, SocketAddr};
 
@@ -51,7 +52,7 @@ pub fn run(
                 match status.web_addr.zip(status.web_url) {
                     Some((addr, url)) if serves_requested(&addr, ip, args.port) => {
                         if !quiet {
-                            eprintln!("clove web UI served by the running daemon: {url}");
+                            status!("clove web UI served by the running daemon: {url}");
                         }
                         if args.open {
                             open_browser(&url);
@@ -59,7 +60,7 @@ pub fn run(
                         return Ok(());
                     }
                     Some(_) => {}
-                    None if !quiet => eprintln!(
+                    None if !quiet => status!(
                         "note: the running daemon is not serving the web UI; \
                          starting a standalone server"
                     ),
@@ -70,7 +71,7 @@ pub fn run(
     }
 
     if !ip.is_loopback() && !quiet {
-        eprintln!(
+        status!(
             "warning: serving on a non-loopback address ({ip}) exposes write access \
              with no authentication; use only on a trusted network"
         );
@@ -109,16 +110,16 @@ pub fn run(
         let url = format!("http://{}", listener.local_addr()?);
         if !quiet {
             if args.port.is_none() && listener.local_addr()?.port() != requested.port() {
-                eprintln!(
+                status!(
                     "note: port {} is in use; using a free port",
                     requested.port()
                 );
             }
-            eprintln!("clove web UI: {url}");
+            status!("clove web UI: {url}");
             if args.no_watch {
-                eprintln!("  (file-watcher disabled — no live updates)");
+                status!("  (file-watcher disabled — no live updates)");
             }
-            eprintln!("  press Ctrl-C to stop");
+            status!("  press Ctrl-C to stop");
         }
         if args.open {
             open_browser(&url);

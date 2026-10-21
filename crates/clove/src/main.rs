@@ -6,12 +6,24 @@
 //! each subcommand under [`cmd`].
 #![deny(clippy::print_stdout)] // print via `outln!`/`out!` (see `clove_plugin::stdout`)
 
+/// `eprintln!` for a long-running process's status lines: if whoever read our
+/// stderr has gone away (`clove serve 2>&1 | head -1`), the write fails and is
+/// dropped instead of panicking and taking the server down with it.
+#[cfg(feature = "web")]
+macro_rules! status {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), $($arg)*);
+    }};
+}
+
 mod cli;
 mod clove_home;
 mod cmd;
 mod context;
 mod exit;
 mod item_json;
+mod knobs;
 mod mux_help;
 mod output;
 mod plugin;
@@ -293,6 +305,7 @@ fn run_repo(
         }
         Commands::Label(a) => cmd::label::run(ctx, f, &a.id, &a.action, &a.label).map(|_| ok),
         Commands::Assign(a) => cmd::assign::run(ctx, f, &a.id, a.assignee, a.clear).map(|_| ok),
+        Commands::Parent(a) => cmd::parent::run(ctx, f, &a.id, a.parent, a.clear).map(|_| ok),
         Commands::Priority(a) => cmd::priority::run(ctx, f, &a.id, a.priority).map(|_| ok),
         Commands::Dep(a) => cmd::dep::run(ctx, f, a.action, no_index),
         Commands::Ready(a) => cmd::ready::run(ctx, f, a, quiet, no_index, deep).map(|_| ok),

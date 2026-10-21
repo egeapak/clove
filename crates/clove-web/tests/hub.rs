@@ -7,6 +7,10 @@ use clove_types::{ItemType, Priority};
 use clove_web::{AppState, HubWeb};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+/// How long a read may take before the test calls it a hang; reads end on the
+/// reply or close they wait for, never on this.
+const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// A repo at `<parent>/<name>` holding one item titled `title`.
 fn repo(parent: &Utf8Path, name: &str, title: &str) -> (Utf8PathBuf, AppState) {
     let root = parent.join(name);
@@ -386,7 +390,7 @@ async fn the_event_socket_upgrades_through_the_prefix() {
     );
     stream.write_all(req.as_bytes()).await.unwrap();
     let mut buf = [0u8; 512];
-    let n = tokio::time::timeout(std::time::Duration::from_secs(5), stream.read(&mut buf))
+    let n = tokio::time::timeout(HANG_GUARD, stream.read(&mut buf))
         .await
         .expect("handshake reply")
         .unwrap();
@@ -483,7 +487,7 @@ async fn ws_connect(
     );
     stream.write_all(req.as_bytes()).await.unwrap();
     let mut buf = [0u8; 1024];
-    let n = tokio::time::timeout(std::time::Duration::from_secs(5), stream.read(&mut buf))
+    let n = tokio::time::timeout(HANG_GUARD, stream.read(&mut buf))
         .await
         .expect("handshake reply")
         .unwrap();
@@ -503,7 +507,7 @@ async fn unmounting_closes_the_projects_event_sockets() {
     assert!(head.starts_with("HTTP/1.1 101"), "{head}");
 
     hub.unmount(&slug);
-    let closed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    let closed = tokio::time::timeout(HANG_GUARD, async {
         let mut buf = [0u8; 1024];
         loop {
             match stream.read(&mut buf).await {

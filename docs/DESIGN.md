@@ -659,9 +659,11 @@ cache-only artifact (M4).
 Because that table is durable, it is the one place where rows written by *different clove
 versions* coexist indefinitely — a schema bump would not migrate it, since it is preserved
 verbatim across the rebuild. `captured_at` is therefore written canonically (§2.2),
-canonicalized again on read, and both the `ORDER BY` and the `--since` bound compare
-`substr(captured_at, 1, 19)` — the second-precision prefix every RFC 3339 spelling of a UTC
-instant shares — rather than resting on the byte order of the suffix. Rows an older clove
+canonicalized again on read, and both the history order (newest first) and the `--since`
+bound compare the *parsed* instant (`clove_types::parse_rfc3339`) in memory rather than any
+byte order of the stored text, so every RFC 3339 spelling of a UTC instant sorts and filters
+alike; rows whose `captured_at` does not parse sort last (ties broken by row id) instead of
+being dropped. The table holds one row per `--snapshot`, so reading it whole is cheap. Rows an older clove
 wrote are re-spelled in place on the next `--snapshot` ("rewrite on the next mutation").
 
 ### 6.2 Staleness Detection (Two-Level)
@@ -857,6 +859,7 @@ clove close <id>                            # alias: status closed
 clove label <id> add <label>
 clove label <id> rm <label>
 clove assign <id> <assignee>
+clove parent <id> <parent-id> | --clear     # cycle-checked, like dep add
 clove priority <id> <0-4>
 clove dep add <id> <dep-id>
 clove dep rm <id> <dep-id>
@@ -1718,7 +1721,7 @@ on the refusal like on any daemon error.
 
 **`PROTOCOL_VERSION`** gates a mixed-version pair; the client fails a mismatch
 and falls back, which is safe because the daemon is a cache, not a source of
-truth. It is **9**:
+truth. It is **10**:
 
 | v | change |
 |---|---|
@@ -1729,6 +1732,7 @@ truth. It is **9**:
 | 7 | the hub: every connection opens with a version `Hello`; every project-scoped call carries a `Project` (path, `load`); `hub_status`, `attach`, `detach` added; `STATUS.web_url` added |
 | 8 | `Project` carries the project token, and refuses unknown fields; `Detached` reports a teardown still under way. A v7 hub would drop a v8 client's token on the floor, so the two meet at the handshake instead |
 | 9 | `view::Filters` gains `synced` and `parent` (§7.8). A v8 daemon drops them as unknown keys and answers as if neither was set, so a v9 client must not reach one: the hub refuses the hello and the client answers from the index or the files |
+| 10 | the import/sync writes `create_item`, `link_external` and `add_comment_at`, and `STATUS.writes_applied`; `GraphRequest::Blocked` **removed** in favour of `QueryKind::Blocked`, so `blocked` is filtered and windowed by the daemon's index like `ls`/`ready` |
 
 A v6 client never reaches the hub (it looks for `.clove/daemon.sock`); a hub
 client never reaches a 0.1.0 daemon (it looks in the runtime directory) except
@@ -1844,7 +1848,9 @@ from whichever client started the hub; `clove daemon stop --all` and a restart
 picks up new ones. Only `CLOVED_DISABLE_WEB` and `CLOVED_WEB_PORT` are honoured
 by every daemon: the timer overrides and delay injectors (and
 `CLOVE_GITHUB_RETRY_MS`) are read only by a build with the **`test-knobs`**
-feature (`cloved`, `clove-web`, `clove-import`/`clove-sync-github`), which is
+feature (`cloved`, `clove-web`, `clove-import`/`clove-sync-github`, and `clove`
+itself for `CLOVE_PLUGIN_PROBE_MS`, `CLOVE_PLUGIN_HELLO_MS` and
+`CLOVE_REINDEX_WAIT_MARKER`), which is
 never in `default` or `full`, so a released or `cargo install`ed daemon ignores
 them (#61).
 
@@ -2120,7 +2126,8 @@ served by the *same* `clove-sync-github` binary as directional projections of th
 one reconcile (`PLUGIN_SYSTEM.md` §4.2, the umbrella fallback): `import github`
 runs it **pull-only** (remote → local), `export github` **push-only** (local →
 remote), and the full `sync github` is both. Issue **comments only sync under the
-full `sync github`** — a one-way `import`/`export github` reconciles items only.
+full `sync github`** — a one-way `import`/`export github` reconciles items only
+(no comment edits or deletions either).
 The plugin picks the direction from `$CLOVE_COMMAND`, so all three share one
 reconcile planner and one code path; there is no separate one-way importer to
 drift.
@@ -2156,10 +2163,42 @@ via GitHub `updated_at` vs the item's `updated`); `local`/`remote` force a side,
 `manual` reports without applying. Every conflict is reported regardless. With no
 prior sync for an already-linked pair, the planner falls back to a content
 comparison so a first sync never silently clobbers a side. Pulls/updates go
-through the unified write path (`apply_edit`); comment dedup uses GitHub comment
-ids (pull) and stable body hashes (push). `--dry-run` plans without touching
+through the unified write path (`apply_edit`). `--dry-run` plans without touching
 either side; `--no-comments` skips comment reconciliation. A running daemon can
 run the sync on a timer (`[daemon] github_sync_interval_min` + `github_sync_repo`).
+
+**Comments** are reconciled per linked issue. A local comment (a file under
+`.clove/issues/<id>/comments/`, identified by its file name) and its GitHub
+comment are *paired* by a link in the sync state (`comment_links`: GitHub id,
+local file name, and a hash of the body both sides held at the last sync). A side
+whose body no longer matches that hash has been edited since:
+
+| GitHub comment | local comment | action |
+|---|---|---|
+| edited | unchanged | rewrite the local file |
+| unchanged | edited | `PATCH` the GitHub comment in place |
+| edited | edited (different text) | `--prefer` policy (`newer` compares the comment's `updated_at` with the file's mtime; no timestamp, or `manual`: neither side is touched, reported every run) |
+| deleted | unchanged | delete the local file |
+| unchanged | deleted | delete the GitHub comment, only with `--delete-remote-comments`; otherwise reported as pending and left alone |
+| deleted | edited | post the local text again as a new comment |
+| edited | deleted | pull the GitHub text again as a new local comment |
+
+Deletions only propagate when the surviving side is unchanged since the last
+sync; an edited comment is never deleted. A GitHub deletion deletes the local file
+automatically (git can restore it). The reverse is opt-in: a deleted local file is
+deleted on GitHub only with `--delete-remote-comments`, because a missing file is
+also what checking out a branch that lacks the comment looks like. Without the flag
+the deletion is listed as pending (`data.comments.pending_remote_delete`, and a
+"not propagated to GitHub" line), the link is kept so the comment is neither
+re-pulled nor forgotten, and the file coming back is a no-op. Every deletion is listed
+in the `--dry-run` plan and in the run's output (`data.comments.delete_local` /
+`delete_remote`, and a `deleted` count in the summary line). Local edits and
+deletions are made by editing or removing the comment file. A comment with no link
+is new: a GitHub comment is pulled, a local one pushed, except that an identical
+unlinked pair is *adopted* as one comment, which is also how a fresh clone (the
+state is git-ignored) and a state file written by 0.1.x are upgraded without
+duplicates. `comments_checked_at` in the state lets the next sync ask GitHub which
+comments changed since and re-fetch only those issues' threads. 
 
 Fields clove's model can't represent are still preserved on push (using the live
 issue + sync state, so no item-schema change): extra GitHub **assignees** a human

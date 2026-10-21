@@ -12,6 +12,23 @@ pub fn ms(name: &str) -> Option<u64> {
     std::env::var(name).ok()?.parse().ok()
 }
 
+/// Whether `dir` holds the file named by the environment variable `name`: a
+/// test holds a timer or a step by creating the file, does its setup, then
+/// removes it, instead of racing a short window against its own setup. Always
+/// `false` outside a `test-knobs` build.
+pub fn held(name: &str, dir: &std::path::Path) -> bool {
+    if !cfg!(feature = "test-knobs") {
+        return false;
+    }
+    std::env::var_os(name).is_some_and(|file| dir.join(file).exists())
+}
+
+/// [`held`] for the idle timers (`CLOVED_IDLE_HOLD_FILE`): a project's idle
+/// window, or — in the hub's runtime directory — the hub's empty grace period.
+pub fn idle_held(dir: &std::path::Path) -> bool {
+    held("CLOVED_IDLE_HOLD_FILE", dir)
+}
+
 /// [`ms`] as a [`Duration`].
 pub fn duration(name: &str) -> Option<Duration> {
     ms(name).map(Duration::from_millis)

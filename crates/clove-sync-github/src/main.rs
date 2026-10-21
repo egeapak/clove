@@ -3,7 +3,7 @@
 //!
 //! It is the fat-plugin extraction of `clove sync github`: a `clove-plugin`
 //! `main` that materializes the host-exported [`PluginContext`], parses the
-//! forwarded `OWNER/REPO [--dry-run] [--prefer POLICY] [--no-comments]` args, and
+//! forwarded `OWNER/REPO [--dry-run] [--prefer POLICY] [--no-comments] [--delete-remote-comments]` args, and
 //! drives `clove_import::sync_net::sync_github` — the *same* entry point the
 //! in-process `cmd/sync.rs` used. Its `sync github` stdout/stderr and exit codes
 //! are kept byte-for-byte identical to that built-in so scripts, agents, and the
@@ -28,7 +28,8 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use clove_plugin::{
-    clap_exit_code, emit_error, emit_success, parse_format, PluginArgs, PluginContext, PluginInfo,
+    clap_exit_code, emit_error, emit_success, emit_success_with_meta, parse_format, PluginArgs,
+    PluginContext, PluginInfo,
 };
 use clove_types::CloveError;
 use clove_types::OutputFormat;
@@ -67,6 +68,10 @@ struct Cli {
     /// Skip syncing issue comments (faster: avoids one API call per issue).
     #[arg(long)]
     no_comments: bool,
+    /// Also delete a GitHub comment whose local file was removed (and is
+    /// unedited on GitHub). Without it such deletions are only reported.
+    #[arg(long)]
+    delete_remote_comments: bool,
     /// Output format override. Also arrives via `$CLOVE_FORMAT`; accepted here
     /// (per PLUGIN_SYSTEM.md §6.3) so `clove sync github <repo> --format json`
     /// works even with the flag after the provider.
@@ -134,7 +139,7 @@ fn main() -> ExitCode {
     //    env-provided one (§6.3), for both success and error output.
     let format = cli.format.unwrap_or(cx.format);
     match run(&cx, cli, format, direction) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => ExitCode::from(code),
         Err(err) => ExitCode::from(emit_error(format, &err, cx.quiet)),
     }
 }
@@ -142,14 +147,15 @@ fn main() -> ExitCode {
 /// Drive the reconcile in `direction` and render its result exactly as the host's
 /// `cmd/sync.rs` did (`sync`), or as a one-way pull/push (`import`/`export`).
 ///
-/// Emits the success envelope / human summary itself and returns `Ok(())`; any
-/// `Err` (a bad `--prefer` value or a sync failure) is rendered by the caller.
+/// Emits the success envelope / human summary itself and returns the exit code: 0,
+/// or 5 when GitHub rejected some items and the run skipped them. Any `Err` (a bad
+/// `--prefer` value or a sync failure) is rendered by the caller.
 fn run(
     cx: &PluginContext,
     cli: Cli,
     format: OutputFormat,
     direction: clove_import::Direction,
-) -> Result<(), CloveError> {
+) -> Result<u8, CloveError> {
     use clove_import::ConflictPolicy;
 
     let policy = match &cli.prefer {
@@ -167,14 +173,19 @@ fn run(
         &clove_import::HostStore::connect(cx)?,
         policy,
         !cli.no_comments,
+        cli.delete_remote_comments,
         cli.dry_run,
         direction,
     )
     .map_err(sync_err)?;
 
+    let exit_code = match &report {
+        Some(report) if !report.skipped.is_empty() => SKIPPED_EXIT_CODE,
+        _ => 0,
+    };
     match (format, report) {
         // Applied: emit the action counts (and any conflicts) the run produced.
-        (OutputFormat::Json | OutputFormat::Jsonl, Some(report)) => emit_success(
+        (OutputFormat::Json | OutputFormat::Jsonl, Some(report)) => emit_success_with_meta(
             format,
             json!({
                 "pulled_created": report.pulled_created,
@@ -183,11 +194,19 @@ fn run(
                 "pushed_updated": report.pushed_updated,
                 "comments_pulled": report.comments_pulled,
                 "comments_pushed": report.comments_pushed,
+                "comments_updated_local": report.comments.update_local,
+                "comments_updated_remote": report.comments.update_remote,
+                "comments_deleted_local": report.comments.delete_local.len(),
+                "comments_deleted_remote": report.comments.delete_remote.len(),
+                "comments_pending_remote_delete": report.comments.pending_remote_delete.len(),
+                "comments": report.comments,
                 "in_sync": report.in_sync,
                 "conflicts": summary.conflicts,
                 "remote_missing": summary.remote_missing,
                 "foreign": summary.foreign,
+                "skipped": report.skipped,
             }),
+            json!({ "warnings": run_warnings(&report) }),
         ),
         // Dry run: emit the full write-free plan.
         (OutputFormat::Json | OutputFormat::Jsonl, None) => emit_success(
@@ -196,7 +215,7 @@ fn run(
         ),
         (OutputFormat::Human, Some(report)) => {
             outln!(
-                "{}: pulled {} new / {} updated, pushed {} new / {} updated, comments {} pulled / {} pushed, {} in sync, {} conflicts",
+                "{}: pulled {} new / {} updated, pushed {} new / {} updated, comments {} pulled / {} pushed / {} edited / {} deleted, {} in sync, {} conflicts",
                 applied_label(direction, &cli.target),
                 report.pulled_created,
                 report.pulled_updated,
@@ -204,11 +223,17 @@ fn run(
                 report.pushed_updated,
                 report.comments_pulled,
                 report.comments_pushed,
+                report.comments.update_local + report.comments.update_remote,
+                report.comments.delete_local.len() + report.comments.delete_remote.len(),
                 report.in_sync,
                 report.conflicts,
             );
             print_conflicts(&summary);
+            print_comment_changes(&report.comments, "deleted");
             print_remote_missing(&summary);
+            for warning in run_warnings(&report) {
+                eprintln!("warning: {warning}");
+            }
         }
         (OutputFormat::Human, None) => {
             outln!(
@@ -223,9 +248,38 @@ fn run(
             );
             print_conflicts(&summary);
             print_remote_missing(&summary);
+            if !summary.comments.is_empty() {
+                let comments = &summary.comments;
+                outln!(
+                    "  comments: pull {} / push {} / edit {} local, {} remote / delete {} local, {} remote",
+                    comments.pull,
+                    comments.push,
+                    comments.update_local,
+                    comments.update_remote,
+                    comments.delete_local.len(),
+                    comments.delete_remote.len(),
+                );
+                print_comment_changes(comments, "would delete");
+            }
         }
     }
-    Ok(())
+    Ok(exit_code)
+}
+
+/// Exit code when GitHub rejected items the run then skipped: the `IoError` class
+/// (5), as for any other GitHub failure, though the run itself completed.
+const SKIPPED_EXIT_CODE: u8 = 5;
+
+/// Everything the run wants the user to know: dropped assignees, then each
+/// skipped item with GitHub's reason.
+fn run_warnings(report: &clove_import::SyncReport) -> Vec<String> {
+    let skipped = report.skipped.iter().map(|item| {
+        format!(
+            "skipped {} (will retry next sync): {}",
+            item.clove_id, item.reason
+        )
+    });
+    report.warnings.iter().cloned().chain(skipped).collect()
 }
 
 /// The human summary prefix for an applied run. `Both` reproduces the former
@@ -258,6 +312,50 @@ fn print_conflicts(summary: &clove_import::SyncSummary) {
             conflict.external_ref,
             conflict.clove_id,
             conflict.title,
+            conflict.resolution
+        );
+    }
+}
+
+/// Print one line per comment deletion and per comment edited on both sides, so
+/// a run (or its dry-run plan) never deletes anything unannounced.
+fn print_comment_changes(comments: &clove_import::sync::CommentSummary, verb: &str) {
+    if !comments.pending_remote_delete.is_empty() {
+        outln!(
+            "  {} local comment deletion(s) not propagated to GitHub; re-run with --delete-remote-comments",
+            comments.pending_remote_delete.len()
+        );
+        for comment in &comments.pending_remote_delete {
+            outln!(
+                "    pending {} on {} ({}): {}",
+                comment.comment,
+                comment.clove_id,
+                comment.external_ref,
+                comment.preview
+            );
+        }
+    }
+    let deletions = [
+        ("local", &comments.delete_local),
+        ("GitHub", &comments.delete_remote),
+    ];
+    for (side, refs) in deletions {
+        for comment in refs {
+            outln!(
+                "  {verb} {side} comment {} on {} ({}): {}",
+                comment.comment,
+                comment.clove_id,
+                comment.external_ref,
+                comment.preview
+            );
+        }
+    }
+    for conflict in &comments.conflicts {
+        outln!(
+            "  comment conflict {} on {} ({}) -> {}",
+            conflict.comment,
+            conflict.clove_id,
+            conflict.external_ref,
             conflict.resolution
         );
     }
@@ -309,6 +407,7 @@ mod tests {
         assert!(!cli.dry_run);
         assert!(cli.prefer.is_none());
         assert!(!cli.no_comments);
+        assert!(!cli.delete_remote_comments);
 
         let cli = Cli::try_parse_from([
             "egeapak/clove",
@@ -316,12 +415,14 @@ mod tests {
             "--prefer",
             "remote",
             "--no-comments",
+            "--delete-remote-comments",
         ])
         .expect("flagged form parses");
         assert_eq!(cli.target, "egeapak/clove");
         assert!(cli.dry_run);
         assert_eq!(cli.prefer.as_deref(), Some("remote"));
         assert!(cli.no_comments);
+        assert!(cli.delete_remote_comments);
     }
 
     /// A missing target is a usage error. clap's native code is 2, but we map it

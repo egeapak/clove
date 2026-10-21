@@ -418,10 +418,8 @@ impl Engine {
     /// point of this list is `blocked_by`, which no lean row carries. A
     /// `projection` of [`Projection::Files`] still pins it to the file scan.
     ///
-    /// The daemon tier answers from its cached graph (ordered ids); the index
-    /// tier — new in read-path §4, this was the one list that could not answer
-    /// from SQL at all — runs [`QueryMode::Blocked`], the exact complement of
-    /// the `ready` clause. Both are then hydrated for the page only.
+    /// The daemon and index tiers both run [`QueryMode::Blocked`], the exact
+    /// complement of the `ready` clause, and hydrate the page only.
     pub fn blocked(
         &self,
         filters: &Filters,
@@ -430,32 +428,19 @@ impl Engine {
         projection: Projection,
     ) -> Result<ListAnswer, CloveError> {
         if projection.allows_tiers() {
-            // Daemon: the *set* comes from its cached graph and the *order* from
-            // its index, so the ids arrive already sorted. Filtering preserves
-            // that order.
-            if let Some(ids) = self.blocked_ids_via_daemon(order) {
-                let matched: Vec<ItemFrontmatter> = self
-                    .hydrate(ids.iter().map(String::as_str))
-                    .into_iter()
-                    .filter(|fm| filters.matches(fm))
-                    .collect();
-                let total = matched.len();
-                let (page, _) = window.apply(matched);
-                return Ok(ListAnswer {
-                    source: Source::Daemon,
-                    rows: Rows::Full(self.with_blocked_by(page)?),
-                    total,
-                    warnings: Vec::new(),
-                    graph: None,
-                });
-            }
-            if let Some((rows, total, warnings)) =
-                self.lean_via_index(QueryMode::Blocked, filters, order, window)?
-            {
+            // Both tiers filter, order, count and window in SQL; only the page is
+            // read back from disk to carry `blocked_by`.
+            let tiered = match self.lean_via_daemon(QueryKind::Blocked, filters, order, window) {
+                Some(answer) => Some((Source::Daemon, answer)),
+                None => self
+                    .lean_via_index(QueryMode::Blocked, filters, order, window)?
+                    .map(|answer| (Source::Index, answer)),
+            };
+            if let Some((source, (rows, total, warnings))) = tiered {
                 let (page, _) = window.apply(rows);
                 let hydrated = self.hydrate(page.iter().map(|row| row.id.as_str()));
                 return Ok(ListAnswer {
-                    source: Source::Index,
+                    source,
                     rows: Rows::Full(self.with_blocked_by(hydrated)?),
                     total,
                     warnings,
@@ -699,17 +684,6 @@ impl Engine {
             response.total as usize,
             response.warnings,
         ))
-    }
-
-    /// Ask a running daemon for the blocked ids, already in `order`.
-    fn blocked_ids_via_daemon(&self, order: Order) -> Option<Vec<String>> {
-        if !self.tiers.daemon {
-            return None;
-        }
-        match self.with_daemon(|d| d.graph(GraphRequest::Blocked { order }))? {
-            Ok(GraphResponse::Blocked { ids }) => Some(ids),
-            _ => None,
-        }
     }
 
     /// Try to satisfy a lean list query from the local index.

@@ -18,11 +18,7 @@ const TEST_CLOVE_HOME: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target
 /// The `cloved` binary, built on demand so these tests can never pass by
 /// skipping.
 fn cloved_bin() -> PathBuf {
-    support::cloved_build()
-        .run()
-        .expect("build cloved for the daemon routing tests")
-        .path()
-        .to_path_buf()
+    support::cloved("").to_path_buf()
 }
 
 fn clove() -> Command {
@@ -39,10 +35,14 @@ fn run_in(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
         .unwrap()
 }
 
+/// How long any wait may take before the test calls it a hang. Generous on
+/// purpose: a wait ends on its condition, never on this.
+const HANG_GUARD: Duration = Duration::from_secs(30);
+
 /// Wait until the daemon's watcher for the project at `root` watches: until
 /// then the daemon leaves reads to the index and the files.
 fn wait_watching(root: &std::path::Path) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let deadline = std::time::Instant::now() + HANG_GUARD;
     loop {
         let out = run_in(root, &["daemon", "status", "-f", "json"]);
         let status: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
@@ -105,7 +105,7 @@ fn spawn_daemon(clove_dir: &std::path::Path, bin: &std::path::Path) -> Daemon {
         .expect("spawn cloved");
     let pid = run.join("hub.pid");
     let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(5) {
+    while start.elapsed() < HANG_GUARD {
         if pid.exists() {
             let daemon = Daemon(child);
             // A daemon is started bare; the project is loaded by an ordinary
@@ -210,6 +210,9 @@ fn tier1_tier2_commands_route_through_daemon_with_parity() {
     // Ground truth (no daemon, file scan).
     let mut want_blocked = list_ids(&run_in(root, &["--no-index", "blocked", "-f", "json"]).stdout);
     want_blocked.sort();
+    let paged = ["blocked", "--offset", "1", "--limit", "1", "-f", "json"];
+    let want_paged =
+        ids_total_source(&run_in(root, &[&["--no-index"][..], &paged].concat()).stdout);
     let want_cycle_count = cycle_count(&run_in(root, &["dep", "cycle", "-f", "json"]).stdout);
     let want_tree = tree_shape(&run_in(root, &["dep", "tree", &c, "-f", "json"]).stdout);
 
@@ -233,6 +236,10 @@ fn tier1_tier2_commands_route_through_daemon_with_parity() {
         blocked_ids, want_blocked,
         "blocked set matches the file path"
     );
+    // …and the daemon windows it: the same page and pre-window total.
+    let (ids, total, source) = ids_total_source(&run_in(root, &paged).stdout);
+    assert_eq!(source, "daemon");
+    assert_eq!((ids, total), (want_paged.0, want_paged.1), "paged blocked");
 
     // dep cycle → daemon, same count.
     assert_eq!(
@@ -252,6 +259,12 @@ fn tier1_tier2_commands_route_through_daemon_with_parity() {
     assert_eq!(rv["data"]["items_indexed"], serde_json::json!(3));
 
     drop(daemon);
+}
+
+fn ids_total_source(out: &[u8]) -> (Vec<String>, u64, String) {
+    let v: serde_json::Value = serde_json::from_slice(out).unwrap();
+    let (ids, source) = ids_and_source(out);
+    (ids, v["_meta"]["total"].as_u64().unwrap(), source)
 }
 
 fn list_ids(out: &[u8]) -> Vec<String> {
@@ -488,12 +501,8 @@ fn writes_applied(root: &std::path::Path) -> u64 {
 #[test]
 fn plugin_store_writes_route_through_the_daemon() {
     let bin = cloved_bin();
-    let plugin = escargot::CargoBuild::new()
-        .package("clove-import-tk")
-        .bin("clove-import-tk")
-        .run()
-        .expect("build clove-import-tk plugin");
-    let plugin_dir = plugin.path().parent().unwrap().to_owned();
+    let plugin = support::plugin("clove-import-tk", "clove-import-tk", "");
+    let plugin_dir = plugin.parent().unwrap().to_owned();
 
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();

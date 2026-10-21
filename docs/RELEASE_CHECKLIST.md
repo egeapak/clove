@@ -112,6 +112,25 @@ empty or a real GitHub user.
       and comment; `external_ref` written back.
 - [ ] Both sides at once: comment on the issue on GitHub; locally close it and add a
       comment → sync pushes the close and the local comment, pulls the remote comment.
+- [ ] Comment edits, both directions (on the throwaway issue, after a sync that
+      linked its comments): edit a comment on GitHub, `clove sync github
+      egeapak/clove` → the local comment file now has the new text (same file, no
+      second comment). Edit a comment file under `.clove/issues/<id>/comments/`,
+      sync → the GitHub comment shows the new text (edited in place, no new
+      comment, no "edited" duplicate). Edit both to different text: `--prefer
+      manual` reports it and changes neither; `--prefer local`/`remote` picks a side.
+- [ ] Comment deletions, both directions: delete a comment on GitHub, run
+      `--dry-run` → it lists `would delete local comment …`; sync → the file is
+      gone. Delete a comment file, then sync without the flag → the GitHub
+      comment stays, the run reports it as pending ("not propagated to GitHub"),
+      and no local copy reappears; restore the file (`git checkout`) and sync →
+      nothing changes. Delete it again, `--dry-run --delete-remote-comments` →
+      `would delete GitHub comment …`; sync with `--delete-remote-comments` → it is
+      gone from the issue. Delete on GitHub but edit the file (and the
+      reverse): nothing is deleted, the edited text is re-created on the other side.
+      `--no-comments` leaves all of it alone.
+- [ ] Upgrade case: copy a `.clove/sync/github/*.json` written by 0.1.5, run the
+      0.2.0 sync → no duplicated or re-pushed comments, then an edit propagates.
 - [ ] Reopen on GitHub → sync pulls `open`; close locally → sync pushes `CLOSED`
       (the same-second case is covered by
       `sync::tests::local_edit_in_the_same_second_as_the_last_pull_is_pushed`; by hand,
@@ -132,6 +151,11 @@ Drive with a real browser (Playwright MCP is fine). Check the console on every p
 - [ ] Navigate **from every view** to an item's detail page: board card, **list row
       (click and Enter)**, **timeline bar** — each lands on `/p/<slug>/items/<id>`.
 - [ ] Timeline throughput: the 30d/90d/All ranges show days, not snapshots.
+- [ ] Timeline hover guide: moving the pointer over the plot draws a vertical guide
+      line with a date chip on the top axis showing the date under the cursor
+      (legible in a light and a dark theme, chip stays inside the plot at both
+      edges, bar tooltips and bar clicks still work); it disappears when the
+      pointer leaves the plot or enters the label column.
 - [ ] Write path: add a label in the detail sidebar → it lands in the item file.
 - [ ] Live push: change the item from the CLI while (a) the List view and (b) its
       detail page — opened **both** from the board **and** by direct URL/refresh — is
@@ -162,10 +186,11 @@ read with `tmux capture-pane -p`.
 
 Everything `release-smoke.sh` does not already cover:
 
-- [ ] `set`, `edit --field`, `status`, `start`, `label add|rm`, `assign`, `priority`,
+- [ ] `set`, `edit --field`, `edit` with `EDITOR='<editor> --wait'`, `status`, `start`,
+      `label add|rm`, `assign`, `parent <id> <parent>` / `--clear`, `priority`,
       `dep add|rm|cycle`, `query` (stdin + `--filter`), `ls --fields id,created`
       (file tier), `comments --limit`, `export jsonl` → `import jsonl`,
-      `init --merge-driver` (driver + `.gitattributes`), `-q`, no-repo error,
+      `init --merge-driver` (driver + `.gitattributes`), `--quiet`, no-repo error,
       `version -f json`, `setup --help`.
 - [ ] List filters on every tier: `ls --synced`, `--unsynced`, `--parent <id>` (also
       via `query` JSON and the web `?synced=` / `?parent=`) agree with the files; against

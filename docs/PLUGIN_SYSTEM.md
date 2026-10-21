@@ -121,7 +121,8 @@ pub struct SyncArgs {
 Dispatch for `sync`:
 
 1. Resolve `clove-sync-<provider>` (§5) and exec it with `rest` forwarded (§6).
-   The `sync`-level conventions (`--dry-run`, `--prefer`, `--no-comments`) are
+   The `sync`-level conventions (`--dry-run`, `--prefer`, `--no-comments`, and for
+   `sync github` `--delete-remote-comments`) are
    passed through in `rest` and are a **documented contract** every sync plugin
    must honor (§6.3), so the host need not know each provider's flags.
 2. If it does not resolve: exit 4 (`ValidationError`) — "unknown sync provider
@@ -377,6 +378,16 @@ The `sync`/`import`/`export` conventions the plugin must accept in its tail args
 `--format` (already in `CLOVE_FORMAT` too), and for sync `--prefer <policy>` /
 `--no-comments`.
 
+`sync github` reconciles comment *edits and deletions* as well as new comments
+(`DESIGN.md` §11.3): linked pairs are tracked in the sync state, deletions apply
+only when the surviving side is unchanged (a deleted local file is deleted on
+GitHub only with `--delete-remote-comments`; otherwise it is reported under
+`comments.pending_remote_delete`), and the dry-run plan and the success
+envelope carry a `comments` object (counts, plus every deletion with its item,
+`gh-N` ref, comment key and a body preview) beside the flat `comments_pulled` /
+`comments_pushed` / `comments_updated_{local,remote}` /
+`comments_deleted_{local,remote}` counts.
+
 ### 6.4 Store access — preserving the "unified write path"
 
 This is the crux. The DESIGN's central invariant is *one* write path
@@ -445,7 +456,10 @@ client SID after the first message. The first message must be `hello` with the
 token from `$CLOVE_HOST_TOKEN` (compared in constant time). On Unix the whole
 `hello` line must arrive within 5 seconds (one deadline, not a per-read
 timeout) and be at most 64 KiB; otherwise, or with a wrong token, the host
-answers `-32001` and closes the connection. Windows named pipes have no
+answers `-32001` and closes the connection. (The 5 seconds, and the 500 ms
+`--clove-plugin-info` probe deadline, are overridable by `CLOVE_PLUGIN_HELLO_MS`
+/ `CLOVE_PLUGIN_PROBE_MS` in a `test-knobs` build only; released binaries ignore
+them.) Windows named pipes have no
 receive timeout in `interprocess`, so there an idle unauthenticated connection
 (only this user can open one) holds its thread until the plugin exits. The
 token is reusable for the whole invocation.
@@ -473,8 +487,10 @@ answers its requests in order; there is no cancellation and no host timeout.
 | `store.apply_edit` | `{id, request: EditRequest}` | the edited item |
 | `store.dep_add`, `store.dep_remove` | `{id, dep}` | the edited item |
 | `store.link_external` | `{id, source_system, external_ref}` | `{updated}` |
-| `store.comments` | `{id}` | `[{timestamp, author, body}]` |
+| `store.comments` | `{id}` | `[{key, timestamp, author, body, modified?}]` |
 | `store.add_comment` | `{id, author, body, timestamp}` | `{id, path}` |
+| `store.update_comment` | `{id, key, body}` | `{id, path}` |
+| `store.delete_comment` | `{id, key}` | `{id, path}` |
 
 The **store tier** (`store.*`, types in `clove_types::tool`) is what an
 importer or a sync engine needs to mirror another tracker: whole items with
@@ -484,9 +500,13 @@ their original author and time. Every write goes through the validated ops in
 `create`, and it never overwrites an existing id; an existing id is
 `VALIDATION_ERROR`), `store.apply_edit` is `apply_edit`, the dependency methods
 are the cycle-checked `dep_add`/`dep_remove`, `store.link_external` is
-`link_external`, and `store.add_comment` is `comment_at`. Like the tools, these
-writes run in the `cloved` daemon when one serves the project, and in the host
-process otherwise. The writer stamps `updated`; no write takes a time from the
+`link_external`, `store.add_comment` is `comment_at`, and `store.update_comment` /
+`store.delete_comment` are `comment_update` / `comment_delete` (a comment is named
+by its `key`, the file name `store.comments` reports; it is stable across body
+edits). Like the tools, these writes run in the `cloved` daemon when one serves the
+project, and in the host process otherwise; comment edits and deletions always run
+in the host process, since comments are not indexed and the daemon has no state
+for them to keep coherent. The writer stamps `updated`; no write takes a time from the
 plugin, except a comment's own `timestamp`. The store tier is not exposed over
 MCP. `clove_import::HostStore` implements
 `clove_import::Store` on top of it.

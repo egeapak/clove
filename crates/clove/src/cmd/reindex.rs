@@ -95,6 +95,9 @@ fn reindex_locally(ctx: &Ctx) -> Result<clove_index::ReindexReport, CloveError> 
     loop {
         match clove_index::reindex(&ctx.issues_dir, &ctx.db_path) {
             Err(clove_index::IndexError::AlreadyRunning) if start.elapsed() < REBUILD_WAIT => {
+                if let Some(marker) = crate::knobs::var("CLOVE_REINDEX_WAIT_MARKER") {
+                    let _ = std::fs::write(marker, b"waiting");
+                }
                 std::thread::sleep(Duration::from_millis(100));
             }
             Err(clove_index::IndexError::AlreadyRunning) => {

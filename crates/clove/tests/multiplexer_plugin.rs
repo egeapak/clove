@@ -9,6 +9,8 @@
 //! the exported env. A provider with no matching plugin is a scoped validation
 //! error (exit 4) that names the binary to install.
 
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -21,24 +23,25 @@ use tempfile::TempDir;
 /// `(dir, path)`. The temp dir is what `CLOVE_PLUGIN_PATH` points at so the
 /// search path is deterministic.
 fn install_echo_as(name: &str) -> (TempDir, PathBuf) {
-    let built = escargot::CargoBuild::new()
-        .package("clove-plugin-echo")
-        .bin("clove-echo")
-        .run()
-        .expect("build clove-echo fixture");
+    let built = support::plugin("clove-plugin-echo", "clove-echo", "");
     let dir = tempfile::tempdir().unwrap();
     // The host resolver looks for `clove-<provider>{EXE_SUFFIX}`, so the renamed
     // copy must carry the platform executable suffix (`.exe` on Windows).
     let dest = dir
         .path()
         .join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
-    std::fs::copy(built.path(), &dest).expect("copy echo fixture into the plugin dir");
+    std::fs::copy(built, &dest).expect("copy echo fixture into the plugin dir");
     (dir, dest)
 }
 
 /// A `clove` invocation rooted at `dir` with a hermetic environment.
 fn clove(dir: &Path) -> Command {
     let mut cmd = Command::cargo_bin("clove").unwrap();
+    // Generous plugin timeouts (honoured only by a `test-knobs` build): a slow
+    // plugin start under load must not flip a result. The tests that target a
+    // timeout set a small value of their own.
+    cmd.env("CLOVE_PLUGIN_PROBE_MS", "60000");
+    cmd.env("CLOVE_PLUGIN_HELLO_MS", "60000");
     // Pin the clove-managed home into `dir`: `<clove-home>/bin` is on the plugin
     // search path, and `assert_cmd` inherits `$HOME`, so without this a developer
     // with plugins installed under `~/.local/share/clove/bin` would have them

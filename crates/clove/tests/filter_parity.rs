@@ -46,7 +46,7 @@ fn run_in(dir: &Path, args: &[&str]) -> std::process::Output {
 /// then the daemon leaves reads to the index and the files.
 #[cfg(unix)]
 fn wait_watching(root: &Path) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         let out = run_in(root, &["daemon", "status", "-f", "json"]);
         let status: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
@@ -856,11 +856,7 @@ mod daemon {
     /// this branch already (see `sort_order.rs`), so this test guarantees its
     /// own precondition instead.
     fn cloved_bin() -> PathBuf {
-        crate::support::cloved_build()
-            .run()
-            .expect("build cloved for the daemon filter comparison")
-            .path()
-            .to_path_buf()
+        crate::support::cloved("").to_path_buf()
     }
 
     /// A spawned `cloved` that dies with the test, however the test ends.
@@ -893,7 +889,7 @@ mod daemon {
         let daemon = Daemon(child);
         let pid = run.join("hub.pid");
         let start = Instant::now();
-        while start.elapsed() < Duration::from_secs(10) {
+        while start.elapsed() < Duration::from_secs(30) {
             if pid.exists() {
                 // A daemon is started bare; the project is loaded by an
                 // ordinary call, as `clove daemon start` makes it.
