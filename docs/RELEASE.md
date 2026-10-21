@@ -323,12 +323,14 @@ curl -s -A "$UA" \
 # 3. End-to-end install through the shipped command, in a throwaway root.
 #    `install` (correctly) refuses to shadow a clove-sync-github already on the
 #    plugin search path, so run a copy of clove from an empty dir with
-#    ~/.cargo/bin off PATH.
+#    ~/.cargo/bin off PATH. That also drops rustup's `cargo` proxy, which
+#    `install` needs, so put the toolchain's own bin dir back.
 export CLOVE_HOME="$(mktemp -d)"
 bin=$(mktemp -d) && cp "$(command -v clove)" "$bin/"
+toolchain=$(dirname "$(rustup which cargo)")
 (
-  PATH="$bin:$(printf %s "$PATH" | tr : '\n' | grep -v '/\.cargo/bin$' | paste -sd: -)"
-  clove plugin list                     # should show the three, marked available
+  PATH="$bin:$toolchain:$(printf %s "$PATH" | tr : '\n' | grep -v '/\.cargo/bin$' | paste -sd: -)"
+  clove plugin list --all               # the three under "Available" (plain `list` is installed-only)
   clove plugin install sync-github --yes
   clove sync github --help              # dispatch resolves to the installed binary
   clove plugin uninstall sync-github

@@ -120,10 +120,12 @@ empty or a real GitHub user.
       comment, no "edited" duplicate). Edit both to different text: `--prefer
       manual` reports it and changes neither; `--prefer local`/`remote` picks a side.
 - [ ] Comment deletions, both directions: delete a comment on GitHub, run
-      `--dry-run` → it lists `would delete local comment …`; sync → the file is
-      gone. Delete a comment file, then sync without the flag → the GitHub
-      comment stays, the run reports it as pending ("not propagated to GitHub"),
-      and no local copy reappears; restore the file (`git checkout`) and sync →
+      `--dry-run` → it lists `would delete local comment …` (wait until the
+      issue list reports the new comment count — it lags 10–20 s, and until then
+      the thread looks idle and is skipped); sync → the file is gone. Delete a
+      comment file, then sync without the flag → the GitHub comment stays, the
+      run reports it as pending ("not propagated to GitHub"), and no local copy
+      reappears; restore the file (from a copy — `.clove/` is untracked here) and sync →
       nothing changes. Delete it again, `--dry-run --delete-remote-comments` →
       `would delete GitHub comment …`; sync with `--delete-remote-comments` → it is
       gone from the issue. Delete on GitHub but edit the file (and the
@@ -179,7 +181,8 @@ read with `tmux capture-pane -p`.
       present), `tools/list`, `clove_stats`, `clove_ready` (`source: daemon`),
       `clove_dep_tree`, `clove_comment` on the throwaway item, `resources/list`.
 - [ ] Live in Claude Code (reconnect with `/mcp` after installing): the same tools
-      answer from the new binary. Comments written via MCP carry the real author
+      answer from the new binary (`clove_ready` reports `source: daemon`; `index`
+      means the session still runs the old server against the new daemon). Comments written via MCP carry the real author
       (git identity), not `unknown`.
 
 ## 8. CLI coverage (scratch repo, isolated `CLOVE_HOME`/`CLOVE_RUNTIME_DIR`)
@@ -187,10 +190,11 @@ read with `tmux capture-pane -p`.
 Everything `release-smoke.sh` does not already cover:
 
 - [ ] `set`, `edit --field`, `edit` with `EDITOR='<editor> --wait'`, `status`, `start`,
-      `label add|rm`, `assign`, `parent <id> <parent>` / `--clear`, `priority`,
+      `label <id> add|rm`, `assign`, `parent <id> <parent>` / `--clear`, `priority`,
       `dep add|rm|cycle`, `query` (stdin + `--filter`), `ls --fields id,created`
       (file tier), `comments --limit`, `export jsonl` → `import jsonl`,
-      `init --merge-driver` (driver + `.gitattributes`), `--quiet`, no-repo error,
+      `init --merge-driver` (`merge.clove-item.driver` + `.gitattributes`),
+      `--quiet` (no stderr notes; the result still prints), no-repo error,
       `version -f json`, `setup --help`.
 - [ ] List filters on every tier: `ls --synced`, `--unsynced`, `--parent <id>` (also
       via `query` JSON and the web `?synced=` / `?parent=`) agree with the files; against
@@ -201,9 +205,11 @@ Everything `release-smoke.sh` does not already cover:
       leftover `clove-sync-github` process (`pgrep -f clove-sync-github`);
       `timeout 1 clove sync github …` exits 124 likewise; `clove import tk
       <missing-dir>; echo $?` prints the plugin's exit code. On Unix, no
-      `$TMPDIR/clove-plugin-*` directory is left behind. (The host IPC channel
-      itself is exercised on all three platforms by `plugin_dispatch.rs` in CI;
-      the shipped plugins do not use it yet.)
+      `$TMPDIR/clove-plugin-*` directory is left behind. Send the Ctrl-C to the
+      foreground process group (a terminal, or `os.killpg`): a `&` job in a
+      non-interactive shell ignores SIGINT, so `kill -INT` on it proves nothing.
+      (The host IPC channel itself is exercised on all three platforms by
+      `plugin_dispatch.rs` in CI, and every shipped plugin writes through it.)
 
 ## 9. Close out
 
