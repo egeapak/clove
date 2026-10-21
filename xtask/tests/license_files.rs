@@ -88,9 +88,11 @@ fn every_published_crate_ships_its_license_files() {
                 "{name}: {file} differs from the workspace root copy"
             );
             if let Some(include) = &include {
+                // Anchored: a bare `"LICENSE"` also matches every nested
+                // LICENSE, such as git-ignored `node_modules/**/LICENSE`.
                 assert!(
-                    include.contains(&format!("\"{file}\"")),
-                    "{name}: its `include` list drops {file} from the .crate"
+                    include.contains(&format!("\"/{file}\"")),
+                    "{name}: its `include` list must name /{file} (anchored)"
                 );
             }
         }
