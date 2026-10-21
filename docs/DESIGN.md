@@ -2463,3 +2463,4 @@ line for each list field. If `deps` is omitted when empty, a branch that adds th
 produces a new line (add) rather than modifying an existing line, which changes the conflict
 semantics. The diff noise from `deps: []` is minimal; the merge-correctness benefit is
 concrete.
+
