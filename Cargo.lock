@@ -5216,6 +5216,7 @@ dependencies = [
  "anyhow",
  "camino",
  "clove-core",
+ "serde_json",
 ]
 
 [[package]]

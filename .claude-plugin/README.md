@@ -65,7 +65,8 @@ providing tools for work-item management. They surface in Claude Code as
 
 ### Daemon-coordinated writes (topology B)
 
-Reads compute directly from the file store. Writes prefer the single `cloved`
+Reads are answered by the running `cloved` daemon when there is one, else by
+the `.clove/index.db` index, else by a file scan. Writes prefer the single `cloved`
 daemon, which `clove mcp` **auto-starts** (with a heartbeat that keeps it alive
 for the session) so multiple agents working on one project share one write
 coordinator and stay coherent. If `cloved` isn't on your `PATH` or can't start,
