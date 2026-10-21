@@ -28,6 +28,7 @@ the whole runbook once before running any `cargo publish`.
 > 4. Re-verify the names (§2), then publish the crates (§3-§4) with
 >    `scripts/release/publish.sh`.
 > 5. Verify what landed (§4a).
+> 6. Bump the Homebrew tap (§7).
 
 ---
 
@@ -411,44 +412,27 @@ After the tag push:
 
 ---
 
-## 7. Homebrew tap (optional, for `brew install`)
+## 7. Homebrew tap
 
-Create a tap repo `egeapak/homebrew-clove` (so users run
-`brew install egeapak/clove/clove`). Add a formula built from the macOS Release
-tarball + its published SHA256:
+The formulae live in the tap repo [`egeapak/homebrew-tap`](https://github.com/egeapak/homebrew-tap)
+(`brew tap egeapak/tap`): `clove` installs `clove` + `cloved`, and
+`clove-sync-github` / `clove-import-tk` / `clove-import-beads` each depend on it
+and install one plugin. All four install from the same per-platform Release
+archive, and the version and checksums live once, in the tap's
+`lib/clove_release.rb`. Once the GitHub Release is published (step 3 of the
+order above), bump the tap:
 
-```ruby
-# Formula/clove.rb
-class Clove < Formula
-  desc "Fast, git-native, dependency-aware work-item tracker"
-  homepage "https://github.com/egeapak/clove"
-  version "0.2.0"
-  license "AGPL-3.0-only"
-
-  on_macos do
-    url "https://github.com/egeapak/clove/releases/download/v0.2.0/clove-v0.2.0-macos-universal2.tar.gz"
-    sha256 "PASTE_FROM_THE_RELEASE_.sha256_FILE"
-  end
-
-  def install
-    bin.install "clove"
-    bin.install "cloved"
-    # The plugins must land on PATH next to `clove` so `clove sync github`,
-    # `clove import tk`, and `clove import|export beads` resolve (PLUGIN_SYSTEM §5).
-    bin.install "clove-sync-github"
-    bin.install "clove-import-tk"
-    bin.install "clove-import-beads"
-  end
-
-  test do
-    assert_match "clove", shell_output("#{bin}/clove version")
-  end
-end
+```sh
+gh release download v<version> -R egeapak/clove -p '*.tar.gz.sha256' -D "$(mktemp -d)"
+# set VERSION and the three SHA256 entries (macos-aarch64, macos-x86_64,
+# linux-x86_64) in lib/clove_release.rb, and the versions in the tap README
 ```
 
-Adjust the asset filename to match what the Release actually produced (see the
-`stage`/artifact names in `release.yml`). Update `url`/`sha256`/`version` on
-every future release.
+Open a PR in the tap: its `brew test-bot` CI runs `brew audit` and every
+formula's `test do` on macOS and Linux. Then confirm the published formula
+installs: `brew update && brew install clove clove-sync-github &&
+clove version`. A new platform archive in `release.yml` needs a matching
+`on_*` entry in `lib/clove_release.rb`.
 
 ---
 
