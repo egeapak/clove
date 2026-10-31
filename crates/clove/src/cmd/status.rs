@@ -57,9 +57,7 @@ pub fn run(
         .collect();
     warn_open_dependents(ctx, status, quiet, &closed);
 
-    let first_failure = results
-        .iter()
-        .find_map(|(_, r)| r.as_ref().err().map(|e| classify(e).0));
+    let first_err = results.iter().find_map(|(_, r)| r.as_ref().err());
     let failed = results.iter().filter(|(_, r)| r.is_err()).count();
 
     match format {
@@ -71,7 +69,7 @@ pub fn run(
                 "data": entries,
                 "_meta": { "warnings": [] },
             });
-            if let Some((_, Err(first))) = results.iter().find(|(_, r)| r.is_err()) {
+            if let Some(first) = first_err {
                 let (exit, code) = classify(first);
                 envelope["error"] = json!({
                     "code": code,
@@ -102,7 +100,7 @@ pub fn run(
         }
     }
 
-    Ok(first_failure.unwrap_or(ExitCode::Success))
+    Ok(first_err.map_or(ExitCode::Success, |e| classify(e).0))
 }
 
 /// Transition one id through the unified write path ([`ops::transition_item`]).
