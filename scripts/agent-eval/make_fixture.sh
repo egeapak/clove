@@ -82,6 +82,17 @@ Small CLI to recieve numbers on stdin and print `sum` or `avg`.
 P
 git init -q; git add -A; git -c user.email=a@b -c user.name=a commit -qm init
 $C init >/dev/null
+if [ "$S" = s13 ]; then
+  dep=$($C new "Refactor tally.cli.main into run(argv, stdin)" --type chore -b "tally/cli.py main() reads sys.stdin and sys.argv directly, so it cannot be tested. Move the logic into run(argv, stdin) that returns the output text; main() calls it. Done when: a test calls run() with a fake stdin." --format json | python3 -c 'import json,sys;print(json.load(sys.stdin)["data"]["id"])')
+  $C new "Add a --json output flag to the CLI" --type feature --dep "$dep" -b "tally.cli prints bare numbers. With --json, sum and avg print {\"result\": N}. Done when: a test of run() covers --json for sum and avg." >/dev/null
+fi
+if [ "$S" = s16 ]; then
+  $C new "average() raises ZeroDivisionError on an empty list" --type bug -b "tally/stats.py average([]) divides by zero. Expected: return 0. Done when: tests/test_stats.py::test_average_empty passes." >/dev/null
+  $C new "parse_line() fails on a trailing comma" --type bug -b "tally/stats.py parse_line('1,2,\\n') raises ValueError. Expected: [1, 2]. Done when: tests/test_stats.py::test_parse_line_trailing_comma passes." >/dev/null
+fi
+if [ "$S" = s17 ]; then
+  $C new "Add a total(xs) function to tally/stats.py" --type feature -b "tally/stats.py needs total(xs) that returns the sum of xs. Done when: tests/test_stats.py::test_total passes." >/dev/null
+fi
 if [ "$S" = s11 ]; then
   $C new "CLI: machine-readable output mode" --type feature -b "tally.cli prints bare numbers. Scripts that consume the output need a JSON form, for example {\"result\": 6} for \`sum\`." >/dev/null
 fi

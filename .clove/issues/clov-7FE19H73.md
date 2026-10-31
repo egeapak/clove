@@ -2,11 +2,12 @@
 schema: 1
 id: clov-7FE19H73
 title: 'agent-eval: repeat runs per scenario and add a weaker agent model'
-status: open
+status: closed
 type: chore
 priority: 3
 created: 2026-10-31T08:00:00.494Z
-updated: 2026-10-31T08:00:00.494Z
+updated: 2026-10-31T08:14:30.995Z
+closed: 2026-10-31T08:14:30.995Z
 labels: []
 deps: []
 relates: []

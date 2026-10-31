@@ -53,6 +53,20 @@ def score(d, sc):
         checks["dep"] = 1.0 if any(s["deps"] for s, _ in det) else 0.0
     if sc.get("dup_re"):
         checks["no_dup"] = 0.0 if len(matching(det, sc["dup_re"])) > 1 else 1.0
+    if sc.get("dep_order"):
+        # No item is closed while one of its hard dependencies is still open.
+        status = {x[0]["id"]: x[0]["status"] for x in det}
+        closed = [x for x in det if x[0]["status"] == "closed"]
+        bad = [x for x in closed if any(status.get(dep) != "closed" for dep in x[0]["deps"])]
+        checks["dep_order"] = 0.0 if bad else 1.0
+    if sc.get("min_children"):
+        # A request for an epic: at least this many items have a parent.
+        children = [x for x in det if x[0].get("parent")]
+        checks["children"] = min(1.0, len(children) / sc["min_children"])
+    if sc.get("close_comment"):
+        # Every closed item carries a comment that records the result.
+        closed = [x for x in det if x[0]["status"] == "closed"]
+        checks["close_comment"] = (sum(1 for _, cs in closed if cs) / len(closed)) if closed else 0.0
     if sc.get("no_change"):
         checks["no_change"] = 0.0 if changed_files(d) else 1.0
     total = sum(checks.values()) / len(checks)

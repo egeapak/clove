@@ -21,6 +21,9 @@ The agent gets the candidate text as its `CLAUDE.md` and does the work. Then
 | `dep`     | A dependency is wired where one task waits for another (`s4`). |
 | `no_dup`  | An existing item is reused, not filed again (`dup_re` matches at most one title). |
 | `no_change` | No file outside `.clove/` changed. |
+| `dep_order` | No item is closed while one of its hard dependencies is open. |
+| `children` | At least `min_children` items have a parent (an epic was set up). |
+| `close_comment` | Every closed item has a comment that records the result. |
 
 The score of one rollout is the mean of its checks (0 to 1).
 
@@ -38,6 +41,11 @@ The score of one rollout is the mean of its checks (0 to 1).
 | `s10` | Fix one bug now, defer one feature | 2 or 3: the bug closed, the feature open, no deadline in the text |
 | `s11` | A task that an open item describes in other words | 1 to 3, the existing item reused and closed |
 | `s12` | A question that asks for no change | 0, no code change |
+| `s13` | Implement an item that an open item blocks | 2 to 4; no item closed before its dependency |
+| `s14` | A feature tracked as an epic with one child per part | 6 to 8; at least 5 children, all closed |
+| `s15` | Three review comments | 3 to 5; one closed item per comment |
+| `s16` | Fix one of two open bugs | 2; that bug closed, the other open, no duplicate |
+| `s17` | Close an item whose work is already done | 1; closed with a result comment, no code change |
 
 An agent may also file the failing tests it finds outside its task as new
 items, so some ranges allow one or two extra items. `count_ignore_re` leaves
@@ -50,17 +58,34 @@ store by hand and confirm that only the correct one scores 1.0.
 
 ## Run one round
 
-To run every scenario for one candidate, run:
+To run every scenario 3 times for one candidate and one model, run:
 
 ```sh
 cargo build -p clove-cli --bin clove
 CLOVE_BIN=$PWD/target/debug/clove \
-  scripts/agent-eval/run_round.sh CLOVE.md /tmp/agent-eval/current
+  scripts/agent-eval/run_round.sh --runs 3 --model haiku CLOVE.md /tmp/agent-eval
 ```
 
-`AGENT_CMD` selects the agent (default: `claude -p` with Bash and file tools).
-The agent reads the prompt on stdin and runs inside the toy project. To run
-only some scenarios, list them after the output directory.
+- `--runs N` sets the runs per scenario (default 3). One run is not enough to
+  compare two texts: the same text and scenario can score 0.0 in one run and
+  1.0 in the next.
+- `--model M` names the model. The default `AGENT_CMD` passes it to
+  `claude -p`, and it is the directory name under the output directory, so
+  rounds for several models can share one output directory.
+- `AGENT_CMD` replaces the agent. It reads the prompt on stdin and runs inside
+  the toy project. The default loads only project settings
+  (`--setting-sources project`), so user hooks do not act on the rollout.
+- To run only some scenarios, list them after the output directory.
+
+Results go to `<out>/<model>/<scenario>/r<k>/` (`prompt.txt`, `agent.txt`,
+`score.json`, and the toy project in `repo/`). To print the mean and minimum
+score per scenario and model, run `aggregate.py <out>`; add `--markdown` for
+a table.
+
+If your environment does not allow a script to start an agent, then run each
+rollout as a subagent: create the toy project with `make_fixture.sh`, give the
+agent the output of `mkprompt.py`, and score it with `score.py`. Put the
+results in the same layout so that `aggregate.py` reads them.
 
 ## Improve a text (reflective search)
 

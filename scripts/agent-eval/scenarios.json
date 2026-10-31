@@ -116,5 +116,66 @@
    0
   ],
   "no_change": true
+ },
+ "s13": {
+  "prompt": "Implement the clove item for the `--json` output flag.",
+  "expect_items": [
+   2,
+   4
+  ],
+  "dep_order": true,
+  "preexisting_titles": [
+   "Add a --json output flag to the CLI",
+   "Refactor tally.cli.main into run(argv, stdin)"
+  ],
+  "dup_re": "json"
+ },
+ "s14": {
+  "prompt": "Add a `report` CLI command that prints count, min, max, mean, and median in one table. Track it as an epic with one child item per statistic, then implement it.",
+  "expect_items": [
+   6,
+   8
+  ],
+  "min_children": 5,
+  "need_closed": true,
+  "closed_re": "report|count|min|max|mean|median|epic"
+ },
+ "s15": {
+  "prompt": "Review comments on the last change:\n1. tally/cli.py: `cmd = argv[1]` raises IndexError when no command is given.\n2. tally/stats.py: `average` has no docstring.\n3. README.md: the example uses `python -m`, but it should use `python3 -m`.\nPlease address all three.",
+  "expect_items": [
+   3,
+   5
+  ],
+  "need_closed": true,
+  "closed_re": "argv|index|command|docstring|python3|readme|example"
+ },
+ "s16": {
+  "prompt": "Fix the average bug.",
+  "expect_items": [
+   2,
+   2
+  ],
+  "need_closed": true,
+  "closed_re": "average",
+  "open_re": "parse_line",
+  "preexisting_titles": [
+   "average() raises ZeroDivisionError on an empty list",
+   "parse_line() fails on a trailing comma"
+  ],
+  "dup_re": "average"
+ },
+ "s17": {
+  "prompt": "Check whether the clove item for total() is already done. If it is, close it.",
+  "expect_items": [
+   1,
+   1
+  ],
+  "need_closed": true,
+  "closed_re": "total",
+  "close_comment": true,
+  "no_change": true,
+  "preexisting_titles": [
+   "Add a total(xs) function to tally/stats.py"
+  ]
  }
 }
