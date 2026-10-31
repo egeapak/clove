@@ -693,8 +693,6 @@ fn route(
     }
 }
 
-/// GitHub's 422 for an issue create/update naming an assignee it refuses — the
-/// body shape (incl. `value` and the string `status`) real GitHub returns.
 /// The requested page of `all` when the mock paginates (`State::page_size`),
 /// setting the `Link: next` URL in GitHub's numeric-id form; `all` otherwise.
 fn page_of(s: &mut State, target: &str, route: &str, all: Vec<Value>) -> Vec<Value> {
@@ -720,6 +718,8 @@ fn page_of(s: &mut State, target: &str, route: &str, all: Vec<Value>) -> Vec<Val
     all.into_iter().skip(start).take(size).collect()
 }
 
+/// GitHub's 422 for an issue create/update naming an assignee it refuses — the
+/// body shape (incl. `value` and the string `status`) real GitHub returns.
 fn assignee_rejection(s: &State, body: &Value) -> Option<(&'static str, Value)> {
     let rejected = str_array(&body["assignees"])
         .into_iter()

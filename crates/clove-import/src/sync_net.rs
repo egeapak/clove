@@ -1126,16 +1126,19 @@ async fn fetch_comments(
     let handler = crab.issues(owner, repo);
     let operation = &operation;
     let handler = &handler;
-    let all = crate::github::net::collect_pages(|page| async move {
-        with_retry(true, operation, || {
-            handler
-                .list_comments(number)
-                .per_page(100u8)
-                .page(page)
-                .send()
-        })
-        .await
-    })
+    let all = crate::github::net::collect_pages(
+        |comment: &octocrab::models::issues::Comment| comment.id.into_inner(),
+        |page| async move {
+            with_retry(true, operation, || {
+                handler
+                    .list_comments(number)
+                    .per_page(100u8)
+                    .page(page)
+                    .send()
+            })
+            .await
+        },
+    )
     .await?;
     Ok(all
         .into_iter()

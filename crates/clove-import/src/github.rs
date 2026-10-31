@@ -491,9 +491,19 @@ pub(crate) mod net {
                     .to_owned(),
             )
         })?;
-        let proxy = crate::proxy::ProxyConfig::from_env().map_err(setup_err)?;
-        if let Some(proxy) = proxy {
-            return build_proxied_client(token, proxy, api_base_override(), &setup_err);
+        // Whether a proxy applies depends on the API base (its scheme picks the
+        // variable, its host is checked against NO_PROXY). A base that does not
+        // parse is left to the default builder, which reports it.
+        let base = api_base_override();
+        let base_uri = base
+            .as_deref()
+            .unwrap_or("https://api.github.com")
+            .parse::<http::Uri>();
+        if let Ok(base_uri) = base_uri {
+            let proxy = crate::proxy::ProxyConfig::for_destination(&base_uri).map_err(setup_err)?;
+            if let Some(proxy) = proxy {
+                return build_proxied_client(token, proxy, base_uri, &setup_err);
+            }
         }
         let mut builder = Octocrab::builder().personal_token(token);
         if let Some(base) = api_base_override() {
@@ -521,7 +531,7 @@ pub(crate) mod net {
     fn build_proxied_client(
         token: String,
         proxy: crate::proxy::ProxyConfig,
-        base: Option<String>,
+        base_uri: http::Uri,
         setup_err: &impl Fn(String) -> ImportError,
     ) -> Result<Octocrab, ImportError> {
         use http::header::{HeaderValue, USER_AGENT};
@@ -532,12 +542,6 @@ pub(crate) mod net {
         use octocrab::{AuthState, OctoBody, OctocrabBuilder};
         use std::sync::Arc;
 
-        let base_uri: Uri = match &base {
-            Some(base) => base
-                .parse()
-                .map_err(|err| setup_err(format!("invalid GitHub API base `{base}`: {err}")))?,
-            None => Uri::from_static("https://api.github.com"),
-        };
         // octocrab's default upload base; the token header is scoped to these
         // two hosts.
         let upload_uri = Uri::from_static("https://uploads.github.com");
@@ -605,16 +609,19 @@ pub(crate) mod net {
         let operation = format!("issue list fetch from {owner}/{repo}");
         let handler = &crab.issues(owner, repo);
         let operation = &operation;
-        let all = collect_pages(|page| async move {
-            handler
-                .list()
-                .state(octocrab::params::State::All)
-                .per_page(100)
-                .page(page)
-                .send()
-                .await
-                .map_err(|err| net_err(operation, &err))
-        })
+        let all = collect_pages(
+            |issue: &octocrab::models::issues::Issue| issue.number,
+            |page| async move {
+                handler
+                    .list()
+                    .state(octocrab::params::State::All)
+                    .per_page(100)
+                    .page(page)
+                    .send()
+                    .await
+                    .map_err(|err| net_err(operation, &err))
+            },
+        )
         .await?;
         all.iter().map(to_intermediate).collect()
     }
@@ -626,17 +633,30 @@ pub(crate) mod net {
     /// following the `Link: next` URL. GitHub writes that URL with the numeric
     /// repository id (`/repositories/{id}/…`), and some proxies allow only
     /// `/repos/{owner}/{repo}/…` paths, so the `Link` URL fails behind them.
-    pub(crate) async fn collect_pages<T, F, Fut>(mut fetch: F) -> Result<Vec<T>, ImportError>
+    ///
+    /// An item created while the pages are read shifts the later pages, so an
+    /// item can come back twice; `key` (the issue number or comment id) drops
+    /// the repeat. (Following `Link` URLs has the same race.)
+    pub(crate) async fn collect_pages<T, F, Fut>(
+        key: impl Fn(&T) -> u64,
+        mut fetch: F,
+    ) -> Result<Vec<T>, ImportError>
     where
         F: FnMut(u32) -> Fut,
         Fut: std::future::Future<Output = Result<octocrab::Page<T>, ImportError>>,
     {
+        let mut seen = std::collections::HashSet::new();
         let mut items = Vec::new();
         let mut page = 1u32;
         loop {
             let current = fetch(page).await?;
             let more = current.next.is_some() && !current.items.is_empty();
-            items.extend(current.items);
+            items.extend(
+                current
+                    .items
+                    .into_iter()
+                    .filter(|item| seen.insert(key(item))),
+            );
             if !more {
                 return Ok(items);
             }

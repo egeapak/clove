@@ -3,24 +3,37 @@
 //! octocrab's default client (a `hyper-util` legacy client over `hyper-rustls`)
 //! connects straight to the API host and never reads the proxy environment. So a
 //! user behind a company proxy could not sync. This module reads the proxy
-//! environment the way curl does and, when a proxy applies, opens the
+//! environment and, when a proxy applies to the API host, opens the
 //! connection through an HTTP `CONNECT` tunnel. TLS to the API host then runs
 //! inside the tunnel, so the proxy sees only the host name and port.
 //!
-//! The variables, in precedence order (the first non-empty one wins):
+//! The variables (for each pair the first non-empty one wins, uppercase first,
+//! as in hyper-util's `Matcher::from_env`; curl prefers the lowercase name):
 //!
 //! - `HTTPS_PROXY` / `https_proxy` — the proxy for an `https://` API base;
 //! - `HTTP_PROXY` / `http_proxy` — the proxy for an `http://` API base;
-//! - `ALL_PROXY` / `all_proxy` — the fallback for both;
+//! - `ALL_PROXY` / `all_proxy` — the fallback when the scheme's own pair is
+//!   unset;
 //! - `NO_PROXY` / `no_proxy` — hosts that bypass the proxy (curl rules:
 //!   comma-separated domains, which also match their subdomains, IP addresses,
 //!   CIDR ranges, or `*` for every host).
 //!
+//! Only the variable that applies to the API base is used and checked: an
+//! `HTTP_PROXY` meant for other tools does not matter for an `https://` base,
+//! and nothing matters for a host in `NO_PROXY`.
+//!
 //! A proxy URL is `http://[user:password@]host[:port]` (the scheme may be
-//! omitted; the port defaults to 80). Credentials are sent as
-//! `Proxy-Authorization: Basic …` on the `CONNECT` request. Any other scheme
-//! (`https://`, `socks5://`, …) is a setup error, not a silent direct
-//! connection.
+//! omitted; the port defaults to 80; percent-encode `@`, `:` and `/` in the
+//! user name or password). Credentials are sent as
+//! `Proxy-Authorization: Basic …` on the `CONNECT` request. A URL that does not
+//! parse, or any other scheme (`https://`, `socks5://`, …), is a setup error,
+//! never a silent direct connection. The check is the matcher's own parse, so
+//! what is checked is exactly what is used.
+//!
+//! An `http://` API base is tunnelled with `CONNECT` too (to port 80), not
+//! forwarded in absolute form. A proxy that allows `CONNECT` only to TLS ports
+//! refuses it; GitHub's own API is `https://`, so this affects only a plain-HTTP
+//! GitHub Enterprise.
 //!
 //! Certificate trust does not change: the TLS roots are the platform's native
 //! roots (`rustls-native-certs`), which honour `SSL_CERT_FILE` /
@@ -49,47 +62,92 @@ const HTTP_VARS: [&str; 2] = ["HTTP_PROXY", "http_proxy"];
 const ALL_VARS: [&str; 2] = ["ALL_PROXY", "all_proxy"];
 const NO_VARS: [&str; 2] = ["NO_PROXY", "no_proxy"];
 
-/// The resolved proxy settings: which proxy serves each scheme, and which hosts
-/// bypass it.
+/// The resolved proxy settings for one API base: the proxy that serves it,
+/// and the hosts that bypass it.
 pub(crate) struct ProxyConfig {
     matcher: Matcher,
 }
 
+/// The expected shape, for error messages.
+const PROXY_URL_SHAPE: &str = "expected `http://[user:password@]host[:port]`";
+
 impl ProxyConfig {
-    /// Read the proxy settings from the process environment.
+    /// The proxy settings that apply to `dst` (the API base), from the process
+    /// environment.
     ///
-    /// `Ok(None)` means no proxy variable is set, so the caller keeps the
-    /// direct client. `Err` names the variable whose URL is not usable.
-    pub(crate) fn from_env() -> Result<Option<Self>, String> {
-        Self::from_lookup(|key| std::env::var(key).ok())
+    /// `Ok(None)` means no proxy applies (no variable for its scheme, or its
+    /// host is in `NO_PROXY`), so the caller keeps the direct client. `Err`
+    /// names the variable whose URL is not usable.
+    pub(crate) fn for_destination(dst: &Uri) -> Result<Option<Self>, String> {
+        Self::for_destination_with(|key| std::env::var(key).ok(), dst)
     }
 
-    /// [`from_env`](Self::from_env) over an injected lookup (unit tests).
-    pub(crate) fn from_lookup(
+    /// [`for_destination`](Self::for_destination) over an injected lookup
+    /// (unit tests).
+    pub(crate) fn for_destination_with(
         lookup: impl Fn(&str) -> Option<String>,
+        dst: &Uri,
     ) -> Result<Option<Self>, String> {
-        let https = first_set(&lookup, &HTTPS_VARS)?;
-        let http = first_set(&lookup, &HTTP_VARS)?;
-        let all = first_set(&lookup, &ALL_VARS)?;
-        if https.is_none() && http.is_none() && all.is_none() {
+        let scheme_vars: &[&str] = if dst.scheme_str() == Some("http") {
+            &HTTP_VARS
+        } else {
+            &HTTPS_VARS
+        };
+        let Some((key, val)) =
+            first_set(&lookup, scheme_vars).or_else(|| first_set(&lookup, &ALL_VARS))
+        else {
+            return Ok(None);
+        };
+        let no = first_set(&lookup, &NO_VARS)
+            .map(|(_, list)| list)
+            .unwrap_or_default();
+        // A bypassed host never uses the proxy, so its URL does not matter.
+        let probe = Matcher::builder()
+            .all("http://proxy.invalid")
+            .no(no.as_str())
+            .build();
+        if probe.intercept(dst).is_none() {
             return Ok(None);
         }
-        let no = NO_VARS
-            .iter()
-            .find_map(|key| lookup(key).filter(|val| !val.trim().is_empty()))
-            .unwrap_or_default();
-        let matcher = Matcher::builder()
-            .https(https.unwrap_or_default())
-            .http(http.unwrap_or_default())
-            .all(all.unwrap_or_default())
-            .no(no)
-            .build();
+        let matcher = Matcher::builder().all(val).no(no).build();
+        // The matcher drops a URL it cannot parse; that must not turn into a
+        // silent direct connection. The message never echoes the value, which
+        // may carry a password.
+        let intercept = matcher.intercept(dst).ok_or_else(|| {
+            format!(
+                "invalid proxy URL in {key}: it does not parse; {PROXY_URL_SHAPE} \
+                 (percent-encode `@`, `:` and `/` in the user name or password)"
+            )
+        })?;
+        let proxy = intercept.uri();
+        // The matcher splits the credentials at the first `@`; an unencoded `@`
+        // in the password leaves the rest in the authority and drops the
+        // credentials.
+        if proxy.authority().is_some_and(|a| a.as_str().contains('@')) {
+            return Err(format!(
+                "invalid proxy URL in {key}: it does not parse; {PROXY_URL_SHAPE} \
+                 (percent-encode `@`, `:` and `/` in the user name or password)"
+            ));
+        }
+        if proxy.scheme_str() != Some("http") {
+            let host = dst.host().unwrap_or_default();
+            return Err(format!(
+                "invalid proxy URL in {key}: the `{}` scheme is not supported; use an \
+                 `http://` proxy URL (clove opens an HTTP CONNECT tunnel through it), \
+                 or add `{host}` to NO_PROXY to connect directly",
+                proxy.scheme_str().unwrap_or_default()
+            ));
+        }
+        if proxy.host().is_none_or(str::is_empty) {
+            return Err(format!(
+                "invalid proxy URL in {key}: no host; {PROXY_URL_SHAPE}"
+            ));
+        }
         Ok(Some(Self { matcher }))
     }
 
     #[cfg(test)]
-    /// The proxy URL that serves `dst`, or `None` for a direct connection
-    /// (no proxy for that scheme, or the host is in `NO_PROXY`).
+    /// The proxy URL that serves `dst`, or `None` for a direct connection.
     pub(crate) fn proxy_for(&self, dst: &Uri) -> Option<Uri> {
         self.matcher
             .intercept(dst)
@@ -97,49 +155,16 @@ impl ProxyConfig {
     }
 }
 
-/// The first non-empty variable of `keys`, validated as a proxy URL.
+/// The first non-empty variable of `keys`: its name and trimmed value.
 fn first_set(
     lookup: &impl Fn(&str) -> Option<String>,
-    keys: &[&str],
-) -> Result<Option<String>, String> {
-    for key in keys {
-        let Some(val) = lookup(key) else { continue };
+    keys: &[&'static str],
+) -> Option<(&'static str, String)> {
+    keys.iter().find_map(|key| {
+        let val = lookup(key)?;
         let val = val.trim();
-        if val.is_empty() {
-            continue;
-        }
-        validate_proxy_url(val).map_err(|why| format!("invalid proxy URL in {key}: {why}"))?;
-        return Ok(Some(val.to_owned()));
-    }
-    Ok(None)
-}
-
-/// Check that `val` is a proxy URL the `CONNECT` tunnel can use. The message
-/// never echoes the value, which may carry a password.
-fn validate_proxy_url(val: &str) -> Result<(), String> {
-    let uri: Uri = val
-        .parse()
-        .map_err(|_| "not a URL; expected `http://[user:password@]host[:port]`".to_owned())?;
-    match uri.scheme_str() {
-        None | Some("http") => {}
-        Some(other) => {
-            return Err(format!(
-                "the `{other}` scheme is not supported; use an `http://` proxy URL \
-                 (clove opens an HTTP CONNECT tunnel through it)"
-            ))
-        }
-    }
-    let authority = uri
-        .authority()
-        .ok_or_else(|| "no host; expected `http://[user:password@]host[:port]`".to_owned())?;
-    let host_port = authority
-        .as_str()
-        .rsplit_once('@')
-        .map_or(authority.as_str(), |(_, rest)| rest);
-    if host_port.is_empty() || host_port.starts_with(':') {
-        return Err("no host; expected `http://[user:password@]host[:port]`".to_owned());
-    }
-    Ok(())
+        (!val.is_empty()).then(|| (*key, val.to_owned()))
+    })
 }
 
 /// A connector that opens a plain TCP connection to the destination, or to the
@@ -180,6 +205,7 @@ impl Service<Uri> for ProxyConnector {
         };
         let proxy = intercept.uri().clone();
         let mut tunnel = Tunnel::new(proxy.clone(), self.http.clone());
+        let has_auth = intercept.basic_auth().is_some();
         if let Some(auth) = intercept.basic_auth() {
             tunnel = tunnel.with_auth(auth.clone());
         }
@@ -192,7 +218,7 @@ impl Service<Uri> for ProxyConnector {
             tunnel
                 .call(target)
                 .await
-                .map_err(|err| BoxError::from(describe_tunnel_error(&proxy, &err)))
+                .map_err(|err| BoxError::from(describe_tunnel_error(&proxy, has_auth, &err)))
         })
     }
 }
@@ -220,8 +246,13 @@ fn with_explicit_port(dst: &Uri) -> Result<Uri, BoxError> {
 /// One line on why the `CONNECT` tunnel through `proxy` failed: the error and
 /// its source chain. `TunnelError`'s own `Display` is terse ("tunnel error:
 /// unsuccessful"), so name the proxy. `proxy` carries no credentials (the
-/// matcher strips them from the URL).
-fn describe_tunnel_error(proxy: &Uri, err: &(dyn std::error::Error + 'static)) -> String {
+/// matcher strips them from the URL). `has_auth` says whether credentials
+/// were sent, which decides the hint on a 407.
+fn describe_tunnel_error(
+    proxy: &Uri,
+    has_auth: bool,
+    err: &(dyn std::error::Error + 'static),
+) -> String {
     let mut text = format!("proxy CONNECT through {proxy} failed: {err}");
     let mut cause = err.source();
     while let Some(inner) = cause {
@@ -230,7 +261,11 @@ fn describe_tunnel_error(proxy: &Uri, err: &(dyn std::error::Error + 'static)) -
         cause = inner.source();
     }
     if text.contains("proxy authorization required") {
-        text.push_str(" (put the credentials in the proxy URL: `http://user:password@host:port`)");
+        text.push_str(if has_auth {
+            " (the proxy refused the credentials in the proxy URL)"
+        } else {
+            " (put the credentials in the proxy URL: `http://user:password@host:port`)"
+        });
     }
     text
 }
@@ -240,79 +275,91 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    fn config(vars: &[(&str, &str)]) -> Result<Option<ProxyConfig>, String> {
+    const GITHUB: &str = "https://api.github.com";
+
+    fn config(vars: &[(&str, &str)], base: &str) -> Result<Option<ProxyConfig>, String> {
         let map: HashMap<String, String> = vars
             .iter()
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect();
-        ProxyConfig::from_lookup(|key| map.get(key).cloned())
+        ProxyConfig::for_destination_with(|key| map.get(key).cloned(), &base.parse().unwrap())
     }
 
-    fn proxy(cfg: &ProxyConfig, url: &str) -> Option<String> {
-        cfg.proxy_for(&url.parse().unwrap()).map(|u| u.to_string())
+    /// The proxy that serves `base`, as a string (`None`: direct).
+    fn proxy(vars: &[(&str, &str)], base: &str) -> Option<String> {
+        config(vars, base)
+            .unwrap()
+            .and_then(|cfg| cfg.proxy_for(&base.parse().unwrap()))
+            .map(|u| u.to_string())
     }
 
     #[test]
     fn no_proxy_variable_keeps_the_direct_client() {
-        assert!(config(&[]).unwrap().is_none());
-        assert!(config(&[("HTTPS_PROXY", "  ")]).unwrap().is_none());
+        assert!(config(&[], GITHUB).unwrap().is_none());
+        assert!(config(&[("HTTPS_PROXY", "  ")], GITHUB).unwrap().is_none());
         // NO_PROXY alone configures no proxy.
-        assert!(config(&[("NO_PROXY", "example.com")]).unwrap().is_none());
+        assert!(config(&[("NO_PROXY", "example.com")], GITHUB)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
-    fn https_proxy_serves_https_and_http_proxy_serves_http() {
-        let cfg = config(&[
+    fn the_base_scheme_picks_the_variable() {
+        let vars = [
             ("HTTPS_PROXY", "http://secure.proxy:3128"),
             ("HTTP_PROXY", "http://plain.proxy:8080"),
-        ])
-        .unwrap()
-        .unwrap();
+        ];
         assert_eq!(
-            proxy(&cfg, "https://api.github.com/repos"),
+            proxy(&vars, GITHUB),
             Some("http://secure.proxy:3128/".to_owned())
         );
         assert_eq!(
-            proxy(&cfg, "http://ghe.local/api/v3"),
+            proxy(&vars, "http://ghe.local/api/v3"),
             Some("http://plain.proxy:8080/".to_owned())
+        );
+        // An https_proxy does not serve an http:// base.
+        assert_eq!(
+            proxy(&[("https_proxy", "http://p:1")], "http://ghe.local/"),
+            None
         );
     }
 
     #[test]
     fn lowercase_names_and_all_proxy_are_read() {
-        let cfg = config(&[("https_proxy", "proxy.corp:3128")])
-            .unwrap()
-            .unwrap();
         assert_eq!(
-            proxy(&cfg, "https://api.github.com/"),
+            proxy(&[("https_proxy", "proxy.corp:3128")], GITHUB),
             Some("http://proxy.corp:3128/".to_owned())
         );
-        // An https_proxy does not serve an http:// base.
-        assert_eq!(proxy(&cfg, "http://api.github.com/"), None);
-
-        let cfg = config(&[("ALL_PROXY", "http://all.proxy:1")])
-            .unwrap()
-            .unwrap();
+        for base in ["http://ghe.local/", "https://ghe.local/"] {
+            assert_eq!(
+                proxy(&[("all_proxy", "http://all.proxy:1")], base),
+                Some("http://all.proxy:1/".to_owned()),
+                "{base}"
+            );
+        }
+        // The scheme's own variable wins over ALL_PROXY.
         assert_eq!(
-            proxy(&cfg, "http://ghe.local/"),
-            Some("http://all.proxy:1/".to_owned())
-        );
-        assert_eq!(
-            proxy(&cfg, "https://ghe.local/"),
-            Some("http://all.proxy:1/".to_owned())
+            proxy(
+                &[
+                    ("ALL_PROXY", "http://all:1"),
+                    ("HTTPS_PROXY", "http://own:2")
+                ],
+                GITHUB
+            ),
+            Some("http://own:2/".to_owned())
         );
     }
 
     #[test]
     fn uppercase_wins_over_lowercase() {
-        let cfg = config(&[
-            ("HTTPS_PROXY", "http://upper:1"),
-            ("https_proxy", "http://lower:2"),
-        ])
-        .unwrap()
-        .unwrap();
         assert_eq!(
-            proxy(&cfg, "https://api.github.com/"),
+            proxy(
+                &[
+                    ("HTTPS_PROXY", "http://upper:1"),
+                    ("https_proxy", "http://lower:2")
+                ],
+                GITHUB
+            ),
             Some("http://upper:1/".to_owned())
         );
     }
@@ -324,22 +371,44 @@ mod tests {
             ("no_proxy", ".github.com, other.org"),
             ("NO_PROXY", "*"),
         ] {
-            let cfg = config(&[("HTTPS_PROXY", "http://p:3128"), (key, list)])
-                .unwrap()
-                .unwrap();
-            assert_eq!(proxy(&cfg, "https://api.github.com/"), None, "{key}={list}");
+            let vars = [("HTTPS_PROXY", "http://p:3128"), (key, list)];
+            assert!(config(&vars, GITHUB).unwrap().is_none(), "{key}={list}");
         }
-        let cfg = config(&[
+        let vars = [
             ("HTTPS_PROXY", "http://p:3128"),
             ("NO_PROXY", "10.0.0.0/8,notgithub.com"),
-        ])
-        .unwrap()
-        .unwrap();
-        assert_eq!(proxy(&cfg, "https://10.1.2.3/"), None);
+        ];
+        assert!(config(&vars, "https://10.1.2.3/").unwrap().is_none());
+        assert_eq!(proxy(&vars, GITHUB), Some("http://p:3128/".to_owned()));
+    }
+
+    #[test]
+    fn a_variable_that_does_not_apply_is_not_checked() {
+        // HTTP_PROXY is for http:// bases; a socks URL there is someone else's.
+        assert!(config(&[("HTTP_PROXY", "socks5://p:1080")], GITHUB)
+            .unwrap()
+            .is_none());
+        // ALL_PROXY is shadowed by the scheme's own variable.
         assert_eq!(
-            proxy(&cfg, "https://api.github.com/"),
-            Some("http://p:3128/".to_owned())
+            proxy(
+                &[
+                    ("ALL_PROXY", "socks5://p:1080"),
+                    ("HTTPS_PROXY", "http://own:2")
+                ],
+                GITHUB
+            ),
+            Some("http://own:2/".to_owned())
         );
+        // A bypassed host never uses the proxy, whatever its URL.
+        assert!(config(
+            &[
+                ("HTTPS_PROXY", "socks5://p:1080"),
+                ("NO_PROXY", "api.github.com")
+            ],
+            GITHUB
+        )
+        .unwrap()
+        .is_none());
     }
 
     #[test]
@@ -355,11 +424,22 @@ mod tests {
                 "https://p:443",
                 "`https` scheme is not supported",
             ),
-            ("HTTP_PROXY", "http://", "not a URL"),
-            ("ALL_PROXY", "http://user:secret@:8080", "no host"),
-            ("HTTPS_PROXY", "not a url", "not a URL"),
+            (
+                "ALL_PROXY",
+                "socks5h://user:secret@p:1080",
+                "scheme is not supported",
+            ),
+            ("HTTPS_PROXY", "http://", "does not parse"),
+            ("HTTPS_PROXY", "not a url", "does not parse"),
+            // An unencoded `@` in the password: the matcher cannot use it, so
+            // it must not fall through to a direct connection.
+            (
+                "HTTPS_PROXY",
+                "http://user:p@ss@proxy:3128",
+                "does not parse",
+            ),
         ] {
-            let Err(err) = config(&[(key, val)]) else {
+            let Err(err) = config(&[(key, val)], GITHUB) else {
                 panic!("{key}={val} must be rejected");
             };
             assert!(
@@ -367,8 +447,20 @@ mod tests {
                 "{err}"
             );
             assert!(err.contains(needle), "{key}={val}: {err}");
-            assert!(!err.contains("secret"), "the password must not leak: {err}");
+            assert!(!err.contains("secret") && !err.contains("p@ss"), "{err}");
         }
+        let Err(err) = config(&[("HTTPS_PROXY", "socks5://p:1080")], GITHUB) else {
+            panic!("socks5 must be rejected");
+        };
+        assert!(err.contains("add `api.github.com` to NO_PROXY"), "{err}");
+    }
+
+    #[test]
+    fn a_407_hint_depends_on_whether_credentials_were_sent() {
+        let proxy: Uri = "http://p:3128/".parse().unwrap();
+        let err = std::io::Error::other("tunnel error: proxy authorization required");
+        assert!(describe_tunnel_error(&proxy, false, &err).contains("put the credentials"));
+        assert!(describe_tunnel_error(&proxy, true, &err).contains("refused the credentials"));
     }
 
     #[test]

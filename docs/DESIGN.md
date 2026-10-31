@@ -2172,25 +2172,35 @@ through the unified write path (`apply_edit`). `--dry-run` plans without touchin
 either side; `--no-comments` skips comment reconciliation. A running daemon can
 run the sync on a timer (`[daemon] github_sync_interval_min` + `github_sync_repo`).
 
-**Proxy and TLS trust.** The GitHub client reads the proxy environment the way
-curl does. `HTTPS_PROXY` serves an `https://` API base, `HTTP_PROXY` an
-`http://` one (GitHub Enterprise or the test mock), and `ALL_PROXY` is the
-fallback for both; each name is also read in lowercase, and the uppercase name
-wins. `NO_PROXY` lists hosts that connect directly (comma-separated domains,
-which also match their subdomains, IP addresses, CIDR ranges, or `*`). A proxy
-URL is `http://[user:password@]host[:port]`: the client opens an HTTP `CONNECT`
-tunnel through it (credentials go as `Proxy-Authorization: Basic`), and TLS to
-GitHub runs inside the tunnel. Any other proxy scheme (`https://`, `socks5://`)
-or a URL with no host is a `client setup` error that names the variable; it
-never falls back to a direct connection. With no proxy variable set, the client
-is octocrab's default one. The TLS roots are the platform's native roots
-(`rustls-native-certs`), which `SSL_CERT_FILE` / `SSL_CERT_DIR` replace; so a
-proxy that re-terminates TLS works once its CA is in the system store or in that
-file. Certificate verification is never turned off. Lists are paged by page
-number on the `/repos/{owner}/{repo}/…` route rather than by following GitHub's
-`Link: next` URL, which names the numeric repository id (`/repositories/{id}/…`)
-that some proxies refuse. The daemon's timed sync keeps these variables from the
-client that started it (the spawn environment in §8.8).
+**Proxy and TLS trust.** The GitHub client reads the proxy environment.
+`HTTPS_PROXY` serves an `https://` API base, `HTTP_PROXY` an `http://` one
+(GitHub Enterprise or the test mock), and `ALL_PROXY` is the fallback when the
+scheme's own variable is unset. Each name is also read in lowercase, and the
+uppercase name wins (as in hyper-util's `Matcher::from_env`; curl prefers the
+lowercase name). `NO_PROXY` lists hosts that connect directly (comma-separated
+domains, which also match their subdomains, IP addresses, CIDR ranges, or `*`).
+Only the variable that applies to the API base is used and checked, so an
+`HTTP_PROXY` or `ALL_PROXY` meant for other tools does not affect an `https://`
+base that has its own `HTTPS_PROXY`, and nothing affects a host in `NO_PROXY`.
+A proxy URL is `http://[user:password@]host[:port]` (percent-encode `@`, `:` and
+`/` in the user name or password). The client opens an HTTP `CONNECT` tunnel
+through it (credentials go as `Proxy-Authorization: Basic`), and TLS to GitHub
+runs inside the tunnel. An `http://` base is tunnelled to port 80 too, not
+forwarded in absolute form, so a proxy that allows `CONNECT` only to TLS ports
+refuses a plain-HTTP GitHub Enterprise. A proxy URL that does not parse, or any
+other scheme (`https://`, `socks5://`), is a `client setup` error that names the
+variable; it never falls back to a direct connection. With no proxy applying,
+the client is octocrab's default one. The TLS roots are the platform's native
+roots (`rustls-native-certs`), which `SSL_CERT_FILE` / `SSL_CERT_DIR` replace;
+so a proxy that re-terminates TLS works once its CA is in the system store or
+in that file. Certificate verification is never turned off. Lists are paged by
+page number on the `/repos/{owner}/{repo}/…` route rather than by following
+GitHub's `Link: next` URL, which names the numeric repository id
+(`/repositories/{id}/…`) that some proxies refuse; an item that a concurrent
+change shifts onto a second page is dropped by its number or id. The daemon's
+timed sync keeps these variables from the client that started the daemon (the
+spawn environment in §8.8); after you change them, restart the daemon
+(`clove daemon stop --all`).
 
 **Comments** are reconciled per linked issue. A local comment (a file under
 `.clove/issues/<id>/comments/`, identified by its file name) and its GitHub
