@@ -2,11 +2,11 @@
 schema: 1
 id: clov-P0D5RQRS
 title: 'CLOVE.md: show examples of conversation context that items must not contain'
-status: open
+status: in_progress
 type: docs
 priority: 2
 created: 2026-10-31T08:27:11.563Z
-updated: 2026-10-31T10:46:21.994Z
+updated: 2026-10-31T10:48:33.738Z
 assignee: claude
 labels: []
 deps: []
