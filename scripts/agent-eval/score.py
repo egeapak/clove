@@ -12,7 +12,9 @@ def j(args, cwd):
     return json.loads(out)["data"]
 def changed_files(d):
     out = subprocess.run(["git", "status", "--porcelain"], cwd=d, capture_output=True, text=True).stdout
-    return [l for l in out.splitlines() if ".clove/" not in l]
+    # .clove/ is the tracker; __pycache__ and .pyc files appear whenever an
+    # agent runs the tests, so neither counts as a change.
+    return [l for l in out.splitlines() if ".clove/" not in l and "__pycache__" not in l and not l.endswith(".pyc")]
 def matching(det, pattern):
     return [x for x in det if re.search(pattern, x[0]["title"], re.I)]
 def score(d, sc):
