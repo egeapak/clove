@@ -252,6 +252,11 @@ fn explicit_port_skips_the_daemon_hand_off() {
 /// address they named, not the daemon's URL.
 #[test]
 fn explicit_host_skips_the_daemon_hand_off() {
+    // Without IPv6 nothing can serve on [::1], so there is nothing to check.
+    if TcpListener::bind("[::1]:0").is_err() {
+        eprintln!("skipped: no IPv6 loopback here");
+        return;
+    }
     let held = TcpListener::bind("127.0.0.1:0").unwrap();
     let repo = repo_with_web_port(held.local_addr().unwrap().port());
     clove(repo.path())

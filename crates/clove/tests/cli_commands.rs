@@ -54,18 +54,11 @@ fn init_is_idempotent_and_writes_gitignore() {
     clove(dir.path()).arg("init").assert().success();
 
     let gitignore = std::fs::read_to_string(dir.path().join(".clove/.gitignore")).unwrap();
-    for entry in [
-        "index.db",
-        "*.db-shm",
-        "*.db-wal",
-        "daemon.sock",
-        "daemon.pid",
-        "reindex.lock",
-        "daemon.lock",
-        "index.db.tmp",
-        "daemon.token",
-    ] {
-        assert!(gitignore.contains(entry), "missing {entry}");
+    for entry in clove_core::GITIGNORE_ENTRIES {
+        assert!(
+            gitignore.lines().any(|line| line == entry),
+            "missing {entry}"
+        );
     }
     assert!(!gitignore.contains('\r'), "gitignore must use LF endings");
     assert!(dir.path().join(".clove/config.toml").exists());
@@ -969,7 +962,7 @@ fn doctor_detects_and_fixes_gitignore_drift() {
         .assert()
         .success();
     let fixed = std::fs::read_to_string(&gitignore).unwrap();
-    for entry in ["index.db", "daemon.sock", "index.db.tmp"] {
+    for entry in ["index.db", "daemon.sock", "index.db.tmp", "write.lock"] {
         assert!(fixed.contains(entry), "missing {entry} after fix");
     }
     let after = json_ok(clove(dir.path()).arg("doctor"));
@@ -984,6 +977,57 @@ fn doctor_detects_and_fixes_gitignore_drift() {
         .assert()
         .success();
     assert!(gitignore.exists());
+}
+
+/// `.clove/write.lock` (the store-wide write lock, created on the first write)
+/// is git-ignored by the `.gitignore` that `clove init` writes, and the next
+/// write adds the entry to a `.gitignore` from an older clove that lacks it.
+#[test]
+fn write_lock_is_git_ignored() {
+    let git_status = |dir: &Path| {
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(["status", "--porcelain", "--untracked-files=all", ".clove"])
+            .output()
+            .expect("git must be on PATH");
+        assert!(out.status.success(), "git status failed: {out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let git_init = std::process::Command::new("git")
+        .current_dir(dir.path())
+        .args(["init", "-q"])
+        .status()
+        .expect("git must be on PATH");
+    assert!(git_init.success());
+    clove(dir.path())
+        .args(["init", "--prefix", "proj"])
+        .assert()
+        .success();
+    new_item(dir.path(), "X", &[]);
+    assert!(dir.path().join(".clove/write.lock").exists());
+    let status = git_status(dir.path());
+    assert!(!status.contains("write.lock"), "git status: {status}");
+
+    // A `.gitignore` from before `write.lock` was listed: the lock file shows
+    // as untracked until the next write adds the entry.
+    let gitignore = dir.path().join(".clove/.gitignore");
+    let old = std::fs::read_to_string(&gitignore)
+        .unwrap()
+        .replace("write.lock\n", "");
+    std::fs::write(&gitignore, &old).unwrap();
+    let status = git_status(dir.path());
+    assert!(status.contains("write.lock"), "git status: {status}");
+    new_item(dir.path(), "Y", &[]);
+    let status = git_status(dir.path());
+    assert!(!status.contains("write.lock"), "git status: {status}");
+    assert_eq!(
+        std::fs::read_to_string(&gitignore).unwrap(),
+        format!("{old}write.lock\n"),
+        "the entry is appended, the rest kept"
+    );
+    let report = json_ok(clove(dir.path()).arg("doctor"));
+    assert!(!doctor_codes(&report).contains(&"GITIGNORE_DRIFT".to_owned()));
 }
 
 #[test]
