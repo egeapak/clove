@@ -65,6 +65,13 @@ ignore = [
     # GitHub App JWT auth, which clove does not exercise in a setting where an
     # attacker can observe decryption timing. No fixed `rsa` release exists.
     "RUSTSEC-2023-0071",
+    # crypto-bigint 0.5 timing variability in constant-time operations. Same
+    # path as RUSTSEC-2023-0071: only the optional `github` feature pulls it
+    # (octocrab -> jsonwebtoken -> p256/p384 -> elliptic-curve), for GitHub App
+    # JWT signing, which clove never does: it authenticates with a personal
+    # token. The fix is crypto-bigint 0.7.6, which elliptic-curve 0.13 cannot
+    # use; revisit when octocrab moves to a jsonwebtoken on elliptic-curve 0.14.
+    "RUSTSEC-2026-0387",
     # `paste` is unmaintained (not a vulnerability). Pulled transitively by
     # `ratatui` (the `clove tui` browser); revisit on a ratatui bump.
     "RUSTSEC-2024-0436",
