@@ -4,6 +4,8 @@
 //! → `CLOVE_*` environment variables. The `--format` CLI flag (highest) is
 //! applied by the CLI layer, above everything here.
 
+use std::io;
+
 use camino::Utf8Path;
 use serde::{Deserialize, Serialize};
 
@@ -19,7 +21,7 @@ pub const CURRENT_CONFIG_SCHEMA: u32 = 1;
 /// writes this set (LF endings on every platform) and `clove doctor` verifies it
 /// is present (`GITIGNORE_DRIFT`), so the canonical list lives here, shared by
 /// both rather than duplicated.
-pub const GITIGNORE_ENTRIES: [&str; 10] = [
+pub const GITIGNORE_ENTRIES: [&str; 11] = [
     "index.db",
     "*.db-shm",
     "*.db-wal",
@@ -33,7 +35,33 @@ pub const GITIGNORE_ENTRIES: [&str; 10] = [
     // Per-clone GitHub sync bookkeeping (`sync/github/<owner>__<repo>.json`):
     // local last-sync clocks, rebuildable, must not enter the source of truth.
     "sync/",
+    // The store-wide advisory write lock, created on the first write.
+    crate::store::WRITE_LOCK_FILE,
 ];
+
+/// Add `entry` to `.clove/.gitignore` (creating the file if absent) when no line
+/// of it is `entry` — a list written by a clove that predates the entry. The
+/// rest of the file is kept; a symlinked `.gitignore` is refused, not followed.
+/// The runtime file that needs the entry calls this when it is used, so an
+/// existing clone is covered without `clove doctor --fix`.
+pub(crate) fn ensure_gitignored(clove_dir: &Utf8Path, entry: &str) -> io::Result<()> {
+    let gitignore = clove_dir.join(".gitignore");
+    crate::fs_safe::refuse_symlink(&gitignore)?;
+    let mut contents = match std::fs::read_to_string(&gitignore) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e),
+    };
+    if contents.lines().any(|line| line.trim() == entry) {
+        return Ok(());
+    }
+    if !contents.is_empty() && !contents.ends_with('\n') {
+        contents.push('\n');
+    }
+    contents.push_str(entry);
+    contents.push('\n');
+    crate::fs_safe::write_atomic(clove_dir, &gitignore, contents.as_bytes())
+}
 
 /// The number of random characters in a generated id — fixed: the id grammar
 /// (`^[a-z][a-z0-9]{0,7}-[0-9A-Z]{8}$`) *requires* exactly 8, so this is not

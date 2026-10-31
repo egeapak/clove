@@ -908,6 +908,23 @@ mod tests {
         (tmp, clove_dir)
     }
 
+    /// Whether a read-only (`0o500`) directory refuses a new file here. It does
+    /// not as root (or with `CAP_DAC_OVERRIDE`), which ignores the mode bits.
+    #[cfg(unix)]
+    fn read_only_dirs_are_enforced(parent: &std::path::Path) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        let probe = parent.join("read-only-probe");
+        std::fs::create_dir(&probe).unwrap();
+        std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let enforced = std::fs::File::create(probe.join("x")).is_err();
+        std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::remove_dir_all(&probe).unwrap();
+        if !enforced {
+            eprintln!("skipped: a read-only directory is writable here (running as root?)");
+        }
+        enforced
+    }
+
     /// Only a call that loads the project makes its token; a read writes
     /// nothing and has no token to send.
     #[test]
@@ -943,7 +960,10 @@ mod tests {
     #[test]
     fn an_unusable_token_is_not_sent() {
         use std::os::unix::fs::PermissionsExt;
-        let (_tmp, clove_dir) = store();
+        let (tmp, clove_dir) = store();
+        if !read_only_dirs_are_enforced(tmp.path()) {
+            return;
+        }
         let token = clove_core::daemon_token::token_path(&clove_dir);
         std::fs::write(&token, "0123456789abcdef0123456789abcdef\n").unwrap();
         std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o644)).unwrap();
