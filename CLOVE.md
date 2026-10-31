@@ -33,6 +33,15 @@ found the problem, whether it was in scope, and "as requested". Keep such a
 detail only if the work is wrong without it (for example, a required output
 format). This rule applies to titles, bodies, and comments.
 
+| Do not write                     | Write instead |
+|----------------------------------|---------------|
+| "Found while running the tests." | Nothing. The body states the defect. |
+| "Out of scope; left unfixed."    | Nothing. An open item is unfixed work. |
+| "Deferred to next week."         | Nothing. Leave the item open, with no date. |
+| "Added per the request."         | "Added mode(xs); tests/run.py passes." |
+
+An item that you file and leave open needs no comment.
+
 ## Rule: name items by id and title when you talk to the user
 
 The user does not know what an id means. Whenever you mention an item in a
