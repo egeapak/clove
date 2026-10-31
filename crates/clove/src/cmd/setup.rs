@@ -69,8 +69,10 @@ Never write a bare id to the user. Item bodies and comments may use a bare id.
 - File work: `clove new "<title>" --type bug|feature|chore|docs|epic -b "<body>" [--dep ID] [--parent ID]`.
 - Order work: `clove dep add <id> <dep-id>` means `<id>` waits for `<dep-id>`.
 - Track progress: `clove start <id>` when you begin, `clove comment <id> "<step or finding>"`
-  as you go. Before `clove close <id>`, add a comment that says what changed and
-  how you verified it. `start`, `close`, and `comment` take one id per call.
+  as you go. Before `clove close <id>`, first run the check that shows the work is
+  done (for example, the tests). Then add a comment that says what changed and
+  quotes the actual result of that check (for example, which tests pass and which
+  fail). `start`, `close`, and `comment` take one id per call.
 - Before you reply to the user, check `clove ls --status in_progress`: no item
   you started may stay open without a comment that says why.
 
