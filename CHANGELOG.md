@@ -19,6 +19,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   easy, `clove new` and `clove comment` now print the title, and their JSON
   `data` (and the `clove_new` / `clove_comment` MCP results) gain a `title`
   key. `clove new` keeps the id and path as its first two fields.
+- The id-and-title rule now covers every mention: a repeated mention of the
+  same item and an id in a list get the title too, the title is copied
+  exactly, and the directives tell the agent to check every id in a reply
+  before it sends the reply.
 
 ### Fixed
 

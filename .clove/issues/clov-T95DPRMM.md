@@ -2,11 +2,12 @@
 schema: 1
 id: clov-T95DPRMM
 title: Agents drop the title when they mention an item id a second time
-status: open
+status: closed
 type: chore
 priority: 2
 created: 2026-10-31T10:24:29.735Z
-updated: 2026-10-31T10:46:22.015Z
+updated: 2026-10-31T11:23:31.486Z
+closed: 2026-10-31T11:23:31.486Z
 assignee: claude
 labels: []
 deps: []

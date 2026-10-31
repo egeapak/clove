@@ -347,6 +347,7 @@ fn agent_doc_has_workflow_section() {
     assert!(section.contains("One item per separate task"));
     assert!(section.contains("self-contained body"));
     assert!(section.contains("its id and then its title"));
+    assert!(section.contains("also on a second mention"));
     for (i, _) in section.match_indices("`clove ") {
         let word: String = section[i + "`clove ".len()..]
             .chars()
