@@ -87,6 +87,15 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 octocrab = { version = "0.51", default-features = false, features = [
     "default-client", "follow-redirect", "rustls", "rustls-ring", "jwt-rust-crypto",
 ] }
+# Proxy support for the GitHub client (clove-import `github` feature). All are
+# already in the tree through octocrab; these lines only turn on hyper-util's
+# `client-proxy` (CONNECT tunnel + curl-style env matcher) and let clove-import
+# build the same hyper-rustls connector octocrab builds. hyper-rustls keeps
+# default features off: its default is aws-lc-rs, which must stay out.
+http = "1"
+hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy", "http1", "tokio"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "native-tokio", "ring", "tls12", "logging"] }
+tower-service = "0.3"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }  # octocrab/hyper-rustls pull BOTH ring + aws-lc-rs via feature unification, so rustls can't auto-pick a provider and panics on first TLS use; we install the ring provider explicitly (clove-import github feature). The explicit `ring` pin is also load-bearing for the `ureq` registry client: a default-features rustls unifies onto aws-lc-sys and triples the binary — CI asserts aws-lc-sys stays out of clove-cli's normal tree.
 # crates.io registry client (`clove plugin list --all` / `search`). Blocking/sync
 # (correct for a CLI, and it must never be called from cloved/clove-web, which are

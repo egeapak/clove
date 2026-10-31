@@ -1124,14 +1124,19 @@ async fn fetch_comments(
 ) -> Result<Vec<GhComment>, ImportError> {
     let operation = format!("comment fetch of {} for {clove_id}", issue_label(number));
     let handler = crab.issues(owner, repo);
-    let first = with_retry(true, &operation, || {
-        handler.list_comments(number).per_page(100u8).send()
+    let operation = &operation;
+    let handler = &handler;
+    let all = crate::github::net::collect_pages(|page| async move {
+        with_retry(true, operation, || {
+            handler
+                .list_comments(number)
+                .per_page(100u8)
+                .page(page)
+                .send()
+        })
+        .await
     })
     .await?;
-    let all = crab
-        .all_pages(first)
-        .await
-        .map_err(|err| net_err(&operation, &err))?;
     Ok(all
         .into_iter()
         .map(|c| GhComment {

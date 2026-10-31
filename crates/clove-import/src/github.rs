@@ -491,6 +491,10 @@ pub(crate) mod net {
                     .to_owned(),
             )
         })?;
+        let proxy = crate::proxy::ProxyConfig::from_env().map_err(setup_err)?;
+        if let Some(proxy) = proxy {
+            return build_proxied_client(token, proxy, api_base_override(), &setup_err);
+        }
         let mut builder = Octocrab::builder().personal_token(token);
         if let Some(base) = api_base_override() {
             builder = builder.base_uri(base.clone()).map_err(|err| {
@@ -503,6 +507,65 @@ pub(crate) mod net {
         builder
             .build()
             .map_err(|err| setup_err(describe_octocrab_error(&err)))
+    }
+
+    /// Build the client for a configured proxy (`HTTPS_PROXY` & co., see
+    /// [`crate::proxy`]).
+    ///
+    /// octocrab's default builder cannot take a custom connector, so this
+    /// assembles the same stack it builds (rustls with the native roots, the
+    /// legacy hyper client, follow-redirect, the `User-Agent` header, the base
+    /// URI and the token header, which is only sent to the API host) around a
+    /// connector that tunnels through the proxy. Hosts in `NO_PROXY` still
+    /// connect directly.
+    fn build_proxied_client(
+        token: String,
+        proxy: crate::proxy::ProxyConfig,
+        base: Option<String>,
+        setup_err: &impl Fn(String) -> ImportError,
+    ) -> Result<Octocrab, ImportError> {
+        use http::header::{HeaderValue, USER_AGENT};
+        use http::Uri;
+        use octocrab::service::middleware::auth_header::AuthHeaderLayer;
+        use octocrab::service::middleware::base_uri::BaseUriLayer;
+        use octocrab::service::middleware::extra_headers::ExtraHeadersLayer;
+        use octocrab::{AuthState, OctoBody, OctocrabBuilder};
+        use std::sync::Arc;
+
+        let base_uri: Uri = match &base {
+            Some(base) => base
+                .parse()
+                .map_err(|err| setup_err(format!("invalid GitHub API base `{base}`: {err}")))?,
+            None => Uri::from_static("https://api.github.com"),
+        };
+        // octocrab's default upload base; the token header is scoped to these
+        // two hosts.
+        let upload_uri = Uri::from_static("https://uploads.github.com");
+        let mut auth = HeaderValue::from_str(&format!("Bearer {token}"))
+            .map_err(|_| setup_err("the GitHub token is not a valid header value".to_owned()))?;
+        auth.set_sensitive(true);
+
+        let connector = hyper_rustls::HttpsConnectorBuilder::new()
+            .with_native_roots()
+            .map_err(|err| setup_err(format!("cannot load the TLS root certificates: {err}")))?
+            .https_or_http()
+            .enable_http1()
+            .wrap_connector(crate::proxy::ProxyConnector::new(proxy));
+        let client: hyper_util::client::legacy::Client<_, OctoBody> =
+            hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
+                .build(connector);
+        OctocrabBuilder::new_empty()
+            .with_service(client)
+            .with_layer(&tower_http::follow_redirect::FollowRedirectLayer::new())
+            .with_layer(&ExtraHeadersLayer::new(Arc::new(vec![(
+                USER_AGENT,
+                HeaderValue::from_static("octocrab"),
+            )])))
+            .with_layer(&BaseUriLayer::new(base_uri.clone()))
+            .with_layer(&AuthHeaderLayer::new(Some(auth), base_uri, upload_uri))
+            .with_auth(AuthState::None)
+            .build()
+            .map_err(|never| match never {})
     }
 
     /// The API base-URI override, if any (`CLOVE_GITHUB_API_URL`, then
@@ -540,19 +603,45 @@ pub(crate) mod net {
         repo: &str,
     ) -> Result<Vec<GitHubIssue>, ImportError> {
         let operation = format!("issue list fetch from {owner}/{repo}");
-        let first = crab
-            .issues(owner, repo)
-            .list()
-            .state(octocrab::params::State::All)
-            .per_page(100)
-            .send()
-            .await
-            .map_err(|err| net_err(&operation, &err))?;
-        let all = crab
-            .all_pages(first)
-            .await
-            .map_err(|err| net_err(&operation, &err))?;
+        let handler = &crab.issues(owner, repo);
+        let operation = &operation;
+        let all = collect_pages(|page| async move {
+            handler
+                .list()
+                .state(octocrab::params::State::All)
+                .per_page(100)
+                .page(page)
+                .send()
+                .await
+                .map_err(|err| net_err(operation, &err))
+        })
+        .await?;
         all.iter().map(to_intermediate).collect()
+    }
+
+    /// Every item of a paginated list, fetched page by page with `fetch(n)`
+    /// (`n` from 1) until a page has no `next` link.
+    ///
+    /// The next page is requested by number on the caller's own route, not by
+    /// following the `Link: next` URL. GitHub writes that URL with the numeric
+    /// repository id (`/repositories/{id}/…`), and some proxies allow only
+    /// `/repos/{owner}/{repo}/…` paths, so the `Link` URL fails behind them.
+    pub(crate) async fn collect_pages<T, F, Fut>(mut fetch: F) -> Result<Vec<T>, ImportError>
+    where
+        F: FnMut(u32) -> Fut,
+        Fut: std::future::Future<Output = Result<octocrab::Page<T>, ImportError>>,
+    {
+        let mut items = Vec::new();
+        let mut page = 1u32;
+        loop {
+            let current = fetch(page).await?;
+            let more = current.next.is_some() && !current.items.is_empty();
+            items.extend(current.items);
+            if !more {
+                return Ok(items);
+            }
+            page += 1;
+        }
     }
 
     /// Wrap a failed octocrab call as [`ImportError::GitHub`]. `operation` names

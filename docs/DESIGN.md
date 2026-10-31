@@ -1829,7 +1829,10 @@ A client spawns it with an emptied environment plus only: `PATH`, `HOME`,
 `USER`/`LOGNAME`, `TMPDIR`, `XDG_RUNTIME_DIR`, `XDG_DATA_HOME`, `CLOVE_HOME`
 (made absolute),
 `XDG_CONFIG_HOME` and `GH_CONFIG_DIR` (where `gh auth token` finds a GitHub CLI
-config kept somewhere other than `~/.config/gh`), `LANG`/`LC_*`, the `CLOVED_*` knobs (`CLOVED_DISABLE_WEB`, `CLOVED_WEB_PORT`,
+config kept somewhere other than `~/.config/gh`), the proxy and CA variables the
+timed GitHub sync needs behind a proxy (`HTTPS_PROXY`, `HTTP_PROXY`,
+`ALL_PROXY`, `NO_PROXY`, each also lowercase, and `SSL_CERT_FILE` /
+`SSL_CERT_DIR`), `LANG`/`LC_*`, the `CLOVED_*` knobs (`CLOVED_DISABLE_WEB`, `CLOVED_WEB_PORT`,
 `CLOVED_IDLE_SHUTDOWN_MS`, `CLOVED_HUB_GRACE_MS`, `CLOVED_STATS_SNAPSHOT_MS`,
 `CLOVED_GITHUB_SYNC_MS`, `CLOVED_LOAD_DELAY_MS`, `CLOVED_WATCH_ARM_DELAY_MS`, `CLOVED_BIND_DELAY_MS` — test stand-ins for a large
 project's slow load, a slow watch and a slow bind on a loaded machine, …), `CLOVE_GITHUB_API_URL` (GitHub Enterprise) /
@@ -2166,6 +2169,26 @@ comparison so a first sync never silently clobbers a side. Pulls/updates go
 through the unified write path (`apply_edit`). `--dry-run` plans without touching
 either side; `--no-comments` skips comment reconciliation. A running daemon can
 run the sync on a timer (`[daemon] github_sync_interval_min` + `github_sync_repo`).
+
+**Proxy and TLS trust.** The GitHub client reads the proxy environment the way
+curl does. `HTTPS_PROXY` serves an `https://` API base, `HTTP_PROXY` an
+`http://` one (GitHub Enterprise or the test mock), and `ALL_PROXY` is the
+fallback for both; each name is also read in lowercase, and the uppercase name
+wins. `NO_PROXY` lists hosts that connect directly (comma-separated domains,
+which also match their subdomains, IP addresses, CIDR ranges, or `*`). A proxy
+URL is `http://[user:password@]host[:port]`: the client opens an HTTP `CONNECT`
+tunnel through it (credentials go as `Proxy-Authorization: Basic`), and TLS to
+GitHub runs inside the tunnel. Any other proxy scheme (`https://`, `socks5://`)
+or a URL with no host is a `client setup` error that names the variable; it
+never falls back to a direct connection. With no proxy variable set, the client
+is octocrab's default one. The TLS roots are the platform's native roots
+(`rustls-native-certs`), which `SSL_CERT_FILE` / `SSL_CERT_DIR` replace; so a
+proxy that re-terminates TLS works once its CA is in the system store or in that
+file. Certificate verification is never turned off. Lists are paged by page
+number on the `/repos/{owner}/{repo}/…` route rather than by following GitHub's
+`Link: next` URL, which names the numeric repository id (`/repositories/{id}/…`)
+that some proxies refuse. The daemon's timed sync keeps these variables from the
+client that started it (the spawn environment in §8.8).
 
 **Comments** are reconciled per linked issue. A local comment (a file under
 `.clove/issues/<id>/comments/`, identified by its file name) and its GitHub

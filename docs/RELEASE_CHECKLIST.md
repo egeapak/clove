@@ -108,6 +108,13 @@ empty or a real GitHub user.
 
 - [ ] `GITHUB_TOKEN="$(gh auth token)" clove sync github egeapak/clove --dry-run` —
       read the plan; every "push N new" is an item you expect to publish.
+- [ ] Through a proxy (a machine behind one, or a local CONNECT proxy such as
+      `mitmdump --mode regular` or `tinyproxy` on `127.0.0.1:8888`):
+      `HTTPS_PROXY=http://127.0.0.1:8888 clove sync github egeapak/clove --dry-run`
+      plans the same as without it, and the proxy log shows the
+      `CONNECT api.github.com:443`. If the proxy re-terminates TLS, export
+      `SSL_CERT_FILE` with its CA first. `HTTPS_PROXY=socks5://x:1` gives an
+      `invalid proxy URL in HTTPS_PROXY` setup error.
 - [ ] Create the throwaway item + a local comment; **sync** → new issue with labels
       and comment; `external_ref` written back.
 - [ ] Both sides at once: comment on the issue on GitHub; locally close it and add a

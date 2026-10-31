@@ -128,6 +128,18 @@ fn keep_var(name: &str) -> bool {
         // Where `gh auth token` finds a non-default GitHub CLI config.
         "XDG_CONFIG_HOME",
         "GH_CONFIG_DIR",
+        // The timed GitHub sync honours the proxy and the CA bundle the user
+        // set up (clove-import `proxy.rs`), like a `clove sync github` run.
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "NO_PROXY",
+        "no_proxy",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
         "CLOVE_HOME",
         "CLOVE_GITHUB_API_URL",
         "CLOVE_GITHUB_RETRY_MS",
@@ -243,6 +255,10 @@ mod tests {
             "LC_ALL",
             "XDG_CONFIG_HOME",
             "GH_CONFIG_DIR",
+            // The timed GitHub sync reaches the API through the user's proxy.
+            "HTTPS_PROXY",
+            "NO_PROXY",
+            "SSL_CERT_FILE",
         ] {
             assert!(keep_var(kept), "{kept}");
         }
