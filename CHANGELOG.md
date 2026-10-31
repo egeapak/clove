@@ -8,6 +8,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `.clove/write.lock`, the store write lock, is git-ignored. `clove init` writes
+  the entry to `.clove/.gitignore`, and in an existing project the next write
+  adds it (as clove already does for `daemon.token`). `clove doctor` reports a
+  `.gitignore` without it as `GITIGNORE_DRIFT`, and `clove doctor --fix` adds it.
 - `clove sync github` (and the daemon's timed sync) now honours
   `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` and `NO_PROXY` (each also
   lowercase). It reaches the API through an HTTP `CONNECT` tunnel, with

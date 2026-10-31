@@ -90,6 +90,8 @@ TMPDIR=/tmp CLOVE_HOME=$(mktemp -d /tmp/cvd.XXXX)/h scripts/ci/daemon-smoke.sh <
 - [ ] `clove daemon start` → serving, watcher `watching`; `clove daemon status` shows
       the hub pid, project, web URL and log path.
 - [ ] `.clove/daemon.token` is `0600` and git-ignored (`git check-ignore`).
+- [ ] After the CLI and daemon steps, `git status --porcelain --untracked-files=all .clove`
+      lists only item and comment files: no `*.lock`, `index.db*`, `daemon.token` or `sync/`.
 - [ ] `clove -f json ls|ready|blocked` report `_meta.source == "daemon"`.
 - [ ] In a scratch project with the daemon serving it, `clove import tk <.tickets>`
       raises `writes_applied` in `clove -f json daemon status` by at least the
