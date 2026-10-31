@@ -2,11 +2,12 @@
 schema: 1
 id: clov-A8N29MWJ
 title: Accept several ids in `clove start`, `close`, and `status`
-status: open
+status: closed
 type: feature
 priority: 3
 created: 2026-10-31T06:46:18.399Z
-updated: 2026-10-31T06:46:18.399Z
+updated: 2026-10-31T08:07:29.491Z
+closed: 2026-10-31T08:07:29.491Z
 labels: []
 deps: []
 relates: []

@@ -58,7 +58,7 @@ it. Item bodies and comments may use a bare id.
   as you go. Before `clove close <id>`, first run the check that shows the work is
   done (for example, the tests). Then add a comment that says what changed and
   quotes the actual result of that check (for example, which tests pass and which
-  fail). `start`, `close`, and `comment` take one id per call.
+  fail). `start` and `close` take one or more ids; `comment` takes one id per call.
 - Before you reply to the user, check `clove ls --status in_progress`: no item
   you started may stay open without a comment that says why.
 

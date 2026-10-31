@@ -150,6 +150,128 @@ fn close_sets_then_clears_closed_timestamp() {
     assert!(reopened["data"]["closed"].is_null());
 }
 
+/// The status of `id`, read back with `show`.
+fn status_of(dir: &Path, id: &str) -> String {
+    let v = json_ok(clove(dir).args(["show", id]));
+    v["data"]["status"].as_str().unwrap().to_owned()
+}
+
+#[test]
+fn start_close_status_take_several_ids() {
+    let dir = init_repo();
+    let a = new_item(dir.path(), "A", &[]);
+    let b = new_item(dir.path(), "B", &[]);
+    let c = new_item(dir.path(), "C", &[]);
+
+    // `start` with several ids: one entry per id, in argument order.
+    let v = json_ok(clove(dir.path()).args(["start", &a, &b, &c]));
+    let entries = v["data"].as_array().unwrap();
+    assert_eq!(entries.len(), 3);
+    for (entry, id) in entries.iter().zip([&a, &b, &c]) {
+        assert_eq!(entry["id"], id.as_str());
+        assert_eq!(entry["ok"], true);
+        assert_eq!(entry["item"]["status"], "in_progress");
+    }
+    assert!(v.get("error").is_none());
+
+    // `status <id>... <state>`: the last argument is the state.
+    let v = json_ok(clove(dir.path()).args(["status", &a, &b, "open"]));
+    assert_eq!(v["data"].as_array().unwrap().len(), 2);
+    assert_eq!(status_of(dir.path(), &a), "open");
+    assert_eq!(status_of(dir.path(), &b), "open");
+    assert_eq!(status_of(dir.path(), &c), "in_progress");
+
+    // Human mode prints one item line per id.
+    let out = clove(dir.path()).args(["close", &a, &b]).output().unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(stdout.lines().count(), 2, "{stdout}");
+    assert!(stdout.contains(&a) && stdout.contains(&b));
+}
+
+#[test]
+fn several_ids_with_a_missing_one_apply_the_rest_and_fail() {
+    let dir = init_repo();
+    let a = new_item(dir.path(), "A", &[]);
+    let b = new_item(dir.path(), "B", &[]);
+    let missing = "proj-ZZZZZZZZ";
+
+    // JSON: every id is attempted; the missing one is an error entry; the
+    // envelope is not ok and the exit code is the missing id's (2).
+    let out = clove(dir.path())
+        .args(["--format", "json", "close", &a, missing, &b])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let v: Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["error"]["code"], "ITEM_NOT_FOUND");
+    assert_eq!(v["error"]["exit"], 2);
+    let entries = v["data"].as_array().unwrap();
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[0]["ok"], true);
+    assert_eq!(entries[0]["item"]["status"], "closed");
+    assert_eq!(entries[1]["id"], missing);
+    assert_eq!(entries[1]["ok"], false);
+    assert_eq!(entries[1]["error"]["code"], "ITEM_NOT_FOUND");
+    assert_eq!(entries[2]["ok"], true);
+    assert_eq!(status_of(dir.path(), &a), "closed");
+    assert_eq!(status_of(dir.path(), &b), "closed");
+
+    // JSONL: one line per id, each with `data`.
+    let out = clove(dir.path())
+        .args(["--format", "jsonl", "start", &a, missing])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let lines: Vec<Value> = String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0]["ok"], true);
+    assert_eq!(lines[0]["data"]["item"]["status"], "in_progress");
+    assert_eq!(lines[1]["ok"], false);
+    assert_eq!(lines[1]["data"]["id"], missing);
+
+    // Human: the success prints on stdout, the failure names its id on stderr.
+    let out = clove(dir.path())
+        .args(["status", missing, &b, "open"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8(out.stdout).unwrap().contains(&b));
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains(&format!("error: {missing}:")), "{stderr}");
+    assert_eq!(status_of(dir.path(), &b), "open");
+}
+
+#[test]
+fn a_single_id_keeps_the_single_item_output() {
+    let dir = init_repo();
+    let a = new_item(dir.path(), "A", &[]);
+
+    // Success: `data` is the item object itself, not a one-entry array.
+    let v = json_ok(clove(dir.path()).args(["start", &a]));
+    assert_eq!(v["data"]["id"], a.as_str());
+    assert_eq!(v["data"]["status"], "in_progress");
+
+    // Failure: the standard error envelope, with no `data`.
+    let out = clove(dir.path())
+        .args(["--format", "json", "close", "proj-ZZZZZZZZ"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["error"]["code"], "ITEM_NOT_FOUND");
+    assert!(v.get("data").is_none());
+
+    // No id at all is a usage error.
+    clove(dir.path()).arg("start").assert().code(1);
+}
+
 #[test]
 fn labels_are_canonicalized_and_filterable() {
     let dir = init_repo();

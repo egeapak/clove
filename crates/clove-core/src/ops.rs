@@ -90,11 +90,26 @@ pub fn transition(
     status: ItemStatus,
     now: DateTime<Utc>,
 ) -> Result<Value, CloveError> {
-    let saved = store.update_with(id, now, |item| {
+    transition_item(store, id, status, now).map(|saved| Value::Object(item_object(&saved)))
+}
+
+/// [`transition`], returning the saved [`Item`] instead of its JSON object
+/// (for callers that render it some other way, e.g. the CLI's human line).
+///
+/// The read-modify-write runs under one store-wide lock (`update_with`), so a
+/// concurrent writer cannot commit between the read and the write. The closure
+/// holds the mutation alone: it runs under the exclusive lock, and that lock
+/// is not reentrant, so a nested `update` inside it would self-deadlock.
+pub fn transition_item(
+    store: &ItemStore,
+    id: &CloveId,
+    status: ItemStatus,
+    now: DateTime<Utc>,
+) -> Result<Item, CloveError> {
+    store.update_with(id, now, |item| {
         set_status(&mut item.frontmatter, status, now);
         Ok(())
-    })?;
-    Ok(Value::Object(item_object(&saved)))
+    })
 }
 
 /// Apply `KEY=VALUE` edits atomically; returns the updated item object. Thin

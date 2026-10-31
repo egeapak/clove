@@ -295,14 +295,10 @@ fn run_repo(
         Commands::Set(a) => cmd::set::run(ctx, f, a).map(|_| ok),
         Commands::Status(a) => {
             let s = util::parse_status(&a.state)?;
-            cmd::status::run(ctx, f, &a.id, s, quiet).map(|_| ok)
+            cmd::status::run(ctx, f, &a.ids, s, quiet)
         }
-        Commands::Start(a) => {
-            cmd::status::run(ctx, f, &a.id, ItemStatus::InProgress, quiet).map(|_| ok)
-        }
-        Commands::Close(a) => {
-            cmd::status::run(ctx, f, &a.id, ItemStatus::Closed, quiet).map(|_| ok)
-        }
+        Commands::Start(a) => cmd::status::run(ctx, f, &a.ids, ItemStatus::InProgress, quiet),
+        Commands::Close(a) => cmd::status::run(ctx, f, &a.ids, ItemStatus::Closed, quiet),
         Commands::Label(a) => cmd::label::run(ctx, f, &a.id, &a.action, &a.label).map(|_| ok),
         Commands::Assign(a) => cmd::assign::run(ctx, f, &a.id, a.assignee, a.clear).map(|_| ok),
         Commands::Parent(a) => cmd::parent::run(ctx, f, &a.id, a.parent, a.clear).map(|_| ok),

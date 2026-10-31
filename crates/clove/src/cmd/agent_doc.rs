@@ -116,7 +116,7 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
 - `clove new <title> [--type T] [-p N] [-l LABEL]... [--dep ID]... [--parent ID] [-a WHO] [-b TEXT]`\n\
 - `clove show <id> [--fields LIST] [--compact]` — one item. `ready`/`blocked_by` are always computed (`-v` is accepted but no longer needed for them).\n\
 - `clove edit <id> [--field KEY=VALUE]...` / `clove set <id> KEY=VALUE...`\n\
-- `clove status <id> <open|in_progress|closed>` (aliases `start`, `close`).\n\
+- `clove status <id>... <open|in_progress|closed>` (aliases `start <id>...`, `close <id>...`). With one id the output is the item, as before. With several ids every id is attempted: JSON `data` is one `{{id, ok, item}}` or `{{id, ok, error}}` entry per id (JSONL: one line per id), the envelope `ok` is `false` if any id failed, and the exit code is the first failure's.\n\
 - `clove label <id> <add|rm> <label>`, `clove assign <id> <who|--clear>`, `clove parent <id> <parent-id|--clear>` (cycle-checked), `clove priority <id> <0-4>`.\n\
 - `clove dep add <id> <dep-id>` / `dep rm` / `dep tree <id> [--depth N|--full] [--flat]` / `dep cycle [--fail-on-cycle]`.\n\
 - `clove ready` / `clove blocked` — work queues (filters: `--status --type --label --assignee --priority --q --synced --unsynced --parent`; also `--sort --desc --limit --offset --fields --compact`).\n\
