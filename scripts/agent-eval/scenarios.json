@@ -5,7 +5,8 @@
    3,
    3
   ],
-  "need_closed": true
+  "need_closed": true,
+  "side_re": "recieve|typo|indexerror|no arguments|without a command|no command|unknown command"
  },
  "s2": {
   "prompt": "Rename the module tally/stats.py to tally/metrics.py. Do it in three steps: first move the file, then update every import, then update the README. Make sure `python3 tests/run.py` still runs afterwards (the two existing failures are known, leave them).",
@@ -23,7 +24,8 @@
    0,
    1
   ],
-  "need_closed": false
+  "need_closed": false,
+  "side_re": "zerodivision|average\\(\\[\\]\\)|parse_line|\\bcomma\\b"
  },
  "s4": {
   "prompt": "I'd like a `--json` flag on the CLI that prints the result as {\"result\": N}. Once that's in, document the flag in the README. Separately, a colleague reported that `tally sum` crashes when stdin has a blank line \u2014 please fix that too.",
