@@ -468,6 +468,8 @@ fn agent_doc_has_workflow_section() {
     let section = &doc[start..doc[start..].find("## Commands").map(|i| start + i).unwrap()];
     assert!(section.contains("One item per separate task"));
     assert!(section.contains("self-contained body"));
+    assert!(section.contains("its id and then its title"));
+    assert!(section.contains("also on a second mention"));
     for (i, _) in section.match_indices("`clove ") {
         let word: String = section[i + "`clove ".len()..]
             .chars()
@@ -1373,4 +1375,42 @@ fn ready_warns_about_items_excluded_for_dangling_deps() {
         blocked["data"][0]["blocked_by"],
         serde_json::json!(["proj-ZZZZZZZZ"])
     );
+}
+
+/// `clove new` and `clove comment` name the item by title as well as id, in
+/// both formats, so an agent can report the item to a person without a lookup.
+#[test]
+fn new_and_comment_report_the_title() {
+    let dir = init_repo();
+    let human = clove(dir.path())
+        .args(["new", "Fix the parser"])
+        .output()
+        .unwrap();
+    let line = String::from_utf8(human.stdout).unwrap();
+    let id = line.split_whitespace().next().unwrap().to_owned();
+    assert!(line.trim_end().ends_with("Fix the parser"), "new: {line}");
+
+    let json = clove(dir.path())
+        .args(["new", "Second item", "--format", "json"])
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(v["data"]["title"], "Second item");
+
+    let out = clove(dir.path())
+        .args(["comment", &id, "note"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(
+        text.trim_end(),
+        format!("added comment to {id} (Fix the parser)")
+    );
+
+    let out = clove(dir.path())
+        .args(["comment", &id, "note", "--format", "json"])
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["data"]["title"], "Fix the parser");
 }
