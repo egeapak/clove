@@ -2,11 +2,12 @@
 schema: 1
 id: clov-0SEJR3ZG
 title: .clove/.gitignore does not ignore write.lock
-status: open
+status: closed
 type: bug
 priority: 2
 created: 2026-10-31T06:53:05.193Z
-updated: 2026-10-31T06:53:05.193Z
+updated: 2026-10-31T08:08:34.047Z
+closed: 2026-10-31T08:08:34.047Z
 labels: []
 deps: []
 relates: []

@@ -2,11 +2,12 @@
 schema: 1
 id: clov-JQA3TCDS
 title: web_port test explicit_host_skips_the_daemon_hand_off fails on hosts without IPv6
-status: open
+status: closed
 type: bug
 priority: 2
 created: 2026-10-31T11:13:13.485Z
-updated: 2026-10-31T11:13:13.485Z
+updated: 2026-10-31T18:04:40.026Z
+closed: 2026-10-31T18:04:40.026Z
 labels: []
 deps: []
 relates: []

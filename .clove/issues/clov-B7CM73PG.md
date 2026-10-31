@@ -2,11 +2,12 @@
 schema: 1
 id: clov-B7CM73PG
 title: Token permission tests fail when the tests run as root
-status: open
+status: closed
 type: bug
 priority: 2
 created: 2026-10-31T11:23:22.897Z
-updated: 2026-10-31T11:23:22.897Z
+updated: 2026-10-31T18:04:40.725Z
+closed: 2026-10-31T18:04:40.725Z
 labels: []
 deps: []
 relates: []
