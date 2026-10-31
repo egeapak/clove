@@ -314,8 +314,11 @@ impl ServerHandler for CloveServer {
              clove_status closed, add a clove_comment that says what changed and \
              how you verified it. When you mention an item to the user (in a \
              reply, a question, or a summary), write its id and then its title \
-             in parentheses, for example `proj-7af3q2k9` (Fix the parser); never \
-             a bare id. Explore with clove_show (detail), \
+             in parentheses, for example `proj-7af3q2k9` (Fix the parser). Do \
+             this every time you write the id, also on a second mention of the \
+             same item, and copy the title exactly as clove returns it; never \
+             a bare id, not even in a list. Before you send a reply, find \
+             every id in it and check that its title follows it. Explore with clove_show (detail), \
              clove_comments (the discussion thread — clove_show gives only a \
              count), clove_blocked, and clove_dep_tree; clove_stats for an \
              overview; clove_dep_remove / clove_set_parent to edit the graph. \

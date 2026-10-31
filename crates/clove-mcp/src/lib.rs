@@ -210,4 +210,24 @@ mod tests {
             "decrease (daemon restart reset) → notify"
         );
     }
+
+    #[test]
+    fn instructions_require_the_title_on_every_mention() {
+        use rmcp::ServerHandler;
+        let tiers = clove_engine::Tiers::for_repo(camino::Utf8Path::new("/nonexistent"));
+        let engine = super::Engine::new(
+            "/nonexistent/.clove".into(),
+            "/nonexistent".into(),
+            "proj".into(),
+            clove_types::ItemType::Chore,
+            tiers,
+        );
+        let info = super::CloveServer::new(engine).get_info();
+        let text = info.instructions.expect("the server sends instructions");
+        assert!(text.contains("write its id and then its title"));
+        assert!(text.contains("also on a second mention"));
+        assert!(text.contains("copy the title exactly"));
+        assert!(text.contains("never a bare id"));
+        assert!(text.contains("find every id in it"));
+    }
 }
