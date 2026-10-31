@@ -27,18 +27,24 @@ def score(d, sc):
         det.append((s, cs))
     n = len(items)
     lo, hi = sc["expect_items"]
-    # Items for problems outside the request (for example, the fixture's two
-    # failing tests) do not count when the scenario names them.
-    counted = n - (len(matching(det, sc["count_ignore_re"])) if sc.get("count_ignore_re") else 0)
+    pre = set(sc.get("preexisting_titles", []))
+    # The fixture has known defects outside each request (two failing tests,
+    # a README typo, a crash on a missing command). CLOVE.md tells an agent to
+    # file such a defect as its own item, so an item that `side_re` names is
+    # neither counted nor required to be closed. Pre-existing items always count.
+    side_re = sc.get("side_re") or sc.get("count_ignore_re")
+    side = [x for x in det if side_re and x[0]["title"] not in pre and re.search(side_re, x[0]["title"], re.I)]
+    side_ids = {x[0]["id"] for x in side}
+    counted = n - len(side)
     checks = {}
     checks["count"] = 1.0 if lo <= counted <= hi else max(0.0, 1 - abs(counted - (lo if counted < lo else hi)) / max(hi, 1))
-    pre = set(sc.get("preexisting_titles", []))
     unrelated = set(sc.get("unrelated_titles", []))
     new = [x for x in det if x[0]["title"] not in pre]
     if sc.get("need_closed"):
         # The requested work must be closed. Items filed for problems outside
         # the request may stay open, so `closed_re` narrows the set.
         work = matching(det, sc["closed_re"]) if sc.get("closed_re") else [x for x in det if x[0]["title"] not in unrelated]
+        work = [x for x in work if x[0]["id"] not in side_ids]
         checks["closed"] = (sum(1 for s, _ in work if s["status"] == "closed") / len(work)) if work else 0.0
     if sc.get("open_re"):
         # Deferred work must be tracked and left open.

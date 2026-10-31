@@ -14,8 +14,8 @@
    1
   ],
   "need_closed": true,
-  "count_ignore_re": "recieve|typo|zerodivision|average\\(|parse_line|comma",
-  "closed_re": "renam|metrics|move"
+  "closed_re": "renam|metrics|move",
+  "side_re": "recieve|typo|zerodivision|average\\(\\[\\]\\)|parse_line|\\bcomma\\b"
  },
  "s3": {
   "prompt": "Fix the typo 'recieve' in README.md.",
@@ -29,17 +29,18 @@
   "prompt": "I'd like a `--json` flag on the CLI that prints the result as {\"result\": N}. Once that's in, document the flag in the README. Separately, a colleague reported that `tally sum` crashes when stdin has a blank line \u2014 please fix that too.",
   "expect_items": [
    3,
-   4
+   3
   ],
   "need_closed": true,
   "need_dep": true,
-  "closed_re": "json|readme|doc|blank|crash|empty line"
+  "closed_re": "json|readme|doc|blank|crash|empty line",
+  "side_re": "recieve|typo|zerodivision|average\\(\\[\\]\\)|trailing comma"
  },
  "s5": {
   "prompt": "Make average() return 0 for an empty list, and add a `mode(xs)` function with a test.",
   "expect_items": [
    3,
-   4
+   3
   ],
   "need_closed": true,
   "closed_re": "average|mode",
@@ -47,25 +48,28 @@
    "average() raises ZeroDivisionError on an empty list",
    "Support negative numbers in the README example"
   ],
-  "dup_re": "average"
+  "dup_re": "average",
+  "side_re": "recieve|typo|parse_line|\\bcomma\\b"
  },
  "s6": {
   "prompt": "Following up on what we talked about earlier \u2014 you suggested caching and I agree. Please memoize parse_line with functools.lru_cache. Also the CLI should exit with code 2 and print an error on an unknown command (right now it silently does nothing). My manager wants both before Friday, so thanks!",
   "expect_items": [
    2,
-   4
+   2
   ],
   "need_closed": true,
-  "closed_re": "cache|memo|lru|unknown|exit|command"
+  "closed_re": "cache|memo|lru|unknown",
+  "side_re": "recieve|typo|zerodivision|average\\(\\[\\]\\)|trailing comma|empty field|\\bcomma\\b|test_parse_line|indexerror|without a command|no command"
  },
  "s7": {
   "prompt": "Add three new CLI subcommands: `min`, `max`, and `count`. Each needs a test.",
   "expect_items": [
    3,
-   5
+   3
   ],
   "need_closed": true,
-  "closed_re": "min|max|count"
+  "closed_re": "min|max|count",
+  "side_re": "recieve|typo|zerodivision|average\\(\\[\\]\\)|parse_line|\\bcomma\\b"
  },
  "s8": {
   "prompt": "`tally avg` prints `2.0` for the input `1,2,3`. It should print `2` when the average is a whole number and keep the decimals otherwise. Find where the output is formatted, fix it, and add a regression test.",
@@ -75,39 +79,42 @@
   ],
   "need_closed": true,
   "closed_re": "whole|decimal|format|2\\.0|float|print",
-  "count_ignore_re": "zerodivision|average\\(\\)|average\\(\\[\\]\\)|parse_line|comma"
+  "side_re": "recieve|typo|zerodivision|average\\(\\[\\]\\)|parse_line|\\bcomma\\b"
  },
  "s9": {
   "prompt": "We want CSV file input for tally: a `--file PATH` flag, skipping a header row, and a clear error message for a non-numeric cell. Don't implement anything yet. Just set up the tracking so someone can pick it up.",
   "expect_items": [
    3,
-   6
+   4
   ],
   "all_open": true,
-  "no_change": true
+  "no_change": true,
+  "side_re": "recieve|typo|zerodivision|average\\(\\[\\]\\)|parse_line|\\bcomma\\b"
  },
  "s10": {
   "prompt": "Fix the empty-list bug in average() now. The `--json` output flag can wait until next week; make sure it's tracked so we don't forget.",
   "expect_items": [
    2,
-   3
+   2
   ],
   "need_closed": true,
   "closed_re": "average",
-  "open_re": "json"
+  "open_re": "json",
+  "side_re": "recieve|typo|parse_line|\\bcomma\\b"
  },
  "s11": {
   "prompt": "Add a `--json` flag to the CLI that prints `{\"result\": N}`.",
   "expect_items": [
    1,
-   3
+   1
   ],
   "need_closed": true,
   "closed_re": "json|machine",
   "preexisting_titles": [
    "CLI: machine-readable output mode"
   ],
-  "dup_re": "json|machine"
+  "dup_re": "json|machine",
+  "side_re": "recieve|typo|zerodivision|average\\(\\[\\]\\)|parse_line|\\bcomma\\b"
  },
  "s12": {
   "prompt": "Which functions in tally/stats.py have no test? Tell me; don't change anything.",
@@ -121,33 +128,36 @@
   "prompt": "Implement the clove item for the `--json` output flag.",
   "expect_items": [
    2,
-   4
+   2
   ],
   "dep_order": true,
   "preexisting_titles": [
    "Add a --json output flag to the CLI",
    "Refactor tally.cli.main into run(argv, stdin)"
   ],
-  "dup_re": "json"
+  "dup_re": "json",
+  "side_re": "recieve|typo|zerodivision|average\\(\\[\\]\\)|parse_line|\\bcomma\\b"
  },
  "s14": {
   "prompt": "Add a `report` CLI command that prints count, min, max, mean, and median in one table. Track it as an epic with one child item per statistic, then implement it.",
   "expect_items": [
    6,
-   8
+   7
   ],
   "min_children": 5,
   "need_closed": true,
-  "closed_re": "report|count|min|max|mean|median|epic"
+  "closed_re": "report|count|min|max|mean|median|epic",
+  "side_re": "recieve|typo|zerodivision|average\\(\\[\\]\\)|parse_line|\\bcomma\\b"
  },
  "s15": {
   "prompt": "Review comments on the last change:\n1. tally/cli.py: `cmd = argv[1]` raises IndexError when no command is given.\n2. tally/stats.py: `average` has no docstring.\n3. README.md: the example uses `python -m`, but it should use `python3 -m`.\nPlease address all three.",
   "expect_items": [
    3,
-   5
+   3
   ],
   "need_closed": true,
-  "closed_re": "argv|index|command|docstring|python3|readme|example"
+  "closed_re": "argv|index|command|docstring|python3|readme|example",
+  "side_re": "recieve|typo|zerodivision|average\\(\\[\\]\\)|parse_line|\\bcomma\\b"
  },
  "s16": {
   "prompt": "Fix the average bug.",
@@ -162,7 +172,8 @@
    "average() raises ZeroDivisionError on an empty list",
    "parse_line() fails on a trailing comma"
   ],
-  "dup_re": "average"
+  "dup_re": "average",
+  "side_re": "recieve|typo"
  },
  "s17": {
   "prompt": "Check whether the clove item for total() is already done. If it is, close it.",
@@ -176,6 +187,7 @@
   "no_change": true,
   "preexisting_titles": [
    "Add a total(xs) function to tally/stats.py"
-  ]
+  ],
+  "side_re": "recieve|typo|zerodivision|average\\(\\[\\]\\)|parse_line|\\bcomma\\b"
  }
 }

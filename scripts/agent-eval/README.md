@@ -47,9 +47,11 @@ The score of one rollout is the mean of its checks (0 to 1).
 | `s16` | Fix one of two open bugs | 2; that bug closed, the other open, no duplicate |
 | `s17` | Close an item whose work is already done | 1; closed with a result comment, no code change |
 
-An agent may also file the failing tests it finds outside its task as new
-items, so some ranges allow one or two extra items. `count_ignore_re` leaves
-such items out of the count instead, so a range can stay exact.
+The fixture has defects outside each request: two failing tests, a README
+typo, and a crash when no command is given. `CLOVE.md` tells an agent to file
+such a defect as its own item. So `side_re` names them per scenario: an item
+whose title matches is neither counted nor required to be closed (pre-existing
+items always count), and each range is the exact number of requested items.
 
 To add a scenario, add an entry to `scenarios.json` (a `prompt`, an
 `expect_items` range, and the optional check keys above), and add any
@@ -104,15 +106,38 @@ The current `CLOVE.md` came from a reflective prompt search (the GEPA method):
 
 ## Results so far
 
-One run per scenario, Claude Sonnet as the agent:
+Current `CLOVE.md`, 3 runs per scenario and model (153 runs). Each cell is the
+mean score, the minimum, and the run count:
 
-| Text | s1–s7 | s8–s12 | Mean of s1–s12 |
-|------|-------|--------|----------------|
-| Current `CLOVE.md` | 1.0 on each | 1.0 on each | 1.0 |
-| 0.2.0 baseline | 1.0, 0.75, 0.667, 1.0, 0.8, 0.83, 1.0 | 1.0 on each | 0.921 |
+| Scenario | haiku | opus | sonnet |
+|---|---|---|---|
+| s1 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s2 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s3 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s4 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s5 | 0.98 (min 0.93, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s6 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s7 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s8 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s9 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s10 | 0.93 (min 0.86, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s11 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s12 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s13 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s14 | 0.98 (min 0.93, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s15 | 0.94 (min 0.83, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s16 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s17 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| **mean** | 0.990 | 1.000 | 1.000 |
 
-The baseline loses points for items without a body (`s2`, `s3`, `s5`) and for
-conversation context in comments (`s6`). Single runs vary: the first baseline
-runs of `s1` and `s4` scored 0.0 and 0.083 (the agent hit the nonexistent
-`clove list` command, or filed nothing), and the reruns scored 1.0. So compare
-texts over several runs per scenario before you trust a small difference.
+- Sonnet and Opus score 1.0 on every run.
+- Haiku loses points only on `no_leak`: in 5 of 51 runs it writes
+  conversation context into an item ("next week", "per the request",
+  "Found while testing").
+- Single runs vary. With the 0.2.0 text, Sonnet scored 0.0 and 0.083 on the
+  first runs of `s1` and `s4`, and 1.0 on reruns. Compare texts over several
+  runs per scenario.
+- A rollout agent can see every tool of the session that starts it. Haiku
+  rollouts called session and message tools in several runs, even with the
+  prompt line that forbids it. Run rollouts where the agent has only shell and
+  file tools, as the default `AGENT_CMD` does.

@@ -2,11 +2,12 @@
 schema: 1
 id: clov-6RC64GSZ
 title: Measure CLOVE.md adherence per agent model
-status: in_progress
+status: closed
 type: chore
 priority: 3
 created: 2026-10-31T08:13:08.802Z
-updated: 2026-10-31T08:15:33.732Z
+updated: 2026-10-31T08:27:11.640Z
+closed: 2026-10-31T08:27:11.640Z
 labels: []
 deps: [clov-7FE19H73, clov-Q3736PTQ]
 relates: []
