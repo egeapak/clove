@@ -75,6 +75,19 @@ The current `CLOVE.md` came from a reflective prompt search (the GEPA method):
    rules into the next candidate, and repeat until the scores stop rising.
 5. Read the items by hand at the end. The scorer checks shape, not quality.
 
-`candidates/baseline-0.2.0.md` is the `CLOVE.md` text of clove 0.2.0. It
-scored a mean of 0.46 on `s1`–`s5`, and the current text scored 1.0 on every
-scenario that was run (Claude Sonnet as the agent).
+`candidates/baseline-0.2.0.md` is the `CLOVE.md` text of clove 0.2.0.
+
+## Results so far
+
+One run per scenario, Claude Sonnet as the agent:
+
+| Text | s1–s7 | s8–s12 | Mean of s1–s12 |
+|------|-------|--------|----------------|
+| Current `CLOVE.md` | 1.0 on each | 1.0 on each | 1.0 |
+| 0.2.0 baseline | 1.0, 0.75, 0.667, 1.0, 0.8, 0.83, 1.0 | 1.0 on each | 0.921 |
+
+The baseline loses points for items without a body (`s2`, `s3`, `s5`) and for
+conversation context in comments (`s6`). Single runs vary: the first baseline
+runs of `s1` and `s4` scored 0.0 and 0.083 (the agent hit the nonexistent
+`clove list` command, or filed nothing), and the reruns scored 1.0. So compare
+texts over several runs per scenario before you trust a small difference.

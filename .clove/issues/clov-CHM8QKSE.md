@@ -2,11 +2,12 @@
 schema: 1
 id: clov-CHM8QKSE
 title: Evaluate the CLOVE.md directives on every agent-eval scenario
-status: in_progress
+status: closed
 type: chore
 priority: 2
 created: 2026-10-31T07:53:42.581Z
-updated: 2026-10-31T07:56:37.191Z
+updated: 2026-10-31T08:00:00.485Z
+closed: 2026-10-31T08:00:00.485Z
 labels: []
 deps: [clov-PQ0R4DSP]
 relates: []

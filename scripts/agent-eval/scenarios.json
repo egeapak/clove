@@ -13,7 +13,9 @@
    1,
    1
   ],
-  "need_closed": true
+  "need_closed": true,
+  "count_ignore_re": "recieve|typo|zerodivision|average\\(|parse_line|comma",
+  "closed_re": "renam|metrics|move"
  },
  "s3": {
   "prompt": "Fix the typo 'recieve' in README.md.",
