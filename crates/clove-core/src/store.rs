@@ -69,6 +69,9 @@ impl ScanError {
     }
 }
 
+/// The file name of the store-wide write lock, under `.clove/`.
+pub const WRITE_LOCK_FILE: &str = "write.lock";
+
 /// The store-wide advisory write lock (`.clove/write.lock`), open but not yet
 /// acquired. Obtain one with [`ItemStore::write_lock`], then hold the guard
 /// from [`StoreWriteLock::lock`] across a read-modify-write window.
@@ -330,12 +333,19 @@ impl ItemStore {
     /// (`.clove/write.lock`). The caller acquires it via
     /// [`StoreWriteLock::lock`] and holds the guard for the whole
     /// read-modify-write window.
+    ///
+    /// It also puts `write.lock` into a `.clove/.gitignore` that lacks it (one
+    /// written by an older clove), so the lock file never lands in a commit.
     pub fn write_lock(&self) -> Result<StoreWriteLock, CloveError> {
-        let path = self.repo_root.join(".clove").join("write.lock");
+        let clove_dir = self.repo_root.join(".clove");
+        let path = clove_dir.join(WRITE_LOCK_FILE);
         let file = crate::fs_safe::open_lock_file(&path).map_err(|source| CloveError::Io {
             path: path.clone(),
             source,
         })?;
+        // Best effort: the lock works either way, and `clove doctor` reports
+        // the missing entry.
+        let _ = crate::config::ensure_gitignored(&clove_dir, WRITE_LOCK_FILE);
         Ok(StoreWriteLock {
             path,
             lock: fd_lock::RwLock::new(file),
@@ -583,6 +593,39 @@ mod tests {
         let root = camino::Utf8Path::from_path(tmp.path()).unwrap().to_owned();
         std::fs::create_dir_all(root.join(".clove").join("issues")).unwrap();
         (tmp, ItemStore::new(root))
+    }
+
+    /// Opening the write lock adds `write.lock` to a `.gitignore` that lacks it
+    /// (an older clove's), once, keeping the rest.
+    #[test]
+    fn write_lock_git_ignores_itself() {
+        let (_tmp, store) = temp_store();
+        let gitignore = store.repo_root().join(".clove").join(".gitignore");
+        std::fs::write(&gitignore, "index.db\nsync/").unwrap();
+        drop(store.write_lock().unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&gitignore).unwrap(),
+            "index.db\nsync/\nwrite.lock\n"
+        );
+        drop(store.write_lock().unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&gitignore).unwrap(),
+            "index.db\nsync/\nwrite.lock\n",
+            "the entry is added once"
+        );
+    }
+
+    /// A symlinked `.gitignore` is not written through, and the lock still opens.
+    #[cfg(unix)]
+    #[test]
+    fn write_lock_does_not_write_through_a_symlinked_gitignore() {
+        let (tmp, store) = temp_store();
+        let victim = tmp.path().join("precious");
+        std::fs::write(&victim, "precious\n").unwrap();
+        std::os::unix::fs::symlink(&victim, store.repo_root().join(".clove").join(".gitignore"))
+            .unwrap();
+        drop(store.write_lock().unwrap());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious\n");
     }
 
     fn spec(title: &str) -> NewItem {

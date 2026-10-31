@@ -29,6 +29,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `CLOVE.md` named a `clove list` command that does not exist; it now names
   `clove ls`, and a test rejects any subcommand the CLI does not define.
+- `.clove/write.lock`, the store write lock, is git-ignored. `clove init` writes
+  the entry to `.clove/.gitignore`, and in an existing project the next write
+  adds it (as clove already does for `daemon.token`). `clove doctor` reports a
+  `.gitignore` without it as `GITIGNORE_DRIFT`, and `clove doctor --fix` adds it.
 
 ## [0.2.0] - 2026-10-21
 

@@ -243,7 +243,7 @@ pub fn read_or_create(clove_dir: &Utf8Path) -> io::Result<String> {
         }
     };
     // Best effort: the token works either way.
-    let _ = ensure_gitignored(clove_dir);
+    let _ = crate::config::ensure_gitignored(clove_dir, TOKEN_FILE);
     Ok(token)
 }
 
@@ -352,27 +352,6 @@ fn create(clove_dir: &Utf8Path, path: &Utf8Path) -> io::Result<String> {
     }
 }
 
-/// Add `daemon.token` to `.clove/.gitignore` when it is not there (a list
-/// written by a clove that predates the token).
-fn ensure_gitignored(clove_dir: &Utf8Path) -> io::Result<()> {
-    let gitignore = clove_dir.join(".gitignore");
-    crate::fs_safe::refuse_symlink(&gitignore)?;
-    let mut contents = match std::fs::read_to_string(&gitignore) {
-        Ok(text) => text,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(e),
-    };
-    if contents.lines().any(|line| line.trim() == TOKEN_FILE) {
-        return Ok(());
-    }
-    if !contents.is_empty() && !contents.ends_with('\n') {
-        contents.push('\n');
-    }
-    contents.push_str(TOKEN_FILE);
-    contents.push('\n');
-    crate::fs_safe::write_atomic(clove_dir, &gitignore, contents.as_bytes())
-}
-
 /// Compare two tokens without an early exit on the first differing byte.
 pub fn matches(expected: &str, presented: &str) -> bool {
     let (a, b) = (expected.as_bytes(), presented.as_bytes());
@@ -410,6 +389,23 @@ mod tests {
         let _ = std::fs::remove_file(path);
         std::fs::write(path, text).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// Whether a read-only (`0o500`) directory refuses a new file here. It does
+    /// not as root (or with `CAP_DAC_OVERRIDE`), which ignores the mode bits.
+    #[cfg(unix)]
+    fn read_only_dirs_are_enforced(parent: &std::path::Path) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        let probe = parent.join("read-only-probe");
+        std::fs::create_dir(&probe).unwrap();
+        std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let enforced = std::fs::File::create(probe.join("x")).is_err();
+        std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::remove_dir_all(&probe).unwrap();
+        if !enforced {
+            eprintln!("skipped: a read-only directory is writable here (running as root?)");
+        }
+        enforced
     }
 
     #[cfg(unix)]
@@ -498,7 +494,12 @@ mod tests {
     #[test]
     fn an_unreadable_token_is_replaced_or_named() {
         use std::os::unix::fs::PermissionsExt;
-        let (_tmp, dir) = clove_dir();
+        let (tmp, dir) = clove_dir();
+        // Root reads a mode-000 file and writes into a read-only directory, so
+        // neither half of this test means anything there.
+        if !read_only_dirs_are_enforced(tmp.path()) {
+            return;
+        }
         let path = token_path(&dir);
         write_with_mode(&path, SOME_TOKEN, 0o000);
         assert_ne!(read_or_create(&dir).unwrap(), SOME_TOKEN);
