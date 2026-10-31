@@ -10,6 +10,10 @@ LEAK = re.compile(r"\b(the user|user asked|user wants|you asked|as requested|req
 def j(args, cwd):
     out = subprocess.run([C] + args + ["--format", "json"], cwd=cwd, capture_output=True, text=True).stdout
     return json.loads(out)["data"]
+ID_RE = re.compile(r"[a-z][a-z0-9]{0,7}-[0-9A-Z]{8}")
+def norm(text):
+    # Compare titles without the quoting an agent may add or drop.
+    return re.sub(r"\s+", " ", re.sub(r"[`'\"*]", "", text)).lower()
 def changed_files(d):
     out = subprocess.run(["git", "status", "--porcelain"], cwd=d, capture_output=True, text=True).stdout
     # .clove/ is the tracker; __pycache__ and .pyc files appear whenever an
@@ -77,8 +81,24 @@ def score(d, sc):
         checks["close_comment"] = (sum(1 for _, cs in closed if cs) / len(closed)) if closed else 0.0
     if sc.get("no_change"):
         checks["no_change"] = 0.0 if changed_files(d) else 1.0
+    # The reply to the user must name each item as `<id>` (<title>): every
+    # mention of an id that exists in the store has the title right after it.
+    reply_path = os.path.join(os.path.dirname(os.path.abspath(d)), "reply.txt")
+    reply_ids = None
+    if os.path.exists(reply_path):
+        reply = open(reply_path).read()
+        titles = {x[0]["id"]: norm(x[0]["title"]) for x in det}
+        mentions = [m for m in ID_RE.finditer(reply) if m.group(0) in titles]
+        reply_ids = len(mentions)
+        if mentions:
+            # The title must start within a few characters of the id, as in
+            # `id` (title); the window allows the quoting and the parenthesis.
+            def titled(m):
+                t = titles[m.group(0)]
+                return t in norm(reply[m.end():m.end() + len(t) + 12])
+            checks["id_titles"] = sum(1 for m in mentions if titled(m)) / len(mentions)
     total = sum(checks.values()) / len(checks)
-    return {"score": round(total, 3), "checks": {k: round(v, 2) for k, v in checks.items()}, "n_items": n,
+    return {"score": round(total, 3), "checks": {k: round(v, 2) for k, v in checks.items()}, "n_items": n, "reply_ids": reply_ids,
             "items": [{"title": s["title"], "type": s["type"], "status": s["status"], "deps": s["deps"], "body": (s.get("body") or "")[:300], "comments": [c["body"][:200] for c in cs]} for s, cs in det]}
 if __name__ == "__main__":
     scs = json.load(open(os.path.join(HERE, "scenarios.json")))

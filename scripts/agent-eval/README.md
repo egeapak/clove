@@ -24,6 +24,7 @@ The agent gets the candidate text as its `CLAUDE.md` and does the work. Then
 | `dep_order` | No item is closed while one of its hard dependencies is open. |
 | `children` | At least `min_children` items have a parent (an epic was set up). |
 | `close_comment` | Every closed item has a comment that records the result. |
+| `id_titles` | Every item id in the agent's final reply (`reply.txt`) has the item's title right after it, as `` `<id>` (<title>) ``. A reply that names no item skips this check; `reply_ids` in the score records how many ids it named. |
 
 The score of one rollout is the mean of its checks (0 to 1).
 
@@ -80,6 +81,7 @@ CLOVE_BIN=$PWD/target/debug/clove \
 - To run only some scenarios, list them after the output directory.
 
 Results go to `<out>/<model>/<scenario>/r<k>/` (`prompt.txt`, `agent.txt`,
+`reply.txt` (the agent's final reply, which the prompt asks it to save),
 `score.json`, and the toy project in `repo/`). To print the mean and minimum
 score per scenario and model, run `aggregate.py <out>`; add `--markdown` for
 a table.
