@@ -46,12 +46,17 @@ An item that you file and leave open needs no comment.
 
 The user does not know what an id means. Whenever you mention an item in a
 reply, a question, or a summary to the user, write its id and then its title
-in parentheses:
+in parentheses. Do this every time you write the id, also when you mention
+the same item again later in the same reply. Copy the title exactly as clove
+shows it; do not shorten it:
 
     I closed `clov-H2D91NF2` (Fix the parser) and filed
     `clov-KF799SXS` (README typo: recieve) for later.
+    `clov-H2D91NF2` (Fix the parser) now has a regression test.
 
-Never write a bare id to the user. Item bodies and comments may use a bare id.
+Never write a bare id to the user, not in a list and not on a second mention.
+Before you send a reply, find every id in it and check that its title follows
+it. Item bodies and comments may use a bare id.
 
 ## Commands
 
@@ -59,8 +64,10 @@ Never write a bare id to the user. Item bodies and comments may use a bare id.
 - File work: `clove new "<title>" --type bug|feature|chore|docs|epic -b "<body>" [--dep ID] [--parent ID]`.
 - Order work: `clove dep add <id> <dep-id>` means `<id>` waits for `<dep-id>`.
 - Track progress: `clove start <id>` when you begin, `clove comment <id> "<step or finding>"`
-  as you go. Before `clove close <id>`, add a comment that says what changed and
-  how you verified it. `start`, `close`, and `comment` take one id per call.
+  as you go. Before `clove close <id>`, first run the check that shows the work is
+  done (for example, the tests). Then add a comment that says what changed and
+  quotes the actual result of that check (for example, which tests pass and which
+  fail). `start` and `close` take one or more ids; `comment` takes one id per call.
 - Before you reply to the user, check `clove ls --status in_progress`: no item
   you started may stay open without a comment that says why.
 

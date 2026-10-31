@@ -108,6 +108,64 @@ The current `CLOVE.md` came from a reflective prompt search (the GEPA method):
 
 ## Results so far
 
+### Round 3: the title on every mention
+
+`CLOVE.md` with the round 2 rule plus four additions: write the title every
+time you write the id, also on a second mention of the same item; copy the
+title exactly; never write a bare id in a list; and, before you send a reply,
+find every id in it and check that its title follows it. The run count is 3
+runs per scenario and model (153 runs). Each cell is the mean score, the
+minimum, and the run count:
+
+| Scenario | haiku | opus | sonnet |
+|---|---|---|---|
+| s1 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s2 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s3 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s4 | 0.98 (min 0.94, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s5 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s6 | 0.95 (min 0.86, n=3) | 1.00 (min 1.00, n=3) | 0.98 (min 0.95, n=3) |
+| s7 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s8 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s9 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s10 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s11 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s12 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s13 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s14 | 0.98 (min 0.94, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s15 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s16 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s17 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| **mean** | 0.995 | 1.000 | 0.999 |
+
+`id_titles` results (a reply that names no item id skips the check):
+
+| Model | Replies with ids | Every id titled | Mean `id_titles` |
+|---|---|---|---|
+| haiku | 44 of 51 | 44 of 44 | 1.000 |
+| opus | 45 of 51 | 45 of 45 | 1.000 |
+| sonnet | 45 of 51 | 44 of 45 | 0.994 |
+
+Compared with round 2:
+
+- No reply repeats an id without its title (round 2: Haiku `s9`, Opus
+  `s13`). No Haiku reply lists ids bare or shortens a title (round 2: `s8`,
+  `s15`).
+- The model means are 0.995 for Haiku (round 2: 0.990), 1.000 for Opus
+  (0.998), and 0.999 for Sonnet (1.000).
+- There is 1 `id_titles` miss: Sonnet `s6` adds a word to a title
+  ("parse_line fails on a trailing comma" for "parse_line fails on trailing
+  comma").
+- `s6` drops for Haiku (1.00 to 0.95: `no_leak`, conversation context in an
+  item) and for Sonnet (1.00 to 0.98: the `id_titles` miss above). Every other
+  scenario mean is the same as in round 2 or higher. `no_leak` costs Haiku 3
+  runs (`s4`, `s6`, `s14`), as in round 2.
+- Sonnet now names item ids in 45 of 51 replies (round 2: 34 of 51).
+- A first candidate without the last sentence ("Before you send a reply, ...")
+  also ran 153 runs. It had 1 repeated-mention miss (Haiku `s9`: "`clove
+  ready` now shows only `<id>`") and model means of 0.995 (Haiku), 1.000
+  (Opus), and 1.000 (Sonnet). The last sentence removes that miss.
+
 ### Round 2: id and title in replies
 
 `CLOVE.md` with the "name items by id and title" rule, and `clove new` and

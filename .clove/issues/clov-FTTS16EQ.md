@@ -2,11 +2,12 @@
 schema: 1
 id: clov-FTTS16EQ
 title: 'CLOVE.md: run the check before writing the closing comment'
-status: open
+status: closed
 type: docs
 priority: 3
 created: 2026-10-31T08:27:11.589Z
-updated: 2026-10-31T10:46:22.005Z
+updated: 2026-10-31T11:02:44.986Z
+closed: 2026-10-31T11:02:44.986Z
 assignee: claude
 labels: []
 deps: []
