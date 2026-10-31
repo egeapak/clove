@@ -194,7 +194,7 @@ impl CloveServer {
                        or fix (the steps of one task are comments, not items). \
                        Give a `body` that stands on its own without this \
                        conversation: what is wrong or missing, where, and how to \
-                       verify it is done. Returns its generated id and path."
+                       verify it is done. Returns its generated id, path, and title."
     )]
     async fn clove_new(
         &self,
@@ -228,7 +228,9 @@ impl CloveServer {
         self.run(move || e.edit(a)).await
     }
 
-    #[tool(description = "Append a comment to an item.")]
+    #[tool(
+        description = "Append a comment to an item. Returns the item id, the comment path, and the item title."
+    )]
     async fn clove_comment(
         &self,
         Parameters(a): Parameters<CommentArgs>,
@@ -310,7 +312,10 @@ impl ServerHandler for CloveServer {
              When one task must wait for another, wire it with clove_dep_add. \
              Call clove_status in_progress when you begin an item; before \
              clove_status closed, add a clove_comment that says what changed and \
-             how you verified it. Explore with clove_show (detail), \
+             how you verified it. When you mention an item to the user (in a \
+             reply, a question, or a summary), write its id and then its title \
+             in parentheses, for example `proj-7af3q2k9` (Fix the parser); never \
+             a bare id. Explore with clove_show (detail), \
              clove_comments (the discussion thread — clove_show gives only a \
              count), clove_blocked, and clove_dep_tree; clove_stats for an \
              overview; clove_dep_remove / clove_set_parent to edit the graph. \

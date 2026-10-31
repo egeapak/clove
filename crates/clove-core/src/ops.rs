@@ -42,8 +42,9 @@ pub use clove_types::{apply_assignments, set_status, NewSpec};
 
 // ---- High-level operations (store I/O → JSON) --------------------------------
 
-/// Create an item from a raw [`NewSpec`]. Returns `{ id, path }` (path relative
-/// to the repo root), matching `clove new`.
+/// Create an item from a raw [`NewSpec`]. Returns `{ id, path, title }` (path
+/// relative to the repo root), matching `clove new`. The title rides along so a
+/// caller can name the item to a person without a second read.
 pub fn create(
     store: &ItemStore,
     prefix: &str,
@@ -79,7 +80,7 @@ pub fn create(
     let item = store.create(prefix, new_item, now)?;
     let id = item.frontmatter.id.clone();
     let rel = rel_path(store, &id);
-    Ok(json!({ "id": id.as_str(), "path": rel }))
+    Ok(json!({ "id": id.as_str(), "path": rel, "title": item.frontmatter.title }))
 }
 
 /// Transition an item's status; returns the updated item object.
@@ -138,7 +139,8 @@ pub fn link_external(
     Ok(json!({ "updated": saved.frontmatter.updated }))
 }
 
-/// Append a comment; returns `{ id, path }` (path relative to the repo root).
+/// Append a comment; returns `{ id, path, title }` (path relative to the repo
+/// root; `title` is the item's title).
 pub fn comment(
     store: &ItemStore,
     id: &CloveId,
@@ -196,7 +198,10 @@ fn comment_result(store: &ItemStore, id: &CloveId, path: camino::Utf8PathBuf) ->
         .strip_prefix(store.repo_root())
         .map(|p| p.to_string())
         .unwrap_or_else(|_| path.to_string());
-    json!({ "id": id.as_str(), "path": rel })
+    // The item exists (every caller checks first); a read failure here only
+    // drops the convenience title, never the comment that was already written.
+    let title = store.get(id).map(|item| item.frontmatter.title).ok();
+    json!({ "id": id.as_str(), "path": rel, "title": title })
 }
 
 /// Add a hard dependency `id → dep_id` with the full validation pipeline

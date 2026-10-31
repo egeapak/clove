@@ -39,10 +39,13 @@ pub fn run(ctx: &Ctx, format: OutputFormat, args: NewArgs) -> Result<(), CloveEr
         OutputFormat::Json | OutputFormat::Jsonl => {
             print_json_success(value, json!({ "warnings": [] }))
         }
+        // id and path stay the first two fields (scripts split on them); the
+        // title follows so a person, or an agent reporting to one, can name it.
         OutputFormat::Human => outln!(
-            "{}  {}",
+            "{}  {}  {}",
             value["id"].as_str().unwrap_or_default(),
-            value["path"].as_str().unwrap_or_default()
+            value["path"].as_str().unwrap_or_default(),
+            value["title"].as_str().unwrap_or_default()
         ),
     }
     Ok(())

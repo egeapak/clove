@@ -14,6 +14,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are comments on its item; every item has a self-contained body without
   conversation context. `scripts/agent-eval/` measures how well agents follow
   the directives.
+- The agent directives require naming an item to the user as its id and
+  title (`` `clov-H2D91NF2` (Fix the parser) ``), never a bare id. To make that
+  easy, `clove new` and `clove comment` now print the title, and their JSON
+  `data` (and the `clove_new` / `clove_comment` MCP results) gain a `title`
+  key. `clove new` keeps the id and path as its first two fields.
 
 ### Fixed
 

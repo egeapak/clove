@@ -101,6 +101,9 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
 - If one task must wait for another, run `clove dep add <id> <dep-id>`.\n\
 - Run `clove start <id>` when you begin. Before `clove close <id>`, add a\n\
   `clove comment` that says what changed and how you verified it.\n\
+- When you mention an item to the user, write its id and then its title in\n\
+  parentheses, for example `proj-7af3q2k9` (Fix the parser). Never write a\n\
+  bare id to the user; item bodies and comments may use one.\n\
 \n\
 ## Commands\n\
 \n\
