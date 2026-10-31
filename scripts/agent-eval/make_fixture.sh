@@ -78,6 +78,9 @@ Small CLI to recieve numbers on stdin and print `sum` or `avg`.
 P
 git init -q; git add -A; git -c user.email=a@b -c user.name=a commit -qm init
 $C init >/dev/null 2>&1
+if [ "$S" = s11 ]; then
+  $C new "CLI: machine-readable output mode" --type feature -b "tally.cli prints bare numbers. Scripts that consume the output need a JSON form, for example {\"result\": 6} for \`sum\`." >/dev/null
+fi
 if [ "$S" = s5 ]; then
   $C new "average() raises ZeroDivisionError on an empty list" --type bug -b "tally.stats.average([]) divides by zero. Expected: return 0 (see tests/test_stats.py::test_average_empty)." >/dev/null
   $C new "Support negative numbers in the README example" --type docs -b "README shows only positive input." >/dev/null

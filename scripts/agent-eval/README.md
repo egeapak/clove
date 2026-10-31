@@ -13,11 +13,14 @@ The agent gets the candidate text as its `CLAUDE.md` and does the work. Then
 | Check     | Meaning |
 |-----------|---------|
 | `count`   | The number of items is in the scenario's expected range. |
-| `closed`  | The items for the requested work are closed. |
+| `closed`  | The items for the requested work are closed (`closed_re` selects them by title). |
+| `open`    | The items for deferred work are open (`open_re`). |
+| `all_open`| Every item is open: the request asked only for planning. |
 | `bodies`  | Every new item has a body of at least 30 characters. |
 | `no_leak` | Titles, bodies, and comments contain no conversation context ("the user asked", deadlines, "found while", "out of scope", ...). |
 | `dep`     | A dependency is wired where one task waits for another (`s4`). |
-| `no_dup`  | An existing item is reused, not filed again (`s5`). |
+| `no_dup`  | An existing item is reused, not filed again (`dup_re` matches at most one title). |
+| `no_change` | No file outside `.clove/` changed. |
 
 The score of one rollout is the mean of its checks (0 to 1).
 
@@ -30,9 +33,20 @@ The score of one rollout is the mean of its checks (0 to 1).
 | `s5` | Fix a bug that an open item describes, and add `mode()` | 3 or 4, no duplicate |
 | `s6` | Two tasks, wrapped in conversation context | 2 to 4, no context in items |
 | `s7` | Three similar subcommands | 3 to 5 |
+| `s8` | One bug with several investigation steps | exactly 1, not counting the fixture's two failing tests |
+| `s9` | Plan three tasks, implement nothing | 3 to 6, all open, no code change |
+| `s10` | Fix one bug now, defer one feature | 2 or 3: the bug closed, the feature open, no deadline in the text |
+| `s11` | A task that an open item describes in other words | 1 to 3, the existing item reused and closed |
+| `s12` | A question that asks for no change | 0, no code change |
 
 An agent may also file the failing tests it finds outside its task as new
-items, so some ranges allow one or two extra items.
+items, so some ranges allow one or two extra items. `count_ignore_re` leaves
+such items out of the count instead, so a range can stay exact.
+
+To add a scenario, add an entry to `scenarios.json` (a `prompt`, an
+`expect_items` range, and the optional check keys above), and add any
+pre-existing items to `make_fixture.sh`. Then build a correct store and a wrong
+store by hand and confirm that only the correct one scores 1.0.
 
 ## Run one round
 
