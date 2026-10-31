@@ -36,6 +36,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The `CLOVE.md` directives tell an agent to run the check that shows the work
   is done before it writes the closing comment, and to quote the actual result
   of that check (which tests pass and which fail) in that comment.
+- The `CLOVE.md` directives show a short "Do not write / Write instead" table
+  of conversation context that items and comments must not contain, and say
+  that an item filed and left open needs no comment.
 
 ### Fixed
 
