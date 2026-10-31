@@ -2,11 +2,12 @@
 schema: 1
 id: clov-BMP6B7M2
 title: .clove/write.lock is not git-ignored
-status: open
+status: closed
 type: bug
 priority: 2
 created: 2026-10-31T08:08:23.625Z
-updated: 2026-10-31T08:08:23.625Z
+updated: 2026-10-31T10:45:37.500Z
+closed: 2026-10-31T10:45:37.500Z
 labels: []
 deps: []
 relates: []
