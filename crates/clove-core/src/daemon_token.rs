@@ -412,6 +412,23 @@ mod tests {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
     }
 
+    /// Whether a read-only (`0o500`) directory refuses a new file here. It does
+    /// not as root (or with `CAP_DAC_OVERRIDE`), which ignores the mode bits.
+    #[cfg(unix)]
+    fn read_only_dirs_are_enforced(parent: &std::path::Path) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        let probe = parent.join("read-only-probe");
+        std::fs::create_dir(&probe).unwrap();
+        std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let enforced = std::fs::File::create(probe.join("x")).is_err();
+        std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::remove_dir_all(&probe).unwrap();
+        if !enforced {
+            eprintln!("skipped: a read-only directory is writable here (running as root?)");
+        }
+        enforced
+    }
+
     #[cfg(unix)]
     fn mode(path: &Utf8Path) -> u32 {
         use std::os::unix::fs::PermissionsExt;
@@ -498,11 +515,14 @@ mod tests {
     #[test]
     fn an_unreadable_token_is_replaced_or_named() {
         use std::os::unix::fs::PermissionsExt;
-        let (_tmp, dir) = clove_dir();
+        let (tmp, dir) = clove_dir();
         let path = token_path(&dir);
         write_with_mode(&path, SOME_TOKEN, 0o000);
         assert_ne!(read_or_create(&dir).unwrap(), SOME_TOKEN);
 
+        if !read_only_dirs_are_enforced(tmp.path()) {
+            return;
+        }
         write_with_mode(&path, SOME_TOKEN, 0o000);
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
         let failed = read_or_create(&dir);
