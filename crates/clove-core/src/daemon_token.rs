@@ -243,7 +243,7 @@ pub fn read_or_create(clove_dir: &Utf8Path) -> io::Result<String> {
         }
     };
     // Best effort: the token works either way.
-    let _ = ensure_gitignored(clove_dir);
+    let _ = crate::config::ensure_gitignored(clove_dir, TOKEN_FILE);
     Ok(token)
 }
 
@@ -350,27 +350,6 @@ fn create(clove_dir: &Utf8Path, path: &Utf8Path) -> io::Result<String> {
         },
         Err(e) => Err(with_path(path, "creating")(e.error)),
     }
-}
-
-/// Add `daemon.token` to `.clove/.gitignore` when it is not there (a list
-/// written by a clove that predates the token).
-fn ensure_gitignored(clove_dir: &Utf8Path) -> io::Result<()> {
-    let gitignore = clove_dir.join(".gitignore");
-    crate::fs_safe::refuse_symlink(&gitignore)?;
-    let mut contents = match std::fs::read_to_string(&gitignore) {
-        Ok(text) => text,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(e),
-    };
-    if contents.lines().any(|line| line.trim() == TOKEN_FILE) {
-        return Ok(());
-    }
-    if !contents.is_empty() && !contents.ends_with('\n') {
-        contents.push('\n');
-    }
-    contents.push_str(TOKEN_FILE);
-    contents.push('\n');
-    crate::fs_safe::write_atomic(clove_dir, &gitignore, contents.as_bytes())
 }
 
 /// Compare two tokens without an early exit on the first differing byte.

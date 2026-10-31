@@ -106,7 +106,7 @@ embedders who require an older toolchain).
   daemon.lock           # held by whichever daemon serves the project (§8.1) — .gitignore'd
   daemon.token          # the project's daemon token (§8.4): random, 0600, per clone — .gitignore'd
   reindex.lock          # advisory lock during reindex — .gitignore'd
-  write.lock            # store-wide advisory write lock, created on the first write — .gitignore'd
+  write.lock            # store-wide advisory write lock, created on the first write — .gitignore'd (each write adds the entry to an older clove's .gitignore)
   sync/                 # per-clone sync bookkeeping (`sync/github/<owner>__<repo>.json`) — .gitignore'd
 ```
 

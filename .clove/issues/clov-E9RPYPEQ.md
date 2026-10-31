@@ -2,11 +2,12 @@
 schema: 1
 id: clov-E9RPYPEQ
 title: Existing clones keep write.lock untracked until doctor --fix
-status: open
+status: closed
 type: feature
 priority: 2
 created: 2026-10-31T08:41:27.454Z
-updated: 2026-10-31T08:41:27.454Z
+updated: 2026-10-31T09:33:19.623Z
+closed: 2026-10-31T09:33:19.623Z
 labels: []
 deps: []
 relates: []

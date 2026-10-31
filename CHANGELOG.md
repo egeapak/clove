@@ -9,8 +9,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - `.clove/write.lock`, the store write lock, is git-ignored. `clove init` writes
-  it to `.clove/.gitignore`. In an existing project, `clove doctor` reports
-  `GITIGNORE_DRIFT` until you run `clove doctor --fix`, which adds the entry.
+  the entry to `.clove/.gitignore`, and in an existing project the next write
+  adds it (as clove already does for `daemon.token`). `clove doctor` reports a
+  `.gitignore` without it as `GITIGNORE_DRIFT`, and `clove doctor --fix` adds it.
 
 ## [0.2.0] - 2026-10-21
 
