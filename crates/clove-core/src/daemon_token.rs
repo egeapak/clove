@@ -516,13 +516,15 @@ mod tests {
     fn an_unreadable_token_is_replaced_or_named() {
         use std::os::unix::fs::PermissionsExt;
         let (tmp, dir) = clove_dir();
+        // Root reads a mode-000 file and writes into a read-only directory, so
+        // neither half of this test means anything there.
+        if !read_only_dirs_are_enforced(tmp.path()) {
+            return;
+        }
         let path = token_path(&dir);
         write_with_mode(&path, SOME_TOKEN, 0o000);
         assert_ne!(read_or_create(&dir).unwrap(), SOME_TOKEN);
 
-        if !read_only_dirs_are_enforced(tmp.path()) {
-            return;
-        }
         write_with_mode(&path, SOME_TOKEN, 0o000);
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
         let failed = read_or_create(&dir);

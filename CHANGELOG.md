@@ -4,6 +4,14 @@ All notable changes to clove are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- `.clove/write.lock`, the store write lock, is git-ignored. `clove init` writes
+  it to `.clove/.gitignore`. In an existing project, `clove doctor` reports
+  `GITIGNORE_DRIFT` until you run `clove doctor --fix`, which adds the entry.
+
 ## [0.2.0] - 2026-10-21
 
 ### Changed

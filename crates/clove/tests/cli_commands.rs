@@ -54,18 +54,11 @@ fn init_is_idempotent_and_writes_gitignore() {
     clove(dir.path()).arg("init").assert().success();
 
     let gitignore = std::fs::read_to_string(dir.path().join(".clove/.gitignore")).unwrap();
-    for entry in [
-        "index.db",
-        "*.db-shm",
-        "*.db-wal",
-        "daemon.sock",
-        "daemon.pid",
-        "reindex.lock",
-        "daemon.lock",
-        "index.db.tmp",
-        "daemon.token",
-    ] {
-        assert!(gitignore.contains(entry), "missing {entry}");
+    for entry in clove_core::GITIGNORE_ENTRIES {
+        assert!(
+            gitignore.lines().any(|line| line == entry),
+            "missing {entry}"
+        );
     }
     assert!(!gitignore.contains('\r'), "gitignore must use LF endings");
     assert!(dir.path().join(".clove/config.toml").exists());
