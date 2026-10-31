@@ -229,5 +229,6 @@ mod tests {
         assert!(text.contains("copy the title exactly"));
         assert!(text.contains("never a bare id"));
         assert!(text.contains("find every id in it"));
+        assert!(text.contains("Item bodies and comments may use a bare id"));
     }
 }

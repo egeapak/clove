@@ -318,7 +318,8 @@ impl ServerHandler for CloveServer {
              this every time you write the id, also on a second mention of the \
              same item, and copy the title exactly as clove returns it; never \
              a bare id, not even in a list. Before you send a reply, find \
-             every id in it and check that its title follows it. Explore with clove_show (detail), \
+             every id in it and check that its title follows it. Item bodies \
+             and comments may use a bare id. Explore with clove_show (detail), \
              clove_comments (the discussion thread — clove_show gives only a \
              count), clove_blocked, and clove_dep_tree; clove_stats for an \
              overview; clove_dep_remove / clove_set_parent to edit the graph. \

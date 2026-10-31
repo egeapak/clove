@@ -21,7 +21,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   key. `clove new` keeps the id and path as its first two fields.
 - The id-and-title rule now covers every mention: a repeated mention of the
   same item and an id in a list get the title too, the title is copied
-  exactly, and the agent checks every id in a reply before it sends it.
+  exactly, and the directives tell the agent to check every id in a reply
+  before it sends the reply.
 
 ### Fixed
 
