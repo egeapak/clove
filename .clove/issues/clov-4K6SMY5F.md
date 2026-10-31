@@ -2,11 +2,12 @@
 schema: 1
 id: clov-4K6SMY5F
 title: Measure id-plus-title adherence per model on all agent-eval scenarios
-status: in_progress
+status: closed
 type: chore
 priority: 2
 created: 2026-10-31T10:01:43.244Z
-updated: 2026-10-31T10:13:29.509Z
+updated: 2026-10-31T10:24:29.761Z
+closed: 2026-10-31T10:24:29.761Z
 labels: []
 deps: [clov-1S95372Y, clov-P5PRP3S2, clov-ZSM0NJ2E]
 relates: []

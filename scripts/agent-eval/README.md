@@ -108,8 +108,57 @@ The current `CLOVE.md` came from a reflective prompt search (the GEPA method):
 
 ## Results so far
 
-Current `CLOVE.md`, 3 runs per scenario and model (153 runs). Each cell is the
-mean score, the minimum, and the run count:
+### Round 2: id and title in replies
+
+`CLOVE.md` with the "name items by id and title" rule, and `clove new` and
+`clove comment` that return the item title. The run count is 3 runs per
+scenario and model (153 runs). Each cell is the mean score, the minimum, and
+the run count:
+
+| Scenario | haiku | opus | sonnet |
+|---|---|---|---|
+| s1 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s2 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s3 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s4 | 0.98 (min 0.94, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s5 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s6 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s7 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s8 | 0.95 (min 0.85, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s9 | 0.99 (min 0.96, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s10 | 1.00 (min 1.00, n=3) | 0.98 (min 0.94, n=3) | 1.00 (min 1.00, n=3) |
+| s11 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s12 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s13 | 1.00 (min 1.00, n=3) | 0.99 (min 0.97, n=3) | 1.00 (min 1.00, n=3) |
+| s14 | 0.94 (min 0.89, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s15 | 0.98 (min 0.93, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s16 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s17 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| **mean** | 0.990 | 0.998 | 1.000 |
+
+`id_titles` results (a reply that names no item id skips the check):
+
+| Model | Replies with ids | Every id titled | Mean `id_titles` |
+|---|---|---|---|
+| haiku | 45 of 51 | 42 of 45 | 0.970 |
+| opus | 45 of 51 | 44 of 45 | 0.996 |
+| sonnet | 34 of 51 | 34 of 34 | 1.000 |
+
+- No scenario and model pair has a mean below 0.94.
+- There are 4 `id_titles` misses:
+  - Haiku `s8` lists 3 ids bare.
+  - Haiku `s15` shortens 2 titles.
+  - Haiku `s9` and Opus `s13` repeat an id without its title on its second
+    mention.
+- `no_leak` still costs Haiku 3 runs (`s4`, `s14` twice) and Opus 1 run
+  (`s10`: "next week" in an item body).
+- Sonnet names fewer item ids in its replies (34 of 51). It describes the
+  work instead.
+
+### Round 1: item tracking
+
+`CLOVE.md` before the id-and-title rule, 3 runs per scenario and model (153
+runs). Each cell is the mean score, the minimum, and the run count:
 
 | Scenario | haiku | opus | sonnet |
 |---|---|---|---|
