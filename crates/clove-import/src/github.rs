@@ -491,9 +491,9 @@ pub(crate) mod net {
                     .to_owned(),
             )
         })?;
-        // Whether a proxy applies depends on the API base (its scheme picks the
-        // variable, its host is checked against NO_PROXY). A base that does not
-        // parse is left to the default builder, which reports it.
+        // The API base decides which proxy variable must be usable (its
+        // scheme's) and whether NO_PROXY excuses it. A base that does not parse
+        // is left to the default builder, which reports it.
         let base = api_base_override();
         let base_uri = base
             .as_deref()

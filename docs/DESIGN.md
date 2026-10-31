@@ -2188,14 +2188,14 @@ the base's scheme is an error; it is never replaced by `ALL_PROXY`. The other
 scheme's proxy serves only other hosts (an upload host, a redirect); if it is
 not usable, that scheme connects directly.
 A proxy URL is `http://[user:password@]host[:port]` (percent-encode `@`, `:`,
-`/`, `?` and `#` in the user name or password; a `@` outside the credentials is
-rejected, since it cannot be told from a mis-encoded password). The client opens an HTTP `CONNECT` tunnel
+`/`, `?` and `#` in the user name or password; a URL with a `@` but no
+credentials parsed is rejected, since that is a mis-encoded password). The client opens an HTTP `CONNECT` tunnel
 through it (credentials go as `Proxy-Authorization: Basic`), and TLS to GitHub
 runs inside the tunnel. An `http://` base is tunnelled to port 80 too, not
 forwarded in absolute form, so a proxy that allows `CONNECT` only to TLS ports
 refuses a plain-HTTP GitHub Enterprise. A proxy URL that does not parse, or any
 other scheme (`https://`, `socks5://`), is a `client setup` error that names the
-variable; it never falls back to a direct connection. With no proxy applying,
+variable; it never falls back to a direct connection. With no usable proxy set,
 the client is octocrab's default one. The TLS roots are the platform's native
 roots (`rustls-native-certs`), which `SSL_CERT_FILE` / `SSL_CERT_DIR` replace;
 so a proxy that re-terminates TLS works once its CA is in the system store or

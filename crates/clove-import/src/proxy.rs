@@ -28,8 +28,8 @@
 //!
 //! A proxy URL is `http://[user:password@]host[:port]` (the scheme may be
 //! omitted; the port defaults to 80; percent-encode `@`, `:`, `/`, `?` and `#`
-//! in the user name or password; a `@` anywhere outside the credentials is
-//! rejected, since it cannot be told from a mis-encoded password). Credentials are sent as
+//! in the user name or password; a URL with a `@` but no credentials parsed is
+//! rejected, since that is a mis-encoded password). Credentials are sent as
 //! `Proxy-Authorization: Basic …` on the `CONNECT` request. A URL that does not
 //! parse, or any other scheme (`https://`, `socks5://`, …), is a setup error,
 //! never a silent direct connection. The check is the matcher's own parse, so
@@ -80,13 +80,15 @@ impl ProxyConfig {
     /// The proxy settings that apply to `dst` (the API base), from the process
     /// environment.
     ///
-    /// `Ok(None)` means no proxy applies (no variable for its scheme, or its
-    /// host is in `NO_PROXY`), so the caller keeps the direct client. `Err`
-    /// names the variable whose URL is not usable.
+    /// `Ok(None)` means no usable proxy is set for either scheme, so the
+    /// caller keeps the direct client. `Err` names the variable for the API
+    /// base's scheme whose URL is not usable (unless `NO_PROXY` covers the API
+    /// host).
     pub(crate) fn for_destination(dst: &Uri) -> Result<Option<Self>, String> {
-        // `var_os` + lossy: a non-UTF-8 value still counts as set (the CGI guard
-        // must not miss a `REQUEST_METHOD`), and a garbled proxy URL then fails
-        // the check instead of being skipped.
+        // `var_os` + lossy: a non-UTF-8 value still counts as set, so the CGI
+        // guard does not miss a `REQUEST_METHOD`, and a garbled proxy URL for
+        // the API base's scheme is an error. (A garbled one for the other
+        // scheme, like any unusable one, leaves that scheme direct.)
         Self::for_destination_with(
             |key| std::env::var_os(key).map(|val| val.to_string_lossy().into_owned()),
             dst,
@@ -101,40 +103,42 @@ impl ProxyConfig {
     ) -> Result<Option<Self>, String> {
         let cgi = lookup("REQUEST_METHOD").is_some();
         let http_vars: &[&'static str] = if cgi { &HTTP_VARS[1..] } else { &HTTP_VARS };
-        let all = first_set(&lookup, &ALL_VARS);
-        // Each scheme's proxy: its own variable, else ALL_PROXY; checked once.
-        let resolve = |own: Option<(&'static str, String)>| {
-            own.or_else(|| all.clone()).map(|(key, val)| {
-                let checked = check_proxy_url(&val);
-                (key, val, checked)
-            })
+        let checked = |(key, val): (&'static str, String)| {
+            let check = check_proxy_url(&val);
+            (key, val, check)
         };
-        let https = resolve(first_set(&lookup, &HTTPS_VARS));
-        let http = resolve(first_set(&lookup, http_vars));
+        // Each scheme's proxy: its own variable, else ALL_PROXY; each value
+        // checked once.
+        let all = first_set(&lookup, &ALL_VARS).map(checked);
+        let https = first_set(&lookup, &HTTPS_VARS)
+            .map(checked)
+            .or_else(|| all.clone());
+        let http = first_set(&lookup, http_vars)
+            .map(checked)
+            .or_else(|| all.clone());
         let no = first_set(&lookup, &NO_VARS)
             .map(|(_, list)| list)
             .unwrap_or_default();
+        // The one place that decides whether the API host bypasses the proxy.
+        let bypassed = Matcher::builder()
+            .all("http://proxy.invalid")
+            .no(no.as_str())
+            .build()
+            .intercept(dst)
+            .is_none();
         let own = if dst.scheme_str() == Some("http") {
             &http
         } else {
             &https
         };
-        let Some((key, _, checked)) = own else {
-            return Ok(None);
-        };
-        if let Err(why) = checked {
+        if let Some((key, _, Err(why))) = own {
             // A host in NO_PROXY never uses the proxy, whatever its URL.
-            let probe = Matcher::builder()
-                .all("http://proxy.invalid")
-                .no(no.as_str())
-                .build();
-            if probe.intercept(dst).is_none() {
-                return Ok(None);
+            if !bypassed {
+                let host = dst.host().unwrap_or_default();
+                return Err(format!(
+                    "invalid proxy URL in {key}: {why}; or add `{host}` to NO_PROXY to connect directly"
+                ));
             }
-            let host = dst.host().unwrap_or_default();
-            return Err(format!(
-                "invalid proxy URL in {key}: {why}; or add `{host}` to NO_PROXY to connect directly"
-            ));
         }
         // Set each scheme explicitly and never `.all()`: the matcher would
         // fill an empty scheme from it, which would let ALL_PROXY replace an
@@ -143,12 +147,15 @@ impl ProxyConfig {
             Some((_, val, Ok(()))) => val.clone(),
             _ => String::new(),
         };
-        let matcher = Matcher::builder()
-            .https(usable(&https))
-            .http(usable(&http))
-            .no(no)
-            .build();
-        Ok(matcher.intercept(dst).map(|_| Self { matcher }))
+        let (https, http) = (usable(&https), usable(&http));
+        if https.is_empty() && http.is_empty() {
+            return Ok(None);
+        }
+        // Kept even when the API host is bypassed or has no proxy of its own:
+        // the connector decides per request, so other hosts (an upload host, a
+        // redirect) still use their scheme's proxy.
+        let matcher = Matcher::builder().https(https).http(http).no(no).build();
+        Ok(Some(Self { matcher }))
     }
 
     #[cfg(test)]
@@ -418,22 +425,20 @@ mod tests {
             ("NO_PROXY", "*"),
         ] {
             let vars = [("HTTPS_PROXY", "http://p:3128"), (key, list)];
-            assert!(config(&vars, GITHUB).unwrap().is_none(), "{key}={list}");
+            assert!(proxy(&vars, GITHUB).is_none(), "{key}={list}");
         }
         let vars = [
             ("HTTPS_PROXY", "http://p:3128"),
             ("NO_PROXY", "10.0.0.0/8,notgithub.com"),
         ];
-        assert!(config(&vars, "https://10.1.2.3/").unwrap().is_none());
+        assert!(proxy(&vars, "https://10.1.2.3/").is_none());
         assert_eq!(proxy(&vars, GITHUB), Some("http://p:3128/".to_owned()));
     }
 
     #[test]
     fn a_variable_that_does_not_apply_is_not_checked() {
         // HTTP_PROXY is for http:// bases; a socks URL there is someone else's.
-        assert!(config(&[("HTTP_PROXY", "socks5://p:1080")], GITHUB)
-            .unwrap()
-            .is_none());
+        assert!(proxy(&[("HTTP_PROXY", "socks5://p:1080")], GITHUB).is_none());
         // ALL_PROXY is shadowed by the scheme's own variable.
         assert_eq!(
             proxy(
@@ -446,14 +451,13 @@ mod tests {
             Some("http://own:2/".to_owned())
         );
         // A bypassed host never uses the proxy, whatever its URL.
-        assert!(config(
+        assert!(proxy(
             &[
                 ("HTTPS_PROXY", "socks5://p:1080"),
                 ("NO_PROXY", "api.github.com")
             ],
             GITHUB
         )
-        .unwrap()
         .is_none());
     }
 
@@ -555,10 +559,49 @@ mod tests {
     }
 
     #[test]
+    fn a_bypassed_api_host_keeps_the_proxy_for_other_hosts() {
+        let vars = [
+            ("HTTPS_PROXY", "http://corp:3128"),
+            ("NO_PROXY", "api.github.com"),
+        ];
+        let cfg = config(&vars, GITHUB).unwrap().unwrap();
+        assert_eq!(cfg.proxy_for(&GITHUB.parse().unwrap()), None);
+        assert_eq!(
+            cfg.proxy_for(&"https://uploads.github.com/".parse().unwrap())
+                .map(|u| u.to_string()),
+            Some("http://corp:3128/".to_owned())
+        );
+    }
+
+    #[test]
+    fn an_http_base_follows_the_same_rules() {
+        let base = "http://ghe.local/api/v3";
+        // An unusable HTTP_PROXY is an error, not replaced by ALL_PROXY.
+        let vars = [
+            ("HTTP_PROXY", "socks5://s:1"),
+            ("ALL_PROXY", "http://all:8080"),
+        ];
+        let Err(err) = config(&vars, base) else {
+            panic!("an unusable HTTP_PROXY must be an error");
+        };
+        assert!(
+            err.starts_with("invalid proxy URL in HTTP_PROXY: "),
+            "{err}"
+        );
+        // In a CGI environment HTTP_PROXY is dropped, so ALL_PROXY serves.
+        let vars = [
+            ("HTTP_PROXY", "http://evil:1"),
+            ("ALL_PROXY", "http://all:8080"),
+            ("REQUEST_METHOD", "GET"),
+        ];
+        assert_eq!(proxy(&vars, base), Some("http://all:8080/".to_owned()));
+    }
+
+    #[test]
     fn a_cgi_environment_ignores_uppercase_http_proxy() {
         let base = "http://ghe.local/";
         let vars = [("HTTP_PROXY", "http://evil:1"), ("REQUEST_METHOD", "GET")];
-        assert!(config(&vars, base).unwrap().is_none());
+        assert!(proxy(&vars, base).is_none());
         let vars = [("http_proxy", "http://ok:1"), ("REQUEST_METHOD", "GET")];
         assert_eq!(proxy(&vars, base), Some("http://ok:1/".to_owned()));
     }
