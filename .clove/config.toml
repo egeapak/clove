@@ -1,0 +1,15 @@
+# clove configuration. See `clove agent-doc` for the full reference.
+config_schema = 1
+id_prefix = "clov"
+default_type = "feature"
+default_format = "human"
+
+[index]
+auto_refresh = true
+
+[daemon]
+git_sync = false
+watch_debounce_ms = 200
+# Idle minutes before the daemon self-terminates (0 = never). Each clove
+# command resets this, so it only fires after a long gap of no activity.
+idle_shutdown_min = 240

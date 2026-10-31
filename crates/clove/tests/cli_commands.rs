@@ -943,7 +943,7 @@ fn doctor_detects_and_fixes_gitignore_drift() {
         .assert()
         .success();
     let fixed = std::fs::read_to_string(&gitignore).unwrap();
-    for entry in ["index.db", "daemon.sock", "index.db.tmp"] {
+    for entry in ["index.db", "daemon.sock", "index.db.tmp", "write.lock"] {
         assert!(fixed.contains(entry), "missing {entry} after fix");
     }
     let after = json_ok(clove(dir.path()).arg("doctor"));
@@ -958,6 +958,58 @@ fn doctor_detects_and_fixes_gitignore_drift() {
         .assert()
         .success();
     assert!(gitignore.exists());
+}
+
+/// `.clove/write.lock` (the store-wide write lock, created on the first write)
+/// is git-ignored by the `.gitignore` that `clove init` writes, and an existing
+/// `.gitignore` without it is drift that `doctor --fix` repairs.
+#[test]
+fn write_lock_is_git_ignored() {
+    let git = |dir: &Path, args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .expect("git must be on PATH");
+        assert!(out.status.success(), "git {args:?} failed: {out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q"]);
+    clove(dir.path())
+        .args(["init", "--prefix", "proj"])
+        .assert()
+        .success();
+    new_item(dir.path(), "X", &[]);
+    assert!(dir.path().join(".clove/write.lock").exists());
+    let status = git(
+        dir.path(),
+        &["status", "--porcelain", "--untracked-files=all", ".clove"],
+    );
+    assert!(!status.contains("write.lock"), "git status: {status}");
+
+    // A `.gitignore` from before `write.lock` was listed is drift.
+    let gitignore = dir.path().join(".clove/.gitignore");
+    let old = std::fs::read_to_string(&gitignore)
+        .unwrap()
+        .replace("write.lock\n", "");
+    std::fs::write(&gitignore, old).unwrap();
+    let status = git(
+        dir.path(),
+        &["status", "--porcelain", "--untracked-files=all", ".clove"],
+    );
+    assert!(status.contains("write.lock"), "git status: {status}");
+    let report = json_ok(clove(dir.path()).arg("doctor"));
+    assert!(doctor_codes(&report).contains(&"GITIGNORE_DRIFT".to_owned()));
+    clove(dir.path())
+        .args(["doctor", "--fix"])
+        .assert()
+        .success();
+    let status = git(
+        dir.path(),
+        &["status", "--porcelain", "--untracked-files=all", ".clove"],
+    );
+    assert!(!status.contains("write.lock"), "git status: {status}");
 }
 
 #[test]
