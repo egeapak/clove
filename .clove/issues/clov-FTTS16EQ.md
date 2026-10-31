@@ -6,7 +6,8 @@ status: open
 type: docs
 priority: 3
 created: 2026-10-31T08:27:11.589Z
-updated: 2026-10-31T08:27:11.589Z
+updated: 2026-10-31T10:46:22.005Z
+assignee: claude
 labels: []
 deps: []
 relates: []

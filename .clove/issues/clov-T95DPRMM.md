@@ -6,7 +6,8 @@ status: open
 type: chore
 priority: 2
 created: 2026-10-31T10:24:29.735Z
-updated: 2026-10-31T10:24:29.735Z
+updated: 2026-10-31T10:46:22.015Z
+assignee: claude
 labels: []
 deps: []
 relates: []
