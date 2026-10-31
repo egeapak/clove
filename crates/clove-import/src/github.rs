@@ -491,8 +491,22 @@ pub(crate) mod net {
                     .to_owned(),
             )
         })?;
+        // The API base decides which proxy variable must be usable (its
+        // scheme's) and whether NO_PROXY excuses it. A base that does not parse
+        // is left to the default builder, which reports it.
+        let base = api_base_override();
+        let base_uri = base
+            .as_deref()
+            .unwrap_or("https://api.github.com")
+            .parse::<http::Uri>();
+        if let Ok(base_uri) = base_uri {
+            let proxy = crate::proxy::ProxyConfig::for_destination(&base_uri).map_err(setup_err)?;
+            if let Some(proxy) = proxy {
+                return build_proxied_client(token, proxy, base_uri, &setup_err);
+            }
+        }
         let mut builder = Octocrab::builder().personal_token(token);
-        if let Some(base) = api_base_override() {
+        if let Some(base) = base {
             builder = builder.base_uri(base.clone()).map_err(|err| {
                 setup_err(format!(
                     "invalid GitHub API base `{base}`: {}",
@@ -503,6 +517,59 @@ pub(crate) mod net {
         builder
             .build()
             .map_err(|err| setup_err(describe_octocrab_error(&err)))
+    }
+
+    /// Build the client for a configured proxy (`HTTPS_PROXY` & co., see
+    /// [`crate::proxy`]).
+    ///
+    /// octocrab's default builder cannot take a custom connector, so this
+    /// assembles the same stack it builds (rustls with the native roots, the
+    /// legacy hyper client, follow-redirect, the `User-Agent` header, the base
+    /// URI and the token header, which is only sent to the API host) around a
+    /// connector that tunnels through the proxy. Hosts in `NO_PROXY` still
+    /// connect directly.
+    fn build_proxied_client(
+        token: String,
+        proxy: crate::proxy::ProxyConfig,
+        base_uri: http::Uri,
+        setup_err: &impl Fn(String) -> ImportError,
+    ) -> Result<Octocrab, ImportError> {
+        use http::header::{HeaderValue, USER_AGENT};
+        use http::Uri;
+        use octocrab::service::middleware::auth_header::AuthHeaderLayer;
+        use octocrab::service::middleware::base_uri::BaseUriLayer;
+        use octocrab::service::middleware::extra_headers::ExtraHeadersLayer;
+        use octocrab::{AuthState, OctoBody, OctocrabBuilder};
+        use std::sync::Arc;
+
+        // octocrab's default upload base; the token header is scoped to these
+        // two hosts.
+        let upload_uri = Uri::from_static("https://uploads.github.com");
+        let mut auth = HeaderValue::from_str(&format!("Bearer {token}"))
+            .map_err(|_| setup_err("the GitHub token is not a valid header value".to_owned()))?;
+        auth.set_sensitive(true);
+
+        let connector = hyper_rustls::HttpsConnectorBuilder::new()
+            .with_native_roots()
+            .map_err(|err| setup_err(format!("cannot load the TLS root certificates: {err}")))?
+            .https_or_http()
+            .enable_http1()
+            .wrap_connector(crate::proxy::ProxyConnector::new(proxy));
+        let client: hyper_util::client::legacy::Client<_, OctoBody> =
+            hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
+                .build(connector);
+        OctocrabBuilder::new_empty()
+            .with_service(client)
+            .with_layer(&tower_http::follow_redirect::FollowRedirectLayer::new())
+            .with_layer(&ExtraHeadersLayer::new(Arc::new(vec![(
+                USER_AGENT,
+                HeaderValue::from_static("octocrab"),
+            )])))
+            .with_layer(&BaseUriLayer::new(base_uri.clone()))
+            .with_layer(&AuthHeaderLayer::new(Some(auth), base_uri, upload_uri))
+            .with_auth(AuthState::None)
+            .build()
+            .map_err(|never| match never {})
     }
 
     /// The API base-URI override, if any (`CLOVE_GITHUB_API_URL`, then
@@ -540,19 +607,63 @@ pub(crate) mod net {
         repo: &str,
     ) -> Result<Vec<GitHubIssue>, ImportError> {
         let operation = format!("issue list fetch from {owner}/{repo}");
-        let first = crab
-            .issues(owner, repo)
-            .list()
-            .state(octocrab::params::State::All)
-            .per_page(100)
-            .send()
-            .await
-            .map_err(|err| net_err(&operation, &err))?;
-        let all = crab
-            .all_pages(first)
-            .await
-            .map_err(|err| net_err(&operation, &err))?;
+        let handler = &crab.issues(owner, repo);
+        let operation = &operation;
+        let all = collect_pages(
+            |issue: &octocrab::models::issues::Issue| issue.number,
+            |page| async move {
+                handler
+                    .list()
+                    .state(octocrab::params::State::All)
+                    .per_page(100)
+                    .page(page)
+                    .send()
+                    .await
+                    .map_err(|err| net_err(operation, &err))
+            },
+        )
+        .await?;
         all.iter().map(to_intermediate).collect()
+    }
+
+    /// Every item of a paginated list, fetched page by page with `fetch(n)`
+    /// (`n` from 1) until a page has no `next` link.
+    ///
+    /// The next page is requested by number on the caller's own route, not by
+    /// following the `Link: next` URL. GitHub writes that URL with the numeric
+    /// repository id (`/repositories/{id}/…`), and some proxies allow only
+    /// `/repos/{owner}/{repo}/…` paths, so the `Link` URL fails behind them.
+    ///
+    /// An item created while the pages are read shifts the later pages, so an
+    /// item can come back twice; `key` (the issue number or comment id) drops
+    /// the repeat. An item deleted meanwhile shifts them the other way, so one
+    /// item can be missed; dedup cannot help there. (Following `Link` URLs has
+    /// both races: GitHub's `Link` URLs are page numbers too.)
+    pub(crate) async fn collect_pages<T, F, Fut>(
+        key: impl Fn(&T) -> u64,
+        mut fetch: F,
+    ) -> Result<Vec<T>, ImportError>
+    where
+        F: FnMut(u32) -> Fut,
+        Fut: std::future::Future<Output = Result<octocrab::Page<T>, ImportError>>,
+    {
+        let mut seen = std::collections::HashSet::new();
+        let mut items = Vec::new();
+        let mut page = 1u32;
+        loop {
+            let current = fetch(page).await?;
+            let more = current.next.is_some() && !current.items.is_empty();
+            items.extend(
+                current
+                    .items
+                    .into_iter()
+                    .filter(|item| seen.insert(key(item))),
+            );
+            if !more {
+                return Ok(items);
+            }
+            page += 1;
+        }
     }
 
     /// Wrap a failed octocrab call as [`ImportError::GitHub`]. `operation` names
@@ -658,8 +769,41 @@ pub(crate) mod net {
 
     #[cfg(test)]
     mod tests {
-        use super::describe_github_rejection;
+        use super::{collect_pages, describe_github_rejection};
         use serde_json::json;
+
+        /// A page of `items`, with a `next` link unless it is the last.
+        fn page(items: &[u64], last: bool) -> octocrab::Page<u64> {
+            let mut page = octocrab::Page::default();
+            page.items = items.to_vec();
+            if !last {
+                page.next = Some("https://api.github.invalid/next".parse().unwrap());
+            }
+            page
+        }
+
+        #[test]
+        fn pages_are_read_by_number_until_no_next_link_and_repeats_are_dropped() {
+            // Page 2 repeats page 1's last item, as when an item is created
+            // between the two requests.
+            let pages = [page(&[5, 4], false), page(&[4, 3], false), page(&[2], true)];
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            let requested = std::cell::RefCell::new(Vec::new());
+            let items = rt
+                .block_on(collect_pages(
+                    |n: &u64| *n,
+                    |n| {
+                        requested.borrow_mut().push(n);
+                        let page = pages[n as usize - 1].clone();
+                        async move { Ok(page) }
+                    },
+                ))
+                .unwrap();
+            assert_eq!(items, [5, 4, 3, 2]);
+            assert_eq!(*requested.borrow(), [1, 2, 3]);
+        }
 
         #[test]
         fn a_validation_failure_names_status_message_field_and_value() {

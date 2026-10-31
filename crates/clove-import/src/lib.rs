@@ -16,6 +16,8 @@ pub mod github;
 pub mod map;
 pub mod merge;
 pub mod plan;
+#[cfg(feature = "github")]
+mod proxy;
 pub mod render;
 pub mod restore;
 pub mod store;
