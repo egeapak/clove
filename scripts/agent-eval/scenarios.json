@@ -1,0 +1,65 @@
+{
+ "s1": {
+  "prompt": "Two tests in tests/ are failing (run `python3 tests/run.py`). Please fix them. While you're at it, add a `median(xs)` function to tally/stats.py with a test.",
+  "expect_items": [
+   3,
+   3
+  ],
+  "need_closed": true
+ },
+ "s2": {
+  "prompt": "Rename the module tally/stats.py to tally/metrics.py. Do it in three steps: first move the file, then update every import, then update the README. Make sure `python3 tests/run.py` still runs afterwards (the two existing failures are known, leave them).",
+  "expect_items": [
+   1,
+   1
+  ],
+  "need_closed": true
+ },
+ "s3": {
+  "prompt": "Fix the typo 'recieve' in README.md.",
+  "expect_items": [
+   0,
+   1
+  ],
+  "need_closed": false
+ },
+ "s4": {
+  "prompt": "I'd like a `--json` flag on the CLI that prints the result as {\"result\": N}. Once that's in, document the flag in the README. Separately, a colleague reported that `tally sum` crashes when stdin has a blank line \u2014 please fix that too.",
+  "expect_items": [
+   3,
+   4
+  ],
+  "need_closed": true,
+  "need_dep": true,
+  "work_re": "json|readme|doc|blank|crash|empty line"
+ },
+ "s5": {
+  "prompt": "Make average() return 0 for an empty list, and add a `mode(xs)` function with a test.",
+  "expect_items": [
+   3,
+   4
+  ],
+  "need_closed": true,
+  "preexisting": 2,
+  "reuse_title": "average() raises ZeroDivisionError",
+  "work_re": "average|mode"
+ },
+ "s6": {
+  "prompt": "Following up on what we talked about earlier \u2014 you suggested caching and I agree. Please memoize parse_line with functools.lru_cache. Also the CLI should exit with code 2 and print an error on an unknown command (right now it silently does nothing). My manager wants both before Friday, so thanks!",
+  "expect_items": [
+   2,
+   4
+  ],
+  "need_closed": true,
+  "work_re": "cache|memo|lru|unknown|exit|command"
+ },
+ "s7": {
+  "prompt": "Add three new CLI subcommands: `min`, `max`, and `count`. Each needs a test.",
+  "expect_items": [
+   3,
+   5
+  ],
+  "need_closed": true,
+  "work_re": "min|max|count"
+ }
+}
