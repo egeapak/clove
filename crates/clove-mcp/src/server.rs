@@ -189,7 +189,13 @@ impl CloveServer {
         self.run(move || e.stats(a)).await
     }
 
-    #[tool(description = "Create a new work item. Returns its generated id and path.")]
+    #[tool(
+        description = "Create a new work item: one item per separate task, bug, \
+                       or fix (the steps of one task are comments, not items). \
+                       Give a `body` that stands on its own without this \
+                       conversation: what is wrong or missing, where, and how to \
+                       verify it is done. Returns its generated id and path."
+    )]
     async fn clove_new(
         &self,
         Parameters(a): Parameters<NewArgs>,
@@ -287,16 +293,28 @@ impl ServerHandler for CloveServer {
         .with_server_info(Implementation::new("clove", env!("CARGO_PKG_VERSION")))
         .with_instructions(
             "clove is a fast, dependency-aware work-item tracker and the source \
-             of truth for this repository's tasks, bugs, and features. Prefer it \
-             over ad-hoc TODO lists for any multi-step work: at the start of a \
-             task call clove_ready (unblocked work) and clove_search / clove_list \
-             to find existing items before creating new ones, then record \
-             progress as you go — clove_new to file work, clove_status to \
-             transition it (open/in_progress/closed), and clove_comment to note \
-             findings. Explore with clove_show (detail), clove_comments (the \
-             discussion thread — clove_show gives only a count), clove_blocked, \
-             and clove_dep_tree; clove_stats for an overview; clove_dep_add / \
-             clove_dep_remove / clove_set_parent to wire the graph. Ids look like \
+             of truth for this repository's tasks, bugs, and features. Track \
+             work in clove for every request that has more than one task, or \
+             one task with more than one step; file the items before you start, \
+             even when clove has no items yet (a one-line edit needs no item). \
+             First call clove_ready and clove_search / clove_list: if an open \
+             item already describes a task, use it instead of filing a \
+             duplicate. File one item per separate task, bug, or fix with \
+             clove_new; the steps of one task are clove_comment entries on that \
+             item, not separate items; a problem you find outside the current \
+             task is a new item. Every item needs a self-contained `body` (what \
+             is wrong or missing, where, and how to verify it is done), because \
+             the reader does not see this conversation: leave out who asked, \
+             deadlines, what was said earlier, how you found the problem, and \
+             whether it was in scope, in titles, bodies, and comments alike. \
+             When one task must wait for another, wire it with clove_dep_add. \
+             Call clove_status in_progress when you begin an item; before \
+             clove_status closed, add a clove_comment that says what changed and \
+             how you verified it. Explore with clove_show (detail), \
+             clove_comments (the discussion thread — clove_show gives only a \
+             count), clove_blocked, and clove_dep_tree; clove_stats for an \
+             overview; clove_dep_remove / clove_set_parent to edit the graph. \
+             Ids look like \
              `proj-7af3q2k9`. Read results are compacted: keys that are null or \
              an empty list are omitted, so a missing `assignee`, `labels`, or \
              `blocked_by` means unset or empty, never unknown. When scanning \

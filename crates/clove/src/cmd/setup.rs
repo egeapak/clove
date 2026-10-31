@@ -19,27 +19,53 @@ use crate::output::print_json_success;
 /// `.crate` tarball.
 const CLOVE_MD_CONTENT: &str = r#"# clove
 
-This repository uses **clove** — a git-native, dependency-aware work-item
-tracker — as the source of truth for tasks, bugs, and features. Prefer it over
-ad-hoc TODO lists or scratch notes for anything that spans more than a single
-step.
+This repository tracks its work in **clove**, a git-native, dependency-aware
+work-item tracker. Track your work in clove for every request that contains
+more than one task, or one task with more than one step. File the items
+**before** you start the work, even when clove has no items yet. A single
+small edit (one typo, one line) does not need an item.
 
-- **Check before starting** — at the start of any multi-step task, run
-  `clove ready` (unblocked work) and `clove search <text>` / `clove list` to find
-  related items *before* creating new ones. The `clove_ready` / `clove_search` /
-  `clove_list` MCP tools do the same.
-- **File work as items** — capture new tasks/bugs/features with
-  `clove new <title> [--type bug|feature|chore|docs|epic] [-p 0-4] [--dep ID]
-  [--parent ID]` instead of loose notes, so the work is tracked and shareable.
-- **Record progress** — transition items with
-  `clove status <id> <open|in_progress|closed>` (aliases `start` / `close`) and
-  capture findings with `clove comment <id> <message>` as you go.
-- **Respect the graph** — wire blocking relationships with
-  `clove dep add <id> <dep-id>`; use `clove blocked` and `clove dep tree <id>` to
-  see what is waiting on what. An item is *ready* when it is open and every hard
-  dependency is closed.
-- **Full reference** — run `clove agent-doc` for the complete command surface,
-  the `{ v, ok, data, _meta }` JSON envelope, and exit codes.
+## Rule: one item per task, one comment per step
+
+| The request                                              | Items to file |
+|----------------------------------------------------------|---------------|
+| "Fix the two failing tests and add `median()`"           | 3 (bug, bug, feature) |
+| "Rename X: move the file, then fix imports, then docs"   | 1 (steps go in comments) |
+| "Add flag F, then document F; also fix crash C"          | 3, and the docs item depends on the F item |
+| A bug you find while you work on something else          | 1 new item; do not fix or drop it silently |
+| A task that an open item already describes               | 0; use the existing item |
+
+## Rule: items are self-contained
+
+Another person reads the item later, without this conversation. Give every
+item a body with `-b`:
+
+    clove new "parse_line() fails on empty fields" --type bug \
+      -b "tally/stats.py parse_line('1,2,') raises ValueError on the empty
+    field. Expected: skip empty fields and return [1, 2].
+    Done when: tests/test_stats.py::test_parse_line_trailing_comma passes."
+
+Write facts about the code: what is wrong or missing, where, and how to check
+that it is done. Leave out the conversation: who asked, deadlines or people
+that do not change the work, what was said or agreed earlier, how or when you
+found the problem, whether it was in scope, and "as requested". Keep such a
+detail only if the work is wrong without it (for example, a required output
+format). This rule applies to titles, bodies, and comments.
+
+## Commands
+
+- Find existing work: `clove ready`, `clove ls`, `clove search <text>`.
+- File work: `clove new "<title>" --type bug|feature|chore|docs|epic -b "<body>" [--dep ID] [--parent ID]`.
+- Order work: `clove dep add <id> <dep-id>` means `<id>` waits for `<dep-id>`.
+- Track progress: `clove start <id>` when you begin, `clove comment <id> "<step or finding>"`
+  as you go. Before `clove close <id>`, add a comment that says what changed and
+  how you verified it. `start`, `close`, and `comment` take one id per call.
+- Before you reply to the user, check `clove ls --status in_progress`: no item
+  you started may stay open without a comment that says why.
+
+The `clove_*` MCP tools do the same things (`clove_ready`, `clove_list`,
+`clove_search`, `clove_new`, `clove_status`, `clove_comment`, `clove_dep_add`).
+`clove agent-doc` prints the full reference.
 "#;
 
 /// The line appended to `CLAUDE.md` to import the directives above.
@@ -761,6 +787,44 @@ mod tests {
             on_disk, CLOVE_MD_CONTENT,
             "CLOVE.md drifted from the embedded CLOVE_MD_CONTENT; update the const"
         );
+    }
+
+    #[test]
+    fn clove_md_names_only_real_subcommands() {
+        // Every `` `clove <word>`` in the directives must be a subcommand the
+        // CLI defines (or an alias of one). An agent that runs a command the
+        // directives name and gets "unknown subcommand" tends to stop using
+        // clove for the rest of the task.
+        use clap::CommandFactory;
+        let cmd = crate::cli::Cli::command();
+        let known: Vec<String> = cmd
+            .get_subcommands()
+            .flat_map(|s| {
+                std::iter::once(s.get_name().to_owned())
+                    .chain(s.get_all_aliases().map(str::to_owned))
+            })
+            .collect();
+        let mut named = Vec::new();
+        for (i, _) in CLOVE_MD_CONTENT.match_indices("`clove ") {
+            let rest = &CLOVE_MD_CONTENT[i + "`clove ".len()..];
+            let word: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .collect();
+            if !word.is_empty() {
+                named.push(word);
+            }
+        }
+        assert!(
+            !named.is_empty(),
+            "no `clove <sub>` found; test went vacuous"
+        );
+        for word in named {
+            assert!(
+                known.contains(&word),
+                "CLOVE.md names `clove {word}`, which is not a clove subcommand"
+            );
+        }
     }
 
     #[cfg(feature = "mcp")]

@@ -340,6 +340,31 @@ fn agent_doc_is_idempotent_and_checks_schema() {
         .success();
 }
 
+/// The agent document carries the item-granularity workflow, and every
+/// `` `clove <word>`` it names in that section is a real subcommand.
+#[test]
+fn agent_doc_has_workflow_section() {
+    let dir = init_repo();
+    let out = clove(dir.path()).arg("agent-doc").output().unwrap();
+    let doc = String::from_utf8(out.stdout).unwrap();
+    let start = doc
+        .find("## Workflow for agents")
+        .expect("agent-doc has a workflow section");
+    let section = &doc[start..doc[start..].find("## Commands").map(|i| start + i).unwrap()];
+    assert!(section.contains("One item per separate task"));
+    assert!(section.contains("self-contained body"));
+    for (i, _) in section.match_indices("`clove ") {
+        let word: String = section[i + "`clove ".len()..]
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .collect();
+        clove(dir.path())
+            .args([word.as_str(), "--help"])
+            .assert()
+            .success();
+    }
+}
+
 /// A rebuild already running — a daemon's, cut off from its client by a
 /// `clove daemon stop` — holds the reindex lock for a while yet. `clove
 /// reindex` waits for it and then rebuilds, rather than failing (item 5). The

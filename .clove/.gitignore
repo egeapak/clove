@@ -1,0 +1,10 @@
+index.db
+*.db-shm
+*.db-wal
+daemon.sock
+daemon.pid
+reindex.lock
+daemon.lock
+index.db.tmp
+daemon.token
+sync/

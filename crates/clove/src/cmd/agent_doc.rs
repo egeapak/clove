@@ -84,6 +84,24 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
 | 6 | index error |\n\
 | 7 | daemon error |\n\
 \n\
+## Workflow for agents\n\
+\n\
+- Track work in clove for every request that has more than one task, or one\n\
+  task with more than one step. File the items before you start, even when\n\
+  clove has no items yet. A single small edit needs no item.\n\
+- First run `clove ready` and `clove search <text>`. If an open item already\n\
+  describes a task, use it; do not file a duplicate.\n\
+- One item per separate task, bug, or fix. The steps of one task are comments\n\
+  on that item, not separate items. A problem you find outside the current\n\
+  task is a new item.\n\
+- Every item has a self-contained body (`-b`): what is wrong or missing, where,\n\
+  and how to verify it is done. Leave out conversation context (who asked,\n\
+  deadlines, what was said earlier, how you found the problem) in titles,\n\
+  bodies, and comments, unless the work is wrong without it.\n\
+- If one task must wait for another, run `clove dep add <id> <dep-id>`.\n\
+- Run `clove start <id>` when you begin. Before `clove close <id>`, add a\n\
+  `clove comment` that says what changed and how you verified it.\n\
+\n\
 ## Commands\n\
 \n\
 - `clove init [--prefix STR] [--merge-driver]` — create `.clove/`.\n\

@@ -4,6 +4,22 @@ All notable changes to clove are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- The agent directives that `clove setup` writes (`CLOVE.md`), the MCP server
+  instructions, and `clove agent-doc` now say when to file items and how to
+  split work: one item per separate task, bug, or fix; the steps of one task
+  are comments on its item; every item has a self-contained body without
+  conversation context. `scripts/agent-eval/` measures how well agents follow
+  the directives.
+
+### Fixed
+
+- `CLOVE.md` named a `clove list` command that does not exist; it now names
+  `clove ls`, and a test rejects any subcommand the CLI does not define.
+
 ## [0.2.0] - 2026-10-21
 
 ### Changed
