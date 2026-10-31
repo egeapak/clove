@@ -506,7 +506,7 @@ pub(crate) mod net {
             }
         }
         let mut builder = Octocrab::builder().personal_token(token);
-        if let Some(base) = api_base_override() {
+        if let Some(base) = base {
             builder = builder.base_uri(base.clone()).map_err(|err| {
                 setup_err(format!(
                     "invalid GitHub API base `{base}`: {}",
@@ -636,7 +636,9 @@ pub(crate) mod net {
     ///
     /// An item created while the pages are read shifts the later pages, so an
     /// item can come back twice; `key` (the issue number or comment id) drops
-    /// the repeat. (Following `Link` URLs has the same race.)
+    /// the repeat. An item deleted meanwhile shifts them the other way, so one
+    /// item can be missed; dedup cannot help there. (Following `Link` URLs has
+    /// both races: GitHub's `Link` URLs are page numbers too.)
     pub(crate) async fn collect_pages<T, F, Fut>(
         key: impl Fn(&T) -> u64,
         mut fetch: F,
@@ -767,8 +769,41 @@ pub(crate) mod net {
 
     #[cfg(test)]
     mod tests {
-        use super::describe_github_rejection;
+        use super::{collect_pages, describe_github_rejection};
         use serde_json::json;
+
+        /// A page of `items`, with a `next` link unless it is the last.
+        fn page(items: &[u64], last: bool) -> octocrab::Page<u64> {
+            let mut page = octocrab::Page::default();
+            page.items = items.to_vec();
+            if !last {
+                page.next = Some("https://api.github.invalid/next".parse().unwrap());
+            }
+            page
+        }
+
+        #[test]
+        fn pages_are_read_by_number_until_no_next_link_and_repeats_are_dropped() {
+            // Page 2 repeats page 1's last item, as when an item is created
+            // between the two requests.
+            let pages = [page(&[5, 4], false), page(&[4, 3], false), page(&[2], true)];
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            let requested = std::cell::RefCell::new(Vec::new());
+            let items = rt
+                .block_on(collect_pages(
+                    |n: &u64| *n,
+                    |n| {
+                        requested.borrow_mut().push(n);
+                        let page = pages[n as usize - 1].clone();
+                        async move { Ok(page) }
+                    },
+                ))
+                .unwrap();
+            assert_eq!(items, [5, 4, 3, 2]);
+            assert_eq!(*requested.borrow(), [1, 2, 3]);
+        }
 
         #[test]
         fn a_validation_failure_names_status_message_field_and_value() {

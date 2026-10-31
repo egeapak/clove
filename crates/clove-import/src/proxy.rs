@@ -7,8 +7,10 @@
 //! connection through an HTTP `CONNECT` tunnel. TLS to the API host then runs
 //! inside the tunnel, so the proxy sees only the host name and port.
 //!
-//! The variables (for each pair the first non-empty one wins, uppercase first,
-//! as in hyper-util's `Matcher::from_env`; curl prefers the lowercase name):
+//! The variables (for each pair the first non-empty one wins, uppercase first;
+//! curl prefers the lowercase name). As in curl and hyper-util, the uppercase
+//! `HTTP_PROXY` is ignored when `REQUEST_METHOD` is set (a CGI environment,
+//! where a client's `Proxy:` header can become `HTTP_PROXY`):
 //!
 //! - `HTTPS_PROXY` / `https_proxy` — the proxy for an `https://` API base;
 //! - `HTTP_PROXY` / `http_proxy` — the proxy for an `http://` API base;
@@ -88,20 +90,43 @@ impl ProxyConfig {
         lookup: impl Fn(&str) -> Option<String>,
         dst: &Uri,
     ) -> Result<Option<Self>, String> {
-        let scheme_vars: &[&str] = if dst.scheme_str() == Some("http") {
-            &HTTP_VARS
-        } else {
-            &HTTPS_VARS
-        };
-        let Some((key, val)) =
-            first_set(&lookup, scheme_vars).or_else(|| first_set(&lookup, &ALL_VARS))
-        else {
-            return Ok(None);
-        };
+        let cgi = lookup("REQUEST_METHOD").is_some();
+        let http_vars: &[&'static str] = if cgi { &HTTP_VARS[1..] } else { &HTTP_VARS };
+        let https = first_set(&lookup, &HTTPS_VARS);
+        let http = first_set(&lookup, http_vars);
+        let all = first_set(&lookup, &ALL_VARS);
         let no = first_set(&lookup, &NO_VARS)
             .map(|(_, list)| list)
             .unwrap_or_default();
-        // A bypassed host never uses the proxy, so its URL does not matter.
+        // The variable that serves the API base: its scheme's own, else ALL_PROXY.
+        let own = if dst.scheme_str() == Some("http") {
+            &http
+        } else {
+            &https
+        };
+        let Some((key, val)) = own.as_ref().or(all.as_ref()) else {
+            return Ok(None);
+        };
+        // The base's variable must be usable; the others serve only other
+        // schemes (an upload host, a redirect) and are dropped when they are not
+        // usable, as before this module existed.
+        let usable = |var: &Option<(&str, String)>| {
+            var.as_ref()
+                .filter(|(_, val)| check_proxy_url(val).is_ok())
+                .map(|(_, val)| val.clone())
+                .unwrap_or_default()
+        };
+        let matcher = Matcher::builder()
+            .https(usable(&https))
+            .http(usable(&http))
+            .all(usable(&all))
+            .no(no.as_str())
+            .build();
+        if matcher.intercept(dst).is_some() {
+            return Ok(Some(Self { matcher }));
+        }
+        // No intercept: either the host is in NO_PROXY (fine, whatever the URL),
+        // or the base's variable is not usable.
         let probe = Matcher::builder()
             .all("http://proxy.invalid")
             .no(no.as_str())
@@ -109,41 +134,11 @@ impl ProxyConfig {
         if probe.intercept(dst).is_none() {
             return Ok(None);
         }
-        let matcher = Matcher::builder().all(val).no(no).build();
-        // The matcher drops a URL it cannot parse; that must not turn into a
-        // silent direct connection. The message never echoes the value, which
-        // may carry a password.
-        let intercept = matcher.intercept(dst).ok_or_else(|| {
-            format!(
-                "invalid proxy URL in {key}: it does not parse; {PROXY_URL_SHAPE} \
-                 (percent-encode `@`, `:` and `/` in the user name or password)"
-            )
-        })?;
-        let proxy = intercept.uri();
-        // The matcher splits the credentials at the first `@`; an unencoded `@`
-        // in the password leaves the rest in the authority and drops the
-        // credentials.
-        if proxy.authority().is_some_and(|a| a.as_str().contains('@')) {
-            return Err(format!(
-                "invalid proxy URL in {key}: it does not parse; {PROXY_URL_SHAPE} \
-                 (percent-encode `@`, `:` and `/` in the user name or password)"
-            ));
-        }
-        if proxy.scheme_str() != Some("http") {
-            let host = dst.host().unwrap_or_default();
-            return Err(format!(
-                "invalid proxy URL in {key}: the `{}` scheme is not supported; use an \
-                 `http://` proxy URL (clove opens an HTTP CONNECT tunnel through it), \
-                 or add `{host}` to NO_PROXY to connect directly",
-                proxy.scheme_str().unwrap_or_default()
-            ));
-        }
-        if proxy.host().is_none_or(str::is_empty) {
-            return Err(format!(
-                "invalid proxy URL in {key}: no host; {PROXY_URL_SHAPE}"
-            ));
-        }
-        Ok(Some(Self { matcher }))
+        let why = check_proxy_url(val).err().unwrap_or_else(unparsable);
+        let host = dst.host().unwrap_or_default();
+        Err(format!(
+            "invalid proxy URL in {key}: {why}; or add `{host}` to NO_PROXY to connect directly"
+        ))
     }
 
     #[cfg(test)]
@@ -153,6 +148,47 @@ impl ProxyConfig {
             .intercept(dst)
             .map(|intercept| intercept.uri().clone())
     }
+}
+
+/// Why a proxy URL does not parse. Never echoes the value, which may carry a
+/// password.
+fn unparsable() -> String {
+    format!(
+        "it does not parse; {PROXY_URL_SHAPE} \
+         (percent-encode `@`, `:`, `/`, `?` and `#` in the user name or password)"
+    )
+}
+
+/// Check that `val` is a proxy URL the `CONNECT` tunnel can use, with the
+/// matcher's own parse (so what is checked is what is used).
+fn check_proxy_url(val: &str) -> Result<(), String> {
+    const ANY: &str = "https://check.invalid/";
+    let matcher = Matcher::builder().all(val).build();
+    let intercept = matcher
+        .intercept(&Uri::from_static(ANY))
+        .ok_or_else(unparsable)?;
+    let proxy = intercept.uri();
+    if proxy.scheme_str() != Some("http") {
+        return Err(format!(
+            "the `{}` scheme is not supported; use an `http://` proxy URL \
+             (clove opens an HTTP CONNECT tunnel through it)",
+            proxy.scheme_str().unwrap_or_default()
+        ));
+    }
+    if proxy.host().is_none_or(str::is_empty) {
+        return Err(format!("no host; {PROXY_URL_SHAPE}"));
+    }
+    // The matcher splits the credentials at the first `@`. An unencoded `@`
+    // in the password leaves the rest in the authority; an unencoded `/`, `?`
+    // or `#` ends the authority early, so the user name becomes the host and
+    // the credentials are lost. Either way a `@` in the value with no
+    // credentials parsed, or one left in the authority, means a bad URL.
+    let left_in_authority = proxy.authority().is_some_and(|a| a.as_str().contains('@'));
+    let lost_credentials = val.contains('@') && intercept.basic_auth().is_none();
+    if left_in_authority || lost_credentials {
+        return Err(unparsable());
+    }
+    Ok(())
 }
 
 /// The first non-empty variable of `keys`: its name and trimmed value.
@@ -447,12 +483,45 @@ mod tests {
                 "{err}"
             );
             assert!(err.contains(needle), "{key}={val}: {err}");
-            assert!(!err.contains("secret") && !err.contains("p@ss"), "{err}");
+            for secret in ["secret", "p@ss", "alice", "xyz"] {
+                assert!(!err.contains(secret), "{err}");
+            }
         }
         let Err(err) = config(&[("HTTPS_PROXY", "socks5://p:1080")], GITHUB) else {
             panic!("socks5 must be rejected");
         };
         assert!(err.contains("add `api.github.com` to NO_PROXY"), "{err}");
+    }
+
+    #[test]
+    fn each_scheme_keeps_its_own_proxy() {
+        let vars = [
+            ("HTTPS_PROXY", "http://secure:3128"),
+            ("HTTP_PROXY", "http://plain:8080"),
+        ];
+        let cfg = config(&vars, "http://ghe.local/").unwrap().unwrap();
+        let https: Uri = "https://uploads.github.com/".parse().unwrap();
+        assert_eq!(
+            cfg.proxy_for(&https).map(|u| u.to_string()),
+            Some("http://secure:3128/".to_owned())
+        );
+        // Another scheme's unusable variable is dropped, not used.
+        let vars = [
+            ("HTTPS_PROXY", "http://secure:3128"),
+            ("HTTP_PROXY", "socks5://s:1"),
+        ];
+        let cfg = config(&vars, GITHUB).unwrap().unwrap();
+        let http: Uri = "http://ghe.local/".parse().unwrap();
+        assert_eq!(cfg.proxy_for(&http), None);
+    }
+
+    #[test]
+    fn a_cgi_environment_ignores_uppercase_http_proxy() {
+        let base = "http://ghe.local/";
+        let vars = [("HTTP_PROXY", "http://evil:1"), ("REQUEST_METHOD", "GET")];
+        assert!(config(&vars, base).unwrap().is_none());
+        let vars = [("http_proxy", "http://ok:1"), ("REQUEST_METHOD", "GET")];
+        assert_eq!(proxy(&vars, base), Some("http://ok:1/".to_owned()));
     }
 
     #[test]

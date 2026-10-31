@@ -2176,12 +2176,15 @@ run the sync on a timer (`[daemon] github_sync_interval_min` + `github_sync_repo
 `HTTPS_PROXY` serves an `https://` API base, `HTTP_PROXY` an `http://` one
 (GitHub Enterprise or the test mock), and `ALL_PROXY` is the fallback when the
 scheme's own variable is unset. Each name is also read in lowercase, and the
-uppercase name wins (as in hyper-util's `Matcher::from_env`; curl prefers the
-lowercase name). `NO_PROXY` lists hosts that connect directly (comma-separated
+uppercase name wins (curl prefers the lowercase name). As in curl, the
+uppercase `HTTP_PROXY` is ignored when `REQUEST_METHOD` is set (a CGI
+environment, where a client's `Proxy:` header can become `HTTP_PROXY`). `NO_PROXY` lists hosts that connect directly (comma-separated
 domains, which also match their subdomains, IP addresses, CIDR ranges, or `*`).
-Only the variable that applies to the API base is used and checked, so an
-`HTTP_PROXY` or `ALL_PROXY` meant for other tools does not affect an `https://`
-base that has its own `HTTPS_PROXY`, and nothing affects a host in `NO_PROXY`.
+Only the variable that applies to the API base is checked, so an `HTTP_PROXY`
+or `ALL_PROXY` meant for other tools does not affect an `https://` base that has
+its own `HTTPS_PROXY`, and nothing affects a host in `NO_PROXY`. Each scheme
+keeps its own proxy for other hosts (an upload host, a redirect); a variable
+for another scheme that is not usable is ignored there.
 A proxy URL is `http://[user:password@]host[:port]` (percent-encode `@`, `:` and
 `/` in the user name or password). The client opens an HTTP `CONNECT` tunnel
 through it (credentials go as `Proxy-Authorization: Basic`), and TLS to GitHub
@@ -2196,8 +2199,10 @@ so a proxy that re-terminates TLS works once its CA is in the system store or
 in that file. Certificate verification is never turned off. Lists are paged by
 page number on the `/repos/{owner}/{repo}/…` route rather than by following
 GitHub's `Link: next` URL, which names the numeric repository id
-(`/repositories/{id}/…`) that some proxies refuse; an item that a concurrent
-change shifts onto a second page is dropped by its number or id. The daemon's
+(`/repositories/{id}/…`) that some proxies refuse. An item that a concurrent
+create shifts onto the next page comes back twice and is dropped by its number
+or id; an item that a concurrent delete shifts onto a page already read is
+missed, as it was when following `Link` URLs (those are page numbers too). The daemon's
 timed sync keeps these variables from the client that started the daemon (the
 spawn environment in §8.8); after you change them, restart the daemon
 (`clove daemon stop --all`).
