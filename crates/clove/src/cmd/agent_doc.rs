@@ -102,8 +102,11 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
 - Run `clove start <id>` when you begin. Before `clove close <id>`, add a\n\
   `clove comment` that says what changed and how you verified it.\n\
 - When you mention an item to the user, write its id and then its title in\n\
-  parentheses, for example `proj-7af3q2k9` (Fix the parser). Never write a\n\
-  bare id to the user; item bodies and comments may use one.\n\
+  parentheses, for example `proj-7af3q2k9` (Fix the parser). Do this every\n\
+  time you write the id, also on a second mention of the same item, and copy\n\
+  the title exactly as clove shows it. Never write a bare id to the user, not\n\
+  even in a list; item bodies and comments may use one. Before you send a\n\
+  reply, find every id in it and check that its title follows it.\n\
 \n\
 ## Commands\n\
 \n\
