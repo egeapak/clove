@@ -91,7 +91,7 @@
   ],
   "all_open": true,
   "no_change": true,
-  "side_re": "recieve|typo|zerodivision|average\\(\\[\\]\\)|parse_line|\\bcomma\\b"
+  "side_re": "recieve|typo|zerodivision|average\\(\\[\\]\\)|parse_line\\(\\) fails|\\bcomma\\b"
  },
  "s10": {
   "prompt": "Fix the empty-list bug in average() now. The `--json` output flag can wait until next week; make sure it's tracked so we don't forget.",
