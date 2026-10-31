@@ -8,9 +8,9 @@
 //! inside the tunnel, so the proxy sees only the host name and port.
 //!
 //! The variables (for each pair the first non-empty one wins, uppercase first;
-//! curl prefers the lowercase name). As in curl and hyper-util, the uppercase
-//! `HTTP_PROXY` is ignored when `REQUEST_METHOD` is set (a CGI environment,
-//! where a client's `Proxy:` header can become `HTTP_PROXY`):
+//! curl prefers the lowercase name). As in curl, the uppercase `HTTP_PROXY` is
+//! ignored when `REQUEST_METHOD` is set (a CGI environment, where a client's
+//! `Proxy:` header can become `HTTP_PROXY`):
 //!
 //! - `HTTPS_PROXY` / `https_proxy` — the proxy for an `https://` API base;
 //! - `HTTP_PROXY` / `http_proxy` — the proxy for an `http://` API base;
@@ -20,13 +20,16 @@
 //!   comma-separated domains, which also match their subdomains, IP addresses,
 //!   CIDR ranges, or `*` for every host).
 //!
-//! Only the variable that applies to the API base is used and checked: an
-//! `HTTP_PROXY` meant for other tools does not matter for an `https://` base,
-//! and nothing matters for a host in `NO_PROXY`.
+//! Each scheme's proxy is its own variable, else `ALL_PROXY`. The proxy for the
+//! API base's scheme must be usable (unless `NO_PROXY` covers the API host);
+//! one that is not is a setup error, never replaced by `ALL_PROXY`. The other
+//! scheme's proxy serves only other hosts (an upload host, a redirect); if it
+//! is not usable, that scheme connects directly, as before this module.
 //!
 //! A proxy URL is `http://[user:password@]host[:port]` (the scheme may be
-//! omitted; the port defaults to 80; percent-encode `@`, `:` and `/` in the
-//! user name or password). Credentials are sent as
+//! omitted; the port defaults to 80; percent-encode `@`, `:`, `/`, `?` and `#`
+//! in the user name or password; a `@` anywhere outside the credentials is
+//! rejected, since it cannot be told from a mis-encoded password). Credentials are sent as
 //! `Proxy-Authorization: Basic …` on the `CONNECT` request. A URL that does not
 //! parse, or any other scheme (`https://`, `socks5://`, …), is a setup error,
 //! never a silent direct connection. The check is the matcher's own parse, so
@@ -81,7 +84,13 @@ impl ProxyConfig {
     /// host is in `NO_PROXY`), so the caller keeps the direct client. `Err`
     /// names the variable whose URL is not usable.
     pub(crate) fn for_destination(dst: &Uri) -> Result<Option<Self>, String> {
-        Self::for_destination_with(|key| std::env::var(key).ok(), dst)
+        // `var_os` + lossy: a non-UTF-8 value still counts as set (the CGI guard
+        // must not miss a `REQUEST_METHOD`), and a garbled proxy URL then fails
+        // the check instead of being skipped.
+        Self::for_destination_with(
+            |key| std::env::var_os(key).map(|val| val.to_string_lossy().into_owned()),
+            dst,
+        )
     }
 
     /// [`for_destination`](Self::for_destination) over an injected lookup
@@ -92,53 +101,54 @@ impl ProxyConfig {
     ) -> Result<Option<Self>, String> {
         let cgi = lookup("REQUEST_METHOD").is_some();
         let http_vars: &[&'static str] = if cgi { &HTTP_VARS[1..] } else { &HTTP_VARS };
-        let https = first_set(&lookup, &HTTPS_VARS);
-        let http = first_set(&lookup, http_vars);
         let all = first_set(&lookup, &ALL_VARS);
+        // Each scheme's proxy: its own variable, else ALL_PROXY; checked once.
+        let resolve = |own: Option<(&'static str, String)>| {
+            own.or_else(|| all.clone()).map(|(key, val)| {
+                let checked = check_proxy_url(&val);
+                (key, val, checked)
+            })
+        };
+        let https = resolve(first_set(&lookup, &HTTPS_VARS));
+        let http = resolve(first_set(&lookup, http_vars));
         let no = first_set(&lookup, &NO_VARS)
             .map(|(_, list)| list)
             .unwrap_or_default();
-        // The variable that serves the API base: its scheme's own, else ALL_PROXY.
         let own = if dst.scheme_str() == Some("http") {
             &http
         } else {
             &https
         };
-        let Some((key, val)) = own.as_ref().or(all.as_ref()) else {
+        let Some((key, _, checked)) = own else {
             return Ok(None);
         };
-        // The base's variable must be usable; the others serve only other
-        // schemes (an upload host, a redirect) and are dropped when they are not
-        // usable, as before this module existed.
-        let usable = |var: &Option<(&str, String)>| {
-            var.as_ref()
-                .filter(|(_, val)| check_proxy_url(val).is_ok())
-                .map(|(_, val)| val.clone())
-                .unwrap_or_default()
+        if let Err(why) = checked {
+            // A host in NO_PROXY never uses the proxy, whatever its URL.
+            let probe = Matcher::builder()
+                .all("http://proxy.invalid")
+                .no(no.as_str())
+                .build();
+            if probe.intercept(dst).is_none() {
+                return Ok(None);
+            }
+            let host = dst.host().unwrap_or_default();
+            return Err(format!(
+                "invalid proxy URL in {key}: {why}; or add `{host}` to NO_PROXY to connect directly"
+            ));
+        }
+        // Set each scheme explicitly and never `.all()`: the matcher would
+        // fill an empty scheme from it, which would let ALL_PROXY replace an
+        // unusable scheme proxy.
+        let usable = |var: &Option<(&str, String, Result<(), String>)>| match var {
+            Some((_, val, Ok(()))) => val.clone(),
+            _ => String::new(),
         };
         let matcher = Matcher::builder()
             .https(usable(&https))
             .http(usable(&http))
-            .all(usable(&all))
-            .no(no.as_str())
+            .no(no)
             .build();
-        if matcher.intercept(dst).is_some() {
-            return Ok(Some(Self { matcher }));
-        }
-        // No intercept: either the host is in NO_PROXY (fine, whatever the URL),
-        // or the base's variable is not usable.
-        let probe = Matcher::builder()
-            .all("http://proxy.invalid")
-            .no(no.as_str())
-            .build();
-        if probe.intercept(dst).is_none() {
-            return Ok(None);
-        }
-        let why = check_proxy_url(val).err().unwrap_or_else(unparsable);
-        let host = dst.host().unwrap_or_default();
-        Err(format!(
-            "invalid proxy URL in {key}: {why}; or add `{host}` to NO_PROXY to connect directly"
-        ))
+        Ok(matcher.intercept(dst).map(|_| Self { matcher }))
     }
 
     #[cfg(test)]
@@ -513,6 +523,35 @@ mod tests {
         let cfg = config(&vars, GITHUB).unwrap().unwrap();
         let http: Uri = "http://ghe.local/".parse().unwrap();
         assert_eq!(cfg.proxy_for(&http), None);
+    }
+
+    #[test]
+    fn an_unusable_scheme_proxy_is_not_replaced_by_all_proxy() {
+        // The base's own variable is unusable: an error, not ALL_PROXY.
+        let vars = [
+            ("HTTPS_PROXY", "socks5://corp:1080"),
+            ("ALL_PROXY", "http://other:3128"),
+        ];
+        let Err(err) = config(&vars, GITHUB) else {
+            panic!("an unusable HTTPS_PROXY must be an error");
+        };
+        assert!(
+            err.starts_with("invalid proxy URL in HTTPS_PROXY: "),
+            "{err}"
+        );
+        // The other scheme's unusable variable: that scheme goes direct.
+        let vars = [
+            ("HTTPS_PROXY", "http://secure:3128"),
+            ("HTTP_PROXY", "socks5://s:1"),
+            ("ALL_PROXY", "http://all:8080"),
+        ];
+        let cfg = config(&vars, GITHUB).unwrap().unwrap();
+        assert_eq!(cfg.proxy_for(&"http://ghe.local/".parse().unwrap()), None);
+        // An unusable ALL_PROXY as the base's fallback is an error naming it.
+        let Err(err) = config(&[("all_proxy", "socks5://s:1")], GITHUB) else {
+            panic!("an unusable all_proxy must be an error");
+        };
+        assert!(err.starts_with("invalid proxy URL in all_proxy: "), "{err}");
     }
 
     #[test]

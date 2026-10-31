@@ -2180,13 +2180,16 @@ uppercase name wins (curl prefers the lowercase name). As in curl, the
 uppercase `HTTP_PROXY` is ignored when `REQUEST_METHOD` is set (a CGI
 environment, where a client's `Proxy:` header can become `HTTP_PROXY`). `NO_PROXY` lists hosts that connect directly (comma-separated
 domains, which also match their subdomains, IP addresses, CIDR ranges, or `*`).
-Only the variable that applies to the API base is checked, so an `HTTP_PROXY`
-or `ALL_PROXY` meant for other tools does not affect an `https://` base that has
-its own `HTTPS_PROXY`, and nothing affects a host in `NO_PROXY`. Each scheme
-keeps its own proxy for other hosts (an upload host, a redirect); a variable
-for another scheme that is not usable is ignored there.
-A proxy URL is `http://[user:password@]host[:port]` (percent-encode `@`, `:` and
-`/` in the user name or password). The client opens an HTTP `CONNECT` tunnel
+Each scheme's proxy is its own variable, else `ALL_PROXY`. Only the proxy for
+the API base's scheme must be usable, so an `HTTP_PROXY` or `ALL_PROXY` meant
+for other tools does not affect an `https://` base that has its own
+`HTTPS_PROXY`, and nothing affects a host in `NO_PROXY`. An unusable proxy for
+the base's scheme is an error; it is never replaced by `ALL_PROXY`. The other
+scheme's proxy serves only other hosts (an upload host, a redirect); if it is
+not usable, that scheme connects directly.
+A proxy URL is `http://[user:password@]host[:port]` (percent-encode `@`, `:`,
+`/`, `?` and `#` in the user name or password; a `@` outside the credentials is
+rejected, since it cannot be told from a mis-encoded password). The client opens an HTTP `CONNECT` tunnel
 through it (credentials go as `Proxy-Authorization: Basic`), and TLS to GitHub
 runs inside the tunnel. An `http://` base is tunnelled to port 80 too, not
 forwarded in absolute form, so a proxy that allows `CONNECT` only to TLS ports
