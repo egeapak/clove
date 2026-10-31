@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `clove start`, `clove close`, and `clove status` accept one or more ids
+  (`clove start ID1 ID2`, `clove status ID1 ID2 closed`). Every id is
+  attempted. With one id the output is unchanged. With several ids, JSON
+  `data` is an array with one `{id, ok, item}` or `{id, ok, error}` entry per
+  id, the envelope `ok` is `false` and a top-level `error` is set if any id
+  failed, and the exit code is the exit code of the first failed id. JSONL
+  prints one line per id.
+
 ### Changed
 
 - The agent directives that `clove setup` writes (`CLOVE.md`), the MCP server

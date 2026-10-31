@@ -853,9 +853,9 @@ clove show <id> [--format json] [--fields FIELD,...]
 clove edit <id>                             # opens $EDITOR
 clove edit <id> --field KEY=VALUE [--field KEY=VALUE ...]  # non-interactive
 clove set <id> <field>=<value> [<field>=<value> ...]        # agent alias
-clove status <id> <open|in_progress|closed> [--format json]
-clove start <id>                            # alias: status in_progress
-clove close <id>                            # alias: status closed
+clove status <id>... <open|in_progress|closed> [--format json]
+clove start <id>...                         # alias: status in_progress
+clove close <id>...                         # alias: status closed
 clove label <id> add <label>
 clove label <id> rm <label>
 clove assign <id> <assignee>

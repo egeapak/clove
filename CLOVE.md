@@ -40,7 +40,7 @@ format). This rule applies to titles, bodies, and comments.
 - Order work: `clove dep add <id> <dep-id>` means `<id>` waits for `<dep-id>`.
 - Track progress: `clove start <id>` when you begin, `clove comment <id> "<step or finding>"`
   as you go. Before `clove close <id>`, add a comment that says what changed and
-  how you verified it. `start`, `close`, and `comment` take one id per call.
+  how you verified it. `start` and `close` take one or more ids; `comment` takes one id per call.
 - Before you reply to the user, check `clove ls --status in_progress`: no item
   you started may stay open without a comment that says why.
 
