@@ -71,12 +71,12 @@ pub enum Commands {
     Edit(EditArgs),
     /// Set one or more fields non-interactively (alias for `edit --field`).
     Set(SetArgs),
-    /// Change an item's status (`open|in_progress|closed`).
+    /// Change the status of one or more items (`open|in_progress|closed`).
     Status(StatusArgs),
-    /// Mark an item in progress (alias for `status <id> in_progress`).
-    Start(IdArg),
-    /// Close an item (alias for `status <id> closed`).
-    Close(IdArg),
+    /// Mark one or more items in progress (alias for `status <id>... in_progress`).
+    Start(IdsArg),
+    /// Close one or more items (alias for `status <id>... closed`).
+    Close(IdsArg),
     /// Add or remove a label.
     Label(LabelArgs),
     /// Set or clear the assignee.
@@ -385,9 +385,10 @@ pub enum DaemonAction {
 
 /// A bare `<id>` positional argument.
 #[derive(Debug, Args)]
-pub struct IdArg {
-    /// The item id.
-    pub id: String,
+pub struct IdsArg {
+    /// One or more item ids.
+    #[arg(required = true, num_args = 1..)]
+    pub ids: Vec<String>,
 }
 
 #[derive(Debug, Args)]
@@ -462,8 +463,9 @@ pub struct SetArgs {
 
 #[derive(Debug, Args)]
 pub struct StatusArgs {
-    /// The item id.
-    pub id: String,
+    /// One or more item ids.
+    #[arg(required = true, num_args = 1..)]
+    pub ids: Vec<String>,
     /// The new status: `open`, `in_progress`, or `closed`.
     pub state: String,
 }
