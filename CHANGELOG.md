@@ -33,6 +33,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   same item and an id in a list get the title too, the title is copied
   exactly, and the directives tell the agent to check every id in a reply
   before it sends the reply.
+- The `CLOVE.md` directives tell an agent to run the check that shows the work
+  is done before it writes the closing comment, and to quote the actual result
+  of that check (which tests pass and which fail) in that comment.
 
 ### Fixed
 
