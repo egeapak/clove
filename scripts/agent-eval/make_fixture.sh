@@ -4,6 +4,10 @@
 # CLOVE_BIN overrides the clove binary (default: clove on PATH).
 set -euo pipefail
 D=$1; S=$2; C=${CLOVE_BIN:-clove}
+if ! command -v "$C" >/dev/null 2>&1; then
+  echo "make_fixture.sh: clove binary '$C' not found; set CLOVE_BIN" >&2
+  exit 1
+fi
 rm -rf "$D"; mkdir -p "$D/tally" "$D/tests"; cd "$D"
 cat > tally/__init__.py <<'P'
 P
@@ -77,7 +81,7 @@ Small CLI to recieve numbers on stdin and print `sum` or `avg`.
     echo "1,2,3" | python -m tally.cli sum
 P
 git init -q; git add -A; git -c user.email=a@b -c user.name=a commit -qm init
-$C init >/dev/null 2>&1
+$C init >/dev/null
 if [ "$S" = s11 ]; then
   $C new "CLI: machine-readable output mode" --type feature -b "tally.cli prints bare numbers. Scripts that consume the output need a JSON form, for example {\"result\": 6} for \`sum\`." >/dev/null
 fi
