@@ -1831,7 +1831,10 @@ A client spawns it with an emptied environment plus only: `PATH`, `HOME`,
 `USER`/`LOGNAME`, `TMPDIR`, `XDG_RUNTIME_DIR`, `XDG_DATA_HOME`, `CLOVE_HOME`
 (made absolute),
 `XDG_CONFIG_HOME` and `GH_CONFIG_DIR` (where `gh auth token` finds a GitHub CLI
-config kept somewhere other than `~/.config/gh`), `LANG`/`LC_*`, the `CLOVED_*` knobs (`CLOVED_DISABLE_WEB`, `CLOVED_WEB_PORT`,
+config kept somewhere other than `~/.config/gh`), the proxy and CA variables the
+timed GitHub sync needs behind a proxy (`HTTPS_PROXY`, `HTTP_PROXY`,
+`ALL_PROXY`, `NO_PROXY`, each also lowercase, and `SSL_CERT_FILE` /
+`SSL_CERT_DIR`), `LANG`/`LC_*`, the `CLOVED_*` knobs (`CLOVED_DISABLE_WEB`, `CLOVED_WEB_PORT`,
 `CLOVED_IDLE_SHUTDOWN_MS`, `CLOVED_HUB_GRACE_MS`, `CLOVED_STATS_SNAPSHOT_MS`,
 `CLOVED_GITHUB_SYNC_MS`, `CLOVED_LOAD_DELAY_MS`, `CLOVED_WATCH_ARM_DELAY_MS`, `CLOVED_BIND_DELAY_MS` — test stand-ins for a large
 project's slow load, a slow watch and a slow bind on a loaded machine, …), `CLOVE_GITHUB_API_URL` (GitHub Enterprise) /
@@ -2168,6 +2171,44 @@ comparison so a first sync never silently clobbers a side. Pulls/updates go
 through the unified write path (`apply_edit`). `--dry-run` plans without touching
 either side; `--no-comments` skips comment reconciliation. A running daemon can
 run the sync on a timer (`[daemon] github_sync_interval_min` + `github_sync_repo`).
+
+**Proxy and TLS trust.** The GitHub client reads the proxy environment.
+`HTTPS_PROXY` serves an `https://` API base, `HTTP_PROXY` an `http://` one
+(GitHub Enterprise or the test mock), and `ALL_PROXY` is the fallback when the
+scheme's own variable is unset. Each name is also read in lowercase, and the
+uppercase name wins (curl prefers the lowercase name). As in curl, the
+uppercase `HTTP_PROXY` is ignored when `REQUEST_METHOD` is set (a CGI
+environment, where a client's `Proxy:` header can become `HTTP_PROXY`). `NO_PROXY` lists hosts that connect directly (comma-separated
+domains, which also match their subdomains, IP addresses, CIDR ranges, or `*`).
+Each scheme's proxy is its own variable, else `ALL_PROXY`. Only the proxy for
+the API base's scheme must be usable, so an `HTTP_PROXY` or `ALL_PROXY` meant
+for other tools does not affect an `https://` base that has its own
+`HTTPS_PROXY`, and nothing affects a host in `NO_PROXY`. An unusable proxy for
+the base's scheme is an error; it is never replaced by `ALL_PROXY`. The other
+scheme's proxy serves only other hosts (an upload host, a redirect); if it is
+not usable, that scheme connects directly.
+A proxy URL is `http://[user:password@]host[:port]` (percent-encode `@`, `:`,
+`/`, `?` and `#` in the user name or password; a URL with a `@` but no
+credentials parsed is rejected, since that is a mis-encoded password). The client opens an HTTP `CONNECT` tunnel
+through it (credentials go as `Proxy-Authorization: Basic`), and TLS to GitHub
+runs inside the tunnel. An `http://` base is tunnelled to port 80 too, not
+forwarded in absolute form, so a proxy that allows `CONNECT` only to TLS ports
+refuses a plain-HTTP GitHub Enterprise. A proxy URL that does not parse, or any
+other scheme (`https://`, `socks5://`), is a `client setup` error that names the
+variable; it never falls back to a direct connection. With no usable proxy set,
+the client is octocrab's default one. The TLS roots are the platform's native
+roots (`rustls-native-certs`), which `SSL_CERT_FILE` / `SSL_CERT_DIR` replace;
+so a proxy that re-terminates TLS works once its CA is in the system store or
+in that file. Certificate verification is never turned off. Lists are paged by
+page number on the `/repos/{owner}/{repo}/…` route rather than by following
+GitHub's `Link: next` URL, which names the numeric repository id
+(`/repositories/{id}/…`) that some proxies refuse. An item that a concurrent
+create shifts onto the next page comes back twice and is dropped by its number
+or id; an item that a concurrent delete shifts onto a page already read is
+missed, as it was when following `Link` URLs (those are page numbers too). The daemon's
+timed sync keeps these variables from the client that started the daemon (the
+spawn environment in §8.8); after you change them, restart the daemon
+(`clove daemon stop --all`).
 
 **Comments** are reconciled per linked issue. A local comment (a file under
 `.clove/issues/<id>/comments/`, identified by its file name) and its GitHub
