@@ -83,6 +83,17 @@ struct State {
     /// Titles GitHub refuses: an issue create/PATCH carrying one gets a 422 on
     /// the `title` field (a rejection that is not about assignees).
     rejected_titles: Vec<String>,
+
+    // --- Pagination (`paginate`) ---
+    /// While `Some(n)`, the issue list and each issue's comment list return `n`
+    /// items per page, with a `Link: rel="next"` URL in GitHub's real form
+    /// (`/repositories/{id}/…`), which this mock refuses — as some proxies do.
+    /// clove must page by number on the `/repos/{o}/{r}/…` route instead.
+    page_size: Option<usize>,
+    /// The `Link` header for the response being written (set by `route`).
+    link_next: Option<String>,
+    /// The `Host` header of the request being served (for the `Link` URL).
+    host: String,
 }
 
 impl State {
@@ -123,6 +134,9 @@ impl MockGitHub {
             comment_delete_count: 0,
             rejected_assignees: Vec::new(),
             rejected_titles: Vec::new(),
+            page_size: None,
+            link_next: None,
+            host: String::new(),
         }));
         let thread_state = Arc::clone(&state);
         std::thread::spawn(move || {
@@ -131,6 +145,11 @@ impl MockGitHub {
             }
         });
         Self { state, addr }
+    }
+
+    /// Serve list endpoints `n` items per page (see `State::page_size`).
+    fn paginate(&self, n: usize) {
+        self.state.lock().unwrap().page_size = Some(n);
     }
 
     /// Seed an issue directly (simulating one already on GitHub).
@@ -384,6 +403,7 @@ fn handle_conn(mut stream: TcpStream, state: &Arc<Mutex<State>>) {
     // Headers.
     let mut content_length = 0usize;
     let mut expect_continue = false;
+    let mut host = String::new();
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line).is_err() {
@@ -396,6 +416,8 @@ fn handle_conn(mut stream: TcpStream, state: &Arc<Mutex<State>>) {
         let lower = trimmed.to_lowercase();
         if let Some(v) = lower.strip_prefix("content-length:") {
             content_length = v.trim().parse().unwrap_or(0);
+        } else if lower.starts_with("host:") {
+            host = trimmed["host:".len()..].trim().to_owned();
         } else if lower.starts_with("expect:") && lower.contains("100-continue") {
             expect_continue = true;
         }
@@ -411,14 +433,22 @@ fn handle_conn(mut stream: TcpStream, state: &Arc<Mutex<State>>) {
     }
     let body_json: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
 
+    state.lock().unwrap().host = host;
     let (status, payload) = route(&method, &target, &body_json, state);
+    let link = state
+        .lock()
+        .unwrap()
+        .link_next
+        .take()
+        .map(|url| format!("Link: <{url}>; rel=\"next\"\r\n"))
+        .unwrap_or_default();
     let body_str = if status.starts_with("204") {
         String::new()
     } else {
         payload.to_string()
     };
     let response = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body_str}",
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{link}Content-Length: {}\r\nConnection: close\r\n\r\n{body_str}",
         body_str.len()
     );
     let _ = stream.write_all(response.as_bytes());
@@ -525,10 +555,9 @@ fn route(
         return match method {
             "GET" => {
                 s.comment_get_count += 1;
-                (
-                    "200 OK",
-                    Value::Array(s.comments.get(&number).cloned().unwrap_or_default()),
-                )
+                let all = s.comments.get(&number).cloned().unwrap_or_default();
+                let route = format!("issues/{number}/comments");
+                ("200 OK", Value::Array(page_of(&mut s, target, &route, all)))
             }
             "POST" => {
                 if s.fail_comment_post_for == Some(number) {
@@ -565,7 +594,10 @@ fn route(
                 let number = issue["number"].as_u64().unwrap_or(0);
                 issue["comments"] = json!(s.comments.get(&number).map(Vec::len).unwrap_or(0));
             }
-            ("200 OK", Value::Array(issues))
+            (
+                "200 OK",
+                Value::Array(page_of(&mut s, target, "issues", issues)),
+            )
         }
         ("POST", None) => {
             s.issue_post_count += 1;
@@ -659,6 +691,31 @@ fn route(
         }
         _ => ("404 Not Found", json!({ "message": "unsupported" })),
     }
+}
+
+/// The requested page of `all` when the mock paginates (`State::page_size`),
+/// setting the `Link: next` URL in GitHub's numeric-id form; `all` otherwise.
+fn page_of(s: &mut State, target: &str, route: &str, all: Vec<Value>) -> Vec<Value> {
+    let Some(size) = s.page_size else {
+        return all;
+    };
+    let page = target
+        .split_once('?')
+        .map(|(_, query)| query)
+        .unwrap_or("")
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("page="))
+        .and_then(|n| n.parse::<usize>().ok())
+        .unwrap_or(1);
+    let start = (page - 1) * size;
+    if start + size < all.len() {
+        s.link_next = Some(format!(
+            "http://{}/repositories/4242/{route}?per_page={size}&page={}",
+            s.host,
+            page + 1
+        ));
+    }
+    all.into_iter().skip(start).take(size).collect()
 }
 
 /// GitHub's 422 for an issue create/update naming an assignee it refuses — the
@@ -861,6 +918,18 @@ fn plugin_dir() -> &'static Path {
         .expect("plugin binary has a parent dir")
 }
 
+/// Every variable the GitHub client reads for proxy routing.
+const PROXY_VARS: [&str; 8] = [
+    "HTTPS_PROXY",
+    "https_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+    "NO_PROXY",
+    "no_proxy",
+];
+
 fn clove(dir: &Path, addr: SocketAddr) -> Command {
     let mut cmd = Command::cargo_bin("clove").unwrap();
     // Pin the clove-managed home into `dir`: `<clove-home>/bin` is on the plugin
@@ -872,6 +941,11 @@ fn clove(dir: &Path, addr: SocketAddr) -> Command {
     cmd.current_dir(dir);
     cmd.env_remove("CLOVE_FORMAT");
     cmd.env_remove("EDITOR");
+    // The proxy variables of the machine running the tests must not route the
+    // mock traffic; the proxy scenarios set their own.
+    for key in PROXY_VARS {
+        cmd.env_remove(key);
+    }
     cmd.env("CLOVE_AUTHOR", "tester@example.com");
     // `clove sync github` dispatches to the external `clove-sync-github` plugin;
     // point the plugin search path at the escargot-built binary's dir.
@@ -2820,4 +2894,234 @@ fn a_rejected_comment_write_is_skipped_and_retried_next_run() {
     assert_eq!(v["data"]["comments_updated_remote"], 1, "{v}");
     assert_eq!(v["data"]["comments_deleted_remote"], 1, "{v}");
     assert_eq!(mock.comment_bodies(5), ["local edited"]);
+}
+
+// ---------------------------------------------------------------------------
+// Pagination and proxies
+// ---------------------------------------------------------------------------
+
+/// A paginated issue list and comment list are read in full, by page number on
+/// the `/repos/{o}/{r}/…` route: the mock refuses the numeric-id `Link: next`
+/// URL GitHub writes, as some proxies do.
+#[test]
+fn pagination_follows_page_numbers_not_the_link_url() {
+    let mock = MockGitHub::start();
+    for n in 1..=5 {
+        mock.seed(n, &format!("Issue {n}"), "Body.", "open");
+    }
+    for c in 1..=3 {
+        mock.seed_comment(4, "octocat", &format!("Remote comment {c}"));
+    }
+    mock.paginate(2);
+    let dir = init_repo();
+
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["pulled_created"], 5, "{v}");
+    assert_eq!(v["data"]["comments_pulled"], 3, "{v}");
+    assert_eq!(local_item_count(dir.path(), mock.addr), 5);
+}
+
+/// One `CONNECT` request the test proxy received.
+#[derive(Clone, Debug)]
+struct ConnectSeen {
+    /// The `host:port` the client asked to tunnel to.
+    target: String,
+    /// The `Proxy-Authorization` header, if any.
+    auth: Option<String>,
+}
+
+/// A minimal HTTP `CONNECT` proxy that records each tunnel request. When
+/// `refuse` is set it answers `403` instead of tunnelling.
+struct TestProxy {
+    addr: SocketAddr,
+    seen: Arc<Mutex<Vec<ConnectSeen>>>,
+}
+
+impl TestProxy {
+    fn start(refuse: bool) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let thread_seen = Arc::clone(&seen);
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let seen = Arc::clone(&thread_seen);
+                std::thread::spawn(move || proxy_conn(stream, &seen, refuse));
+            }
+        });
+        Self { addr, seen }
+    }
+
+    fn seen(&self) -> Vec<ConnectSeen> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+fn proxy_conn(mut client: TcpStream, seen: &Arc<Mutex<Vec<ConnectSeen>>>, refuse: bool) {
+    let mut reader = BufReader::new(client.try_clone().unwrap());
+    let mut request_line = String::new();
+    if reader.read_line(&mut request_line).is_err() {
+        return;
+    }
+    let mut auth = None;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).is_err() {
+            return;
+        }
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = trimmed.split_once(':') {
+            if name.eq_ignore_ascii_case("proxy-authorization") {
+                auth = Some(value.trim().to_owned());
+            }
+        }
+    }
+    let mut parts = request_line.split_whitespace();
+    let (Some("CONNECT"), Some(target)) = (parts.next(), parts.next()) else {
+        let _ = client.write_all(b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n");
+        return;
+    };
+    seen.lock().unwrap().push(ConnectSeen {
+        target: target.to_owned(),
+        auth,
+    });
+    if refuse {
+        let _ = client.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
+        return;
+    }
+    let Ok(upstream) = TcpStream::connect(target) else {
+        let _ = client.write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n");
+        return;
+    };
+    let _ = client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n");
+    // Pipe both ways until the mock closes its side (it sends `Connection: close`).
+    let mut up_read = upstream.try_clone().unwrap();
+    let mut client_write = client.try_clone().unwrap();
+    let down = std::thread::spawn(move || {
+        let _ = std::io::copy(&mut up_read, &mut client_write);
+        let _ = client_write.shutdown(std::net::Shutdown::Both);
+    });
+    let mut up_write = upstream;
+    // Bytes the reader already buffered belong to the tunnel.
+    let _ = up_write.write_all(reader.buffer());
+    let _ = std::io::copy(&mut client, &mut up_write);
+    let _ = up_write.shutdown(std::net::Shutdown::Both);
+    let _ = down.join();
+}
+
+/// `HTTP_PROXY` routes an `http://` API base through a `CONNECT` tunnel, with
+/// the URL's credentials as `Proxy-Authorization`.
+#[test]
+fn http_proxy_tunnels_every_request_with_its_credentials() {
+    let mock = MockGitHub::start();
+    mock.seed(5, "From GitHub", "Remote body.", "open");
+    mock.seed_comment(5, "octocat", "A remote comment");
+    let proxy = TestProxy::start(false);
+    let dir = init_repo();
+
+    let out = clove(dir.path(), mock.addr)
+        .args(["sync", "--format", "json", "github", "owner/repo"])
+        .env("HTTP_PROXY", format!("http://user:secret@{}", proxy.addr))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "sync failed: {out:?}");
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["data"]["pulled_created"], 1, "{v}");
+    assert_eq!(v["data"]["comments_pulled"], 1, "{v}");
+
+    let seen = proxy.seen();
+    assert!(!seen.is_empty(), "no request went through the proxy");
+    for connect in &seen {
+        assert_eq!(connect.target, mock.addr.to_string(), "{seen:?}");
+        assert_eq!(
+            connect.auth.as_deref(),
+            Some("Basic dXNlcjpzZWNyZXQ="),
+            "{seen:?}"
+        );
+    }
+}
+
+/// `HTTPS_PROXY` (lowercase here) routes an `https://` API base through the
+/// proxy; a refused tunnel is a clear error that names the proxy.
+#[test]
+fn https_proxy_tunnels_an_https_base() {
+    let mock = MockGitHub::start();
+    let proxy = TestProxy::start(true);
+    let dir = init_repo();
+
+    let out = clove(dir.path(), mock.addr)
+        .args(["sync", "--format", "json", "github", "owner/repo"])
+        .env("CLOVE_GITHUB_API_URL", "https://api.example.test")
+        .env("https_proxy", format!("http://{}", proxy.addr))
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "a refused tunnel must fail: {out:?}");
+    let seen = proxy.seen();
+    assert!(
+        seen.iter().any(|c| c.target == "api.example.test:443"),
+        "{seen:?}"
+    );
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        text.contains(&format!(
+            "proxy CONNECT through http://{}/ failed",
+            proxy.addr
+        )),
+        "{text}"
+    );
+}
+
+/// A host in `NO_PROXY` connects directly even with both proxies set.
+#[test]
+fn no_proxy_host_bypasses_the_proxy() {
+    for no_proxy in ["NO_PROXY", "no_proxy"] {
+        let mock = MockGitHub::start();
+        mock.seed(5, "From GitHub", "Remote body.", "open");
+        let proxy = TestProxy::start(true);
+        let dir = init_repo();
+
+        let out = clove(dir.path(), mock.addr)
+            .args(["sync", "--format", "json", "github", "owner/repo"])
+            .env("HTTP_PROXY", format!("http://{}", proxy.addr))
+            .env("HTTPS_PROXY", format!("http://{}", proxy.addr))
+            .env(no_proxy, "localhost, 127.0.0.1")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{no_proxy}: sync failed: {out:?}");
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(v["data"]["pulled_created"], 1, "{v}");
+        assert!(proxy.seen().is_empty(), "{no_proxy}: {:?}", proxy.seen());
+    }
+}
+
+/// A proxy URL the client cannot use is a setup error naming the variable,
+/// not a silent direct connection. The password is not echoed.
+#[test]
+fn an_unusable_proxy_url_is_a_setup_error() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    let out = clove(dir.path(), mock.addr)
+        .args(["sync", "--format", "json", "github", "owner/repo"])
+        .env("HTTP_PROXY", "socks5://user:secret@127.0.0.1:1080")
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{out:?}");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(text.contains("client setup"), "{text}");
+    assert!(
+        text.contains("invalid proxy URL in HTTP_PROXY: the `socks5` scheme is not supported"),
+        "{text}"
+    );
+    assert!(!text.contains("secret"), "{text}");
 }

@@ -243,7 +243,11 @@ per-repo last-sync clock lives under `.clove/sync/` (git-ignored), and a running
 daemon can run the sync on a timer (`[daemon] github_sync_interval_min` +
 `github_sync_repo`, which must be one of the project's own GitHub remotes). Auth
 via `GITHUB_TOKEN` or the `gh` CLI — the daemon's timed sync uses `gh` only, since
-the daemon does not inherit your shell's `GITHUB_TOKEN`. Requires the
+the daemon does not inherit your shell's `GITHUB_TOKEN`. Behind a proxy, set
+`HTTPS_PROXY` (and `NO_PROXY` for hosts that must connect directly); the sync
+tunnels through it with HTTP `CONNECT`. If the proxy re-terminates TLS, add its
+CA to the system store or point `SSL_CERT_FILE` at a bundle that contains it
+(see `docs/DESIGN.md` §11.3). Requires the
 **`clove-sync-github` plugin** (`cargo install clove-sync-github`; see
 [Install](#install)) — the pre-built release bundle includes it.
 
