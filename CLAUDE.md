@@ -29,7 +29,9 @@ use any license. Rules:
   `xtask/tests/license_files.rs` pins them. A new AGPL crate also needs a
   `[[licenses.exceptions]]` line in `deny.toml`.
 - New third-party dependencies must be permissive (`deny.toml` `allow`).
-- Every commit needs a DCO sign-off (`git commit -s`; `CONTRIBUTING.md`).
+- A DCO sign-off (`git commit -s`) is optional for now: the CI check
+  (`dco.yml`) runs only when the repository variable `REQUIRE_DCO` is `true`
+  (`CONTRIBUTING.md`).
 
 ## Plugin system (cargo-style external subcommands)
 
