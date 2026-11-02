@@ -16,7 +16,10 @@ categories.workspace = true
 # ~3.5 MB of vendored TLS/HTTP; enable it with `--features github`.
 [features]
 default = []
-github = ["dep:octocrab", "dep:tokio", "dep:rustls", "dep:fd-lock"]
+github = [
+    "dep:octocrab", "dep:tokio", "dep:rustls", "dep:fd-lock",
+    "dep:http", "dep:hyper-util", "dep:hyper-rustls", "dep:tower-service", "dep:tower-http",
+]
 # Honour `CLOVE_GITHUB_RETRY_MS` (instant sync retries for the test-suite).
 # Test-only; enabled through `clove-sync-github/test-knobs` (#61).
 test-knobs = []
@@ -48,6 +51,16 @@ tokio = { workspace = true, optional = true }
 # default and panics on first TLS use. We depend on it directly (ring) to install
 # the ring provider explicitly before building the client (see github.rs).
 rustls = { workspace = true, optional = true }
+# HTTPS_PROXY / NO_PROXY support (`proxy.rs`): a CONNECT-tunnel connector under
+# the same hyper-rustls TLS octocrab uses. octocrab's own builder cannot take a
+# connector, so the proxied client is assembled from octocrab's public layers,
+# plus tower-http's follow-redirect (as octocrab's `follow-redirect` feature does).
+http = { workspace = true, optional = true }
+hyper-util = { workspace = true, optional = true }
+hyper-rustls = { workspace = true, optional = true }
+tower-service = { workspace = true, optional = true }
+# Not the workspace entry: that one adds `compression-gzip` for clove-web.
+tower-http = { version = "0.6", default-features = false, features = ["follow-redirect"], optional = true }
 # Advisory lock so a daemon sync and a manual `clove sync` of the same repo can't
 # interleave (which could create duplicate issues). github-only.
 fd-lock = { workspace = true, optional = true }

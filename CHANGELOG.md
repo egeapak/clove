@@ -33,6 +33,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the entry to `.clove/.gitignore`, and in an existing project the next write
   adds it (as clove already does for `daemon.token`). `clove doctor` reports a
   `.gitignore` without it as `GITIGNORE_DRIFT`, and `clove doctor --fix` adds it.
+- `clove sync github` (and the daemon's timed sync) now honours
+  `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` and `NO_PROXY` (each also
+  lowercase). It reaches the API through an HTTP `CONNECT` tunnel, with
+  `Proxy-Authorization` from the proxy URL's credentials. Before, every request
+  went direct, so sync failed behind a proxy. A proxy URL that is not
+  `http://[user:password@]host[:port]` is now a clear setup error. TLS trust is
+  unchanged (the platform roots, or `SSL_CERT_FILE` / `SSL_CERT_DIR`), so a
+  re-terminating proxy works once its CA is trusted.
+- Issue and comment lists are now paged by page number on the
+  `/repos/{owner}/{repo}/…` route instead of following GitHub's `Link: next`
+  URL (`/repositories/{id}/…`), which some proxies refuse.
 
 ## [0.2.0] - 2026-10-21
 
