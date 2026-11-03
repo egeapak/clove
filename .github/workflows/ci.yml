@@ -16,6 +16,14 @@ on:
       - 'docs/json-schema/**'
       - '!.claude-plugin/README.md'
 
+# On Windows the default shell is PowerShell, which reports only the exit code
+# of the last command in a multi-line `run:`. A failure in the first of two
+# commands (the --all-features test or clippy arm) was ignored there, so every
+# step runs in bash, which stops at the first failing command.
+defaults:
+  run:
+    shell: bash
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1

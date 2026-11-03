@@ -211,7 +211,9 @@ mod tests {
 
         // Add a linked worktree alongside it.
         let linked = base.join("linked");
-        git(&["worktree", "add", "-q", linked.as_str()], &main);
+        // A relative path: on Windows `base` is a verbatim `\\?\C:\...` path
+        // (from canonicalize), which git cannot create directories under.
+        git(&["worktree", "add", "-q", "../linked"], &main);
         assert!(
             linked.join(".git").is_file(),
             "linked worktree has a .git file"
@@ -248,7 +250,9 @@ mod tests {
         git(&["commit", "-q", "-m", "add clove"], &main);
 
         let linked = base.join("linked");
-        git(&["worktree", "add", "-q", linked.as_str()], &main);
+        // A relative path: on Windows `base` is a verbatim `\\?\C:\...` path
+        // (from canonicalize), which git cannot create directories under.
+        git(&["worktree", "add", "-q", "../linked"], &main);
         // The linked worktree DOES have its own checked-out `.clove/`...
         assert!(linked.join(".clove").is_dir(), "linked worktree has .clove");
 
