@@ -89,22 +89,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/master' }}
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest
       - name: Test
-        # nextest runs the test binaries in parallel (cargo test runs them one
-        # after another); `.config/nextest.toml` holds the `ci` profile.
+        # `cargo test`, not cargo-nextest: the suites that spawn `cloved` or a
+        # plugin build it with escargot once per test process
+        # (crates/clove/tests/support/mod.rs). nextest runs every test in its own
+        # process, so those builds relink the binary while another test spawns
+        # it, and the spawn fails with ENOENT.
         # --all-features exercises clove-import's github mapping/network tests. The
         # sync_github mock suite lives in clove-cli and builds the clove-sync-github
         # plugin via escargot, so it runs on both arms (proving clove sync github
         # dispatches to the plugin end-to-end).
         run: |
-          cargo nextest run --profile ci --workspace --all-features
-          cargo nextest run --profile ci -p clove-cli -p cloved
-      - name: Doc tests
-        # nextest does not run doc tests.
-        run: cargo test --workspace --all-features --doc
+          cargo test --workspace --all-features
+          cargo test -p clove-cli -p cloved
       - name: Benchmarks compile (T-X01)
         # Build and link the bench targets in the test profile, which reuses the
         # artifacts of the Test step. `cargo bench --no-run` used the bench
