@@ -367,5 +367,5 @@ example `clove serve` behind a proxy), section 13 of the AGPL requires you to
 offer them the source of your version. Set `CLOVE_SOURCE_URL` when you build
 it, so the web UI and `clove version` point to your source.
 
-Contributions are licensed under the license of the files they change, and
-every commit needs a DCO sign-off. See [CONTRIBUTING.md](CONTRIBUTING.md).
+Contributions are licensed under the license of the files they change. A DCO
+sign-off is optional for now. See [CONTRIBUTING.md](CONTRIBUTING.md).

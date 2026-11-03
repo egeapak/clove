@@ -5,7 +5,8 @@ on:
     branches: [main, master]
   # A PR that only touches prose skips CI. Files a build or test reads stay
   # triggers: CLOVE.md (pinned by `clove setup`'s test) and docs/json-schema
-  # (validated against by the CLI tests). DCO runs on every PR (dco.yml).
+  # (validated against by the CLI tests). DCO (dco.yml) runs on every PR when
+  # the REQUIRE_DCO repository variable is `true`.
   pull_request:
     paths:
       - '**'
