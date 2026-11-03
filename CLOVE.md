@@ -33,6 +33,22 @@ found the problem, whether it was in scope, and "as requested". Keep such a
 detail only if the work is wrong without it (for example, a required output
 format). This rule applies to titles, bodies, and comments.
 
+## Rule: name items by id and title when you talk to the user
+
+The user does not know what an id means. Whenever you mention an item in a
+reply, a question, or a summary to the user, write its id and then its title
+in parentheses. Do this every time you write the id, also when you mention
+the same item again later in the same reply. Copy the title exactly as clove
+shows it; do not shorten it:
+
+    I closed `clov-H2D91NF2` (Fix the parser) and filed
+    `clov-KF799SXS` (README typo: recieve) for later.
+    `clov-H2D91NF2` (Fix the parser) now has a regression test.
+
+Never write a bare id to the user, not in a list and not on a second mention.
+Before you send a reply, find every id in it and check that its title follows
+it. Item bodies and comments may use a bare id.
+
 ## Commands
 
 - Find existing work: `clove ready`, `clove ls`, `clove search <text>`.

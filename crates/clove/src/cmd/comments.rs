@@ -23,14 +23,19 @@ pub fn add(
     }
     let path = add_comment(&ctx.issues_dir, &id, &comment_author(&ctx.root), message)?;
     let rel = rel_to_root(&ctx.root, &path);
+    // The comment is written; a failed read only drops the title from the reply.
+    let title = ctx.store.get(&id).map(|item| item.frontmatter.title).ok();
     match format {
         OutputFormat::Json | OutputFormat::Jsonl => print_json_success(
-            json!({ "id": id.as_str(), "path": rel.as_str() }),
+            json!({ "id": id.as_str(), "path": rel.as_str(), "title": title }),
             json!({ "warnings": [] }),
         ),
         OutputFormat::Human => {
             if !quiet {
-                outln!("added comment to {}", id.as_str());
+                match &title {
+                    Some(t) => outln!("added comment to {} ({t})", id.as_str()),
+                    None => outln!("added comment to {}", id.as_str()),
+                }
             }
         }
     }

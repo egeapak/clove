@@ -13,11 +13,18 @@ The agent gets the candidate text as its `CLAUDE.md` and does the work. Then
 | Check     | Meaning |
 |-----------|---------|
 | `count`   | The number of items is in the scenario's expected range. |
-| `closed`  | The items for the requested work are closed. |
+| `closed`  | The items for the requested work are closed (`closed_re` selects them by title). |
+| `open`    | The items for deferred work are open (`open_re`). |
+| `all_open`| Every item is open: the request asked only for planning. |
 | `bodies`  | Every new item has a body of at least 30 characters. |
 | `no_leak` | Titles, bodies, and comments contain no conversation context ("the user asked", deadlines, "found while", "out of scope", ...). |
 | `dep`     | A dependency is wired where one task waits for another (`s4`). |
-| `no_dup`  | An existing item is reused, not filed again (`s5`). |
+| `no_dup`  | An existing item is reused, not filed again (`dup_re` matches at most one title). |
+| `no_change` | No file outside `.clove/` changed. |
+| `dep_order` | No item is closed while one of its hard dependencies is open. |
+| `children` | At least `min_children` items have a parent (an epic was set up). |
+| `close_comment` | Every closed item has a comment that records the result. |
+| `id_titles` | Every item id in the agent's final reply (`reply.txt`) has the item's title right after it, as `` `<id>` (<title>) ``. A reply that names no item skips this check; `reply_ids` in the score records how many ids it named. |
 
 The score of one rollout is the mean of its checks (0 to 1).
 
@@ -30,23 +37,59 @@ The score of one rollout is the mean of its checks (0 to 1).
 | `s5` | Fix a bug that an open item describes, and add `mode()` | 3 or 4, no duplicate |
 | `s6` | Two tasks, wrapped in conversation context | 2 to 4, no context in items |
 | `s7` | Three similar subcommands | 3 to 5 |
+| `s8` | One bug with several investigation steps | exactly 1, not counting the fixture's two failing tests |
+| `s9` | Plan three tasks, implement nothing | 3 to 6, all open, no code change |
+| `s10` | Fix one bug now, defer one feature | 2 or 3: the bug closed, the feature open, no deadline in the text |
+| `s11` | A task that an open item describes in other words | 1 to 3, the existing item reused and closed |
+| `s12` | A question that asks for no change | 0, no code change |
+| `s13` | Implement an item that an open item blocks | 2 to 4; no item closed before its dependency |
+| `s14` | A feature tracked as an epic with one child per part | 6 to 8; at least 5 children, all closed |
+| `s15` | Three review comments | 3 to 5; one closed item per comment |
+| `s16` | Fix one of two open bugs | 2; that bug closed, the other open, no duplicate |
+| `s17` | Close an item whose work is already done | 1; closed with a result comment, no code change |
 
-An agent may also file the failing tests it finds outside its task as new
-items, so some ranges allow one or two extra items.
+The fixture has defects outside each request: two failing tests, a README
+typo, and a crash when no command is given. `CLOVE.md` tells an agent to file
+such a defect as its own item. So `side_re` names them per scenario: an item
+whose title matches is neither counted nor required to be closed (pre-existing
+items always count), and each range is the exact number of requested items.
+
+To add a scenario, add an entry to `scenarios.json` (a `prompt`, an
+`expect_items` range, and the optional check keys above), and add any
+pre-existing items to `make_fixture.sh`. Then build a correct store and a wrong
+store by hand and confirm that only the correct one scores 1.0.
 
 ## Run one round
 
-To run every scenario for one candidate, run:
+To run every scenario 3 times for one candidate and one model, run:
 
 ```sh
 cargo build -p clove-cli --bin clove
 CLOVE_BIN=$PWD/target/debug/clove \
-  scripts/agent-eval/run_round.sh CLOVE.md /tmp/agent-eval/current
+  scripts/agent-eval/run_round.sh --runs 3 --model haiku CLOVE.md /tmp/agent-eval
 ```
 
-`AGENT_CMD` selects the agent (default: `claude -p` with Bash and file tools).
-The agent reads the prompt on stdin and runs inside the toy project. To run
-only some scenarios, list them after the output directory.
+- `--runs N` sets the runs per scenario (default 3). One run is not enough to
+  compare two texts: the same text and scenario can score 0.0 in one run and
+  1.0 in the next.
+- `--model M` names the model. The default `AGENT_CMD` passes it to
+  `claude -p`, and it is the directory name under the output directory, so
+  rounds for several models can share one output directory.
+- `AGENT_CMD` replaces the agent. It reads the prompt on stdin and runs inside
+  the toy project. The default loads only project settings
+  (`--setting-sources project`), so user hooks do not act on the rollout.
+- To run only some scenarios, list them after the output directory.
+
+Results go to `<out>/<model>/<scenario>/r<k>/` (`prompt.txt`, `agent.txt`,
+`reply.txt` (the agent's final reply, which the prompt asks it to save),
+`score.json`, and the toy project in `repo/`). To print the mean and minimum
+score per scenario and model, run `aggregate.py <out>`; add `--markdown` for
+a table.
+
+If your environment does not allow a script to start an agent, then run each
+rollout as a subagent: create the toy project with `make_fixture.sh`, give the
+agent the output of `mkprompt.py`, and score it with `score.py`. Put the
+results in the same layout so that `aggregate.py` reads them.
 
 ## Improve a text (reflective search)
 
@@ -61,6 +104,149 @@ The current `CLOVE.md` came from a reflective prompt search (the GEPA method):
    rules into the next candidate, and repeat until the scores stop rising.
 5. Read the items by hand at the end. The scorer checks shape, not quality.
 
-`candidates/baseline-0.2.0.md` is the `CLOVE.md` text of clove 0.2.0. It
-scored a mean of 0.46 on `s1`–`s5`, and the current text scored 1.0 on every
-scenario that was run (Claude Sonnet as the agent).
+`candidates/baseline-0.2.0.md` is the `CLOVE.md` text of clove 0.2.0.
+
+## Results so far
+
+### Round 3: the title on every mention
+
+`CLOVE.md` with the round 2 rule plus four additions: write the title every
+time you write the id, also on a second mention of the same item; copy the
+title exactly; never write a bare id in a list; and, before you send a reply,
+find every id in it and check that its title follows it. The run count is 3
+runs per scenario and model (153 runs). Each cell is the mean score, the
+minimum, and the run count:
+
+| Scenario | haiku | opus | sonnet |
+|---|---|---|---|
+| s1 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s2 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s3 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s4 | 0.98 (min 0.94, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s5 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s6 | 0.95 (min 0.86, n=3) | 1.00 (min 1.00, n=3) | 0.98 (min 0.95, n=3) |
+| s7 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s8 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s9 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s10 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s11 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s12 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s13 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s14 | 0.98 (min 0.94, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s15 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s16 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s17 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| **mean** | 0.995 | 1.000 | 0.999 |
+
+`id_titles` results (a reply that names no item id skips the check):
+
+| Model | Replies with ids | Every id titled | Mean `id_titles` |
+|---|---|---|---|
+| haiku | 44 of 51 | 44 of 44 | 1.000 |
+| opus | 45 of 51 | 45 of 45 | 1.000 |
+| sonnet | 45 of 51 | 44 of 45 | 0.994 |
+
+Compared with round 2:
+
+- No reply repeats an id without its title (round 2: Haiku `s9`, Opus
+  `s13`). No Haiku reply lists ids bare or shortens a title (round 2: `s8`,
+  `s15`).
+- The model means are 0.995 for Haiku (round 2: 0.990), 1.000 for Opus
+  (0.998), and 0.999 for Sonnet (1.000).
+- There is 1 `id_titles` miss: Sonnet `s6` adds a word to a title
+  ("parse_line fails on a trailing comma" for "parse_line fails on trailing
+  comma").
+- `s6` drops for Haiku (1.00 to 0.95: `no_leak`, conversation context in an
+  item) and for Sonnet (1.00 to 0.98: the `id_titles` miss above). Every other
+  scenario mean is the same as in round 2 or higher. `no_leak` costs Haiku 3
+  runs (`s4`, `s6`, `s14`), as in round 2.
+- Sonnet now names item ids in 45 of 51 replies (round 2: 34 of 51).
+- A first candidate without the last sentence ("Before you send a reply, ...")
+  also ran 153 runs. It had 1 repeated-mention miss (Haiku `s9`: "`clove
+  ready` now shows only `<id>`") and model means of 0.995 (Haiku), 1.000
+  (Opus), and 1.000 (Sonnet). The last sentence removes that miss.
+
+### Round 2: id and title in replies
+
+`CLOVE.md` with the "name items by id and title" rule, and `clove new` and
+`clove comment` that return the item title. The run count is 3 runs per
+scenario and model (153 runs). Each cell is the mean score, the minimum, and
+the run count:
+
+| Scenario | haiku | opus | sonnet |
+|---|---|---|---|
+| s1 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s2 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s3 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s4 | 0.98 (min 0.94, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s5 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s6 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s7 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s8 | 0.95 (min 0.85, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s9 | 0.99 (min 0.96, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s10 | 1.00 (min 1.00, n=3) | 0.98 (min 0.94, n=3) | 1.00 (min 1.00, n=3) |
+| s11 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s12 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s13 | 1.00 (min 1.00, n=3) | 0.99 (min 0.97, n=3) | 1.00 (min 1.00, n=3) |
+| s14 | 0.94 (min 0.89, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s15 | 0.98 (min 0.93, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s16 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s17 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| **mean** | 0.990 | 0.998 | 1.000 |
+
+`id_titles` results (a reply that names no item id skips the check):
+
+| Model | Replies with ids | Every id titled | Mean `id_titles` |
+|---|---|---|---|
+| haiku | 45 of 51 | 42 of 45 | 0.970 |
+| opus | 45 of 51 | 44 of 45 | 0.996 |
+| sonnet | 34 of 51 | 34 of 34 | 1.000 |
+
+- No scenario and model pair has a mean below 0.94.
+- There are 4 `id_titles` misses:
+  - Haiku `s8` lists 3 ids bare.
+  - Haiku `s15` shortens 2 titles.
+  - Haiku `s9` and Opus `s13` repeat an id without its title on its second
+    mention.
+- `no_leak` still costs Haiku 3 runs (`s4`, `s14` twice) and Opus 1 run
+  (`s10`: "next week" in an item body).
+- Sonnet names fewer item ids in its replies (34 of 51). It describes the
+  work instead.
+
+### Round 1: item tracking
+
+`CLOVE.md` before the id-and-title rule, 3 runs per scenario and model (153
+runs). Each cell is the mean score, the minimum, and the run count:
+
+| Scenario | haiku | opus | sonnet |
+|---|---|---|---|
+| s1 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s2 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s3 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s4 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s5 | 0.98 (min 0.93, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s6 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s7 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s8 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s9 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s10 | 0.93 (min 0.86, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s11 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s12 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s13 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s14 | 0.98 (min 0.93, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s15 | 0.94 (min 0.83, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s16 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| s17 | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) | 1.00 (min 1.00, n=3) |
+| **mean** | 0.990 | 1.000 | 1.000 |
+
+- Sonnet and Opus score 1.0 on every run.
+- Haiku loses points only on `no_leak`: in 5 of 51 runs it writes
+  conversation context into an item ("next week", "per the request",
+  "Found while testing").
+- Single runs vary. With the 0.2.0 text, Sonnet scored 0.0 and 0.083 on the
+  first runs of `s1` and `s4`, and 1.0 on reruns. Compare texts over several
+  runs per scenario.
+- A rollout agent can see every tool of the session that starts it. Haiku
+  rollouts called session and message tools in several runs, even with the
+  prompt line that forbids it. Run rollouts where the agent has only shell and
+  file tools, as the default `AGENT_CMD` does.
