@@ -2137,13 +2137,16 @@ The plugin picks the direction from `$CLOVE_COMMAND`, so all three share one
 reconcile planner and one code path; there is no separate one-way importer to
 drift.
 
-**Field mapping.** `number` ↔ `external_ref = "gh-<number>"` (the durable link;
-clove mints a fresh `CloveId` on pull-create), `title` ↔ `title`, `state`
+**Field mapping.** `number` ↔ `external_ref = "gh-<number>"` (the durable link),
+`title` ↔ `title`, `state`
 (`open`/`closed`) ↔ `status` (`closed` → `Closed`), `labels[].name` ↔ `labels`,
-`assignees[0].login` ↔ `assignee`, `closed_at` → `closed`, and `body` (minus the
+`assignees[0].login` ↔ `assignee`, `closed_at` → `closed`, `created_at` →
+`created` (on pull-create), and `body` (minus the
 `clove-meta` comment) ↔ body. clove-only fields (`deps`/`priority`/`id`) ride a
-`<!-- clove-meta: {...} -->` HTML comment in the issue body. Pulled items get
-`source_system = "github"`.
+`<!-- clove-meta: {...} -->` HTML comment in the issue body. A pull-create keeps
+the `clove-meta` `id` when it is a valid id and no local item has it, so `deps`
+and id mentions that name it stay valid; otherwise clove mints a fresh
+`CloveId`. Pulled items get `source_system = "github"`.
 
 **Link write-back:** a *created* issue's number is written back onto the local
 item (`external_ref = "gh-<number>"`), so the next sync UPDATES it rather than

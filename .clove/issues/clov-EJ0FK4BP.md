@@ -6,12 +6,14 @@ status: open
 type: bug
 priority: 2
 created: 2026-10-31T11:35:58.172Z
-updated: 2026-10-31T11:35:58.172Z
+updated: 2026-11-03T17:24:36.627Z
 labels: []
 deps: []
 relates: []
 duplicates: []
 supersedes: []
+source_system: github
+external_ref: gh-167
 ---
 crates/cloved/tests/daemon_race.rs::stopping_the_last_project_while_another_starts_never_strands_it failed once on GitHub's macos-latest runner: panicked at daemon_race.rs:101:47 with 'A starts: Timeout' (clove_ipc::ensure_daemon_at(&hub, &a) returned ClientError Timeout in one of the 25 rounds). The same commit passed on a re-run, and the test passes on Linux. Run: egeapak/clove actions run 41193004283, job 124513463042 (2026-10-31).
 Likely area: the window where a hub has decided to exit (last project detached) while a new ensure_daemon_at spawns or attaches; the start can wait past its deadline on a slow runner.
