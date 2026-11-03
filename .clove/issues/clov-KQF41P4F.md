@@ -2,11 +2,12 @@
 schema: 1
 id: clov-KQF41P4F
 title: 'Cut CI wall time: cache thrash, bench LTO rebuild, serial tests'
-status: in_progress
+status: closed
 type: chore
 priority: 2
 created: 2026-11-03T07:49:46.157Z
-updated: 2026-11-03T07:49:56.679Z
+updated: 2026-11-03T08:21:59.308Z
+closed: 2026-11-03T08:21:59.308Z
 labels: []
 deps: []
 relates: []

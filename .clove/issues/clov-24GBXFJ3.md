@@ -2,11 +2,12 @@
 schema: 1
 id: clov-24GBXFJ3
 title: Windows CI ignores failures of the first command in multi-line steps
-status: in_progress
+status: closed
 type: bug
 priority: 2
 created: 2026-11-03T08:04:45.106Z
-updated: 2026-11-03T08:04:45.150Z
+updated: 2026-11-03T08:21:59.304Z
+closed: 2026-11-03T08:21:59.304Z
 labels: []
 deps: []
 relates: []
