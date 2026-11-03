@@ -3,3 +3,7 @@
 # checkout so the committed and shipped file matches that const on every
 # platform — a Windows CRLF checkout would otherwise fail the test.
 CLOVE.md text eol=lf
+
+# Golden fixtures are compared byte for byte with what the writer produces
+# (always LF), so they must not get CRLF on a Windows checkout either.
+crates/clove-core/tests/fixtures/** text eol=lf
