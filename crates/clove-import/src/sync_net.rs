@@ -327,8 +327,19 @@ async fn apply_plan(
     }
 
     // --- Pulls (remote → local), through the unified write path. ---
+    // The ids already in use, so a pull-create reuses a `clove-meta` id only
+    // when no local item (or earlier pull in this run) has it.
+    let mut taken: std::collections::HashSet<CloveId> = if plan.pull_create.is_empty() {
+        std::collections::HashSet::new()
+    } else {
+        store
+            .scan_frontmatter()?
+            .into_iter()
+            .map(|fm| fm.id)
+            .collect()
+    };
     for pull in &plan.pull_create {
-        pull_create(store, &pull.staged, state)?;
+        pull_create(store, &pull.staged, state, &mut taken)?;
         reconciled.insert(pull.staged.external_ref.clone());
         report.pulled_created += 1;
     }
@@ -378,13 +389,26 @@ enum PushOutcome {
 
 /// Create a brand-new local item from a remote issue (mirrors the importer's
 /// write path), then record the sync fingerprint.
+///
+/// The item keeps the issue's `clove-meta` id when that id is not in `taken`
+/// (an issue clove pushed from another store), so deps and id mentions that
+/// name it stay valid; otherwise it gets a fresh id. `created` is the issue's
+/// `created_at`, so a closed issue never has `closed` before `created`.
 fn pull_create(
     store: &dyn Store,
     staged: &StagedIssue,
     state: &mut SyncState,
+    taken: &mut std::collections::HashSet<CloveId>,
 ) -> Result<(), ImportError> {
     let now = truncate(Utc::now());
-    let id = store.new_id()?;
+    let id = match &staged.meta_id {
+        Some(id) if !taken.contains(id) => id.clone(),
+        _ => store.new_id()?,
+    };
+    taken.insert(id.clone());
+    // Never after `now`: `updated` is `now`, and a skewed remote clock must not
+    // make `updated` precede `created`.
+    let created = staged.created.map(truncate).map_or(now, |c| c.min(now));
     let frontmatter = ItemFrontmatter {
         schema: CURRENT_SCHEMA_VERSION,
         id: id.clone(),
@@ -392,7 +416,7 @@ fn pull_create(
         status: staged.status,
         item_type: staged.item_type.unwrap_or_default(),
         priority: staged.priority,
-        created: now,
+        created,
         updated: now,
         closed: staged.closed.or(if staged.status == ItemStatus::Closed {
             Some(now)

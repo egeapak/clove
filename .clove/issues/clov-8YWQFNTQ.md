@@ -6,11 +6,13 @@ status: closed
 type: bug
 priority: 1
 created: 2026-10-31T17:58:34.736Z
-updated: 2026-10-31T17:58:34.881Z
+updated: 2026-11-03T17:24:04.519Z
 closed: 2026-10-31T17:58:34.881Z
 labels: []
 deps: []
 relates: []
 duplicates: []
 supersedes: []
+source_system: github
+external_ref: gh-150
 ---

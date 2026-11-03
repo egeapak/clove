@@ -6,13 +6,15 @@ status: closed
 type: bug
 priority: 2
 created: 2026-10-31T11:23:22.897Z
-updated: 2026-10-31T18:04:40.725Z
+updated: 2026-11-03T17:24:29.071Z
 closed: 2026-10-31T18:04:40.725Z
 labels: []
 deps: []
 relates: []
 duplicates: []
 supersedes: []
+source_system: github
+external_ref: gh-163
 ---
 Two unit tests rely on file modes that root ignores, so they fail when cargo test runs as uid 0 (for example in a container):
 - crates/clove-core/src/daemon_token.rs an_unreadable_token_is_replaced_or_named (panics at line ~510: a 0o000 token is still readable, and a 0o500 .clove/ is still writable)

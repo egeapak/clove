@@ -1184,6 +1184,68 @@ fn pull_create_makes_local_item() {
 }
 
 #[test]
+fn pull_create_keeps_clove_meta_ids_so_deps_stay_valid() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    // A local item that already holds the id issue #3 claims.
+    clove(dir.path(), mock.addr)
+        .args(["new", "Local item"])
+        .assert()
+        .success();
+    let taken = only_item_id(dir.path(), mock.addr);
+
+    // Issues pushed from another store: #2 depends on #1 by its clove id.
+    mock.seed(1, "Dep target", "Target.", "closed");
+    mock.seed(2, "Dependent", "Dependent.", "open");
+    mock.seed(3, "Id collides", "Collides.", "open");
+    mock.edit(1, |i| {
+        i["body"] = json!("Target.\n\n<!-- clove-meta: {\"id\":\"proj-6RC64GSZ\"} -->");
+        i["created_at"] = json!("2026-01-02T03:04:05Z");
+        i["closed_at"] = json!("2026-01-03T00:00:00Z");
+    });
+    mock.edit(2, |i| {
+        i["body"] = json!(
+            "Dependent.\n\n<!-- clove-meta: {\"id\":\"proj-7FE19H73\",\"deps\":[\"proj-6RC64GSZ\"]} -->"
+        );
+    });
+    mock.edit(3, |i| {
+        i["body"] = json!(format!(
+            "Collides.\n\n<!-- clove-meta: {{\"id\":\"{taken}\"}} -->"
+        ));
+    });
+
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["pulled_created"], 3, "{v}");
+
+    let target = show(dir.path(), mock.addr, "proj-6RC64GSZ");
+    assert_eq!(target["external_ref"], "gh-1", "{target}");
+    // `created` is the issue's created_at, so it is not after `closed`.
+    assert_eq!(target["created"], "2026-01-02T03:04:05.000Z", "{target}");
+    let dependent = show(dir.path(), mock.addr, "proj-7FE19H73");
+    assert_eq!(dependent["deps"], json!(["proj-6RC64GSZ"]), "{dependent}");
+
+    // A taken id is not reused: the local item keeps it, the pull gets a new one.
+    assert_eq!(show(dir.path(), mock.addr, &taken)["title"], "Local item");
+    let ids = all_item_ids(dir.path(), mock.addr);
+    assert_eq!(ids.len(), 4, "{ids:?}");
+    let collided: Vec<_> = ids
+        .iter()
+        .filter(|id| show(dir.path(), mock.addr, id)["external_ref"] == "gh-3")
+        .collect();
+    assert_eq!(collided.len(), 1, "{ids:?}");
+    assert_ne!(collided[0], &taken);
+
+    // No dangling deps and no closed-before-created warnings.
+    let out = clove(dir.path(), mock.addr)
+        .args(["doctor", "--format", "json"])
+        .output()
+        .unwrap();
+    let doctor = String::from_utf8_lossy(&out.stdout);
+    assert!(!doctor.contains("DANGLING_REF"), "{doctor}");
+    assert!(!doctor.contains("TIMESTAMP_INCOHERENT"), "{doctor}");
+}
+
+#[test]
 fn pull_update_applies_remote_edit() {
     let mock = MockGitHub::start();
     mock.seed(5, "Original", "Body.", "open");

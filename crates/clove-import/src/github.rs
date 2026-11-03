@@ -30,7 +30,9 @@
 //!
 //! | GitHub | clove |
 //! |---|---|
-//! | `number` | idempotency key → `external_ref = "gh-<number>"`; clove mints a fresh `CloveId` |
+//! | `number` | idempotency key → `external_ref = "gh-<number>"` |
+//! | `clove-meta.id` | `id` on a pull-create, when valid and unused locally; else clove mints a fresh `CloveId` |
+//! | `created_at` | `created` on a pull-create |
 //! | `title` | `title` |
 //! | `state` (`open`/`closed`) | `status` (`closed` → [`ItemStatus::Closed`]) |
 //! | `labels[].name` | `labels` (normalized via [`crate::map::map_labels`]) |
@@ -68,7 +70,8 @@ const META_CLOSE: &str = "-->";
 /// returning `None`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CloveMeta {
-    /// The clove `id` of the source item (informational; export only).
+    /// The clove `id` of the source item. A pull-create reuses it when it is
+    /// valid and no local item has it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     /// The item priority (0..=4).
@@ -188,6 +191,10 @@ pub struct GitHubIssue {
     pub assignees: Vec<GitHubUser>,
     #[serde(default)]
     pub closed_at: Option<DateTime<Utc>>,
+    /// Creation time reported by GitHub. A pull-created item takes it as its
+    /// `created`, so a closed issue never has `closed` before `created`.
+    #[serde(default)]
+    pub created_at: Option<DateTime<Utc>>,
     /// Last-modified time reported by GitHub. The two-way sync compares this
     /// against the timestamp recorded at the previous sync to decide whether the
     /// remote side changed (see [`crate::sync`]). Absent in older fixtures →
@@ -232,6 +239,13 @@ pub struct StagedIssue {
     pub labels: Vec<String>,
     pub closed: Option<DateTime<Utc>>,
     pub body: String,
+    /// The clove id from `clove-meta`, when it is a valid id. A pull-created
+    /// item keeps it if no local item has it, so deps and id mentions that name
+    /// it stay valid. Not part of the content fingerprint.
+    pub meta_id: Option<CloveId>,
+    /// The issue's GitHub `created_at` (the pull-created item's `created`).
+    /// Not part of the content fingerprint.
+    pub created: Option<DateTime<Utc>>,
     /// The issue's GitHub `updated_at` (carried through so a sync can record it
     /// as the last-synced remote fingerprint). `None` when the source omitted it.
     pub updated_at: Option<DateTime<Utc>>,
@@ -274,6 +288,11 @@ pub fn map_issue(issue: &GitHubIssue) -> Result<StagedIssue, String> {
 
     // A body with no clove-meta gives no dep information at all (`None`);
     // present meta owns the dep set even when empty (`Some(vec![])`).
+    let meta_id = meta
+        .id
+        .as_deref()
+        .and_then(|id| CloveId::new(id.trim()).ok());
+
     let deps = has_meta.then(|| {
         meta.deps
             .iter()
@@ -304,6 +323,8 @@ pub fn map_issue(issue: &GitHubIssue) -> Result<StagedIssue, String> {
         labels,
         closed: issue.closed_at,
         body,
+        meta_id,
+        created: issue.created_at,
         updated_at: issue.updated_at,
     })
 }

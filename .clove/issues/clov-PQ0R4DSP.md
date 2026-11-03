@@ -6,13 +6,15 @@ status: closed
 type: chore
 priority: 2
 created: 2026-10-31T07:53:42.351Z
-updated: 2026-10-31T07:56:37.182Z
+updated: 2026-11-03T17:24:17.424Z
 closed: 2026-10-31T07:56:37.182Z
 labels: []
 deps: []
 relates: []
 duplicates: []
 supersedes: []
+source_system: github
+external_ref: gh-157
 ---
 scripts/agent-eval/scenarios.json covers doing work now (s1-s7) but not these cases:
 - a request to only plan work (items must stay open);
