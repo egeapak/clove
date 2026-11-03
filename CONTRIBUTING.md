@@ -21,7 +21,11 @@ license guard" step in `.github/workflows/ci.yml`).
 
 ## Developer Certificate of Origin (DCO)
 
-Every commit must be signed off. A sign-off certifies the
+The DCO sign-off is optional for now, while the project has one contributor.
+The CI check is off. It turns back on when the repository variable
+`REQUIRE_DCO` is `true`, and then every commit must be signed off.
+
+A sign-off certifies the
 [Developer Certificate of Origin 1.1](https://developercertificate.org/): you
 wrote the change, or you have the right to submit it under the license of the
 files it changes.
@@ -33,8 +37,8 @@ and email:
 Signed-off-by: Your Name <you@example.com>
 ```
 
-The email must match the commit's author email. CI checks every commit of a
-pull request (`scripts/ci/check-dco.sh`).
+The email must match the commit's author email. When the check is on, CI
+checks every commit of a pull request (`scripts/ci/check-dco.sh`).
 
 To sign off commits that you already made on your branch, run:
 

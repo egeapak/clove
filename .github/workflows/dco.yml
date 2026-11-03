@@ -8,6 +8,11 @@ jobs:
     # Developer Certificate of Origin: every commit of a pull request carries a
     # Signed-off-by trailer for its author (CONTRIBUTING.md).
     name: DCO sign-off
+    # Off while the project has one contributor. To turn the check back on,
+    # set the repository variable REQUIRE_DCO to `true` (Settings > Secrets and
+    # variables > Actions > Variables). While it is off, the job reports
+    # "skipped", which still satisfies a required status check.
+    if: vars.REQUIRE_DCO == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
