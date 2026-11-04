@@ -19,7 +19,7 @@ use tempfile::TempDir;
 /// Build the `clove-echo` fixture and copy it into a fresh temp dir under `name`
 /// (e.g. `clove-import-echo`), returning `(dir, path)`.
 fn install_echo_as(name: &str) -> (TempDir, PathBuf) {
-    let built = support::plugin("clove-plugin-echo", "clove-echo", "");
+    let built = support::plugin("clove-echo");
     let dir = tempfile::tempdir().unwrap();
     // The host resolver looks for `clove-<provider>{EXE_SUFFIX}`, so the renamed
     // copy must carry the platform executable suffix (`.exe` on Windows).
@@ -442,7 +442,7 @@ fn a_plugin_in_the_clove_home_bin_is_resolvable_and_pinnable() {
     let bin = home.path().join("bin");
     std::fs::create_dir_all(&bin).unwrap();
 
-    let built = support::plugin("clove-plugin-echo", "clove-echo", "");
+    let built = support::plugin("clove-echo");
     let dest = bin.join(format!("clove-homed{}", std::env::consts::EXE_SUFFIX));
     std::fs::copy(built, &dest).unwrap();
 
@@ -495,7 +495,7 @@ fn clove_plugin_path_outranks_the_clove_home_install_root() {
     std::fs::create_dir_all(&home_bin).unwrap();
     let explicit = tempfile::tempdir().unwrap();
 
-    let built = support::plugin("clove-plugin-echo", "clove-echo", "");
+    let built = support::plugin("clove-echo");
     let name = format!("clove-contended{}", std::env::consts::EXE_SUFFIX);
     std::fs::copy(built, home_bin.join(&name)).unwrap();
     std::fs::copy(built, explicit.path().join(&name)).unwrap();

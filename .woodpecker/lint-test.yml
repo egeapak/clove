@@ -51,10 +51,13 @@ steps:
     image: *rust_image
     environment: *cargo_env
     commands:
-      # --all-features exercises clove-import's github mapping/network tests; the
-      # sync_github mock suite (in clove-cli) builds the clove-sync-github plugin
-      # via escargot and runs regardless, proving end-to-end plugin dispatch.
-      - cargo test --workspace --all-features
+      # cargo-nextest is the supported runner: its setup script
+      # (.config/nextest.toml, `cargo xtask test-bins`) builds the cloved and
+      # plugin binaries that the clove-cli suites spawn. --all-features exercises
+      # clove-import's github mapping/network tests. nextest skips doctests, so
+      # `test-all` runs them after it.
+      - cargo install cargo-nextest --locked
+      - cargo xtask test-all
 
   - name: bench-compile
     image: *rust_image

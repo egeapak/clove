@@ -92,14 +92,14 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
       - name: Test
-        # cargo-nextest runs every test in its own process. The suites that spawn
-        # `cloved` or a plugin share one escargot build per test run through a
-        # file lock and an atomic publish (crates/clove/tests/support/mod.rs).
-        # --all-features exercises clove-import's github mapping/network tests. The
-        # sync_github mock suite lives in clove-cli and builds the clove-sync-github
-        # plugin via escargot, so it runs on both arms (proving clove sync github
-        # dispatches to the plugin end-to-end). nextest does not run doctests, so
-        # `cargo test --doc` runs them.
+        # cargo-nextest runs every test in its own process. Its setup script
+        # (.config/nextest.toml, `cargo xtask test-bins`) builds `cloved` and the
+        # plugins that the clove-cli suites spawn once per run, before any test,
+        # so every test runs the same binaries. --all-features exercises
+        # clove-import's github mapping/network tests. The second arm is the lean
+        # default build of the CLI and the daemon; the sync_github mock suite runs
+        # on both arms (proving clove sync github dispatches to the plugin end to
+        # end). nextest does not run doctests, so `cargo test --doc` runs them.
         run: |
           cargo nextest run --workspace --all-features --no-fail-fast
           cargo test --workspace --all-features --doc

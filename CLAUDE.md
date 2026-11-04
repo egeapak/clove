@@ -167,14 +167,22 @@ Before committing UI or logic changes, run (all must be clean):
 cargo fmt && cargo fmt --check
 cargo clippy --all-targets -- -D warnings      # or scope with -p <crate>
 cargo clippy --workspace --all-targets --all-features -- -D warnings   # the `web` arm
-cargo test --workspace --all-features          # default features skip the web-server tests
+cargo xtask test-all    # cargo nextest run --workspace --all-features, then the doctests
 ```
 
-`web` (the HTTP server + SPA in `clove-cli`/`cloved`) is off by default, so a plain
-`cargo test` does not exercise it; CI runs both arms. CI runs the tests with
-`cargo nextest run` (plus `cargo test --doc`, which nextest skips); both runners
-work locally. The escargot helpers in `crates/clove/tests/support/mod.rs` are
-safe when every test runs in its own process.
+**cargo-nextest is the supported test runner** (`cargo install cargo-nextest
+--locked`); nextest does not run doctests, so `test-all` runs `cargo test --doc`
+after it. The daemon and plugin suites in `crates/clove/tests` spawn `cloved` and
+the plugin binaries, which cargo does not build for another package's tests. The
+nextest setup script in `.config/nextest.toml` (`cargo xtask test-bins`) builds
+them once per run, before any test, with `--all-features`; it puts the plugins
+beside `target/debug/clove` and passes the `cloved` dir in `CLOVE_TEST_BIN_DIR`.
+`crates/clove/tests/support/mod.rs` only looks them up, so plain `cargo test`
+fails those suites with a message that names nextest. Prefer an `xtask` command
+over a shell script for new build or test tooling.
+
+`web` (the HTTP server + SPA in `clove-cli`/`cloved`) is off by default, so a
+default-features run does not exercise it; CI runs both arms.
 
 ## Release checklist (manual, before every release)
 

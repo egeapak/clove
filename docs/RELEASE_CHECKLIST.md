@@ -6,7 +6,7 @@ release binaries** before a GitHub Release is made public and before
 GitHub sync, web, TUI, MCP — against this repository's own backlog.
 
 > **This is not a test suite and does not replace one.** Anything here that can
-> be automated belongs in `cargo test` / the web tests / CI; a bug found here
+> be automated belongs in the test suites (`cargo xtask test-all`) / the web tests / CI; a bug found here
 > gets a regression test with its fix. The checklist exists to catch what tests
 > cannot see: packaging, the upgrade from the previous release, real GitHub,
 > real browsers and terminals, and how the surfaces behave together.

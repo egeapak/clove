@@ -1,0 +1,3 @@
+[alias]
+# `cargo xtask <command>`: the workspace's build and test tooling (xtask/).
+xtask = "run --quiet --package xtask --"

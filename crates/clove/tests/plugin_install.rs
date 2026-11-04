@@ -266,7 +266,7 @@ fn which_cargo() -> std::path::PathBuf {
 
 /// Build the compiled `fake-cargo` fixture once per test binary.
 fn fake_cargo_bin() -> &'static Path {
-    support::plugin("clove-plugin-echo", "fake-cargo", "")
+    support::plugin("fake-cargo")
 }
 
 /// Install the fake cargo into `dir` under the name `cargo`.
@@ -417,6 +417,7 @@ fn cargo_log(dir: &Path) -> String {
 
 struct Env {
     _tmp: TempDir,
+    clove_exe: std::path::PathBuf,
     home: std::path::PathBuf,
     bin: std::path::PathBuf,
     /// Which `--clove-plugin-info` answer the installed plugin gives.
@@ -434,6 +435,7 @@ fn env_with(mode: &str) -> Env {
     std::fs::create_dir_all(&bin).unwrap();
     fake_cargo(&bin);
     Env {
+        clove_exe: isolated_clove(tmp.path()),
         _tmp: tmp,
         home,
         bin,
@@ -463,24 +465,24 @@ fn needs_newer_clove_plugin() -> String {
 /// *below* the exe dir). Running a copy from a temp dir makes that first search
 /// entry a directory holding nothing but `clove`.
 ///
-/// One copy per test binary, not per test.
-fn isolated_clove() -> &'static Path {
-    static CLOVE: std::sync::OnceLock<(TempDir, std::path::PathBuf)> = std::sync::OnceLock::new();
-    &CLOVE
-        .get_or_init(|| {
-            let dir = tempfile::tempdir().unwrap();
-            let dst = dir
-                .path()
-                .join(format!("clove{}", std::env::consts::EXE_SUFFIX));
-            std::fs::copy(assert_cmd::cargo::cargo_bin("clove"), &dst).unwrap();
-            (dir, dst)
-        })
-        .1
+/// One per test, inside the test's own temp dir, so it is removed with it. (A
+/// process-wide copy in a `static` is never dropped: under nextest, which runs
+/// each test in its own process, every test leaked a full `clove` binary.) A
+/// hard link costs no space; a copy is the fallback across filesystems.
+fn isolated_clove(tmp: &Path) -> std::path::PathBuf {
+    let dir = tmp.join("clove-exe");
+    std::fs::create_dir_all(&dir).unwrap();
+    let dst = dir.join(format!("clove{}", std::env::consts::EXE_SUFFIX));
+    let src = assert_cmd::cargo::cargo_bin("clove");
+    if std::fs::hard_link(&src, &dst).is_err() {
+        std::fs::copy(&src, &dst).unwrap();
+    }
+    dst
 }
 
 impl Env {
     fn clove(&self) -> Command {
-        let mut cmd = Command::new(isolated_clove());
+        let mut cmd = Command::new(&self.clove_exe);
         // Generous plugin timeouts (honoured only by a `test-knobs` build): a slow
         // plugin start under load must not flip a result. The tests that target a
         // timeout set a small value of their own.
