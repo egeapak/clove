@@ -2,11 +2,12 @@
 schema: 1
 id: clov-1E18GFMZ
 title: Build the cloved and plugin test binaries once per nextest run
-status: in_progress
+status: closed
 type: chore
 priority: 2
 created: 2026-11-04T14:38:02.843Z
-updated: 2026-11-04T15:21:42.004Z
+updated: 2026-11-04T17:05:40.662Z
+closed: 2026-11-04T17:05:40.662Z
 labels: []
 deps: []
 relates: []
