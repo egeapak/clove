@@ -1839,8 +1839,8 @@ timed GitHub sync needs behind a proxy (`HTTPS_PROXY`, `HTTP_PROXY`,
 `ALL_PROXY`, `NO_PROXY`, each also lowercase, and `SSL_CERT_FILE` /
 `SSL_CERT_DIR`), `LANG`/`LC_*`, the `CLOVED_*` knobs (`CLOVED_DISABLE_WEB`, `CLOVED_WEB_PORT`,
 `CLOVED_IDLE_SHUTDOWN_MS`, `CLOVED_HUB_GRACE_MS`, `CLOVED_STATS_SNAPSHOT_MS`,
-`CLOVED_GITHUB_SYNC_MS`, `CLOVED_LOAD_DELAY_MS`, `CLOVED_WATCH_ARM_DELAY_MS`, `CLOVED_BIND_DELAY_MS`, `CLOVED_SERVE_DELAY_MS` — test stand-ins for a large
-project's slow load, a slow watch, a slow bind and a slow start of serving after the bind on a loaded machine, …), `CLOVE_GITHUB_API_URL` (GitHub Enterprise) /
+`CLOVED_GITHUB_SYNC_MS`, `CLOVED_LOAD_DELAY_MS`, `CLOVED_WATCH_ARM_DELAY_MS`, `CLOVED_BIND_DELAY_MS` — test stand-ins for a large
+project's slow load, a slow watch and a slow bind on a loaded machine, …; and the hold files `CLOVED_IDLE_HOLD_FILE`, `CLOVED_WATCH_ARM_HOLD_FILE`, `CLOVED_SERVE_HOLD_FILE`, which hold a timer or a step while the file exists), `CLOVE_GITHUB_API_URL` (GitHub Enterprise) /
 `CLOVE_GITHUB_RETRY_MS` (test seam), `CLOVE_RUNTIME_DIR` (always set, absolute), and on Windows `SystemRoot`,
 `windir`, `LOCALAPPDATA`, `APPDATA`, `USERPROFILE`, `TEMP`/`TMP`, `PATHEXT`. Its
 working directory is its own private runtime directory (`<runtime>`, §8.2) —
