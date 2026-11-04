@@ -556,16 +556,16 @@ fn available_json(plugin: &RegistryPlugin) -> Value {
     })
 }
 
+/// What a bare human `plugin list` prints when no plugin is installed.
+const NO_PLUGINS_INSTALLED: &str =
+    "no plugins installed (find one with `clove plugin search <query>` \
+     or `clove plugin list --all`)";
+
 /// Render the human `NAME / VERSION / RUN AS / ABOUT` table (§3).
 ///
 /// A plugin that failed the probe (`no_info`) shows `—` for version and
 /// `(no metadata)` for about; an out-of-range plugin (`outdated` /
 /// `needs_newer_clove`) gets a trailing compat note on its row.
-/// What a bare human `plugin list` prints when no plugin is installed.
-const NO_PLUGINS_INSTALLED: &str =
-    "no plugins installed (find one with `clove plugin search <query>` \
-                                    or `clove plugin list --all`)";
-
 fn render_human(
     installed: &[EnrichedPlugin],
     available: &[RegistryPlugin],

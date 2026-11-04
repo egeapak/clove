@@ -567,6 +567,8 @@ fn human_plugin_list_says_so_when_no_plugin_is_installed() {
         out.contains("clove plugin search") && out.contains("clove plugin list --all"),
         "the message must name the commands that find a plugin: {out:?}"
     );
+    let err = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(err.is_empty(), "nothing belongs on stderr: {err:?}");
 }
 
 #[test]
