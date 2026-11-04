@@ -17,17 +17,16 @@ use assert_cmd::prelude::*;
 use serde_json::Value;
 use tempfile::TempDir;
 
-/// Build the `clove-import-beads` plugin once (across all tests) and return the
-/// directory that contains it, for `CLOVE_PLUGIN_PATH` so `clove import beads`
-/// resolves it. Since Phase 4c there is no built-in `beads` importer: `clove
-/// import beads` dispatches to the external `clove-import-beads` plugin
-/// (PLUGIN_SYSTEM.md §4.2). escargot builds it into the same workspace
-/// `target/<profile>/` that holds the test's `cargo_bin("clove")`, so the
-/// current-exe-dir hit and the `CLOVE_PLUGIN_PATH` hit are the identical,
-/// freshly-rebuilt file. The plugin emits byte-identical output to the old
-/// built-in, so every assertion holds.
+/// The directory that holds this run's `clove-import-beads` plugin, for
+/// `CLOVE_PLUGIN_PATH`, so `clove import beads` resolves it. Since Phase 4c there
+/// is no built-in `beads` importer: `clove import beads` dispatches to the external
+/// `clove-import-beads` plugin (PLUGIN_SYSTEM.md §4.2). `support::plugin` returns
+/// the copy beside `cargo_bin("clove")` and checks that it is this run's build,
+/// so the current-exe-dir hit and the `CLOVE_PLUGIN_PATH` hit are the same file.
+/// The plugin emits byte-identical output to the old built-in, so every
+/// assertion holds.
 fn plugin_dir() -> &'static Path {
-    support::plugin("clove-import-beads", "clove-import-beads", "")
+    support::plugin("clove-import-beads")
         .parent()
         .expect("plugin binary has a parent dir")
 }
@@ -45,7 +44,7 @@ fn clove(dir: &Path) -> Command {
     cmd.env_remove("EDITOR");
     cmd.env("CLOVE_AUTHOR", "tester@example.com");
     // `clove import beads` dispatches to the external `clove-import-beads`
-    // plugin; point the plugin search path at the escargot-built binary's dir.
+    // plugin; point the plugin search path at the test-run build's dir.
     cmd.env("CLOVE_PLUGIN_PATH", plugin_dir());
     cmd
 }

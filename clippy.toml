@@ -1,0 +1,9 @@
+# A temp dir must be dropped by the test that made it. Under cargo-nextest every
+# test is its own process, so a leaked or never-dropped temp dir is left behind
+# once per test. Hold the `TempDir` in the test (or in a value the test owns);
+# never in a `static`, which is never dropped.
+disallowed-methods = [
+    { path = "std::mem::forget", reason = "a forgotten TempDir is never removed; keep the value alive in the test instead" },
+    { path = "tempfile::TempDir::keep", reason = "the dir is never removed; hold the TempDir in the test instead" },
+    { path = "tempfile::TempDir::into_path", reason = "the dir is never removed; hold the TempDir in the test instead" },
+]

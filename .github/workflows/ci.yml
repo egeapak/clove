@@ -89,19 +89,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/master' }}
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
       - name: Test
-        # `cargo test`, not cargo-nextest: the suites that spawn `cloved` or a
-        # plugin build it with escargot once per test process
-        # (crates/clove/tests/support/mod.rs). nextest runs every test in its own
-        # process, so those builds relink the binary while another test spawns
-        # it, and the spawn fails with ENOENT.
-        # --all-features exercises clove-import's github mapping/network tests. The
-        # sync_github mock suite lives in clove-cli and builds the clove-sync-github
-        # plugin via escargot, so it runs on both arms (proving clove sync github
-        # dispatches to the plugin end-to-end).
+        # cargo-nextest runs every test in its own process. Its setup script
+        # (.config/nextest.toml, `cargo xtask test-bins`) builds `cloved` and the
+        # plugins that the clove-cli suites spawn once per run, before any test,
+        # so every test runs the same binaries. --all-features exercises
+        # clove-import's github mapping/network tests. The second arm is the lean
+        # default build of the CLI and the daemon; the sync_github mock suite runs
+        # on both arms (proving clove sync github dispatches to the plugin end to
+        # end). nextest does not run doctests, so `cargo test --doc` runs them.
         run: |
-          cargo test --workspace --all-features
-          cargo test -p clove-cli -p cloved
+          cargo nextest run --workspace --all-features --no-fail-fast
+          cargo test --workspace --all-features --doc
+          cargo nextest run -p clove-cli -p cloved --no-fail-fast
       - name: Benchmarks compile (T-X01)
         # Build and link the bench targets in the test profile, which reuses the
         # artifacts of the Test step. `cargo bench --no-run` used the bench

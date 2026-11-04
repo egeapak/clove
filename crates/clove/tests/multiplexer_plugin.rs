@@ -23,7 +23,7 @@ use tempfile::TempDir;
 /// `(dir, path)`. The temp dir is what `CLOVE_PLUGIN_PATH` points at so the
 /// search path is deterministic.
 fn install_echo_as(name: &str) -> (TempDir, PathBuf) {
-    let built = support::plugin("clove-plugin-echo", "clove-echo", "");
+    let built = support::plugin("clove-echo");
     let dir = tempfile::tempdir().unwrap();
     // The host resolver looks for `clove-<provider>{EXE_SUFFIX}`, so the renamed
     // copy must carry the platform executable suffix (`.exe` on Windows).

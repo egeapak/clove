@@ -32,6 +32,7 @@ pub fn run(
     args: FilterArgs,
     _quiet: bool,
     no_index: bool,
+    deep: bool,
 ) -> Result<(), CloveError> {
     let filters = args.filters()?;
     let order = args.order()?;
@@ -41,7 +42,7 @@ pub fn run(
     // `blocked` has no lean projection — `blocked_by` is the whole point of the
     // list and no lean row carries it — so the engine always hydrates the page.
     let answer = ctx
-        .engine(no_index, false)
+        .engine(no_index, deep)
         .blocked(&filters, order, window, Projection::Full)?;
 
     emit(

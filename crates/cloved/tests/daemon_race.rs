@@ -133,3 +133,52 @@ fn stopping_the_last_project_while_another_starts_never_strands_it() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// A hub that has bound its socket but does not serve it yet — still starting,
+/// on a loaded machine — takes a client's connection and leaves the handshake
+/// unanswered. Starting a project then waits for it to serve instead of giving
+/// up with a timeout (gh-167).
+#[test]
+#[cfg_attr(not(feature = "test-knobs"), ignore = "needs a `test-knobs` cloved")]
+fn a_start_waits_for_a_hub_that_has_bound_but_does_not_serve_yet() {
+    let (_ta, a) = init_clove_dir();
+    let (_run, hub) = runtime_dir();
+    let _kill = KillHub(hub.clone());
+    const SERVE_HOLD: &str = "serve-hold";
+    std::fs::write(hub.dir().join(SERVE_HOLD), "").unwrap();
+    let mut child = support::command(
+        &hub,
+        &[
+            ("CLOVED_DISABLE_WEB", "1"),
+            ("CLOVED_SERVE_HOLD_FILE", SERVE_HOLD),
+        ],
+    )
+    .spawn()
+    .expect("spawn cloved");
+    assert!(
+        support::eventually(support::HANG_GUARD, || hub.footprint_present()),
+        "the hub never bound its socket"
+    );
+
+    let start = {
+        let (hub, a) = (hub.clone(), a.clone());
+        std::thread::spawn(move || clove_ipc::ensure_daemon_at(&hub, &a).map(|_| ()))
+    };
+    // The window is real: a handshake with the held hub goes unanswered. The
+    // start above meets the same unanswered handshakes meanwhile.
+    let held = DaemonClient::attach(&hub, &a, true).err();
+    assert!(
+        matches!(held, Some(clove_ipc::ClientError::Timeout)),
+        "a held hub answered: {held:?}"
+    );
+    std::fs::remove_file(hub.dir().join(SERVE_HOLD)).unwrap();
+
+    let started = start.join().expect("the start thread panicked");
+    assert!(started.is_ok(), "A starts: {:?}", started.err());
+    assert!(
+        DaemonClient::probe_at(&hub, &a).is_some(),
+        "the hub serves A"
+    );
+    support::send_signal(child.id(), support::SIGTERM);
+    let _ = child.wait();
+}

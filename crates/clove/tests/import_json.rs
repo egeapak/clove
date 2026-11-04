@@ -2,7 +2,7 @@
 //! restore (the inverse of `clove export json|jsonl`).
 //!
 //! `import json`/`jsonl` are **built-in** (in-process), so these run against
-//! `cargo_bin("clove")` directly — no plugin build/escargot needed. The core
+//! `cargo_bin("clove")` directly — no plugin binary needed. The core
 //! guarantee under test: `export … | import …` into a fresh repo reproduces every
 //! item byte-for-byte (ids, status incl. closed, type, priority, deps, parent,
 //! labels, body), and re-import is idempotent.

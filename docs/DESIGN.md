@@ -566,6 +566,7 @@ CREATE TABLE items (
     updated_at TEXT NOT NULL,
     closed_at TEXT,
     file_mtime INTEGER NOT NULL,         -- Unix epoch ms
+    file_size INTEGER NOT NULL DEFAULT -1, -- bytes; -1 = unknown (schema 7, §6.2)
     content_hash BLOB NOT NULL,          -- first 8 bytes of BLAKE3
     source_system TEXT,
     external_ref TEXT
@@ -670,23 +671,38 @@ wrote are re-spelled in place on the next `--snapshot` ("rewrite on the next mut
 
 ### 6.2 Staleness Detection (Two-Level)
 
-**Level 1 — directory mtime (O(1) syscall):**
-```
-stat(.clove/issues/) → compare st_mtime and file count against meta table
-```
-If matching → index is current for common case.
+There are two checks. The **fast** check (`check_staleness_fast`, the default) runs Level 1
+and falls through to Level 2 only on a mismatch. The **deep** check (`check_staleness`,
+`--deep`) always runs Level 2.
 
-**Level 2 — per-file hash (only for changed files):**
-On dir mtime mismatch: `read_dir` to collect `(path, mtime, size)` tuples; compare against
-`file_mtimes` table. For files where mtime or size differs: compute BLAKE3 hash, compare
-against stored hash. Only re-parse YAML if hash differs.
+**Level 1 — directory mtime + file count (one `stat` + one `read_dir`, fast check only):**
+```
+stat(.clove/issues/) → compare st_mtime and the item-file count against the meta row
+```
+If both match and the directory mtime is at least 2 seconds old, the index is current.
+clove's own writes, git, `sed -i` and most editors replace a file by rename, which bumps
+the directory mtime. An in-place (truncate-and-rewrite) edit does not, so the fast check
+misses it until the next directory change; `--deep` exists for that case.
+
+**Level 2 — per-file stat, hash only the moved files:**
+`read_dir` + `stat` every item file to collect `(id, mtime, size)`, and compare against the
+`items` table (`file_mtime`, `file_size`, `content_hash`). For a file whose mtime **or**
+size differs, compute the content hash (the first 8 bytes of BLAKE3) and compare it with
+the stored hash. Only a hash mismatch marks the item stale and re-parses its YAML. A file
+whose mtime or size moved but whose hash matches is reported as *touched*: applying the
+report stores its new mtime and size, so the next check does not hash it again. Applying
+any report, also a clean one, stores the observed directory mtime and file count in the
+meta row, so the fast check can short-circuit again.
 
 **Special case for macOS HFS+:** If `now - file_mtime < 2 seconds`, always recheck hash
 regardless of stored mtime (HFS+ 1-second mtime granularity).
 
-**After `git checkout`:** Detect HEAD change by comparing `.git/HEAD` content against
-`meta.last_git_head`. On HEAD change: force a full `read_dir` staleness pass (not just
-targeted). Update `last_git_head` after.
+**Not detected outside that 2-second window:** a rewrite that keeps both the exact mtime
+and the exact size of the indexed file. Only hashing every file would catch it.
+
+**After `git checkout`:** a checkout replaces files by rename and unlink, which bumps the
+directory mtime, so Level 1 falls through to Level 2. The meta row also records
+`last_git_head` at reindex time; no check compares it today.
 
 ### 6.3 Write-Through Consistency
 
@@ -1595,7 +1611,10 @@ server's auto-start go through `ensure_daemon`, whose calls carry `load: true`
 (so an evicted project is reloaded on the MCP heartbeat) and which spawns a bare
 `cloved run` only when no process holds `hub.lock`. A hub that has decided to
 exit refuses new projects with `SHUTTING_DOWN`; `ensure_daemon` then waits for it
-to go and spawns another. **The exit decision is atomic with admission:** a
+to go and spawns another. A hub that has bound its socket but does not serve it
+yet (still starting, on a loaded machine) leaves the handshake unanswered; a
+handshake that times out is retried like a refused connect, up to the start's
+10-second limit. **The exit decision is atomic with admission:** a
 detach of the last project, or the idle grace running out, marks the hub exiting
 under the same lock that admits new projects, so a project can never be
 admitted by a hub that is about to exit. `clove serve` loads the project into a
@@ -1837,7 +1856,7 @@ timed GitHub sync needs behind a proxy (`HTTPS_PROXY`, `HTTP_PROXY`,
 `SSL_CERT_DIR`), `LANG`/`LC_*`, the `CLOVED_*` knobs (`CLOVED_DISABLE_WEB`, `CLOVED_WEB_PORT`,
 `CLOVED_IDLE_SHUTDOWN_MS`, `CLOVED_HUB_GRACE_MS`, `CLOVED_STATS_SNAPSHOT_MS`,
 `CLOVED_GITHUB_SYNC_MS`, `CLOVED_LOAD_DELAY_MS`, `CLOVED_WATCH_ARM_DELAY_MS`, `CLOVED_BIND_DELAY_MS` — test stand-ins for a large
-project's slow load, a slow watch and a slow bind on a loaded machine, …), `CLOVE_GITHUB_API_URL` (GitHub Enterprise) /
+project's slow load, a slow watch and a slow bind on a loaded machine, …; and the hold files `CLOVED_IDLE_HOLD_FILE`, `CLOVED_WATCH_ARM_HOLD_FILE`, `CLOVED_SERVE_HOLD_FILE`, which hold a timer or a step while the file exists), `CLOVE_GITHUB_API_URL` (GitHub Enterprise) /
 `CLOVE_GITHUB_RETRY_MS` (test seam), `CLOVE_RUNTIME_DIR` (always set, absolute), and on Windows `SystemRoot`,
 `windir`, `LOCALAPPDATA`, `APPDATA`, `USERPROFILE`, `TEMP`/`TMP`, `PATHEXT`. Its
 working directory is its own private runtime directory (`<runtime>`, §8.2) —

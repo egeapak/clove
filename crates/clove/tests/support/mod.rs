@@ -1,106 +1,82 @@
 //! Shared by the suites that spawn a real daemon or a plugin binary.
 //!
-//! Every escargot build goes through [`cloved`] or [`plugin`], which build each
-//! artifact at most once per test process. That is load-bearing, not a speed-up:
-//! every `cargo build` — even a no-op one — deletes and re-hard-links the binary
-//! it reports, so a test thread rebuilding an artifact makes it briefly vanish
-//! under a sibling thread that is spawning or copying it (`ENOENT`).
+//! Cargo gives an integration test only its own package's binaries, so
+//! `cloved` and the plugins come from elsewhere: the nextest setup script
+//! (`.config/nextest.toml`, `cargo xtask test-bins`) builds them once per run,
+//! before any test, and passes their directory in `CLOVE_TEST_BIN_DIR`. These
+//! helpers only look the binaries up, so every test process of a run spawns the
+//! same files and no test ever builds or replaces one. Plain `cargo test` does
+//! not run the setup script, so these suites fail with a message naming nextest.
 // Each test binary uses a subset of these helpers.
 #![allow(dead_code)]
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
-/// `cloved` built with `features` (space-separated; `""` for the defaults).
-///
-/// Each feature set gets its own artifact dir, so two suites asking for
-/// different features never relink each other's binary, and none of them
-/// overwrites the `cloved` in the workspace `target/<profile>/` that
-/// `crates/cloved/tests` run (`CARGO_BIN_EXE_cloved`). The artifact dirs share
-/// the workspace build dir, so a feature set is compiled once, not once per dir.
+/// The `cloved` built for this test run (all features, so the `CLOVED_*` test
+/// knobs and the web server are both present).
 #[cfg(unix)]
-pub fn cloved(features: &str) -> &'static Path {
-    built("cloved", "cloved", features, Placement::Isolated)
+pub fn cloved() -> &'static Path {
+    static CLOVED: OnceLock<PathBuf> = OnceLock::new();
+    CLOVED.get_or_init(|| existing(bin_dir().join(exe("cloved"))))
 }
 
-/// A plugin binary built into the workspace `target/<profile>/`.
+/// A plugin binary built for this test run, beside the `clove` under test.
 ///
 /// It must live there: the host searches the running `clove`'s own directory
 /// before `CLOVE_PLUGIN_PATH`, so a plugin resolved by name runs whatever sits
-/// beside `cargo_bin("clove")`. Building there makes that the fresh binary. As a
-/// consequence one process may use only one feature set per plugin; asking for a
-/// second panics instead of relinking the binary another test is running.
-pub fn plugin(package: &str, bin: &str, features: &str) -> &'static Path {
-    built(package, bin, features, Placement::Workspace)
+/// beside `cargo_bin("clove")`. The setup script puts this run's build there;
+/// this checks that the file there is that build and not one left over.
+pub fn plugin(bin: &str) -> &'static Path {
+    let beside_clove = existing(clove_bin_dir().join(exe(bin)));
+    let built = existing(bin_dir().join(exe(bin)));
+    let len = |path: &Path| std::fs::metadata(path).map(|meta| meta.len()).ok();
+    assert_eq!(
+        len(&beside_clove),
+        len(&built),
+        "{} is not the {} that this run built; run the tests with `cargo nextest run`",
+        beside_clove.display(),
+        built.display(),
+    );
+    Box::leak(beside_clove.into_boxed_path())
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum Placement {
-    Isolated,
-    Workspace,
-}
-
-type Slot = &'static OnceLock<PathBuf>;
-
-fn built(package: &str, bin: &str, features: &str, placement: Placement) -> &'static Path {
-    let features = normalize_features(features);
-    let slot = slot_for(package, bin, &features, placement);
-    slot.get_or_init(|| {
-        let mut build = escargot::CargoBuild::new().package(package).bin(bin);
-        if !features.is_empty() {
-            build = build.features(&features);
-        }
-        if placement == Placement::Isolated {
-            let tmp = Path::new(env!("CARGO_TARGET_TMPDIR"));
-            let workspace_target = tmp.parent().expect("CARGO_TARGET_TMPDIR has a parent");
-            let features_dir = if features.is_empty() {
-                "default".to_owned()
-            } else {
-                features.replace(' ', "+")
-            };
-            build = build
-                .target_dir(tmp.join("escargot").join(package).join(features_dir))
-                .env("CARGO_BUILD_BUILD_DIR", workspace_target);
-        }
-        build
-            .run()
-            .unwrap_or_else(|err| panic!("build {package}/{bin} [{features}]: {err}"))
-            .path()
-            .to_path_buf()
+/// The directory the setup script built the binaries into.
+fn bin_dir() -> &'static Path {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| match std::env::var_os("CLOVE_TEST_BIN_DIR") {
+        Some(dir) => PathBuf::from(dir),
+        None => panic!(
+            "CLOVE_TEST_BIN_DIR is not set. Run the tests with `cargo nextest run`: \
+             its setup script (`cargo xtask test-bins`) builds the cloved and plugin \
+             binaries that these tests spawn."
+        ),
     })
 }
 
-/// The process-wide build slot for one artifact. A `Workspace` artifact shares
-/// one output path across feature sets, so a second set is refused here.
-fn slot_for(package: &str, bin: &str, features: &str, placement: Placement) -> Slot {
-    static SLOTS: Mutex<BTreeMap<(String, String, String), Slot>> = Mutex::new(BTreeMap::new());
-    let mut slots = SLOTS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if placement == Placement::Workspace {
-        if let Some((pkg, b, other)) = slots
-            .keys()
-            .find(|(pkg, b, other)| pkg == package && b == bin && other != features)
-        {
-            panic!(
-                "{pkg}/{b} is already built with [{other}] in this process; \
-                 rebuilding it with [{features}] would relink the shared binary"
-            );
-        }
-    }
-    slots
-        .entry((package.to_owned(), bin.to_owned(), features.to_owned()))
-        .or_insert_with(|| Box::leak(Box::new(OnceLock::new())))
+/// The directory of the `clove` binary the tests run (`cargo_bin("clove")`).
+/// nextest sets `CARGO_BIN_EXE_*` at run time; the compile-time value is the
+/// fallback.
+fn clove_bin_dir() -> PathBuf {
+    let clove = std::env::var_os("CARGO_BIN_EXE_clove")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_clove")));
+    clove
+        .parent()
+        .expect("the clove binary has a parent dir")
+        .to_path_buf()
 }
 
-/// `"web  test-knobs"` and `"test-knobs,web"` name the same build.
-fn normalize_features(features: &str) -> String {
-    let mut names: Vec<&str> = features
-        .split([' ', ','])
-        .filter(|name| !name.is_empty())
-        .collect();
-    names.sort_unstable();
-    names.dedup();
-    names.join(" ")
+fn exe(bin: &str) -> String {
+    format!("{bin}{}", std::env::consts::EXE_SUFFIX)
+}
+
+fn existing(path: PathBuf) -> PathBuf {
+    assert!(
+        path.is_file(),
+        "{} does not exist; run the tests with `cargo nextest run`, whose setup \
+         script (`cargo xtask test-bins`) builds it",
+        path.display()
+    );
+    path
 }
