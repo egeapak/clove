@@ -286,7 +286,7 @@ fn fake_cargo(dir: &Path) {
 }
 
 /// Put `dir` first on `PATH` for `cmd`, portably.
-fn prepend_path(cmd: &mut Command, dir: &Path) {
+fn prepend_path(cmd: &mut Command, dir: &Path, hermetic: &[std::path::PathBuf]) {
     let mut dirs = vec![dir.to_path_buf()];
     // Drop the cargo target directory from the inherited `PATH`.
     //
@@ -303,7 +303,7 @@ fn prepend_path(cmd: &mut Command, dir: &Path) {
     // emptied — the `--git` tests need the real `git` on it — so the target dir
     // is filtered out by prefix and everything else is kept, minus any clove
     // binaries the developer has installed (see `hermetic_path`).
-    dirs.extend(hermetic_path().iter().cloned());
+    dirs.extend(hermetic.iter().cloned());
     cmd.env("PATH", std::env::join_paths(dirs).unwrap());
 }
 
@@ -313,31 +313,25 @@ fn prepend_path(cmd: &mut Command, dir: &Path) {
 /// A developer with `cargo install clove-sync-github` (or any clove plugin) has
 /// it in `~/.cargo/bin`, which also carries the `rustc`/`cargo` proxies the
 /// `--git` tests need, so the directory is mirrored (every other entry
-/// symlinked) rather than dropped. Built once per test binary.
-fn hermetic_path() -> &'static [std::path::PathBuf] {
-    static PATH: std::sync::OnceLock<(Vec<TempDir>, Vec<std::path::PathBuf>)> =
-        std::sync::OnceLock::new();
-    &PATH
-        .get_or_init(|| {
-            let target_dir = cargo_target_dir();
-            let mut mirrors = Vec::new();
-            let mut dirs = Vec::new();
-            for entry in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
-                if target_dir.as_ref().is_some_and(|t| entry.starts_with(t)) {
-                    continue;
-                }
-                if !holds_clove_binary(&entry) {
-                    dirs.push(entry);
-                    continue;
-                }
-                if let Some(mirror) = mirror_without_clove(&entry) {
-                    dirs.push(mirror.path().to_path_buf());
-                    mirrors.push(mirror);
-                }
-            }
-            (mirrors, dirs)
-        })
-        .1
+/// symlinked) rather than dropped. The mirrors are made under `tmp`, the test's
+/// own temp dir, so they are removed with it.
+fn hermetic_path(tmp: &Path) -> Vec<std::path::PathBuf> {
+    let target_dir = cargo_target_dir();
+    let mut dirs = Vec::new();
+    for entry in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
+        if target_dir.as_ref().is_some_and(|t| entry.starts_with(t)) {
+            continue;
+        }
+        if !holds_clove_binary(&entry) {
+            dirs.push(entry);
+            continue;
+        }
+        let mirror = tmp.join(format!("path-mirror-{}", dirs.len()));
+        if mirror_without_clove(&entry, &mirror) {
+            dirs.push(mirror);
+        }
+    }
+    dirs
 }
 
 fn is_clove_name(name: &std::ffi::OsStr) -> bool {
@@ -354,24 +348,28 @@ fn holds_clove_binary(dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// A temp dir symlinking every entry of `dir` except the clove binaries.
+/// Make `mirror`, a dir symlinking every entry of `dir` except the clove
+/// binaries. Returns false when it cannot.
 #[cfg(unix)]
-fn mirror_without_clove(dir: &Path) -> Option<TempDir> {
-    // Under the cargo target dir (never on the mirrored `PATH`): a static is
-    // never dropped, so this is where the leftover mirrors land.
-    let mirror = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).ok()?;
-    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+fn mirror_without_clove(dir: &Path, mirror: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    if std::fs::create_dir_all(mirror).is_err() {
+        return false;
+    }
+    for entry in entries.flatten() {
         if !is_clove_name(&entry.file_name()) {
-            let _ = std::os::unix::fs::symlink(entry.path(), mirror.path().join(entry.file_name()));
+            let _ = std::os::unix::fs::symlink(entry.path(), mirror.join(entry.file_name()));
         }
     }
-    Some(mirror)
+    true
 }
 
 /// Symlinks need a privilege on Windows, so the directory is dropped instead.
 #[cfg(not(unix))]
-fn mirror_without_clove(_dir: &Path) -> Option<TempDir> {
-    None
+fn mirror_without_clove(_dir: &Path, _mirror: &Path) -> bool {
+    false
 }
 
 /// The cargo target directory this test binary was built into.
@@ -418,6 +416,8 @@ fn cargo_log(dir: &Path) -> String {
 struct Env {
     _tmp: TempDir,
     clove_exe: std::path::PathBuf,
+    /// The inherited `PATH`, made hermetic (see `hermetic_path`).
+    path: Vec<std::path::PathBuf>,
     home: std::path::PathBuf,
     bin: std::path::PathBuf,
     /// Which `--clove-plugin-info` answer the installed plugin gives.
@@ -436,6 +436,7 @@ fn env_with(mode: &str) -> Env {
     fake_cargo(&bin);
     Env {
         clove_exe: isolated_clove(tmp.path()),
+        path: hermetic_path(tmp.path()),
         _tmp: tmp,
         home,
         bin,
@@ -500,7 +501,7 @@ impl Env {
         cmd.env("CLOVE_HOME", &self.home);
         cmd.env("CLOVE_REGISTRY_URL", self.registry.url());
         // The fake cargo must win over the real one.
-        prepend_path(&mut cmd, &self.bin);
+        prepend_path(&mut cmd, &self.bin, &self.path);
         cmd
     }
 
