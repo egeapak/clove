@@ -175,9 +175,42 @@ where
 /// 3. Invoke `f`, then render its `Ok(data)` as a success envelope or its
 ///    `Err(e)` as an error envelope, honoring `cx.format` and `cx.quiet`, and
 ///    return the matching [`ExitCode`].
+///
+/// Steps 1 and 2 are [`run_raw`]; a plugin that needs its own rendering calls
+/// that instead.
 pub fn run_with_info<F>(info: PluginInfo, f: F) -> ExitCode
 where
     F: FnOnce(&PluginContext, PluginArgs) -> Result<serde_json::Value, CloveError>,
+{
+    run_raw(info, |cx, args| match f(cx, args) {
+        Ok(data) => {
+            emit_success(cx.format, data);
+            ExitCode::SUCCESS
+        }
+        Err(err) => ExitCode::from(emit_error(cx.format, &err, cx.quiet)),
+    })
+}
+
+/// Run a plugin that renders its own output, answering the
+/// `--clove-plugin-info` probe with `info`.
+///
+/// This is the lower-level form of [`run_with_info`]. It owns the parts of the
+/// contract that every plugin `main` shares, and nothing else:
+/// 1. If argv contains `--clove-plugin-info`, print `info` as JSON and exit `0`,
+///    before any env materialization.
+/// 2. Materialize [`PluginContext::from_env`]. On failure, render the error
+///    envelope with the `CLOVE_FORMAT` / `CLOVE_QUIET` hints read directly, and
+///    return the validation exit code (4).
+/// 3. Strip the cargo-style leading `<command> [<provider>]` echo from argv
+///    ([`PluginArgs::from_argv`]) and invoke `f`.
+///
+/// The closure has full control of rendering: it parses the tail args, writes
+/// the success envelope or human output itself (with [`emit_success`],
+/// [`emit_success_with_meta`](crate::emit_success_with_meta), [`emit_error`]),
+/// and returns the process [`ExitCode`].
+pub fn run_raw<F>(info: PluginInfo, f: F) -> ExitCode
+where
+    F: FnOnce(&PluginContext, PluginArgs) -> ExitCode,
 {
     if info_requested(&info) {
         return ExitCode::SUCCESS;
@@ -187,28 +220,25 @@ where
 
     let cx = match PluginContext::from_env() {
         Ok(cx) => cx,
-        Err(env_err) => {
-            // The typed context is unavailable, so read the format/quiet hints
-            // directly for this early-failure path (§6.5).
-            let format = std::env::var("CLOVE_FORMAT")
-                .ok()
-                .and_then(|value| clove_types::OutputFormat::parse(&value))
-                .unwrap_or_default();
-            let quiet = std::env::var("CLOVE_QUIET").is_ok_and(|value| value == "1");
-            let err: CloveError = env_err.into();
-            return ExitCode::from(emit_error(format, &err, quiet));
-        }
+        Err(env_err) => return env_failure(env_err),
     };
 
     let args = PluginArgs::from_argv(&argv, &cx.command, cx.provider.as_deref());
+    f(&cx, args)
+}
 
-    match f(&cx, args) {
-        Ok(data) => {
-            emit_success(cx.format, data);
-            ExitCode::SUCCESS
-        }
-        Err(err) => ExitCode::from(emit_error(cx.format, &err, cx.quiet)),
-    }
+/// Render a [`PluginContext::from_env`] failure as the standard error envelope.
+///
+/// The typed context is unavailable, so read the format/quiet hints directly for
+/// this early-failure path (§6.5).
+fn env_failure(env_err: crate::PluginEnvError) -> ExitCode {
+    let format = std::env::var("CLOVE_FORMAT")
+        .ok()
+        .and_then(|value| clove_types::OutputFormat::parse(&value))
+        .unwrap_or_default();
+    let quiet = std::env::var("CLOVE_QUIET").is_ok_and(|value| value == "1");
+    let err: CloveError = env_err.into();
+    ExitCode::from(emit_error(format, &err, quiet))
 }
 
 #[cfg(test)]

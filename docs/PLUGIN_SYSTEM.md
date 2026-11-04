@@ -599,7 +599,10 @@ fn main() -> std::process::ExitCode {
 
 `clove_plugin::run` calls `PluginContext::from_env`, parses argv, invokes the
 closure, and renders the result (or a `CloveError`) as the correct envelope +
-exit code for `cx.format`. Conformance to the DESIGN's output contract is then
+exit code for `cx.format`. A plugin that needs its own human rendering (sync,
+the importers) calls `clove_plugin::run_raw` instead: it does the same probe,
+`from_env`, and argv handling, and the closure renders and returns the
+`ExitCode` itself. Conformance to the DESIGN's output contract is then
 automatic, and the host writes these vars from **one** place — a
 `plugin::export_env(&ctx, cmd, provider)` helper next to the resolver (§5) — so
 the producer and consumer of the contract live in the two crates and are pinned
@@ -760,22 +763,20 @@ because the boundary is a subprocess.
   1. **`clove plugin list` descriptions** — it currently prints only name+path; it
      could invoke each plugin's `--clove-plugin-info` (§7) to show the one-line
      `about`. Likewise `clove --list` could grow an "external subcommands" heading.
-  2. **`clove_plugin::run_raw`** — `clove-sync-github` hand-rolls the
-     `--clove-plugin-info` probe + `from_env`-failure enveloping because it needs
-     bespoke human rendering that `run`/`run_with_info` can't do. A lower-level
-     `run_raw(info, |cx, args| -> ExitCode)` that owns the probe + `from_env` and
-     hands the plugin full rendering control would remove that duplication and keep
-     the contract in one crate. *(Partly done: the clap value-parser and
-     clap→exit-code mapping are now shared as `clove_plugin::{parse_format,
-     clap_exit_code}` behind the crate's optional **`clap`** feature — a plugin that
-     parses argv with clap enables `clove-plugin`'s `clap` feature and reuses them,
-     so the contract crate stays clap-free for the host. The `main` prologue itself
-     is the remaining dedup.)*
-  3. **`_meta` shape** — `clove_plugin::emit_success` emits `_meta: {}`, while the
-     built-in `export` and the import plugins (via `emit_success_with_meta`) emit
-     `_meta: {"warnings": []}`. `emit_success_with_meta` (added for the import
-     plugins) is the escape hatch; the two shapes could be normalized further, but
-     no consumer keys on `_meta` (the JSON schemas don't constrain it).
+  2. **`clove_plugin::run_raw`** — *done.* `run_raw(info, |cx, args| -> ExitCode)`
+     owns the `--clove-plugin-info` probe, the `from_env`-failure envelope, and
+     the leading-echo strip, and hands the plugin full rendering control.
+     `run_with_info` is built on it, and `clove-sync-github`, `clove-import-tk`,
+     and `clove-import-beads` call it instead of hand-rolling the `main`
+     prologue. The clap value parser and the clap→exit-code mapping are shared
+     as `clove_plugin::{parse_format, clap_exit_code}` behind the crate's
+     optional **`clap`** feature, so the contract crate stays clap-free for the
+     host.
+  3. **`_meta` shape** — *done.* `clove_plugin::emit_success` emits
+     `_meta: {"warnings": []}`, the same shape the import plugins and most
+     built-ins emit, so a consumer can always read `_meta.warnings`.
+     `emit_success_with_meta` stays the escape hatch for a plugin with real
+     warnings or other meta.
   4. **Windows `PATHEXT`** (§5) — plugin discovery matches only `EXE_SUFFIX`
      (`.exe`), not `.cmd`/`.bat`/`.ps1`. Unix-only CI; revisit for a Windows plugin
      shipped as a script.

@@ -15,8 +15,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   id, the envelope `ok` is `false` and a top-level `error` is set if any id
   failed, and the exit code is the exit code of the first failed id. JSONL
   prints one line per id.
+- `clove_plugin::run_raw(info, |cx, args| -> ExitCode)`: the plugin harness
+  without the rendering step. It answers `--clove-plugin-info`, renders the
+  error envelope when the host env is missing, and strips the leading
+  command/provider echo; the closure renders and returns the exit code.
+  `clove-sync-github`, `clove-import-tk`, and `clove-import-beads` use it.
 
 ### Changed
+
+- `clove_plugin::emit_success` (and so `run`/`run_with_info`) emits
+  `_meta: {"warnings": []}` instead of `_meta: {}`, the same shape the import
+  plugins emit. This includes the `clove sync github --dry-run` JSON envelope.
 
 - The DCO sign-off is optional for now. The `DCO sign-off` CI job runs only
   when the repository variable `REQUIRE_DCO` is `true` (`CONTRIBUTING.md`).
