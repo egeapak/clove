@@ -26,6 +26,12 @@ export interface Item {
   ready: boolean;
   blocked_by: string[];
   dangling_deps: string[];
+  /**
+   * Every referenced id (deps, parent, relates, duplicates, supersedes) with no
+   * backing item, on an item of any status. Web API only; absent from a
+   * `?fields=` response that does not ask for it.
+   */
+  missing_refs?: string[];
 }
 
 export interface Comment {

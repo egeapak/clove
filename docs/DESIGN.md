@@ -1009,6 +1009,14 @@ That splits the two kinds of command:
 
 **`ready` and `blocked_by` are computed at serialization time, never stored.**
 
+`dangling_deps` is the dangling subset of `blocked_by`, so it is empty on an
+item that is not blocked (closed, or excluded by a cycle or a malformed parent).
+The web API (`clove serve`) adds one more computed field to every item row:
+`missing_refs`, every id in `deps`, `parent`, `relates`, `duplicates` and
+`supersedes` that has no backing item, for an item of any status. The SPA reads
+it to show a reference as missing without requesting it. Every read tier
+computes the same value.
+
 ### 7.5 List Response Schema (v1)
 
 ```json

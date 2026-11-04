@@ -17,28 +17,50 @@ const fetched = new SvelteMap<string, RelatedSummary | null>();
 const fetchedAt = new Map<string, number>();
 const inFlight = new Set<string>();
 
-/** The `store.items` that `danglingIds` was built from. */
-let danglingFrom: Map<string, Item> | null = null;
+/**
+ * The missing references of items known only through `rememberRelated` (the
+ * detail route's children), with the `store.liveRev` they were fetched at. An
+ * entry from an older rev is ignored: a live update may have created the id.
+ */
+const rememberedMissing = new Map<string, { refs: string[]; rev: number }>();
+/** Bumped by `rememberRelated`, so a reader of `knownDangling` re-runs. */
+let rememberedRev = $state(0);
+
+/** What `danglingIds` was built from; any change rebuilds it. */
+let danglingKey: { items: Map<string, Item>; liveRev: number; remembered: number } | null = null;
 let danglingIds = new Set<string>();
 
+function missingOf(it: Item): string[] {
+  return [...(it.dangling_deps ?? []), ...(it.missing_refs ?? [])];
+}
+
 /**
- * True when an item in the store lists `id` in its `dangling_deps`: the server
- * has already said that `id` does not exist, so a fetch would only 404.
- * `store.items` is replaced on every change, so the set is rebuilt only then.
+ * True when the server has already said that `id` does not exist: a stored item
+ * lists it in `dangling_deps` or `missing_refs`, or a remembered item fetched at
+ * the current live rev does. A fetch would only answer 404. `store.items` is
+ * replaced on every change, so the set is rebuilt only when it, the live rev or
+ * the remembered items change.
  */
 function knownDangling(id: string): boolean {
   const items = store.items;
-  if (items !== danglingFrom) {
-    danglingFrom = items;
+  const liveRev = store.liveRev;
+  const remembered = rememberedRev;
+  const key = danglingKey;
+  if (!key || key.items !== items || key.liveRev !== liveRev || key.remembered !== remembered) {
+    danglingKey = { items, liveRev, remembered };
     danglingIds = new Set();
-    for (const it of items.values()) for (const d of it.dangling_deps ?? []) danglingIds.add(d);
+    for (const it of items.values()) for (const d of missingOf(it)) danglingIds.add(d);
+    for (const [owner, entry] of rememberedMissing) {
+      if (entry.rev !== liveRev || items.has(owner)) continue;
+      for (const d of entry.refs) danglingIds.add(d);
+    }
   }
   return danglingIds.has(id);
 }
 
 /**
- * What is known about `id` now: the live store first, then the dangling deps
- * of the stored items, then the fetched cache.
+ * What is known about `id` now: the live store first, then the ids the server
+ * reports as missing, then the fetched cache.
  */
 export function related(id: string): RelatedSummary | null | undefined {
   const live = store.items.get(id);
@@ -52,7 +74,8 @@ export function related(id: string): RelatedSummary | null | undefined {
  * is on its way. Call from an effect: reading `store.liveRev` re-runs it on
  * every live update. The previous value stays visible while refetching, and
  * only a 404 is cached as missing, so a transient error is retried. An id that
- * a stored item lists in `dangling_deps` is missing without a request.
+ * the server already reports as missing (see `knownDangling`) is missing
+ * without a request.
  */
 export function ensureRelated(id: string): void {
   // Read first: an early return must not drop the caller's effect subscription.
@@ -84,7 +107,9 @@ export function rememberRelated(items: Item[]): void {
   for (const it of items) {
     fetched.set(it.id, { title: it.title, status: it.status });
     fetchedAt.set(it.id, store.liveRev);
+    rememberedMissing.set(it.id, { refs: missingOf(it), rev: store.liveRev });
   }
+  rememberedRev += 1;
 }
 
 /** Test hook: forget everything fetched. */
@@ -92,6 +117,7 @@ export function resetRelated(): void {
   fetched.clear();
   fetchedAt.clear();
   inFlight.clear();
-  danglingFrom = null;
+  rememberedMissing.clear();
+  danglingKey = null;
   danglingIds = new Set();
 }

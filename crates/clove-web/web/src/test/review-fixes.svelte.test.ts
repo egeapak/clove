@@ -11,7 +11,7 @@ vi.mock('$app/navigation', () => ({
 
 import { page } from './app-stubs/stores';
 import { store } from '$lib/store.svelte';
-import { related, ensureRelated, resetRelated } from '$lib/related.svelte';
+import { related, ensureRelated, resetRelated, rememberRelated } from '$lib/related.svelte';
 import { stubApi, StubError, item, META } from './fake-api';
 import ListPage from '../routes/list/+page.svelte';
 import RelatedItem from '$lib/components/RelatedItem.svelte';
@@ -22,6 +22,8 @@ const OTHER = 'proj-0000000B';
 
 let otherTitle = 'First title';
 let otherFails = false;
+/** What `/meta` answers. The store's refetch replaces `store.meta` with it. */
+let metaAnswer: unknown = META;
 
 function settle() {
   return new Promise((resolve) => setTimeout(resolve, 0));
@@ -30,9 +32,11 @@ function settle() {
 beforeEach(() => {
   goto.mockClear();
   resetRelated();
+  store.resetForTests();
   store.meta = null;
   otherTitle = 'First title';
   otherFails = false;
+  metaAnswer = META;
   page.set({
     url: new URL('http://localhost/list'),
     params: {},
@@ -44,7 +48,7 @@ beforeEach(() => {
     form: null
   });
   stubApi((path) => {
-    if (path === '/meta') return META;
+    if (path === '/meta') return metaAnswer;
     if (path === '/items') return [item({ id: ID, title: 'Row', external_ref: 'gh-5', source_system: 'github' })];
     if (path === '/stats/history') return [];
     if (path === `/items/${OTHER}`) {
@@ -62,9 +66,6 @@ afterEach(() => {
 });
 
 describe('related-item cache', () => {
-  // These tests put items in the store; drop them so later tests start clean.
-  afterEach(() => store.replaceAll([]));
-
   it('refetches after a live update instead of keeping the first answer', async () => {
     ensureRelated(OTHER);
     await settle();
@@ -146,6 +147,38 @@ describe('related-item cache', () => {
     expect(calls).toEqual([]);
   });
 
+  it('does not fetch a missing ref of a closed item, of any relation kind', async () => {
+    const calls = stubApi(() => {
+      throw new StubError(404, 'NOT_FOUND');
+    });
+    const refs = ['proj-0000000D', 'proj-0000000P', 'proj-0000000R'];
+    store.replaceAll([
+      item({ id: ID, status: 'closed', deps: [refs[0]], parent: refs[1], relates: [refs[2]], missing_refs: refs })
+    ]);
+    for (const r of refs) ensureRelated(r);
+    await settle();
+    expect(calls).toEqual([]);
+    for (const r of refs) expect(related(r)).toBeNull();
+  });
+
+  it('does not fetch a missing ref of a remembered item until a live update', async () => {
+    const MISSING = 'proj-0000000D';
+    const calls = stubApi(() => {
+      throw new StubError(404, 'NOT_FOUND');
+    });
+    rememberRelated([item({ id: 'proj-0000000K', parent: ID, deps: [MISSING], missing_refs: [MISSING] })]);
+    ensureRelated(MISSING);
+    await settle();
+    expect(calls).toEqual([]);
+    expect(related(MISSING)).toBeNull();
+
+    // A live update may have created the id, so the remembered answer is stale.
+    store.liveRev += 1;
+    ensureRelated(MISSING);
+    await settle();
+    expect(calls).toEqual([`/items/${MISSING}`]);
+  });
+
   it('caches a 404 as missing', async () => {
     ensureRelated('proj-0000000Z');
     await settle();
@@ -204,10 +237,11 @@ describe('list page', () => {
   });
 
   it('does not open the cursor row when Enter is pressed on a link', async () => {
-    store.meta = {
+    metaAnswer = {
       ...META,
       sync: [{ provider: 'github', repo: 'o/r', url: 'https://github.com/o/r', issue_url: 'https://github.com/o/r/issues/' }]
-    } as never;
+    };
+    store.meta = metaAnswer as never;
     vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(600);
     vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(800);
     render(ListPage);

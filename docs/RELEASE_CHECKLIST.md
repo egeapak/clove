@@ -161,6 +161,10 @@ Drive with a real browser (Playwright MCP is fine). Check the console on every p
       is green; no console errors.
 - [ ] Navigate **from every view** to an item's detail page: board card, **list row
       (click and Enter)**, **timeline bar** — each lands on `/p/<slug>/items/<id>`.
+- [ ] Missing references: in a scratch project, point an open item's dep, a closed
+      item's dep, and a parent/relates link at ids with no item. Board, list and
+      both detail pages show them as "missing item", and the network tab has no
+      `GET api/v1/items/<missing-id>` request (no 404 in the console).
 - [ ] Timeline throughput: the 30d/90d/All ranges show days, not snapshots.
 - [ ] Timeline hover guide: moving the pointer over the plot draws a vertical guide
       line with a date chip on the top axis showing the date under the cursor
