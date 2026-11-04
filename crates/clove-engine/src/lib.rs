@@ -734,7 +734,9 @@ impl Engine {
                 // Too far behind to refresh inline — use the files instead.
                 return Ok(None);
             }
-            if !report.is_clean() {
+            // Apply bookkeeping-only reports too (touched files, an outdated
+            // `meta` row), or later reads repeat the per-file pass forever.
+            if report.needs_apply() {
                 index
                     .apply_staleness(&report, &self.issues_dir)
                     .map_err(|e| index_error(e, &self.db_path))?;

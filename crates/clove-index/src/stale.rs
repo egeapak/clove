@@ -2,11 +2,12 @@
 //!
 //! [`check_staleness`] (the `--deep` path) diffs the `.clove/issues/` directory
 //! against the index file by file: it stats every item and compares content
-//! hashes only for entries whose mtime changed (or that were touched in the last
-//! 2s — the HFS+ granularity guard). [`check_staleness_fast`] adds a
+//! hashes only for entries whose mtime or size changed (or that were touched in
+//! the last 2s — the HFS+ granularity guard). [`check_staleness_fast`] adds a
 //! directory-mtime + file-count fast path in front of it. [`apply_staleness`]
-//! re-parses and upserts the changed/new items and removes the deleted ones in a
-//! single transaction. Both read the oracle from the `items` table.
+//! re-parses and upserts the changed/new items, removes the deleted ones, and
+//! refreshes the stored mtime and size of files that moved without a content
+//! change, in a single transaction. Both read the oracle from the `items` table.
 
 use std::collections::HashMap;
 
@@ -38,6 +39,28 @@ pub struct StalenessReport {
     /// apply leaves the stored mtime behind the directory's and the fast path
     /// falls through to a re-check instead of masking the file.
     pub observed: Option<(i64, i64)>,
+    /// Indexed items whose file mtime or size moved while the content hash
+    /// stayed the same (a `touch`, a git checkout round-trip). Not a change:
+    /// [`StalenessReport::is_clean`] ignores them. [`apply_staleness`] stores
+    /// their check-time mtime and size, so later checks do not hash them again.
+    pub touched: Vec<TouchedFile>,
+    /// True when `observed` differs from the stored `meta` row, so applying this
+    /// report moves the fast path's oracle forward even when nothing changed.
+    pub meta_outdated: bool,
+}
+
+/// A file whose mtime or size moved without a content change, with the values
+/// observed at check time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TouchedFile {
+    /// The item.
+    pub id: CloveId,
+    /// File mtime, Unix epoch milliseconds.
+    pub mtime_ms: i64,
+    /// File mtime, Unix epoch nanoseconds (the `file_mtimes` column).
+    pub mtime_ns: i64,
+    /// File size in bytes.
+    pub size: i64,
 }
 
 impl StalenessReport {
@@ -51,6 +74,15 @@ impl StalenessReport {
     pub fn is_clean(&self) -> bool {
         self.change_count() == 0
     }
+
+    /// True when [`apply_staleness`] would write anything: a change, or only
+    /// bookkeeping (touched files, an outdated `meta` row). A caller that
+    /// refreshes the index applies when this is true, not only when the report
+    /// is dirty. Otherwise a clean outcome after mtimes moved is never recorded,
+    /// and every later check repeats the per-file stat pass and the hashing.
+    pub fn needs_apply(&self) -> bool {
+        !self.is_clean() || !self.touched.is_empty() || self.meta_outdated
+    }
 }
 
 /// One item file discovered on disk.
@@ -58,6 +90,8 @@ struct DiskEntry {
     id: CloveId,
     path: Utf8PathBuf,
     mtime_ms: i64,
+    mtime_ns: i64,
+    size: i64,
 }
 
 /// Scan `issues_dir` for `<id>.md` files.
@@ -95,11 +129,14 @@ fn scan_dir(issues_dir: &Utf8Path) -> Result<Vec<DiskEntry>, IndexError> {
             source,
         })?;
         let mtime_ms = mtime_to_ms(&meta);
+        let mtime_ns = mtime_to_ns(&meta);
         entries.push(DiskEntry {
             id,
             path: Utf8PathBuf::from_path_buf(entry.path())
                 .unwrap_or_else(|_| issues_dir.join(&name)),
             mtime_ms,
+            mtime_ns,
+            size: meta.len() as i64,
         });
     }
     Ok(entries)
@@ -111,6 +148,15 @@ fn mtime_to_ms(meta: &std::fs::Metadata) -> i64 {
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// File modification time as Unix epoch nanoseconds (0 if unavailable).
+fn mtime_to_ns(meta: &std::fs::Metadata) -> i64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos() as i64)
         .unwrap_or(0)
 }
 
@@ -133,8 +179,11 @@ fn dir_mtime_ms(issues_dir: &Utf8Path) -> Result<i64, IndexError> {
 /// shortcut here made such an edit invisible to `--deep` as soon as it was older
 /// than the recent-mtime window.
 ///
-/// A file is hashed when its mtime differs from the stored one, or when it was
-/// touched within the last 2 s (the coarse-mtime guard).
+/// A file is hashed when its mtime or size differs from the stored one, or when
+/// it was touched within the last 2 s (the coarse-mtime guard). The size check
+/// catches a rewrite that kept (or restored) the old mtime but changed the
+/// length. A rewrite that keeps both the mtime and the size is not detected
+/// outside the recent window; only hashing every file would catch it.
 pub fn check_staleness(
     conn: &Connection,
     issues_dir: &Utf8Path,
@@ -145,24 +194,27 @@ pub fn check_staleness(
     let cur_count = entries.len() as i64;
 
     // Per-file comparison against the items oracle.
-    let mut stored: HashMap<String, (i64, Vec<u8>)> = HashMap::new();
+    let mut stored: HashMap<String, (i64, i64, Vec<u8>)> = HashMap::new();
     {
-        let mut stmt = conn.prepare("SELECT id, file_mtime, content_hash FROM items")?;
+        let mut stmt = conn.prepare("SELECT id, file_mtime, file_size, content_hash FROM items")?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, i64>(1)?,
-                r.get::<_, Vec<u8>>(2)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, Vec<u8>>(3)?,
             ))
         })?;
         for row in rows {
-            let (id, mtime, hash) = row?;
-            stored.insert(id, (mtime, hash));
+            let (id, mtime, size, hash) = row?;
+            stored.insert(id, (mtime, size, hash));
         }
     }
 
+    let observed = (cur_dir_mtime, cur_count);
     let mut report = StalenessReport {
-        observed: Some((cur_dir_mtime, cur_count)),
+        observed: Some(observed),
+        meta_outdated: read_meta(conn)? != Some(observed),
         ..StalenessReport::default()
     };
     let mut seen = HashMap::new();
@@ -170,9 +222,10 @@ pub fn check_staleness(
         seen.insert(entry.id.as_str().to_owned(), ());
         match stored.get(entry.id.as_str()) {
             None => report.new_ids.push(entry.id.clone()),
-            Some((stored_mtime, stored_hash)) => {
+            Some((stored_mtime, stored_size, stored_hash)) => {
                 let recent = now_ms - entry.mtime_ms < RECENT_WINDOW_MS;
-                if entry.mtime_ms != *stored_mtime || recent {
+                let moved = entry.mtime_ms != *stored_mtime || entry.size != *stored_size;
+                if moved || recent {
                     // Content-hash gate: only an actual content change is stale.
                     let bytes =
                         std::fs::read(&entry.path).map_err(|source| IndexError::IoError {
@@ -181,6 +234,13 @@ pub fn check_staleness(
                         })?;
                     if content_hash8(&bytes).as_slice() != stored_hash.as_slice() {
                         report.stale_ids.push(entry.id.clone());
+                    } else if moved {
+                        report.touched.push(TouchedFile {
+                            id: entry.id.clone(),
+                            mtime_ms: entry.mtime_ms,
+                            mtime_ns: entry.mtime_ns,
+                            size: entry.size,
+                        });
                     }
                 }
             }
@@ -372,7 +432,7 @@ pub(crate) fn apply_staleness_tracked(
     report: &StalenessReport,
     issues_dir: &Utf8Path,
 ) -> Result<bool, IndexError> {
-    if report.is_clean() {
+    if !report.needs_apply() {
         return Ok(false);
     }
 
@@ -401,6 +461,7 @@ pub(crate) fn apply_staleness_tracked(
         };
         let meta = RowMeta {
             file_mtime_ms: file_mtime_ms(&path)?,
+            file_size: bytes.len() as i64,
             content_hash: content_hash8(&bytes),
             topo_rank: None,
             has_dangling_deps: false,
@@ -427,6 +488,7 @@ pub(crate) fn apply_staleness_tracked(
         }
         let meta = RowMeta {
             file_mtime_ms: file_mtime_ms(&path)?,
+            file_size: bytes.len() as i64,
             content_hash: content_hash8(&bytes),
             topo_rank: Some(old_derived.topo_rank),
             has_dangling_deps: old_derived.has_dangling,
@@ -434,6 +496,20 @@ pub(crate) fn apply_staleness_tracked(
         };
         write_row(&tx, &item, &meta)?;
         upsert_file_mtime(&tx, id, &path, &bytes)?;
+    }
+
+    // Touched files: content unchanged, so only the stat columns move. The
+    // check-time values are stored, not a fresh stat: a file rewritten since the
+    // check then still differs from the stored values and is hashed next time.
+    for touched in &report.touched {
+        tx.execute(
+            "UPDATE items SET file_mtime = ?1, file_size = ?2 WHERE id = ?3",
+            params![touched.mtime_ms, touched.size, touched.id.as_str()],
+        )?;
+        tx.execute(
+            "UPDATE file_mtimes SET mtime_ns = ?1 WHERE path = ?2",
+            params![touched.mtime_ns, format!("{}.md", touched.id)],
+        )?;
     }
 
     for id in &report.deleted_ids {
@@ -485,12 +561,7 @@ fn upsert_file_mtime(
         path: path.to_owned(),
         source,
     })?;
-    let mtime_ns = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_nanos() as i64)
-        .unwrap_or(0);
+    let mtime_ns = mtime_to_ns(&meta);
     tx.execute(
         "INSERT INTO file_mtimes (path, mtime_ns, content_hash) VALUES (?1, ?2, ?3) \
          ON CONFLICT(path) DO UPDATE SET \
@@ -803,6 +874,93 @@ mod tests {
         // After the apply, the deep path is clean again.
         index.apply_staleness(&report, &fx.issues).unwrap();
         assert!(index.check_staleness(&fx.issues).unwrap().is_clean());
+    }
+
+    #[test]
+    fn deep_catches_same_mtime_rewrite_when_the_size_changed() {
+        // A rewrite that restores the indexed mtime exactly (`touch -r` from a
+        // saved copy). The mtime matches, so only the stored size reveals it.
+        let fx = fixture(3);
+        reindex(&fx.issues, &fx.db).unwrap();
+        backdate(&fx.issues);
+        reindex(&fx.issues, &fx.db).unwrap();
+
+        let id = id_for(1);
+        let path = fx.issues.join(format!("{id}.md"));
+        let indexed = filetime::FileTime::from_unix_time(1_600_000_000, 0);
+        std::fs::write(&path, item_md(&id, "Item 1", "a longer MUTATED body")).unwrap();
+        filetime::set_file_mtime(&path, indexed).unwrap();
+        backdate_dir(&fx.issues);
+
+        let index = Index::open(&fx.db).unwrap();
+        let report = index.check_staleness(&fx.issues).unwrap();
+        assert_eq!(
+            report.stale_ids,
+            vec![CloveId::new(&id).unwrap()],
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn touched_files_are_recorded_so_the_next_check_does_not_hash_them() {
+        // Every file's mtime moves with no content change (a `touch`, a git
+        // checkout round-trip). The report is clean but needs an apply; after
+        // it, the stored mtimes match and the `meta` row is current.
+        let fx = fixture(4);
+        reindex(&fx.issues, &fx.db).unwrap();
+        backdate(&fx.issues);
+        reindex(&fx.issues, &fx.db).unwrap();
+
+        let later = filetime::FileTime::from_unix_time(1_600_000_500, 0);
+        for entry in std::fs::read_dir(&fx.issues).unwrap() {
+            filetime::set_file_mtime(entry.unwrap().path(), later).unwrap();
+        }
+        filetime::set_file_mtime(fx.issues.as_std_path(), later).unwrap();
+
+        let mut index = Index::open(&fx.db).unwrap();
+        let report = index.check_staleness(&fx.issues).unwrap();
+        assert!(report.is_clean(), "{report:?}");
+        assert_eq!(report.touched.len(), 4, "{report:?}");
+        assert!(report.meta_outdated, "the directory mtime moved");
+        assert!(report.needs_apply());
+
+        let recomputed = apply_staleness_tracked(index.conn_mut(), &report, &fx.issues).unwrap();
+        assert!(!recomputed, "a touch changes no topology");
+
+        let after = index.check_staleness(&fx.issues).unwrap();
+        assert!(after.touched.is_empty(), "{after:?}");
+        assert!(!after.meta_outdated, "{after:?}");
+        assert!(!after.needs_apply(), "{after:?}");
+        // And the fast path's oracle matches again: O(readdir) clean.
+        assert_eq!(
+            index.check_staleness_fast(&fx.issues).unwrap(),
+            StalenessReport::default()
+        );
+    }
+
+    #[test]
+    fn a_clean_directory_bump_refreshes_meta() {
+        // A temp file created and removed bumps the directory mtime only. The
+        // fast path falls through to the per-file pass; applying the clean
+        // report must move `meta` forward so the next fast check is O(readdir).
+        let fx = fixture(2);
+        reindex(&fx.issues, &fx.db).unwrap();
+        backdate(&fx.issues);
+        reindex(&fx.issues, &fx.db).unwrap();
+        filetime::set_file_mtime(
+            fx.issues.as_std_path(),
+            filetime::FileTime::from_unix_time(1_600_000_900, 0),
+        )
+        .unwrap();
+
+        let mut index = Index::open(&fx.db).unwrap();
+        let report = index.check_staleness_fast(&fx.issues).unwrap();
+        assert!(report.is_clean() && report.touched.is_empty(), "{report:?}");
+        assert!(report.meta_outdated && report.needs_apply(), "{report:?}");
+        index.apply_staleness(&report, &fx.issues).unwrap();
+
+        let next = index.check_staleness_fast(&fx.issues).unwrap();
+        assert_eq!(next.observed, None, "fast path short-circuits: {next:?}");
     }
 
     // ---- topology-change guard (M4) ----------------------------------------

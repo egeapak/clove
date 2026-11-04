@@ -24,9 +24,11 @@ use thiserror::Error;
 /// **removed** `items_fts`/`fts_map` outright: search no longer runs through the
 /// index at all (read-path roadmap §6.1 — the FTS matched whole ASCII-folded
 /// tokens where every other surface matches Unicode substrings, so it answered
-/// a narrower question, and it was 77% of the file on a 10k store). The index is
-/// a rebuildable cache, so each bump just rebuilds.
-pub const SCHEMA_VERSION: i64 = 6;
+/// a narrower question, and it was 77% of the file on a 10k store). v7 added
+/// `items.file_size`, so the staleness check also hashes a file whose size
+/// changed while its mtime did not (DESIGN §6.2). The index is a rebuildable
+/// cache, so each bump just rebuilds.
+pub const SCHEMA_VERSION: i64 = 7;
 
 /// Complete DDL for the index (DESIGN §6.1). Kept as one reviewable block.
 /// PRAGMAs that must run per-connection (not persisted) are applied separately
@@ -60,6 +62,7 @@ CREATE TABLE items (
     updated_at TEXT NOT NULL,
     closed_at TEXT,
     file_mtime INTEGER NOT NULL,
+    file_size INTEGER NOT NULL DEFAULT -1,
     content_hash BLOB NOT NULL,
     source_system TEXT,
     external_ref TEXT
@@ -673,11 +676,9 @@ mod tests {
         // A tripwire, on purpose: bumping the version invalidates every index in
         // the wild, so it should never happen as a side effect. v6 drops
         // `items_fts`/`fts_map` — search no longer touches the index, so the FTS
-        // was 77% of a 10k index file maintained for nothing.
-        assert_eq!(
-            SCHEMA_VERSION, 6,
-            "index schema v6 removed the full-text tables"
-        );
+        // was 77% of a 10k index file maintained for nothing. v7 adds
+        // `items.file_size` for the staleness size check.
+        assert_eq!(SCHEMA_VERSION, 7, "index schema v7 added items.file_size");
     }
 
     /// A symlinked `index.db` is refused rather than opened: SQLite would write

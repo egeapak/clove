@@ -809,10 +809,12 @@ None of these is a regression from this work — the first two are pre-existing 
   `clove ls --q WWMARK` and `clove --deep ls --q WWMARK` both answered `total=0`
   from the index while `--no-index` answered `total=3`. The short-circuit now
   lives only in `check_staleness_fast`; the deep path always stats every file
-  and hashes the ones whose mtime moved. One gap remains: a rewrite that sets
-  the file's mtime back to exactly the indexed value (for example
-  `touch -r` from a saved copy) is caught only while that indexed mtime is
-  under 2 s old, so in practice not at all. Pinned by
+  and hashes the ones whose mtime or size moved (index schema 7 stores the
+  size). With a running `cloved`, `--deep` reads skip the daemon, which only
+  runs the fast check. A clean report whose mtimes moved is now applied too,
+  so touched files are not re-hashed on every later check and the `meta` row
+  catches up. One gap remains: a rewrite that keeps both the exact indexed
+  mtime and the exact size is caught only inside the 2 s window. Pinned by
   `deep_catches_old_inplace_edit_with_unchanged_directory` (clove-index) and
   `ls_deep_catches_old_in_place_edit` (CLI).
 - **`clove dep tree --format json` omits `repeat_ref`**, which the MCP and web
