@@ -484,7 +484,7 @@ expression: tools
     "name": "clove_dep_remove"
   },
   {
-    "description": "Render the dependency tree rooted at an item, with per-node status, `ready`, and `cycle_ref` markers.",
+    "description": "Render the dependency tree rooted at an item, with per-node status, `ready`, `cycle_ref`, and `repeat_ref` markers. `repeat_ref` marks a subtree that is already expanded elsewhere in the tree; it has no children here.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {

@@ -167,6 +167,9 @@ Drive with a real browser (Playwright MCP is fine). Check the console on every p
       (legible in a light and a dark theme, chip stays inside the plot at both
       edges, bar tooltips and bar clicks still work); it disappears when the
       pointer leaves the plot or enters the label column.
+- [ ] Detail dependency tree matches `clove dep tree <id>` for an item with a shared
+      dependency: the repeated node shows `(repeat)` (the CLI shows `(*)`) and no
+      children, and a cycle shows `(cycle)`.
 - [ ] Write path: add a label in the detail sidebar → it lands in the item file.
 - [ ] Live push: change the item from the CLI while (a) the List view and (b) its
       detail page — opened **both** from the board **and** by direct URL/refresh — is
