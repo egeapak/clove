@@ -112,13 +112,13 @@ describe('timeline hover guide', () => {
 describe('timeline axis ticks', () => {
   it('aligns the first and last tick labels inward so they stay inside the plot', async () => {
     const { axis } = await renderTimeline();
-    const ticks = [...axis.querySelectorAll('.tick')];
+    const ticks = [...axis.querySelectorAll<HTMLElement>('.tick')];
     expect(ticks.length).toBeGreaterThanOrEqual(5);
     const first = ticks[0];
     const last = ticks[ticks.length - 1];
-    expect(first.getAttribute('style')).toBe('left: 0%;');
+    expect(first.style.left).toBe('0%');
     expect(first.classList.contains('tick-start')).toBe(true);
-    expect(last.getAttribute('style')).toBe('left: 100%;');
+    expect(last.style.left).toBe('100%');
     expect(last.classList.contains('tick-end')).toBe(true);
     expect(last.textContent?.trim()).toBe(formatAxisDate(DOMAIN_MAX));
     for (const t of ticks.slice(1, -1)) {
