@@ -1,9 +1,10 @@
 //! Staleness detection and incremental resync (T-S03, DESIGN §6.2/§6.4).
 //!
-//! [`check_staleness`] diffs the `.clove/issues/` directory against the index
-//! cheaply: a directory-mtime + file-count fast path, falling back to a per-file
-//! content-hash comparison only for entries whose mtime changed (or that were
-//! touched in the last 2s — the HFS+ granularity guard). [`apply_staleness`]
+//! [`check_staleness`] (the `--deep` path) diffs the `.clove/issues/` directory
+//! against the index file by file: it stats every item and compares content
+//! hashes only for entries whose mtime changed (or that were touched in the last
+//! 2s — the HFS+ granularity guard). [`check_staleness_fast`] adds a
+//! directory-mtime + file-count fast path in front of it. [`apply_staleness`]
 //! re-parses and upserts the changed/new items and removes the deleted ones in a
 //! single transaction. Both read the oracle from the `items` table.
 
@@ -59,16 +60,15 @@ struct DiskEntry {
     mtime_ms: i64,
 }
 
-/// Scan `issues_dir` for `<id>.md` files, returning `(entries, any_recent)`.
+/// Scan `issues_dir` for `<id>.md` files.
 /// Symlinks, directories (comment dirs), temp files, and names that are not
 /// valid ids are skipped (mirrors the file store's scan rules, §12.3).
-fn scan_dir(issues_dir: &Utf8Path, now_ms: i64) -> Result<(Vec<DiskEntry>, bool), IndexError> {
+fn scan_dir(issues_dir: &Utf8Path) -> Result<Vec<DiskEntry>, IndexError> {
     let read_dir = std::fs::read_dir(issues_dir).map_err(|source| IndexError::IoError {
         path: issues_dir.to_owned(),
         source,
     })?;
     let mut entries = Vec::new();
-    let mut any_recent = false;
     for entry in read_dir {
         let entry = entry.map_err(|source| IndexError::IoError {
             path: issues_dir.to_owned(),
@@ -95,9 +95,6 @@ fn scan_dir(issues_dir: &Utf8Path, now_ms: i64) -> Result<(Vec<DiskEntry>, bool)
             source,
         })?;
         let mtime_ms = mtime_to_ms(&meta);
-        if now_ms - mtime_ms < RECENT_WINDOW_MS {
-            any_recent = true;
-        }
         entries.push(DiskEntry {
             id,
             path: Utf8PathBuf::from_path_buf(entry.path())
@@ -105,7 +102,7 @@ fn scan_dir(issues_dir: &Utf8Path, now_ms: i64) -> Result<(Vec<DiskEntry>, bool)
             mtime_ms,
         });
     }
-    Ok((entries, any_recent))
+    Ok(entries)
 }
 
 /// File modification time as Unix epoch milliseconds (0 if unavailable).
@@ -126,32 +123,28 @@ fn dir_mtime_ms(issues_dir: &Utf8Path) -> Result<i64, IndexError> {
     Ok(mtime_to_ms(&meta))
 }
 
-/// Detect which items differ between `issues_dir` and the index (T-S03).
+/// Detect which items differ between `issues_dir` and the index (T-S03) — the
+/// thorough per-file pass behind `--deep`.
+///
+/// This **always** stats every item file and compares it with the `items`
+/// oracle; it never trusts the directory mtime + file count. That short-circuit
+/// belongs to [`check_staleness_fast`] only. An in-place (truncate-and-rewrite)
+/// edit changes the file's mtime but not the directory's, so a directory-level
+/// shortcut here made such an edit invisible to `--deep` as soon as it was older
+/// than the recent-mtime window.
+///
+/// A file is hashed when its mtime differs from the stored one, or when it was
+/// touched within the last 2 s (the coarse-mtime guard).
 pub fn check_staleness(
     conn: &Connection,
     issues_dir: &Utf8Path,
 ) -> Result<StalenessReport, IndexError> {
     let now_ms = chrono::Utc::now().timestamp_millis();
-    let (entries, any_recent) = scan_dir(issues_dir, now_ms)?;
+    let entries = scan_dir(issues_dir)?;
     let cur_dir_mtime = dir_mtime_ms(issues_dir)?;
     let cur_count = entries.len() as i64;
 
-    // Level 1 — directory fast path. Trust it only when nothing was touched very
-    // recently (coarse-mtime guard): a clean tree skips all hashing.
-    let meta: Option<(i64, i64)> = conn
-        .query_row(
-            "SELECT dir_mtime, file_count FROM meta WHERE id = 1",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    if let Some((dir_mtime, file_count)) = meta {
-        if !any_recent && dir_mtime == cur_dir_mtime && file_count == cur_count {
-            return Ok(StalenessReport::default());
-        }
-    }
-
-    // Level 2 — per-file comparison against the items oracle.
+    // Per-file comparison against the items oracle.
     let mut stored: HashMap<String, (i64, Vec<u8>)> = HashMap::new();
     {
         let mut stmt = conn.prepare("SELECT id, file_mtime, content_hash FROM items")?;
@@ -763,6 +756,53 @@ mod tests {
             1,
             "deep path stats the file and catches the change"
         );
+    }
+
+    #[test]
+    fn deep_catches_old_inplace_edit_with_unchanged_directory() {
+        // An in-place (truncate-and-rewrite) edit older than the recent-mtime
+        // window, with the directory mtime and file count still matching `meta`.
+        // The fast path trusts the directory and misses it (its documented
+        // tradeoff); the deep path must not take that shortcut.
+        let fx = fixture(5);
+        reindex(&fx.issues, &fx.db).unwrap();
+        backdate(&fx.issues);
+        reindex(&fx.issues, &fx.db).unwrap(); // meta + file mtimes = backdated
+
+        let id = id_for(2);
+        let path = fx.issues.join(format!("{id}.md"));
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(&path)
+                .unwrap();
+            f.write_all(item_md(&id, "Item 2", "MUTATED body").as_bytes())
+                .unwrap();
+        }
+        // The edit is old (outside the recent window) but newer than the
+        // indexed mtime; the directory looks untouched.
+        let edited = filetime::FileTime::from_unix_time(1_600_000_100, 0);
+        filetime::set_file_mtime(&path, edited).unwrap();
+        backdate_dir(&fx.issues);
+
+        let mut index = Index::open(&fx.db).unwrap();
+        assert!(
+            index.check_staleness_fast(&fx.issues).unwrap().is_clean(),
+            "fast path trusts the unchanged directory"
+        );
+        let report = index.check_staleness(&fx.issues).unwrap();
+        assert_eq!(
+            report.stale_ids,
+            vec![CloveId::new(&id).unwrap()],
+            "{report:?}"
+        );
+        assert!(report.new_ids.is_empty() && report.deleted_ids.is_empty());
+
+        // After the apply, the deep path is clean again.
+        index.apply_staleness(&report, &fx.issues).unwrap();
+        assert!(index.check_staleness(&fx.issues).unwrap().is_clean());
     }
 
     // ---- topology-change guard (M4) ----------------------------------------
