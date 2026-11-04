@@ -1,0 +1,52 @@
+---
+source: crates/clove-tui/src/snapshot.rs
+expression: rendered
+---
+┌ New item ────────────────────────────┐
+│ ▌   Title: …ge of the form popup ok▏ │
+│      Type: feature                   │
+│  Priority: p2                        │
+│  Assignee:                           │
+│    Labels:                           │
+│    Parent:                           │
+│      Deps:                           │
+│      Body:                           │
+│                                      │
+│                                      │
+│ Ctrl-S save · Esc cancel · Tab/↑↓ fi │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+└──────────────────────────────────────┘

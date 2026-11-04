@@ -1491,6 +1491,53 @@ mod tests {
     }
 
     #[test]
+    fn form_hscroll_keeps_labels_and_cursor_on_glyph() {
+        // Regression: a caret past the right edge of a long value scrolled the
+        // whole form sideways, so every field label was clipped. Only the caret
+        // line's value may scroll; the hardware cursor stays on the glyph. Wide
+        // chars (`日本`) check that the column math holds across a cut.
+        use ratatui::backend::{Backend, TestBackend};
+        use ratatui::Terminal;
+
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        app.caret_glyph = true;
+        app.start_new();
+        let row_text = |t: &Terminal<TestBackend>, y: u16| -> String {
+            let buf = t.backend().buffer();
+            (0..buf.area.width)
+                .map(|x| buf.cell((x, y)).map(|c| c.symbol()).unwrap_or(""))
+                .collect()
+        };
+        let long = "日本 a long value that runs far past the right edge of the popup 日本 end";
+
+        for field in [Field::Title, Field::Body] {
+            while app.form.focused() != field {
+                app.form_next_field();
+            }
+            for c in long.chars() {
+                app.form.insert_char(c);
+            }
+            let mut t = Terminal::new(TestBackend::new(80, 30)).unwrap();
+            t.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+            let pos = t.backend_mut().get_cursor_position().unwrap();
+            assert_eq!(
+                t.backend().buffer().cell((pos.x, pos.y)).unwrap().symbol(),
+                "▏",
+                "{field:?}: hardware cursor on the caret glyph"
+            );
+            let all: String = (0..30).map(|y| row_text(&t, y)).collect();
+            for label in ["Title:", "Type:", "Priority:", "Labels:", "Body:"] {
+                assert!(all.contains(label), "{field:?}: label {label} visible");
+            }
+            assert!(
+                row_text(&t, pos.y).contains("…"),
+                "{field:?}: scrolled value is marked"
+            );
+        }
+    }
+
+    #[test]
     fn form_glyph_and_live_modes_render_identically_except_the_caret() {
         // Regression: a body ending in a newline must render the same lines with
         // the glyph on (snapshot/PNG) and off (live), so the hardware cursor never

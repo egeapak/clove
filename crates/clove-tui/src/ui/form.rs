@@ -68,11 +68,13 @@ pub(crate) fn render_form(f: &mut Frame, app: &App, area: Rect) {
             if !focused && shown.last() == Some(&"") && shown.len() > 1 {
                 shown.pop();
             }
+            // Two spans per line (indent, text) so a horizontal scroll can shift
+            // the text and keep the indent, like the label on a field row.
             for raw in &shown {
-                lines.push(Line::from(Span::styled(
-                    format!("  {raw}"),
-                    Style::default().fg(Color::Reset),
-                )));
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled((*raw).to_owned(), Style::default().fg(Color::Reset)),
+                ]));
             }
             continue;
         }
@@ -138,13 +140,27 @@ pub(crate) fn render_form(f: &mut Frame, app: &App, area: Rect) {
     };
     let inner_h = popup.height.saturating_sub(2);
     let inner_w = popup.width.saturating_sub(4); // 2 borders + 2 padding cols
-                                                 // Vertical scroll so the caret (or, for enum fields, the focused row) stays
-                                                 // visible; horizontal scroll so a caret past the right edge of a long value
-                                                 // is brought back into view instead of vanishing (blind typing).
+
+    // Vertical scroll so the caret (or, for enum fields, the focused row) stays
+    // visible.
     let focus_line = caret.map(|(l, _)| l).unwrap_or(cursor_line);
     let scroll = focus_line.saturating_sub(inner_h.saturating_sub(2));
-    let caret_col = caret.map(|(_, c)| c).unwrap_or(0);
-    let hscroll = caret_col.saturating_sub(inner_w.saturating_sub(1));
+    // Horizontal scroll so a caret past the right edge of a long value is
+    // brought back into view instead of vanishing (blind typing). Only the
+    // caret line's *value* scrolls: the labels of every row (and the caret
+    // row's own label or body indent) stay in place.
+    let hscroll = match caret {
+        Some((line, col)) => {
+            let hscroll = col.saturating_sub(inner_w.saturating_sub(1));
+            if hscroll > 0 {
+                if let Some(l) = lines.get_mut(line as usize) {
+                    scroll_value(l, hscroll);
+                }
+            }
+            hscroll
+        }
+        None => 0,
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(ACCENT))
@@ -153,7 +169,7 @@ pub(crate) fn render_form(f: &mut Frame, app: &App, area: Rect) {
         .style(Style::default().bg(Color::Black));
     f.render_widget(Clear, popup);
     f.render_widget(
-        Paragraph::new(lines).block(block).scroll((scroll, hscroll)),
+        Paragraph::new(lines).block(block).scroll((scroll, 0)),
         popup,
     );
 
@@ -171,6 +187,32 @@ pub(crate) fn render_form(f: &mut Frame, app: &App, area: Rect) {
             f.set_cursor_position((inner_x + vis_col, inner_y + (line - scroll)));
         }
     }
+}
+
+/// Scroll the value of a caret line `cols` display columns to the left. The
+/// line is `[prefix, value]` (a field label or the body indent, then the text);
+/// the prefix is kept. The first visible column of the value becomes `…` so the
+/// hidden start of the value is marked. Every other column keeps its place, so
+/// the caret lands at screen column `col - cols`.
+fn scroll_value(line: &mut Line, cols: u16) {
+    let Some(span) = line.spans.get_mut(1) else {
+        return;
+    };
+    // Hide `cols + 1` columns: `cols` scroll off, one more makes room for `…`.
+    let hide = cols as usize + 1;
+    let mut hidden = 0usize;
+    let mut rest = "";
+    for (b, c) in span.content.char_indices() {
+        if hidden >= hide {
+            rest = &span.content[b..];
+            break;
+        }
+        hidden += c.width().unwrap_or(0);
+    }
+    // A wide char that straddles the cut is hidden whole; pad its visible half
+    // with a space so the columns after it stay aligned.
+    let pad = " ".repeat(hidden.saturating_sub(hide));
+    span.content = format!("…{pad}{rest}").into();
 }
 
 /// The display-column width of the first `chars` characters of `s` (the caret's
