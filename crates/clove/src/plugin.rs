@@ -60,12 +60,14 @@ pub struct PluginInfo {
 
 /// The candidate binary name for a dispatch path, e.g. `["sync", "github"]` →
 /// `clove-sync-github` (plus the platform executable suffix, `.exe` on Windows).
+#[cfg(test)]
 fn binary_name(segments: &[&str]) -> String {
     binary_name_with(segments, std::env::consts::EXE_SUFFIX)
 }
 
 /// [`binary_name`] with the executable suffix injected — see
-/// [`crate::registry::install::installed_binary_path_with`] for why.
+/// [`crate::registry::install::installed_binary_path_with`] for why. The search
+/// itself tries every extension in [`exe_extensions`], one at a time.
 fn binary_name_with(segments: &[&str], exe_suffix: &str) -> String {
     format!("clove-{}{exe_suffix}", segments.join("-"))
 }
@@ -132,10 +134,94 @@ fn is_executable(path: &Utf8Path) -> bool {
     }
     #[cfg(not(unix))]
     {
-        // Known gap (PLUGIN_SYSTEM.md §5): Windows should also match `PATHEXT`
-        // (`.cmd`/`.bat`/`.ps1`), not just `EXE_SUFFIX`. Deferred — the CI target
-        // is Unix; a plugin shipped as a non-`.exe` script is not yet discovered.
+        // Windows has no execute bit: a file is runnable because of its
+        // extension. Every caller only builds or accepts names that carry an
+        // extension from [`exe_extensions`] (`PATHEXT`), so a plain file is
+        // enough here.
         true
+    }
+}
+
+/// The `PATHEXT` used when the variable is unset or lists nothing usable. This
+/// is the Windows default minus the legacy script hosts (`.VBS`, `.JS`, …),
+/// which clove would have no way to run.
+const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
+
+/// The executable extensions to try, in precedence order, for one plugin stem.
+///
+/// On Unix this is only the empty suffix: a plugin is `clove-<x>` with an
+/// execute bit. On Windows it is `$PATHEXT` (§5), so a plugin shipped as
+/// `clove-<x>.cmd`, `.bat`, or (when the user lists it) `.ps1` is found, not
+/// only `clove-<x>.exe`.
+fn exe_extensions() -> Vec<String> {
+    if cfg!(windows) {
+        extensions_from_pathext(std::env::var("PATHEXT").ok().as_deref())
+    } else {
+        vec![String::new()]
+    }
+}
+
+/// Parse a `PATHEXT` value into lowercase extensions, in order and deduplicated.
+///
+/// An entry that does not start with `.` is ignored, as Windows itself does. An
+/// unset or empty value falls back to [`DEFAULT_PATHEXT`]. `.exe` is always
+/// present (appended when the value leaves it out), because every plugin that
+/// `cargo install` writes is an `.exe`, and an unusual `PATHEXT` must not hide
+/// the shipped plugins.
+fn extensions_from_pathext(value: Option<&str>) -> Vec<String> {
+    let parse = |v: &str| -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for entry in v.split(';') {
+            let ext = entry.trim().to_ascii_lowercase();
+            if ext.len() > 1 && ext.starts_with('.') && !out.contains(&ext) {
+                out.push(ext);
+            }
+        }
+        out
+    };
+    let mut exts = value.map(parse).unwrap_or_default();
+    if exts.is_empty() {
+        exts = parse(DEFAULT_PATHEXT);
+    }
+    if !exts.iter().any(|e| e == ".exe") {
+        exts.push(".exe".to_owned());
+    }
+    exts
+}
+
+/// The extension of `file_name` that is in `exts`, compared without regard to
+/// case (Windows file names are case-insensitive), as an index into `exts`.
+///
+/// The empty extension (Unix) matches every name. Returns the stem (the name
+/// without the extension) with the index.
+fn split_exe_extension<'a>(file_name: &'a str, exts: &[String]) -> Option<(&'a str, usize)> {
+    exts.iter().enumerate().find_map(|(rank, ext)| {
+        if ext.is_empty() {
+            return Some((file_name, rank));
+        }
+        let cut = file_name.len().checked_sub(ext.len())?;
+        let (stem, tail) = (file_name.get(..cut)?, file_name.get(cut..)?);
+        tail.eq_ignore_ascii_case(ext).then_some((stem, rank))
+    })
+}
+
+/// The `Command` that runs the plugin at `path`.
+///
+/// `.exe`/`.com` files, and every Unix plugin, run directly. Rust's standard
+/// library runs a `.bat`/`.cmd` file through `cmd.exe` itself, with argument
+/// escaping. A `.ps1` script cannot be started by `CreateProcess`, so it runs
+/// as `powershell.exe -NoLogo -NoProfile -File <path> …`. The user's execution
+/// policy still applies; clove does not bypass it.
+fn plugin_command(path: &Utf8Path) -> Command {
+    if path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("ps1"))
+    {
+        let mut cmd = Command::new("powershell.exe");
+        cmd.args(["-NoLogo", "-NoProfile", "-File"]).arg(path);
+        cmd
+    } else {
+        Command::new(path)
     }
 }
 
@@ -161,14 +247,21 @@ pub fn resolve(segments: &[&str]) -> Option<Utf8PathBuf> {
     if !segments.iter().all(|s| is_valid_segment(s)) {
         return None;
     }
-    let name = binary_name(segments);
-    for dir in search_dirs() {
-        let candidate = dir.join(&name);
-        if is_executable(&candidate) {
-            return Some(candidate);
-        }
-    }
-    None
+    let exts = exe_extensions();
+    search_dirs()
+        .iter()
+        .find_map(|dir| resolve_in(dir, segments, &exts))
+}
+
+/// The first executable `clove-<segments>` in `dir`, trying `exts` in order.
+///
+/// Directory comes before extension, as in a Windows command lookup: a
+/// `clove-foo.cmd` early on the search path wins over a `clove-foo.exe` later on
+/// it, and within one directory `PATHEXT` order decides.
+fn resolve_in(dir: &Utf8Path, segments: &[&str], exts: &[String]) -> Option<Utf8PathBuf> {
+    exts.iter()
+        .map(|ext| dir.join(binary_name_with(segments, ext)))
+        .find(|candidate| is_executable(candidate))
 }
 
 /// The ordered umbrella candidate *home multiplexers* to try for a `<mux>
@@ -210,15 +303,24 @@ pub fn resolve_mux(mux: &str, provider: &str) -> Option<Utf8PathBuf> {
 /// sorted by name. The host's own adjacent binaries (`clove`, `cloved`) never
 /// carry the `clove-` prefix and so are excluded automatically.
 pub fn list() -> Vec<PluginInfo> {
-    let suffix = std::env::consts::EXE_SUFFIX;
+    list_in(&search_dirs(), &exe_extensions())
+}
 
+/// [`list`] over explicit search dirs and extensions, so the extension rules are
+/// testable on every platform.
+fn list_in(dirs: &[Utf8PathBuf], exts: &[String]) -> Vec<PluginInfo> {
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut plugins: Vec<PluginInfo> = Vec::new();
 
-    for dir in search_dirs() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
             continue;
         };
+        // Within one directory the best-ranked extension wins (`PATHEXT`
+        // order, as [`resolve_in`] tries them), whatever order `read_dir`
+        // returns the files in. Keyed by name → (rank, path).
+        let mut best: std::collections::BTreeMap<String, (usize, Utf8PathBuf)> =
+            std::collections::BTreeMap::new();
         for entry in entries.flatten() {
             let Ok(file_name) = entry.file_name().into_string() else {
                 continue;
@@ -228,24 +330,30 @@ pub fn list() -> Vec<PluginInfo> {
             if file_name == "clove" || file_name == "cloved" {
                 continue;
             }
+            let Some((stem, rank)) = split_exe_extension(&file_name, exts) else {
+                continue;
+            };
             // The same rule `provenance::bare_subcommand` applies, from the same
             // function — `require_suffix` is the one deliberate difference, and
-            // it is documented there. These were two inline copies that had
-            // already drifted on the empty-remainder check.
-            let Some(name) =
-                crate::registry::provenance::subcommand_of_file(&file_name, suffix, true)
-            else {
+            // it is documented there. The extension is already stripped above,
+            // so no suffix is passed here.
+            let Some(name) = crate::registry::provenance::subcommand_of_file(stem, "", true) else {
                 continue;
             };
             let path = dir.join(&file_name);
             if !is_executable(&path) {
                 continue;
             }
-            if seen.insert(name.to_owned()) {
-                plugins.push(PluginInfo {
-                    name: name.to_owned(),
-                    path,
-                });
+            match best.get(name) {
+                Some((held, _)) if *held <= rank => {}
+                _ => {
+                    best.insert(name.to_owned(), (rank, path));
+                }
+            }
+        }
+        for (name, (_, path)) in best {
+            if seen.insert(name.clone()) {
+                plugins.push(PluginInfo { name, path });
             }
         }
     }
@@ -368,7 +476,7 @@ pub fn probe_info(path: &Utf8Path) -> Option<ProbedInfo> {
     use std::io::Read;
     use std::process::Stdio;
 
-    let mut child = Command::new(path.as_std_path())
+    let mut child = plugin_command(path)
         .arg("--clove-plugin-info")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -622,7 +730,7 @@ pub fn run_plugin(
     command: &str,
     provider: Option<&str>,
 ) -> Result<ExitCode, CloveError> {
-    let mut cmd = Command::new(path);
+    let mut cmd = plugin_command(path);
     for segment in subcommand_name_echo {
         cmd.arg(segment);
     }
@@ -704,6 +812,157 @@ mod tests {
             binary_name(&["echo"]),
             format!("clove-echo{}", std::env::consts::EXE_SUFFIX)
         );
+    }
+
+    fn exts(list: &[&str]) -> Vec<String> {
+        list.iter().map(|e| (*e).to_owned()).collect()
+    }
+
+    /// Write an executable file (the execute bit matters on Unix only).
+    fn touch_exec(path: &Utf8Path) {
+        std::fs::write(path, b"").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    #[test]
+    fn pathext_is_parsed_in_order_lowercased_and_deduped() {
+        assert_eq!(
+            extensions_from_pathext(Some(".COM;.EXE;.BAT;.CMD;.VBS;.PS1")),
+            exts(&[".com", ".exe", ".bat", ".cmd", ".vbs", ".ps1"])
+        );
+        // Blank entries, entries without a dot, and repeats are dropped.
+        assert_eq!(
+            extensions_from_pathext(Some(" .Cmd ;;cmd;.;.CMD;.exe")),
+            exts(&[".cmd", ".exe"])
+        );
+    }
+
+    #[test]
+    fn pathext_falls_back_and_always_keeps_exe() {
+        let default = exts(&[".com", ".exe", ".bat", ".cmd"]);
+        assert_eq!(extensions_from_pathext(None), default);
+        assert_eq!(extensions_from_pathext(Some("")), default);
+        assert_eq!(extensions_from_pathext(Some(";nodot;")), default);
+        // A PATHEXT without `.exe` still finds the cargo-installed plugins.
+        assert_eq!(
+            extensions_from_pathext(Some(".CMD;.PS1")),
+            exts(&[".cmd", ".ps1", ".exe"])
+        );
+    }
+
+    #[test]
+    fn exe_extensions_match_the_platform() {
+        let found = exe_extensions();
+        if cfg!(windows) {
+            assert!(found.iter().any(|e| e == ".exe"));
+        } else {
+            assert_eq!(found, exts(&[""]));
+        }
+    }
+
+    #[test]
+    fn split_exe_extension_ignores_case_and_reports_rank() {
+        let win = exts(&[".exe", ".cmd", ".ps1"]);
+        assert_eq!(
+            split_exe_extension("clove-foo.exe", &win),
+            Some(("clove-foo", 0))
+        );
+        assert_eq!(
+            split_exe_extension("clove-foo.CMD", &win),
+            Some(("clove-foo", 1))
+        );
+        assert_eq!(
+            split_exe_extension("clove-foo.Ps1", &win),
+            Some(("clove-foo", 2))
+        );
+        assert_eq!(split_exe_extension("clove-foo", &win), None);
+        assert_eq!(split_exe_extension("clove-foo.txt", &win), None);
+        // A multi-byte name never panics on the cut.
+        assert_eq!(split_exe_extension("é", &win), None);
+        // Unix: the empty extension matches the whole name.
+        assert_eq!(
+            split_exe_extension("clove-foo", &exts(&[""])),
+            Some(("clove-foo", 0))
+        );
+    }
+
+    #[test]
+    fn resolve_in_finds_script_plugins_in_pathext_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = Utf8Path::from_path(tmp.path()).unwrap();
+        let win = exts(&[".exe", ".bat", ".cmd", ".ps1"]);
+
+        touch_exec(&dir.join("clove-script.cmd"));
+        assert_eq!(
+            resolve_in(dir, &["script"], &win),
+            Some(dir.join("clove-script.cmd"))
+        );
+        touch_exec(&dir.join("clove-ps.ps1"));
+        assert_eq!(
+            resolve_in(dir, &["ps"], &win),
+            Some(dir.join("clove-ps.ps1"))
+        );
+        // `.exe` ranks before `.cmd`, so it wins when both exist.
+        touch_exec(&dir.join("clove-script.exe"));
+        assert_eq!(
+            resolve_in(dir, &["script"], &win),
+            Some(dir.join("clove-script.exe"))
+        );
+        // An extension outside the list is not a plugin.
+        touch_exec(&dir.join("clove-text.txt"));
+        assert_eq!(resolve_in(dir, &["text"], &win), None);
+    }
+
+    #[test]
+    fn list_in_enumerates_script_plugins_and_prefers_the_best_extension() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = Utf8Path::from_path(tmp.path()).unwrap().join("a");
+        let second = Utf8Path::from_path(tmp.path()).unwrap().join("b");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        let win = exts(&[".exe", ".bat", ".cmd", ".ps1"]);
+
+        touch_exec(&first.join("clove-both.cmd"));
+        touch_exec(&first.join("clove-both.exe"));
+        touch_exec(&first.join("clove-bat.BAT"));
+        touch_exec(&first.join("clove-notes.txt"));
+        touch_exec(&first.join("clove-bare"));
+        // A later directory never outranks an earlier one, whatever the extension.
+        touch_exec(&second.join("clove-bat.exe"));
+        touch_exec(&second.join("clove-ps.ps1"));
+
+        let found = list_in(&[first.clone(), second.clone()], &win);
+        let pairs: Vec<(&str, &Utf8Path)> = found
+            .iter()
+            .map(|p| (p.name.as_str(), p.path.as_path()))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("bat", first.join("clove-bat.BAT").as_path()),
+                ("both", first.join("clove-both.exe").as_path()),
+                ("ps", second.join("clove-ps.ps1").as_path()),
+            ]
+        );
+    }
+
+    #[test]
+    fn ps1_plugins_run_through_powershell() {
+        let cmd = plugin_command(Utf8Path::new("C:/bin/clove-foo.PS1"));
+        assert_eq!(cmd.get_program(), "powershell.exe");
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(
+            args,
+            ["-NoLogo", "-NoProfile", "-File", "C:/bin/clove-foo.PS1"]
+        );
+
+        let direct = plugin_command(Utf8Path::new("/bin/clove-foo"));
+        assert_eq!(direct.get_program(), "/bin/clove-foo");
+        assert_eq!(direct.get_args().count(), 0);
     }
 
     #[test]
