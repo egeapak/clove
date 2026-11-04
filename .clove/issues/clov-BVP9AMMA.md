@@ -2,11 +2,12 @@
 schema: 1
 id: clov-BVP9AMMA
 title: 'web timeline: ''today'' marker label is cut off at the plot''s right edge'
-status: open
+status: closed
 type: bug
 priority: 4
 created: 2026-11-04T09:49:36.816Z
-updated: 2026-11-04T09:49:36.816Z
+updated: 2026-11-04T16:52:19.085Z
+closed: 2026-11-04T16:52:19.085Z
 labels: []
 deps: []
 relates: []
