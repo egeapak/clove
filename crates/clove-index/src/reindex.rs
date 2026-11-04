@@ -42,6 +42,7 @@ struct ParsedFile {
     file_name: String,
     mtime_ms: i64,
     mtime_ns: i64,
+    file_size: i64,
     content_hash: [u8; 8],
 }
 
@@ -167,6 +168,7 @@ fn parse_all(
             file_name: name.clone(),
             mtime_ms: system_time_ms(meta.modified().ok()),
             mtime_ns: system_time_ns(meta.modified().ok()),
+            file_size: bytes.len() as i64,
             content_hash: content_hash8(&bytes),
         })
     };
@@ -205,6 +207,7 @@ fn write_all(conn: &mut Connection, parsed: &[ParsedFile]) -> Result<(), IndexEr
                 .unwrap_or(false);
             let meta = RowMeta {
                 file_mtime_ms: pf.mtime_ms,
+                file_size: pf.file_size,
                 content_hash: pf.content_hash,
                 topo_rank: ranks.get(id).map(|r| *r as i64),
                 has_dangling_deps,

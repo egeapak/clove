@@ -305,7 +305,7 @@ fn run_repo(
         Commands::Priority(a) => cmd::priority::run(ctx, f, &a.id, a.priority).map(|_| ok),
         Commands::Dep(a) => cmd::dep::run(ctx, f, a.action, no_index),
         Commands::Ready(a) => cmd::ready::run(ctx, f, a, quiet, no_index, deep).map(|_| ok),
-        Commands::Blocked(a) => cmd::blocked::run(ctx, f, a, quiet, no_index).map(|_| ok),
+        Commands::Blocked(a) => cmd::blocked::run(ctx, f, a, quiet, no_index, deep).map(|_| ok),
         Commands::Ls(a) => cmd::ls::run(ctx, f, a, no_index, deep).map(|_| ok),
         Commands::Query(a) => cmd::query::run(ctx, f, a, no_index, deep).map(|_| ok),
         Commands::Comment(a) => cmd::comments::add(ctx, f, &a.id, &a.message, quiet).map(|_| ok),
