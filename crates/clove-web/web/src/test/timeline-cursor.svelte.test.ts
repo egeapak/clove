@@ -108,3 +108,21 @@ describe('timeline hover guide', () => {
     expect(chip(container)).toBeNull();
   });
 });
+
+describe('timeline axis ticks', () => {
+  it('aligns the first and last tick labels inward so they stay inside the plot', async () => {
+    const { axis } = await renderTimeline();
+    const ticks = [...axis.querySelectorAll('.tick')];
+    expect(ticks.length).toBeGreaterThanOrEqual(5);
+    const first = ticks[0];
+    const last = ticks[ticks.length - 1];
+    expect(first.getAttribute('style')).toBe('left: 0%;');
+    expect(first.classList.contains('tick-start')).toBe(true);
+    expect(last.getAttribute('style')).toBe('left: 100%;');
+    expect(last.classList.contains('tick-end')).toBe(true);
+    expect(last.textContent?.trim()).toBe(formatAxisDate(DOMAIN_MAX));
+    for (const t of ticks.slice(1, -1)) {
+      expect(t.classList.contains('tick-start') || t.classList.contains('tick-end')).toBe(false);
+    }
+  });
+});

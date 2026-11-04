@@ -114,16 +114,20 @@
     });
   });
 
-  // axis ticks, about one per 140px of track
+  // axis ticks, about one per 140px of track. A centred label at either end of
+  // the plot would hang half outside it (the first under the sticky label
+  // column, the last past the right border), so the edge labels align inward,
+  // the same way the cursor chip is clamped.
   const ticks = $derived.by(() => {
-    const out: { left: number; label: string }[] = [];
+    const out: { left: number; label: string; edge: 'start' | 'end' | null }[] = [];
     const { min, max } = domain;
     const n = Math.max(4, Math.round(trackW / 140));
     for (let k = 0; k <= n; k++) {
       const t = min + ((max - min) * k) / n;
       out.push({
         left: (k / n) * 100,
-        label: formatAxisDate(t)
+        label: formatAxisDate(t),
+        edge: k === 0 ? 'start' : k === n ? 'end' : null
       });
     }
     return out;
@@ -210,7 +214,14 @@
   <div class="tl-corner"></div>
   <div class="tl-axis" bind:this={axisEl}>
     {#each ticks as t (t.left)}
-      <div class="tick mono" style="left:{t.left}%">{t.label}</div>
+      <div
+        class="tick mono"
+        class:tick-start={t.edge === 'start'}
+        class:tick-end={t.edge === 'end'}
+        style="left:{t.left}%"
+      >
+        {t.label}
+      </div>
     {/each}
     {#if cursorFraction !== null}
       <div class="cursor-line" style="left:{cursorFraction * 100}%"></div>
@@ -391,6 +402,14 @@
     color: var(--text-dim);
     transform: translateX(-50%);
     white-space: nowrap;
+  }
+  .tick-start {
+    padding-left: 4px;
+    transform: none;
+  }
+  .tick-end {
+    padding-right: 4px;
+    transform: translateX(-100%);
   }
   .cursor-line {
     position: absolute;
