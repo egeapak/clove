@@ -390,6 +390,27 @@ fn new_form_long_value_hscroll() {
 }
 
 #[test]
+fn new_form_long_body_hscroll() {
+    // A long body line scrolls the same way: the body indent and every label
+    // stay in place, and only the caret line's text shifts behind a `…`.
+    let mut app = app();
+    app.start_new();
+    while app.form.focused() != crate::app::Field::Body {
+        app.form_next_field();
+    }
+    for c in "First line.\nA very long body line that runs well past the right edge of the popup ok"
+        .chars()
+    {
+        if c == '\n' {
+            app.form.newline();
+        } else {
+            app.form.insert_char(c);
+        }
+    }
+    snap("new_form_long_body_hscroll", &mut app);
+}
+
+#[test]
 fn filter_menu() {
     // Open the menu and toggle a single-valued (status:open) and a multi-valued
     // (type:feature) facet so the radio + checkbox states both show.

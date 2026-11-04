@@ -6,7 +6,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 use ratatui::Frame;
 
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Field, FormMode};
 
@@ -53,7 +54,7 @@ pub(crate) fn render_form(f: &mut Frame, app: &App, area: Rect) {
                 let before = &form.body[..char_byte(&form.body, form.cursor)];
                 let lines_before = before.matches('\n').count() as u16;
                 // Display columns (not chars) so wide chars don't offset the caret.
-                let col = before.rsplit('\n').next().unwrap_or("").width() as u16;
+                let col = display_width(before.rsplit('\n').next().unwrap_or(""));
                 caret = Some((cursor_line + 1 + lines_before, 2 + col));
             }
             let body = if focused && app.caret_glyph {
@@ -199,18 +200,20 @@ fn scroll_value(line: &mut Line, cols: u16) {
         return;
     };
     // Hide `cols + 1` columns: `cols` scroll off, one more makes room for `…`.
+    // Step by grapheme, as ratatui renders, so a cut never splits a cluster
+    // (an emoji and its variation selector, a base and its combining mark).
     let hide = cols as usize + 1;
     let mut hidden = 0usize;
     let mut rest = "";
-    for (b, c) in span.content.char_indices() {
+    for (b, g) in span.content.grapheme_indices(true) {
         if hidden >= hide {
             rest = &span.content[b..];
             break;
         }
-        hidden += c.width().unwrap_or(0);
+        hidden += g.width();
     }
-    // A wide char that straddles the cut is hidden whole; pad its visible half
-    // with a space so the columns after it stay aligned.
+    // A wide grapheme that straddles the cut is hidden whole; pad its visible
+    // half with a space so the columns after it stay aligned.
     let pad = " ".repeat(hidden.saturating_sub(hide));
     span.content = format!("…{pad}{rest}").into();
 }
@@ -218,10 +221,15 @@ fn scroll_value(line: &mut Line, cols: u16) {
 /// The display-column width of the first `chars` characters of `s` (the caret's
 /// column offset from the value's start).
 fn prefix_width(s: &str, chars: usize) -> u16 {
-    s.chars()
-        .take(chars)
-        .map(|c| c.width().unwrap_or(0))
-        .sum::<usize>() as u16
+    display_width(&s[..char_byte(s, chars)])
+}
+
+/// The display-column width of `s` as ratatui renders it: the sum of each
+/// grapheme's width. The caret column, the horizontal cut, and the rendered
+/// cells all use this one measure, so the hardware cursor and the caret glyph
+/// stay on the same cell (`❤\u{FE0F}` is one 2-column grapheme, not 1 + 0).
+fn display_width(s: &str) -> u16 {
+    s.graphemes(true).map(UnicodeWidthStr::width).sum::<usize>() as u16
 }
 
 /// The byte offset of char index `idx` in `s` (clamped to `s.len()`).
