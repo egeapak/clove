@@ -243,6 +243,13 @@ pub struct Tiers {
     pub index: bool,
     /// Use the thorough per-file staleness pass (`--deep`) instead of the fast
     /// O(readdir) one.
+    ///
+    /// `deep` also keeps the index-backed daemon reads (`list`/`ready`/
+    /// `blocked`/`query` and `dep_tree`) off the daemon. `cloved` refreshes its
+    /// index only with the fast check, so it cannot see an in-place edit that
+    /// leaves the directory mtime alone, and answering `--deep` from it would
+    /// break the flag's promise. `show` and `stats` still use the daemon: it
+    /// answers them from the files.
     pub deep: bool,
     /// Freshen a lightly-stale index inline (`.clove/config`'s
     /// `index.auto_refresh`).
@@ -539,7 +546,9 @@ impl Engine {
 
     /// The dependency tree rooted at `id`, to `depth` (`usize::MAX` for all).
     pub fn dep_tree(&self, id: &CloveId, depth: usize) -> Result<Answer<Value>, CloveError> {
-        if self.tiers.daemon {
+        // The daemon answers from its hot graph, which only the fast staleness
+        // check refreshes: not a `--deep` answer.
+        if self.daemon_index_reads() {
             if let Some(Ok(GraphResponse::Tree { node: Some(node) })) = self.with_daemon(|d| {
                 d.graph(GraphRequest::Tree {
                     root: id.to_string(),
@@ -662,11 +671,17 @@ impl Engine {
         })
     }
 
+    /// May a read that the daemon answers from its index or hot graph go to
+    /// the daemon? Not under `--deep`: see [`Tiers::deep`].
+    fn daemon_index_reads(&self) -> bool {
+        self.tiers.daemon && !self.tiers.deep
+    }
+
     /// Try to satisfy a lean list query via a running daemon.
     ///
     /// The daemon keeps its own index fresh, so this path skips the CLI's
     /// staleness scan. Returns `None` — so the caller falls through to the index
-    /// — for a disabled tier, no daemon, or any IPC error.
+    /// — for a disabled tier, `--deep`, no daemon, or any IPC error.
     fn lean_via_daemon(
         &self,
         kind: QueryKind,
@@ -674,7 +689,7 @@ impl Engine {
         order: Order,
         window: Page,
     ) -> Option<LeanAnswer> {
-        if !self.tiers.daemon {
+        if !self.daemon_index_reads() {
             return None;
         }
         let request = query_request(kind, filters, order, window);
@@ -719,7 +734,9 @@ impl Engine {
                 // Too far behind to refresh inline — use the files instead.
                 return Ok(None);
             }
-            if !report.is_clean() {
+            // Apply bookkeeping-only reports too (touched files, an outdated
+            // `meta` row), or later reads repeat the per-file pass forever.
+            if report.needs_apply() {
                 index
                     .apply_staleness(&report, &self.issues_dir)
                     .map_err(|e| index_error(e, &self.db_path))?;

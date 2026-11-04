@@ -2,11 +2,12 @@
 schema: 1
 id: clov-DHJCMT9W
 title: clove --deep still trusts the directory fast path for in-place edits older than the recent-mtime window
-status: open
+status: closed
 type: bug
 priority: 2
 created: 2026-10-20T18:47:04.000Z
-updated: 2026-11-03T17:38:52.913Z
+updated: 2026-11-04T09:56:51.463Z
+closed: 2026-11-04T09:56:51.463Z
 labels: []
 deps: []
 relates: []

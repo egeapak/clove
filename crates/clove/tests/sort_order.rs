@@ -468,11 +468,11 @@ mod daemon {
     /// `cargo test -p clove-cli` on a tree where `cloved` had not been built,
     /// the "triple comparison" that DESIGN §7.8 says this file pins was in fact
     /// a double comparison, and it announced itself as passing. A test that
-    /// cannot perform its check must not report success; escargot is already a
-    /// dev-dependency here and is used the same way in `mcp.rs`, so the test can
-    /// simply guarantee its own precondition.
+    /// cannot perform its check must not report success; `support::cloved`
+    /// panics when the test run did not build `cloved`, so the precondition is
+    /// guaranteed.
     fn cloved_bin() -> PathBuf {
-        crate::support::cloved("").to_path_buf()
+        crate::support::cloved().to_path_buf()
     }
 
     /// A spawned `cloved` that dies with the test, however the test ends.

@@ -37,6 +37,8 @@ pub use query::{
     count_items, push_down, query_filtered, query_items, query_list, Filter, PostFilter, QueryMode,
 };
 pub use reindex::{reindex, ReindexReport};
-pub use stale::{apply_staleness, check_staleness, check_staleness_fast, StalenessReport};
+pub use stale::{
+    apply_staleness, check_staleness, check_staleness_fast, StalenessReport, TouchedFile,
+};
 pub use stats_store::StatsSnapshot;
 pub use write::upsert_item;

@@ -58,6 +58,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `http://[user:password@]host[:port]` is now a clear setup error. TLS trust is
   unchanged (the platform roots, or `SSL_CERT_FILE` / `SSL_CERT_DIR`), so a
   re-terminating proxy works once its CA is trusted.
+- Starting the daemon (`clove daemon start`, and the MCP server's auto-start)
+  no longer fails with `daemon connect timed out` when it reaches a hub that
+  has bound its socket but is not serving it yet, as happens on a loaded
+  machine. A handshake that times out is now retried, like a refused connect,
+  until the start's 10-second limit (gh-167).
 - Issue and comment lists are now paged by page number on the
   `/repos/{owner}/{repo}/…` route instead of following GitHub's `Link: next`
   URL (`/repositories/{id}/…`), which some proxies refuse.

@@ -2,11 +2,12 @@
 schema: 1
 id: clov-EJ0FK4BP
 title: daemon_race test times out intermittently on macOS CI
-status: open
+status: closed
 type: bug
 priority: 2
 created: 2026-10-31T11:35:58.172Z
-updated: 2026-11-03T17:24:36.627Z
+updated: 2026-11-04T10:10:24.273Z
+closed: 2026-11-04T10:10:24.273Z
 labels: []
 deps: []
 relates: []

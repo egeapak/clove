@@ -2,11 +2,12 @@
 schema: 1
 id: clov-MH8RC6G7
 title: 'flaky: cloved daemon_lifecycle an_idle_hub_exits_after_its_projects_idle_out under CPU load'
-status: open
+status: closed
 type: bug
 priority: 3
 created: 2026-10-20T18:47:02.000Z
-updated: 2026-11-03T17:38:52.917Z
+updated: 2026-11-04T10:10:24.276Z
+closed: 2026-11-04T10:10:24.276Z
 labels: [test]
 deps: []
 relates: []

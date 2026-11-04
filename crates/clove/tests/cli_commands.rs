@@ -1,5 +1,6 @@
 //! End-to-end CLI tests for the M0 command surface and index wiring.
 
+use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 
@@ -979,6 +980,47 @@ fn ls_deep_flag_still_uses_index() {
     // --deep selects the thorough staleness check but still serves from the index.
     let v = json_ok(clove(dir.path()).args(["ls", "--deep"]));
     assert_eq!(v["_meta"]["source"], "index");
+}
+
+#[test]
+fn ls_deep_catches_old_in_place_edit() {
+    // An in-place (truncate-and-rewrite) edit changes the file's mtime but not
+    // the directory's. Once the edit is older than the 2 s recent-mtime window,
+    // only a per-file stat can see it, and `--deep` must do that stat.
+    let dir = init_repo();
+    let id = new_item(dir.path(), "One", &[]);
+    let issues = dir.path().join(".clove/issues");
+    let path = issues.join(format!("{id}.md"));
+    let indexed = filetime::FileTime::from_unix_time(1_600_000_000, 0);
+    filetime::set_file_mtime(&path, indexed).unwrap();
+    filetime::set_file_mtime(&issues, indexed).unwrap();
+    clove(dir.path()).arg("reindex").assert().success();
+
+    // Rewrite the file in place: same inode, no rename, so the directory entry
+    // list does not change.
+    let text = std::fs::read_to_string(&path).unwrap();
+    let edited = text.replace("title: One", "title: One WWMARK");
+    assert_ne!(text, edited, "fixture title not found");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&path)
+        .unwrap()
+        .write_all(edited.as_bytes())
+        .unwrap();
+    // The edit happened a while ago (outside the recent window), and the
+    // directory mtime is what the index recorded.
+    let later = filetime::FileTime::from_unix_time(1_600_000_100, 0);
+    filetime::set_file_mtime(&path, later).unwrap();
+    filetime::set_file_mtime(&issues, indexed).unwrap();
+
+    let deep = json_ok(clove(dir.path()).args(["--deep", "ls", "--q", "WWMARK"]));
+    assert_eq!(deep["_meta"]["source"], "index", "{deep}");
+    assert_eq!(deep["_meta"]["total"], 1, "--deep missed the edit: {deep}");
+    // The refresh that `--deep` applied is now in the index for every reader.
+    let fast = json_ok(clove(dir.path()).args(["ls", "--q", "WWMARK"]));
+    assert_eq!(fast["_meta"]["source"], "index", "{fast}");
+    assert_eq!(fast["_meta"]["total"], 1, "{fast}");
 }
 
 #[test]

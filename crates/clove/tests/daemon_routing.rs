@@ -18,7 +18,7 @@ const TEST_CLOVE_HOME: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target
 /// The `cloved` binary, built on demand so these tests can never pass by
 /// skipping.
 fn cloved_bin() -> PathBuf {
-    support::cloved("").to_path_buf()
+    support::cloved().to_path_buf()
 }
 
 fn clove() -> Command {
@@ -485,6 +485,78 @@ fn no_index_bypasses_a_live_daemon() {
     drop(daemon);
 }
 
+/// `--deep` promises the per-file staleness pass. `cloved` refreshes its index
+/// only with the fast directory-level check, so an in-place edit that leaves
+/// the directory mtime alone is invisible to it. A `--deep` read must not take
+/// the daemon's answer.
+#[test]
+fn deep_bypasses_a_live_daemon() {
+    let bin = cloved_bin();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    assert!(run_in(root, &["init"]).status.success());
+    let a = new_id(&run_in(root, &["new", "alpha", "-f", "json"]).stdout);
+    let b = new_id(&run_in(root, &["new", "beta", "-f", "json"]).stdout);
+    assert!(run_in(root, &["dep", "add", &a, &b]).status.success());
+
+    let issues = root.join(".clove/issues");
+    let path = issues.join(format!("{a}.md"));
+    let indexed = filetime::FileTime::from_unix_time(1_600_000_000, 0);
+    for entry in std::fs::read_dir(&issues).unwrap() {
+        filetime::set_file_mtime(entry.unwrap().path(), indexed).unwrap();
+    }
+    filetime::set_file_mtime(&issues, indexed).unwrap();
+    assert!(run_in(root, &["reindex"]).status.success());
+
+    let clove_dir = root.join(".clove");
+    let daemon = spawn_daemon(&clove_dir, &bin);
+
+    // In-place rewrite (same inode, no rename), then pin the mtimes so that the
+    // edit is old and the directory looks untouched.
+    let text = std::fs::read_to_string(&path).unwrap();
+    let edited = text.replace("title: alpha", "title: alpha WWMARK");
+    assert_ne!(text, edited, "fixture title not found");
+    {
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap()
+            .write_all(edited.as_bytes())
+            .unwrap();
+    }
+    filetime::set_file_mtime(&path, filetime::FileTime::from_unix_time(1_600_000_100, 0)).unwrap();
+    filetime::set_file_mtime(&issues, indexed).unwrap();
+
+    // The daemon is live and answering, so the `--deep` assertions below are
+    // not vacuous.
+    let (_, src) = ids_and_source(&run_in(root, &["ls", "-f", "json"]).stdout);
+    assert_eq!(src, "daemon", "ls routes while the daemon is alive");
+
+    for cmd in [
+        &["ls", "--q", "WWMARK", "-f", "json"][..],
+        &["ready", "--q", "WWMARK", "-f", "json"][..],
+        &["blocked", "--q", "WWMARK", "-f", "json"][..],
+        &["query", "--filter", r#"{"q":"WWMARK"}"#, "-f", "json"][..],
+    ] {
+        let mut args = vec!["--deep"];
+        args.extend_from_slice(cmd);
+        let (ids, src) = ids_and_source(&run_in(root, &args).stdout);
+        assert_eq!(src, "index", "--deep {cmd:?} must not use the daemon");
+        // `alpha` waits on `beta`, so it is blocked, not ready.
+        let want: Vec<String> = if cmd[0] == "ready" {
+            vec![]
+        } else {
+            vec![a.clone()]
+        };
+        assert_eq!(ids, want, "--deep {cmd:?} must see the in-place edit");
+    }
+
+    drop(daemon);
+}
+
 /// The daemon's count of writes it applied for this project.
 fn writes_applied(root: &std::path::Path) -> u64 {
     let out = run_in(root, &["daemon", "status", "-f", "json"]);
@@ -501,7 +573,7 @@ fn writes_applied(root: &std::path::Path) -> u64 {
 #[test]
 fn plugin_store_writes_route_through_the_daemon() {
     let bin = cloved_bin();
-    let plugin = support::plugin("clove-import-tk", "clove-import-tk", "");
+    let plugin = support::plugin("clove-import-tk");
     let plugin_dir = plugin.parent().unwrap().to_owned();
 
     let tmp = tempfile::tempdir().unwrap();
