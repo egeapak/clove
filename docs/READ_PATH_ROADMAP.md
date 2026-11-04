@@ -780,9 +780,9 @@ came back; `_meta.per_column` marks the difference from a flat list.
   item key is required) and strict about the envelope, which never varies.
   `clove_show`, `clove_stats`, `clove_dep_tree` and the write tools publish
   nothing: an `outputSchema` is a promise on every call, and those payloads are
-  built elsewhere (the daemon, `clove-core`) or render differently per surface —
-  `dep_tree` is the proof, since its engine renderer emits a `repeat_ref` the
-  published `dep-tree.json` did not list (now documented as optional).
+  built elsewhere (the daemon, `clove-core`) or rendered differently per surface
+  at the time — `dep_tree`'s engine renderer emitted a `repeat_ref` that the CLI
+  renderer did not (since unified in §8, and required again in `dep-tree.json`).
 
 - ~~**MCP wire duplication**~~ — **re-examined alongside the `outputSchema`
   work, and deliberately left alone.** Publishing an `outputSchema` is what

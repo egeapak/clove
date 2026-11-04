@@ -58,6 +58,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `http://[user:password@]host[:port]` is now a clear setup error. TLS trust is
   unchanged (the platform roots, or `SSL_CERT_FILE` / `SSL_CERT_DIR`), so a
   re-terminating proxy works once its CA is trusted.
+- `clove dep tree --format json` now includes `repeat_ref` on every node, and
+  `--flat` includes it on every row, as the MCP `clove_dep_tree` tool and the
+  web already did. `repeat_ref` is required again in
+  `docs/json-schema/v1/dep-tree.json`.
 - Issue and comment lists are now paged by page number on the
   `/repos/{owner}/{repo}/…` route instead of following GitHub's `Link: next`
   URL (`/repositories/{id}/…`), which some proxies refuse.

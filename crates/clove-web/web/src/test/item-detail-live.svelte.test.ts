@@ -41,7 +41,7 @@ beforeAll(async () => {
     if (path === '/meta') return META;
     if (path === `/items/${ID}`) return current;
     if (path === `/items/${ID}/deptree`) {
-      return { id: ID, title: current.title, status: current.status, ready: true, cycle_ref: false, children: [] };
+      return { id: ID, title: current.title, status: current.status, ready: true, cycle_ref: false, repeat_ref: false, children: [] };
     }
     if (path === `/items/${ID}/comments`) return comments;
     // List/board rows are lean: no body.
