@@ -135,6 +135,33 @@ pub struct DepTreeNode {
     pub children: Vec<DepTreeNode>,
 }
 
+impl DepTreeNode {
+    /// The nested JSON shape of this node and its subtree.
+    ///
+    /// This is the one serializer behind every `dep tree` surface — the CLI
+    /// `clove dep tree --format json`, `ops::dep_tree`, and the engine's daemon
+    /// tier (so MCP and web) — so the shape cannot drift between them. It is
+    /// the `node` of `docs/json-schema/v1/dep-tree.json`.
+    pub fn to_json(&self) -> serde_json::Value {
+        let mut value = self.flat_json();
+        value["children"] = self.children.iter().map(Self::to_json).collect();
+        value
+    }
+
+    /// This node's own keys, without `children`: the per-row shape of the
+    /// flat (`--flat`) form, which adds `depth` itself.
+    pub fn flat_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "id": self.id.as_str(),
+            "title": self.title,
+            "status": self.status.as_str(),
+            "ready": self.ready,
+            "cycle_ref": self.cycle_ref,
+            "repeat_ref": self.repeat_ref,
+        })
+    }
+}
+
 /// The in-memory dependency graph.
 pub struct GraphStore {
     graph: StableDiGraph<ItemMeta, EdgeKind>,

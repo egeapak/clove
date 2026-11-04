@@ -808,12 +808,13 @@ None of these is a regression from this work — the first two are pre-existing 
   `clove ls --q WWMARK` and `clove --deep ls --q WWMARK` both answer `total=0`
   from the index while `--no-index` answers `total=3`. `--deep` is documented as
   the escape hatch for exactly this, so it should either stat or stop claiming to.
-- **`clove dep tree --format json` omits `repeat_ref`**, which the MCP and web
-  renderers emit. Three `tree_to_json` implementations remain (`cmd/dep.rs`,
-  `ops.rs`, `clove-engine`). §7 marked the key optional in `dep-tree.json` rather
-  than unifying them, so this is the one place "same query, same answer
-  everywhere" is untrue on *shape*. Harmless, but it is an exception, not a
-  guarantee.
+- ~~**`clove dep tree --format json` omits `repeat_ref`**~~ — **done**. The
+  three `tree_to_json` implementations (`cmd/dep.rs`, `ops.rs`, `clove-engine`)
+  are now one serializer, `DepTreeNode::to_json` (plus `flat_json` for the
+  `--flat` rows), so the CLI, MCP, and web emit the same shape. `repeat_ref` is
+  required again in `dep-tree.json`. Pinned by
+  `dep_tree_json_marks_a_shared_subtree_repeat_ref` (`cli_more.rs`) and the
+  schema check in `schema_validation.rs`.
 - ~~**The daemon tier is slower than the index tier for `blocked`.**~~ —
   **done** in protocol 10 (unreleased at the time, so no further bump).
   `GraphRequest::Blocked` carried no filter or window, so the engine hydrated the

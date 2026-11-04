@@ -8,6 +8,7 @@ expression: "v[\"data\"]"
     "depth": 0,
     "id": "proj-AAAAAAAA",
     "ready": false,
+    "repeat_ref": false,
     "status": "open",
     "title": "Chain head A blocked by B"
   },
@@ -16,6 +17,7 @@ expression: "v[\"data\"]"
     "depth": 1,
     "id": "proj-BBBBBBBB",
     "ready": true,
+    "repeat_ref": false,
     "status": "open",
     "title": "Chain middle B ready once C closed"
   },
@@ -24,6 +26,7 @@ expression: "v[\"data\"]"
     "depth": 2,
     "id": "proj-CCCCCCCC",
     "ready": false,
+    "repeat_ref": false,
     "status": "closed",
     "title": "Chain tail C already closed"
   }

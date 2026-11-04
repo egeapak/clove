@@ -961,19 +961,7 @@ pub fn dep_tree(store: &ItemStore, id: &CloveId, depth: usize) -> Result<Value, 
     let root = graph
         .dep_tree(id, depth)
         .ok_or_else(|| CloveError::NotFound { id: id.to_string() })?;
-    Ok(tree_to_json(&root))
-}
-
-fn tree_to_json(node: &crate::DepTreeNode) -> Value {
-    json!({
-        "id": node.id.as_str(),
-        "title": node.title,
-        "status": node.status.as_str(),
-        "ready": node.ready,
-        "cycle_ref": node.cycle_ref,
-        "repeat_ref": node.repeat_ref,
-        "children": node.children.iter().map(tree_to_json).collect::<Vec<_>>(),
-    })
+    Ok(root.to_json())
 }
 
 /// Apply the window and wrap a list of item values into the standard payload.

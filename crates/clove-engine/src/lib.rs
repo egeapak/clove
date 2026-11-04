@@ -548,7 +548,7 @@ impl Engine {
             }) {
                 return Ok(Answer {
                     source: Source::Daemon,
-                    value: tree_to_json(&node),
+                    value: node.to_json(),
                 });
             }
         }
@@ -858,20 +858,6 @@ fn index_error(err: clove_index::IndexError, path: &Utf8Path) -> CloveError {
         path: path.to_owned(),
         source: std::io::Error::other(err.to_string()),
     }
-}
-
-/// Render a daemon-returned dep-tree node in the same JSON shape `ops::dep_tree`
-/// produces, so the two tiers are indistinguishable to a caller.
-fn tree_to_json(node: &clove_core::graph::DepTreeNode) -> Value {
-    serde_json::json!({
-        "id": node.id.as_str(),
-        "title": node.title,
-        "status": node.status.as_str(),
-        "ready": node.ready,
-        "cycle_ref": node.cycle_ref,
-        "repeat_ref": node.repeat_ref,
-        "children": node.children.iter().map(tree_to_json).collect::<Vec<_>>(),
-    })
 }
 
 #[cfg(test)]
