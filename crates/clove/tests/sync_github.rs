@@ -3296,11 +3296,11 @@ fn a_changed_body_on_update_is_edited_back() {
     sync(dir.path(), mock.addr, &[]);
     let id = only_item_id(dir.path(), mock.addr);
     backdate_sync_baseline(dir.path());
-    clove(dir.path(), mock.addr)
-        .args(["edit", &id])
-        .env("EDITOR", "sed -i s/one/two/")
-        .assert()
-        .success();
+    // A body edit in the item file (no `set` token edits the body); the
+    // backdated baseline makes it newer than the last sync.
+    let path = dir.path().join(".clove/issues").join(format!("{id}.md"));
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, text.replace("Version one.", "Version two.")).unwrap();
     mock.append_footer(FOOTER, false);
 
     let v = sync(dir.path(), mock.addr, &[]);
