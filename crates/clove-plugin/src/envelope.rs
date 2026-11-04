@@ -19,8 +19,8 @@ pub const ENVELOPE_VERSION: u32 = 1;
 /// Print a successful envelope for `data`, honoring `format`.
 ///
 /// JSON / JSONL emit `{ v, ok: true, data, _meta }` on stdout, with
-/// `_meta: { "warnings": [] }` — the same shape the host's built-ins and the
-/// import plugins emit, so a consumer can always read `_meta.warnings`. Human
+/// `_meta: { "warnings": [] }` — the same shape the import plugins and most
+/// host built-ins emit, so a consumer can always read `_meta.warnings`. Human
 /// mode prints a concise pretty-printed rendering of `data` on stdout.
 ///
 /// A thin wrapper over [`emit_success_with_meta`] with `{ "warnings": [] }`.

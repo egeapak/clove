@@ -5,7 +5,9 @@
 //! parses argv into [`PluginArgs`], answers the `--clove-plugin-info` metadata
 //! probe (§7), invokes the closure, and renders the result (or a [`CloveError`])
 //! as the correct envelope for `cx.format`, returning the matching
-//! [`std::process::ExitCode`].
+//! [`std::process::ExitCode`]. [`run_raw`] is the same harness without the
+//! rendering step: the closure renders its own output and returns the exit
+//! code, for a plugin with bespoke human output (sync, the importers).
 
 use std::process::ExitCode;
 
@@ -120,10 +122,10 @@ impl PluginInfo {
 ///
 /// This is the **single place** the `--clove-plugin-info` response is produced
 /// (the authored `{name,version,about,provides}` plus the §2 compat fields,
-/// auto-filled from compile-time constants). [`run_with_info`] uses it, and a
-/// plugin that hand-rolls its `main` (for custom human rendering) calls it at the
-/// top of `main` instead of re-authoring the JSON — so no plugin ever hand-writes
-/// the info shape or drifts on the compat fields. The check runs before any env
+/// auto-filled from compile-time constants). [`run_raw`] (and so
+/// [`run_with_info`]) calls it first, so no plugin ever hand-writes the info
+/// shape or drifts on the compat fields. A plugin that does not use either
+/// harness calls it at the top of `main`. The check runs before any env
 /// materialization, so `clove plugin list` can probe without a repo context.
 pub fn info_requested(info: &PluginInfo) -> bool {
     if std::env::args().skip(1).any(|arg| arg == INFO_FLAG) {
@@ -176,8 +178,8 @@ where
 ///    `Err(e)` as an error envelope, honoring `cx.format` and `cx.quiet`, and
 ///    return the matching [`ExitCode`].
 ///
-/// Steps 1 and 2 are [`run_raw`]; a plugin that needs its own rendering calls
-/// that instead.
+/// Everything but the rendering in step 3 is [`run_raw`]; a plugin that needs
+/// its own rendering calls that instead.
 pub fn run_with_info<F>(info: PluginInfo, f: F) -> ExitCode
 where
     F: FnOnce(&PluginContext, PluginArgs) -> Result<serde_json::Value, CloveError>,

@@ -35,7 +35,8 @@ use clove_types::OutputFormat;
 use serde_json::json;
 
 /// The metadata `clove plugin list` / `--clove-plugin-info` reports. Emitted via
-/// the shared `clove_plugin::info_requested` so the JSON shape (incl. the §2
+/// `clove_plugin::run_raw` (which calls the shared
+/// `clove_plugin::info_requested`) so the JSON shape (incl. the §2
 /// compat fields) is authored in exactly one place — this plugin hand-rolls only
 /// its *human* rendering, never the info blob.
 const INFO: PluginInfo = PluginInfo {

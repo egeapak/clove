@@ -197,6 +197,7 @@ fn plugin_without_host_env_renders_the_error_envelope() {
         .code(4);
     let v: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
     assert_eq!(v["ok"], false, "envelope: {v}");
+    assert_eq!(v["error"]["code"], "VALIDATION_ERROR", "envelope: {v}");
     assert_eq!(v["error"]["exit"], 4, "envelope: {v}");
 }
 
