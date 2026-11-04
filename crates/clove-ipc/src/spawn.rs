@@ -73,6 +73,12 @@ pub fn ensure_daemon(clove_dir: &Utf8Path) -> Option<DaemonClient> {
 /// starting or on its way out holds it while its socket says nothing useful. A
 /// hub that has decided to exit refuses new projects (`SHUTTING_DOWN`); this
 /// waits for it to go and then starts another.
+///
+/// A hub that has bound its socket but is not yet serving it (still starting,
+/// on a loaded machine) takes the connection and does not answer the
+/// handshake in time: [`ClientError::Timeout`]. That is the same window as a
+/// refused connect, so this tries again until [`READY_TIMEOUT`], like it does
+/// for a refused connect.
 pub fn ensure_daemon_at(hub: &HubPaths, clove_dir: &Utf8Path) -> Result<DaemonClient, ClientError> {
     let deadline = Instant::now() + READY_TIMEOUT;
     let mut last_spawn: Option<Instant> = None;
@@ -82,9 +88,13 @@ pub fn ensure_daemon_at(hub: &HubPaths, clove_dir: &Utf8Path) -> Result<DaemonCl
             match DaemonClient::attach(hub, clove_dir, true) {
                 Ok(client) => return Ok(client),
                 Err(e) if e.refusal_code() == Some(codes::SHUTTING_DOWN) => last_error = e,
-                // Refused before a socket is bound, or after it is unbound; or
+                // Refused before a socket is bound, or after it is unbound; not
+                // answered by a hub that has bound but is not serving yet; or
                 // cut off by a hub on its way out.
-                Err(e @ (ClientError::Connect(_) | ClientError::Transport(_))) => last_error = e,
+                Err(
+                    e
+                    @ (ClientError::Connect(_) | ClientError::Timeout | ClientError::Transport(_)),
+                ) => last_error = e,
                 // Alive and answering, but not for this project (locked by an
                 // older daemon, unloadable, another protocol): spawning cannot
                 // fix that.

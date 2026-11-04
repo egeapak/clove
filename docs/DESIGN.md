@@ -1595,7 +1595,10 @@ server's auto-start go through `ensure_daemon`, whose calls carry `load: true`
 (so an evicted project is reloaded on the MCP heartbeat) and which spawns a bare
 `cloved run` only when no process holds `hub.lock`. A hub that has decided to
 exit refuses new projects with `SHUTTING_DOWN`; `ensure_daemon` then waits for it
-to go and spawns another. **The exit decision is atomic with admission:** a
+to go and spawns another. A hub that has bound its socket but does not serve it
+yet (still starting, on a loaded machine) leaves the handshake unanswered; a
+handshake that times out is retried like a refused connect, up to the start's
+10-second limit. **The exit decision is atomic with admission:** a
 detach of the last project, or the idle grace running out, marks the hub exiting
 under the same lock that admits new projects, so a project can never be
 admitted by a hub that is about to exit. `clove serve` loads the project into a
@@ -1837,7 +1840,7 @@ timed GitHub sync needs behind a proxy (`HTTPS_PROXY`, `HTTP_PROXY`,
 `SSL_CERT_DIR`), `LANG`/`LC_*`, the `CLOVED_*` knobs (`CLOVED_DISABLE_WEB`, `CLOVED_WEB_PORT`,
 `CLOVED_IDLE_SHUTDOWN_MS`, `CLOVED_HUB_GRACE_MS`, `CLOVED_STATS_SNAPSHOT_MS`,
 `CLOVED_GITHUB_SYNC_MS`, `CLOVED_LOAD_DELAY_MS`, `CLOVED_WATCH_ARM_DELAY_MS`, `CLOVED_BIND_DELAY_MS` — test stand-ins for a large
-project's slow load, a slow watch and a slow bind on a loaded machine, …), `CLOVE_GITHUB_API_URL` (GitHub Enterprise) /
+project's slow load, a slow watch and a slow bind on a loaded machine, …; and the hold files `CLOVED_IDLE_HOLD_FILE`, `CLOVED_WATCH_ARM_HOLD_FILE`, `CLOVED_SERVE_HOLD_FILE`, which hold a timer or a step while the file exists), `CLOVE_GITHUB_API_URL` (GitHub Enterprise) /
 `CLOVE_GITHUB_RETRY_MS` (test seam), `CLOVE_RUNTIME_DIR` (always set, absolute), and on Windows `SystemRoot`,
 `windir`, `LOCALAPPDATA`, `APPDATA`, `USERPROFILE`, `TEMP`/`TMP`, `PATHEXT`. Its
 working directory is its own private runtime directory (`<runtime>`, §8.2) —
