@@ -1,7 +1,7 @@
 //! End-to-end tests for the plugin dispatch seam (PLUGIN_SYSTEM.md §4–§7).
 //!
-//! Both tests build the `clove-echo` fixture plugin with escargot (mirroring
-//! `mcp.rs`'s `cloved` build), drop it into a temp dir, and point
+//! Both tests take the `clove-echo` fixture plugin that the nextest setup
+//! script built (`support::plugin`), drop it into a temp dir, and point
 //! `CLOVE_PLUGIN_PATH` at that dir. `external_plugin_is_dispatched_*` proves the
 //! host resolves `clove-echo`, forwards argv, and exports the `CLOVE_*` env the
 //! plugin reflects back; `plugin_list_reports_the_plugin` proves `clove plugin
@@ -29,7 +29,7 @@ fn install_echo() -> (TempDir, PathBuf) {
 /// same reflect-everything binary can stand in for `clove-sync-echo`,
 /// `clove-import-echo`, … to exercise the umbrella fallback). Returns the dest path.
 fn install_echo_as(dir: &Path, name: &str) -> PathBuf {
-    let built = support::plugin("clove-plugin-echo", "clove-echo", "");
+    let built = support::plugin("clove-echo");
     // The host resolver looks for `clove-<provider>{EXE_SUFFIX}`, so the renamed
     // copy must carry the platform executable suffix (`.exe` on Windows).
     let dest = dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
@@ -230,7 +230,7 @@ fn dedicated_binary_wins_over_umbrella() {
 /// `export tk` cross-sibling dispatch must be refused cleanly.
 #[test]
 fn unsupported_capability_is_exit_2() {
-    let built = support::plugin("clove-import-tk", "clove-import-tk", "");
+    let built = support::plugin("clove-import-tk");
     let plugin_dir = tempfile::tempdir().unwrap();
     // The renamed copy must carry the platform executable suffix (`.exe` on Windows)
     // for the host resolver to find it.

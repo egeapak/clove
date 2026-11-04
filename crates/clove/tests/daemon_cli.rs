@@ -21,16 +21,11 @@ const HANG_GUARD: Duration = Duration::from_secs(30);
 /// Token records for this test's processes go here, never the user's clove home.
 const TEST_CLOVE_HOME: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/test-clove-home");
 
-/// The `cloved` binary, built on demand rather than hoped for in `target/`.
+/// The test run's `cloved`. It is built with all features: the `CLOVED_*` delay
+/// knobs only exist in a `test-knobs` build, and the web-server cases need a
+/// daemon with `web`.
 fn cloved() -> &'static Path {
-    // The `CLOVED_*` delay knobs only exist in a `test-knobs` build, and the
-    // web-server cases need a daemon that has one.
-    let features = if cfg!(feature = "web") {
-        "test-knobs web"
-    } else {
-        "test-knobs"
-    };
-    support::cloved(features)
+    support::cloved()
 }
 
 /// `clove` in `dir`, talking to the hub rooted at `run`.

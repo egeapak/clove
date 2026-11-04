@@ -97,18 +97,18 @@ mod tests {
     use super::*;
     use clove_index::Index;
 
-    fn cache() -> GraphCache {
+    /// The cache and the temp dir that holds its index; the test keeps the dir
+    /// alive and its drop removes it.
+    fn cache() -> (tempfile::TempDir, GraphCache) {
         let tmp = tempfile::tempdir().unwrap();
         let db = camino::Utf8PathBuf::from_path_buf(tmp.path().join("index.db")).unwrap();
         let index = Index::open_or_create(&db).unwrap();
-        // Leak the tempdir so the db file outlives the test (fine for a unit test).
-        std::mem::forget(tmp);
-        GraphCache::new(Arc::new(Mutex::new(index)))
+        (tmp, GraphCache::new(Arc::new(Mutex::new(index))))
     }
 
     #[test]
     fn change_generation_starts_at_zero_and_bumps_on_mark_dirty() {
-        let graph = cache();
+        let (_tmp, graph) = cache();
         assert_eq!(graph.change_generation(), 0, "fresh cache starts at 0");
         graph.mark_dirty();
         assert_eq!(graph.change_generation(), 1);
@@ -118,7 +118,7 @@ mod tests {
 
     #[test]
     fn rebuilding_the_graph_does_not_bump_the_generation() {
-        let graph = cache();
+        let (_tmp, graph) = cache();
         graph.mark_dirty(); // gen = 1, dirty = true
                             // A rebuild (with_graph) reads the graph but must not touch the counter.
         let ran = graph.with_graph(|_g, ranks| ranks.len()).unwrap();

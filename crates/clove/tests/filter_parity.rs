@@ -856,7 +856,7 @@ mod daemon {
     /// this branch already (see `sort_order.rs`), so this test guarantees its
     /// own precondition instead.
     fn cloved_bin() -> PathBuf {
-        crate::support::cloved("").to_path_buf()
+        crate::support::cloved().to_path_buf()
     }
 
     /// A spawned `cloved` that dies with the test, however the test ends.

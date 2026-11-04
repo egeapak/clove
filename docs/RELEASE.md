@@ -55,7 +55,7 @@ red tree.**
 ```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
+cargo xtask test-all    # cargo nextest run --workspace --all-features, then the doctests
 ( cd crates/clove-web/web && npm ci && npm run check && npm run test )
 ```
 
