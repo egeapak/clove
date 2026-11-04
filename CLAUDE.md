@@ -278,4 +278,30 @@ with `clove new`, and record progress with `clove status` / `clove comment`. The
 agent-facing directives are in `@CLOVE.md`; the full command reference is
 `clove agent-doc`.
 
+### The clove MCP server is on by default here
+
+The repo ships the Claude Code config for it, so a session in this repo gets
+the clove tools with no plugin install:
+
+- `.mcp.json` registers a stdio server named `clove` (`clove mcp`).
+- `.claude/settings.json` enables it (`enabledMcpjsonServers`) and allows its
+  tools, so the `mcp__clove__clove_*` calls run without a permission prompt.
+  `.gitignore` tracks this file; `.claude/settings.local.json` stays local.
+
+Use the MCP tools as the default way to track work: `clove_ready`,
+`clove_search`, `clove_new`, `clove_status`, `clove_comment`, `clove_dep_add`.
+Use the `clove` CLI only for what MCP does not cover, such as `clove sync` or
+`clove agent-doc`. Do not keep a separate TODO list. File work as clove items, not
+as GitHub issues: `clove sync github egeapak/clove` links items to issues.
+
+The server needs the `clove` binary on `PATH` (and `cloved` for coordinated
+writes). If `clove` is not installed, then the MCP server does not start. In
+that case, install it from this checkout with
+`cargo install --path crates/clove --locked` (add `cargo install --path
+crates/cloved --locked` for the daemon) and restart the session, or use the
+CLI from a build (`cargo run -q -p clove-cli -- <command>`). When you add or
+remove an MCP tool, update the `permissions.allow` list in
+`.claude/settings.json` to match `CloveServer::tool_names()` in
+`crates/clove-mcp/src/server.rs`.
+
 @CLOVE.md
