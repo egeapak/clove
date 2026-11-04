@@ -158,13 +158,25 @@ fn publish(reported: &Path, published: &Path) {
             panic!("copy {} to {}: {err}", reported.display(), staged.display())
         });
     }
-    fs::rename(&staged, published).unwrap_or_else(|err| {
-        panic!(
-            "rename {} to {}: {err}",
-            staged.display(),
-            published.display()
-        )
-    });
+    // Windows refuses to replace an executable that is running. Before the first
+    // publish of a run, `published` is the copy from the workspace build, and a
+    // sibling test (`clove plugin list` probes every `clove-*` beside `clove`)
+    // may be running it. That copy exits fast, so retry for a while.
+    let mut delay = std::time::Duration::from_millis(50);
+    for attempt in 1.. {
+        match fs::rename(&staged, published) {
+            Ok(()) => break,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied && attempt < 10 => {
+                std::thread::sleep(delay);
+                delay = (delay * 2).min(std::time::Duration::from_secs(2));
+            }
+            Err(err) => panic!(
+                "rename {} to {}: {err}",
+                staged.display(),
+                published.display()
+            ),
+        }
+    }
 }
 
 /// The directory of the `clove` binary the tests run (`cargo_bin("clove")`).

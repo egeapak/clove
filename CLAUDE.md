@@ -171,7 +171,10 @@ cargo test --workspace --all-features          # default features skip the web-s
 ```
 
 `web` (the HTTP server + SPA in `clove-cli`/`cloved`) is off by default, so a plain
-`cargo test` does not exercise it; CI runs both arms.
+`cargo test` does not exercise it; CI runs both arms. CI runs the tests with
+`cargo nextest run` (plus `cargo test --doc`, which nextest skips); both runners
+work locally. The escargot helpers in `crates/clove/tests/support/mod.rs` are
+safe when every test runs in its own process.
 
 ## Release checklist (manual, before every release)
 

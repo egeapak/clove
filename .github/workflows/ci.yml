@@ -101,9 +101,9 @@ jobs:
         # dispatches to the plugin end-to-end). nextest does not run doctests, so
         # `cargo test --doc` runs them.
         run: |
-          cargo nextest run --workspace --all-features
+          cargo nextest run --workspace --all-features --no-fail-fast
           cargo test --workspace --all-features --doc
-          cargo nextest run -p clove-cli -p cloved
+          cargo nextest run -p clove-cli -p cloved --no-fail-fast
       - name: Benchmarks compile (T-X01)
         # Build and link the bench targets in the test profile, which reuses the
         # artifacts of the Test step. `cargo bench --no-run` used the bench
