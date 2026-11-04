@@ -85,6 +85,33 @@ describe('related-item cache', () => {
     expect(related(OTHER)?.title).toBe('First title');
   });
 
+  it('does not fetch a dep that a stored item lists as dangling', async () => {
+    const MISSING = 'proj-0000000D';
+    const calls = stubApi(() => {
+      throw new StubError(404, 'NOT_FOUND');
+    });
+    store.replaceAll([item({ id: ID, deps: [MISSING], blocked_by: [MISSING], dangling_deps: [MISSING] })]);
+    ensureRelated(MISSING);
+    await settle();
+    store.liveRev += 1;
+    ensureRelated(MISSING);
+    await settle();
+    expect(calls).not.toContain(`/items/${MISSING}`);
+    expect(related(MISSING)).toBeNull();
+  });
+
+  it('shows a dangling dep chip as missing without a request', async () => {
+    const MISSING = 'proj-0000000D';
+    const calls = stubApi(() => {
+      throw new StubError(404, 'NOT_FOUND');
+    });
+    store.replaceAll([item({ id: ID, deps: [MISSING], blocked_by: [MISSING], dangling_deps: [MISSING] })]);
+    render(RelatedItem, { id: MISSING });
+    await settle();
+    expect(calls).toEqual([]);
+    expect(screen.getByText('missing item')).toBeTruthy();
+  });
+
   it('caches a 404 as missing', async () => {
     ensureRelated('proj-0000000Z');
     await settle();
