@@ -209,6 +209,10 @@ Everything `release-smoke.sh` does not already cover:
       via `query` JSON and the web `?synced=` / `?parent=`) agree with the files; against
       a stale (older-protocol) daemon they still answer, falling back.
 - [ ] `clove edit <id>` with `$EDITOR` set to a real editor command.
+- [ ] `clove plugin list` with no plugin installed (an isolated `CLOVE_HOME` and a
+      `clove` binary copied into an empty directory) prints `no plugins installed`
+      and names `clove plugin search` and `clove plugin list --all`; it never
+      prints nothing.
 - [ ] Plugin process model (the host now spawns plugins instead of `exec`):
       Ctrl-C during `clove sync github … --dry-run` stops it at once with no
       leftover `clove-sync-github` process (`pgrep -f clove-sync-github`);

@@ -552,6 +552,24 @@ fn the_suite_sees_no_plugin_it_did_not_install() {
 }
 
 #[test]
+fn human_plugin_list_says_so_when_no_plugin_is_installed() {
+    // A bare `plugin list` on a machine with no plugin used to print nothing at
+    // all, which reads as a broken command. It must say that nothing is
+    // installed and name the commands that find a plugin.
+    let env = env_with(&compatible_plugin());
+    let assert = env.clove().args(["plugin", "list"]).assert().success();
+    let out = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        out.contains("no plugins installed"),
+        "an empty plugin list must say so: {out:?}"
+    );
+    assert!(
+        out.contains("clove plugin search") && out.contains("clove plugin list --all"),
+        "the message must name the commands that find a plugin: {out:?}"
+    );
+}
+
+#[test]
 fn a_failed_rollback_says_the_binary_is_still_on_the_search_path() {
     // The `Err` branch of `roll_back`, unreachable until the compiled shim could
     // be told to fail. It is the branch that matters: the rejected binary is
