@@ -39,7 +39,7 @@ pub struct PluginArgs {
 }
 
 impl PluginArgs {
-    /// Build the tail args from a raw argv (already excluding argv[0]).
+    /// Build the tail args from a raw argv (already excluding `argv[0]`).
     ///
     /// The host invokes a plugin cargo-style, echoing the path taken as leading
     /// args: `clove-sync-github sync github <rest…>`. Strip a leading token that

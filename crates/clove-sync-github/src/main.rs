@@ -12,7 +12,8 @@
 //! One binary, three capabilities (`PLUGIN_SYSTEM.md` §4.2): the same reconcile
 //! planner serves the full two-way `sync github` (`Direction::Both`) and the
 //! one-way views `import github` (`PullOnly`) and `export github` (`PushOnly`),
-//! reached via the host's umbrella fallback. `main` picks the [`Direction`] from
+//! reached via the host's umbrella fallback. `main` picks the
+//! [`Direction`](clove_import::Direction) from
 //! `$CLOVE_COMMAND`.
 //!
 //! Unlike `clove-plugin`'s [`run_with_info`](clove_plugin::run_with_info) harness
