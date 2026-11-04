@@ -181,8 +181,15 @@ fn unknown_subcommand_is_a_usage_error() {
 #[test]
 fn plugin_without_host_env_renders_the_error_envelope() {
     let (_dir, echo) = install_echo();
-    let assert = Command::new(&echo)
-        .env_clear()
+    let mut cmd = Command::new(&echo);
+    // Drop only the host contract vars: a full `env_clear` also drops the
+    // variables Windows needs to start a process (`SystemRoot`).
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("CLOVE_") {
+            cmd.env_remove(key);
+        }
+    }
+    let assert = cmd
         .env("CLOVE_FORMAT", "json")
         .arg("hello")
         .assert()
