@@ -25,9 +25,11 @@ pub fn sync_once(
             Err(_) => return false,
         };
         if let Ok(report) = idx.check_staleness_fast(issues_dir) {
-            if !report.is_clean() {
+            if report.needs_apply() {
                 let _ = idx.apply_staleness(&report, issues_dir);
-                applied = true;
+                // Only a content change counts as applied; touched files and
+                // the `meta` row are bookkeeping.
+                applied = !report.is_clean();
             }
         }
         idx.item_count().unwrap_or(0) as u64

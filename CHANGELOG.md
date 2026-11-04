@@ -58,6 +58,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `http://[user:password@]host[:port]` is now a clear setup error. TLS trust is
   unchanged (the platform roots, or `SSL_CERT_FILE` / `SSL_CERT_DIR`), so a
   re-terminating proxy works once its CA is trusted.
+- Starting the daemon (`clove daemon start`, and the MCP server's auto-start)
+  no longer fails with `daemon connect timed out` when it reaches a hub that
+  has bound its socket but is not serving it yet, as happens on a loaded
+  machine. A handshake that times out is now retried, like a refused connect,
+  until the start's 10-second limit (gh-167).
 - `clove dep tree --format json` now includes `repeat_ref` on every node, and
   `--flat` includes it on every row, as the MCP `clove_dep_tree` tool and the
   web already did. `repeat_ref` is required again in

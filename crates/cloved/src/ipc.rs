@@ -341,7 +341,7 @@ impl Dispatcher {
         }
         if let Ok(mut index) = self.index.lock() {
             if let Ok(report) = index.check_staleness_fast(&self.issues_dir) {
-                if !report.is_clean() {
+                if report.needs_apply() {
                     let _ = index.apply_staleness(&report, &self.issues_dir);
                 }
             }
@@ -440,10 +440,13 @@ impl Dispatcher {
             return;
         }
         if let Ok(report) = index.check_staleness_fast(&self.issues_dir) {
-            if !report.is_clean() && report.change_count() <= STALE_REFRESH_LIMIT {
+            if report.needs_apply() && report.change_count() <= STALE_REFRESH_LIMIT {
                 let _ = index.apply_staleness(&report, &self.issues_dir);
-                // The DB advanced; the hot graph (sourced from it) must rebuild.
-                self.graph.mark_dirty();
+                // The rows advanced; the hot graph (sourced from them) must
+                // rebuild. A bookkeeping-only apply changes no row it reads.
+                if !report.is_clean() {
+                    self.graph.mark_dirty();
+                }
             }
         }
     }

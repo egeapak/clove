@@ -226,16 +226,33 @@ fn fixture() -> (tempfile::TempDir, ItemStore) {
     (dir, store)
 }
 
-fn app() -> App {
+/// An [`App`] together with the temp dir that holds its store. The dir is
+/// removed when the test drops this, so no test leaves a store behind.
+struct TestApp {
+    app: App,
+    _dir: tempfile::TempDir,
+}
+
+impl std::ops::Deref for TestApp {
+    type Target = App;
+    fn deref(&self) -> &App {
+        &self.app
+    }
+}
+
+impl std::ops::DerefMut for TestApp {
+    fn deref_mut(&mut self) -> &mut App {
+        &mut self.app
+    }
+}
+
+fn app() -> TestApp {
     let (dir, store) = fixture();
-    // Keep the temp dir alive for the lifetime of the app by leaking it; the
-    // process is a short-lived test binary.
-    std::mem::forget(dir);
     let mut app = App::new(store);
     // The TestBackend / PNG buffer doesn't capture the hardware cursor, so draw
     // the in-buffer caret glyph for these cursor-less backends.
     app.caret_glyph = true;
-    app
+    TestApp { app, _dir: dir }
 }
 
 /// Flatten the rendered terminal buffer to a trimmed text grid.
@@ -420,7 +437,7 @@ fn mk_store() -> (tempfile::TempDir, ItemStore) {
 /// A focused fixture: a dependency target plus a feature item (`#2`, priority 0
 /// so it's selected first) with the given title, labels, and body. When
 /// `blocked`, the dep target is open so the item shows a blocker.
-fn edge_app(title: &str, labels: &[&str], blocked: bool, body: &str) -> App {
+fn edge_app(title: &str, labels: &[&str], blocked: bool, body: &str) -> TestApp {
     let (dir, store) = mk_store();
     let (dep_status, dep_closed) = if blocked {
         (ItemStatus::Open, None)
@@ -434,8 +451,10 @@ fn edge_app(title: &str, labels: &[&str], blocked: bool, body: &str) -> App {
     put(&store, "proj-9QX4D1B7", title, ItemType::Feature, 0, 20,
         ItemStatus::InProgress, None, Some("ada"), Some("proj-7AF3K2MN"),
         labels, &["proj-7AF3K2MN"], &["proj-7AF3K2MN"], body);
-    std::mem::forget(dir);
-    App::new(store)
+    TestApp {
+        app: App::new(store),
+        _dir: dir,
+    }
 }
 
 const LONG_TITLE: &str =

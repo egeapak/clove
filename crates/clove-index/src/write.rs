@@ -34,6 +34,9 @@ pub(crate) const UNRANKED_TOPO: i64 = i64::MAX;
 pub(crate) struct RowMeta {
     /// File modification time, Unix epoch milliseconds.
     pub file_mtime_ms: i64,
+    /// File size in bytes, or `-1` when unknown (the write-through path), which
+    /// never matches a real size and so forces a hash on the next check.
+    pub file_size: i64,
     /// First 8 bytes of BLAKE3 over the file's bytes.
     pub content_hash: [u8; 8],
     /// Topological rank over the hard-dependency graph (`None` when unknown — it
@@ -58,6 +61,7 @@ pub fn upsert_item(conn: &mut Connection, item: &Item) -> Result<(), IndexError>
     let now_ms = chrono::Utc::now().timestamp_millis();
     let meta = RowMeta {
         file_mtime_ms: now_ms,
+        file_size: -1,
         content_hash: content_hash8(item.body.as_bytes()),
         topo_rank: None,
         has_dangling_deps: false,
@@ -98,8 +102,9 @@ pub(crate) fn write_row(
         "INSERT OR REPLACE INTO items
             (id, title, status, item_type, priority, assignee, parent_id,
              topological_rank, has_dangling_deps, excluded, labels, created_at, updated_at,
-             closed_at, file_mtime, content_hash, source_system, external_ref)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+             closed_at, file_mtime, file_size, content_hash, source_system, external_ref)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
+                 ?19)",
         params![
             id,
             fm.title,
@@ -116,6 +121,7 @@ pub(crate) fn write_row(
             fm.updated.to_rfc3339(),
             fm.closed.map(|c| c.to_rfc3339()),
             meta.file_mtime_ms,
+            meta.file_size,
             &meta.content_hash[..],
             fm.source_system,
             fm.external_ref,

@@ -17,10 +17,10 @@ use assert_cmd::prelude::*;
 /// Token records for this test's processes go here, never the user's clove home.
 const TEST_CLOVE_HOME: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/test-clove-home");
 
-/// The `cloved` binary, built on demand so the daemon cases can never pass by
-/// skipping.
+/// The test run's `cloved` (built with all features, so it has `web`); the
+/// daemon cases can never pass by skipping.
 fn cloved() -> &'static Path {
-    support::cloved("web")
+    support::cloved()
 }
 
 fn clove(dir: &Path) -> Command {

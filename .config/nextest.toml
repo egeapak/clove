@@ -1,0 +1,17 @@
+# cargo-nextest is the supported test runner for this workspace
+# (`cargo nextest run --workspace --all-features`; doctests run separately with
+# `cargo test --doc`, because nextest does not run them).
+
+# Setup scripts are still an experimental nextest feature (nextest 0.9.151).
+experimental = ["setup-scripts"]
+
+[scripts.setup.test-bins]
+# Builds `cloved` and the plugins that the clove-cli daemon and plugin suites
+# spawn, once per run, before any test (xtask/src/main.rs `test-bins`).
+command = "cargo xtask test-bins"
+# A cold build of the whole workspace can take a while.
+slow-timeout = { period = "120s" }
+
+[[profile.default.scripts]]
+filter = "package(clove-cli)"
+setup = "test-bins"

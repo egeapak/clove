@@ -800,14 +800,23 @@ came back; `_meta.per_column` marks the difference from a flat list.
 None of these is a regression from this work — the first two are pre-existing on
 `master` — but they are the places a reader will otherwise rediscover as bugs.
 
-- **`--deep` does not stat every file.** `stale::check_staleness` opens with the
-  same directory-mtime + file-count short-circuit as the fast path, so an
-  in-place edit that leaves the directory mtime alone (truncate-and-rewrite, as
-  opposed to the replace-by-rename that clove's own writes, git, `sed -i` and vim
-  all use) is invisible to *both* paths. Measured: three edited items, then
-  `clove ls --q WWMARK` and `clove --deep ls --q WWMARK` both answer `total=0`
-  from the index while `--no-index` answers `total=3`. `--deep` is documented as
-  the escape hatch for exactly this, so it should either stat or stop claiming to.
+- ~~**`--deep` does not stat every file.**~~ — **done**. `stale::check_staleness`
+  opened with the same directory-mtime + file-count short-circuit as the fast
+  path, so an in-place edit that leaves the directory mtime alone
+  (truncate-and-rewrite, as opposed to the replace-by-rename that clove's own
+  writes, git, `sed -i` and vim all use) was invisible to *both* paths once it
+  was older than the 2 s recent-mtime window. Measured: three edited items, then
+  `clove ls --q WWMARK` and `clove --deep ls --q WWMARK` both answered `total=0`
+  from the index while `--no-index` answered `total=3`. The short-circuit now
+  lives only in `check_staleness_fast`; the deep path always stats every file
+  and hashes the ones whose mtime or size moved (index schema 7 stores the
+  size). With a running `cloved`, `--deep` reads skip the daemon, which only
+  runs the fast check. A clean report whose mtimes moved is now applied too,
+  so touched files are not re-hashed on every later check and the `meta` row
+  catches up. One gap remains: a rewrite that keeps both the exact indexed
+  mtime and the exact size is caught only inside the 2 s window. Pinned by
+  `deep_catches_old_inplace_edit_with_unchanged_directory` (clove-index) and
+  `ls_deep_catches_old_in_place_edit` (CLI).
 - ~~**`clove dep tree --format json` omits `repeat_ref`**~~ — **done**. The
   three `tree_to_json` implementations (`cmd/dep.rs`, `ops.rs`, `clove-engine`)
   are now one serializer, `DepTreeNode::to_json` (plus `flat_json` for the

@@ -93,9 +93,17 @@ fn bench_index(c: &mut Criterion) {
             criterion::black_box(rows.len());
         });
     });
-    c.bench_function(&format!("staleness_clean_{n}"), |b| {
+    // `check_staleness` is the `--deep` pass: it stats every file. The name
+    // says so, because before #111 it short-circuited on a clean directory.
+    c.bench_function(&format!("staleness_clean_deep_{n}"), |b| {
         b.iter(|| {
             let report = index.check_staleness(&issues).unwrap();
+            criterion::black_box(report.change_count());
+        });
+    });
+    c.bench_function(&format!("staleness_clean_fast_{n}"), |b| {
+        b.iter(|| {
+            let report = index.check_staleness_fast(&issues).unwrap();
             criterion::black_box(report.change_count());
         });
     });

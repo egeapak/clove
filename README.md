@@ -282,10 +282,16 @@ The plugin wires up the `clove mcp` server automatically (tools surface as
 ```sh
 cargo build --release                    # lean binaries: clove (CLI), cloved (daemon)
 cargo build --release -p clove-sync-github   # the GitHub sync plugin (adds octocrab/TLS)
-cargo test --workspace --all-features    # unit + integration + doctests (incl. github sync)
+cargo xtask test-all                     # nextest (unit + integration, incl. github sync), then doctests
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all --check
 ```
+
+The tests run with [cargo-nextest](https://nexte.st) (`cargo install cargo-nextest --locked`).
+`cargo xtask test-all` runs `cargo nextest run --workspace --all-features` and then
+`cargo test --workspace --all-features --doc`, because nextest does not run doctests.
+A nextest setup script builds the `cloved` and plugin binaries that the integration
+tests spawn, so plain `cargo test` fails those suites.
 
 Frontend checks (only if you touch the web UI):
 
@@ -330,7 +336,7 @@ is clean:
 ```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
+cargo xtask test-all
 ```
 
 When adding an editable field or a synced field, add it in **one** place (the

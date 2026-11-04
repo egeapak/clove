@@ -18,7 +18,7 @@
 //! resolves the external `clove-sync-github` plugin (PLUGIN_SYSTEM.md §4.2/§8).
 //! This suite therefore exercises the **full dispatch path** — the real `clove`
 //! binary routes to the plugin, which runs octocrab against the mock. The plugin
-//! is built once (via escargot) and its directory placed on `CLOVE_PLUGIN_PATH`
+//! is built once per test run (`support::plugin`) and its directory placed on `CLOVE_PLUGIN_PATH`
 //! (see the `clove()` harness); the plugin emits byte-identical JSON to the old
 //! built-in, so every assertion below holds unchanged.
 
@@ -899,21 +899,17 @@ fn make_issue(
 // CLI harness
 // ---------------------------------------------------------------------------
 
-/// Build the `clove-sync-github` plugin once (across all tests) and return the
-/// directory that contains it, to be placed on `CLOVE_PLUGIN_PATH` so that
-/// `clove sync github` resolves the plugin. Built via escargot into the workspace
-/// target dir (the binary persists there for the process lifetime).
+/// The directory that holds this run's `clove-sync-github` plugin, to be placed
+/// on `CLOVE_PLUGIN_PATH` so that `clove sync github` resolves the plugin.
 ///
-/// Note the co-location assumption: plugin resolution searches the running
-/// `clove`'s own directory *before* `CLOVE_PLUGIN_PATH` (see `plugin.rs`).
-/// escargot builds this plugin into the same workspace `target/<profile>/` that
-/// holds the test's `cargo_bin("clove")`, so the current-exe-dir hit and the
-/// `CLOVE_PLUGIN_PATH` hit are the identical, freshly-rebuilt file — no stale
-/// sibling can win. If escargot's output dir ever diverged from the test binary's
-/// dir, a stale sibling could take precedence.
+/// Plugin resolution searches the running `clove`'s own directory *before*
+/// `CLOVE_PLUGIN_PATH` (see `plugin.rs`), so `support::plugin` returns the copy
+/// beside `cargo_bin("clove")` and checks that it is this run's build: the
+/// current-exe-dir hit and the `CLOVE_PLUGIN_PATH` hit are the same file.
 fn plugin_dir() -> &'static Path {
-    // `CLOVE_GITHUB_RETRY_MS` (below) only exists in a `test-knobs` build.
-    support::plugin("clove-sync-github", "clove-sync-github", "test-knobs")
+    // `CLOVE_GITHUB_RETRY_MS` (below) only exists in a `test-knobs` build; the
+    // setup script builds with all features.
+    support::plugin("clove-sync-github")
         .parent()
         .expect("plugin binary has a parent dir")
 }
@@ -948,7 +944,7 @@ fn clove(dir: &Path, addr: SocketAddr) -> Command {
     }
     cmd.env("CLOVE_AUTHOR", "tester@example.com");
     // `clove sync github` dispatches to the external `clove-sync-github` plugin;
-    // point the plugin search path at the escargot-built binary's dir.
+    // point the plugin search path at the test-run build's dir.
     cmd.env("CLOVE_PLUGIN_PATH", plugin_dir());
     // A dummy token (the mock ignores it) and the API-base override that aims
     // octocrab at our server instead of github.com — inherited by the plugin the
