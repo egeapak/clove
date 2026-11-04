@@ -852,6 +852,67 @@ fn update_reports_a_version_change_before_making_it() {
 }
 
 #[test]
+fn update_warns_when_an_earlier_copy_shadows_the_updated_plugin() {
+    // `$CLOVE_PLUGIN_PATH` outranks `<clove-home>/bin`, so after the update
+    // dispatch still runs the copy there. The update must say so, in the JSON
+    // warnings too, rather than report a plain success.
+    let env = env_with(&compatible_plugin());
+    env.seed_installed(
+        "clove-sync-gitlab 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+        &["clove-sync-gitlab"],
+    );
+    env.registry
+        .publish_plugin("clove-sync-gitlab", "0.2.0", "clove-sync-gitlab");
+    let elsewhere = env._tmp.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let shadow = elsewhere.join(format!("clove-sync-gitlab{}", std::env::consts::EXE_SUFFIX));
+    std::fs::copy(fake_cargo_bin(), &shadow).unwrap();
+    #[cfg(unix)]
+    {
+        let mut perms = std::fs::metadata(&shadow).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&shadow, perms).unwrap();
+    }
+
+    let assert = env
+        .clove()
+        .env("CLOVE_PLUGIN_PATH", &elsewhere)
+        .args(["--format", "json", "plugin", "update", "--yes"])
+        .assert()
+        .success();
+    let v: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(v["data"]["updated"][0]["to"], "0.2.0", "{v}");
+    let warnings = v["_meta"]["warnings"].as_array().expect("warnings array");
+    assert!(
+        warnings.iter().any(|w| {
+            let w = w.as_str().unwrap();
+            w.contains("still resolves to") && w.contains("elsewhere")
+        }),
+        "the shadowing copy must be named: {v}"
+    );
+}
+
+#[test]
+fn update_reports_no_shadow_warning_without_a_shadow() {
+    let env = env_with(&compatible_plugin());
+    env.seed_installed(
+        "clove-sync-gitlab 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+        &["clove-sync-gitlab"],
+    );
+    env.registry
+        .publish_plugin("clove-sync-gitlab", "0.2.0", "clove-sync-gitlab");
+
+    let assert = env
+        .clove()
+        .args(["--format", "json", "plugin", "update", "--yes"])
+        .assert()
+        .success();
+    let v: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(v["data"]["updated"][0]["to"], "0.2.0", "{v}");
+    assert_eq!(v["_meta"]["warnings"], serde_json::json!([]), "{v}");
+}
+
+#[test]
 fn update_does_not_re_resolve_a_git_install_through_crates_io() {
     // Silently converting a git install into a registry one would swap the code
     // the user chose for a same-named crate from a different source.
