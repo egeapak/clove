@@ -2201,8 +2201,10 @@ A proxy or a GitHub App can change a body on the way, for example by appending
 a footer. When the bodies differ, the sync edits the issue or comment back to
 the local body once, and lists it in `data.bodies_corrected` (a `corrected the
 body GitHub stored for …` line in the human output). When GitHub changes the
-edit too, the sync keeps GitHub's body, adds a warning that names the issue or
-comment, and records the fingerprint of the body GitHub stores. So a later run
+edit too, or the edit fails, the sync keeps GitHub's body, adds a warning that
+names the issue or comment, and goes on with the run. In every case it records
+the fingerprint of the body GitHub stores (as GitHub returned it, line breaks
+and whitespace included), not of the body it sent. So a later run
 neither pulls that body into the local item nor edits it again, until the local
 side changes and is pushed again.
 
