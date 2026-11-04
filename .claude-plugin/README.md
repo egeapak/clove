@@ -87,9 +87,12 @@ To make it a **standing directive** in a project, run:
 clove setup            # writes <project>/.claude/, or --global for ~/.claude/
 ```
 
-`clove setup` registers the `clove mcp` server (and its tool permissions) in
-`settings.json`, writes a `CLOVE.md` directives file, and adds an `@CLOVE.md`
-import to `CLAUDE.md` (idempotent; `--dry-run` to preview). Claude Code loads
+`clove setup` registers the `clove mcp` server in the project's `.mcp.json`,
+enables it and grants its tool permissions in `.claude/settings.json`, writes a
+`CLOVE.md` directives file, and adds an `@CLOVE.md` import to `CLAUDE.md`
+(idempotent; `--dry-run` to preview). With `--global`, setup does not edit
+`~/.claude.json`; it prints `claude mcp add --scope user clove -- clove mcp`,
+which registers the server for every project. Claude Code loads
 `@`-imported files into every session, so the agent reaches for clove by default
 rather than ad-hoc TODO lists. `clove agent-doc` prints the full command
 reference if you want a longer, versioned doc instead.

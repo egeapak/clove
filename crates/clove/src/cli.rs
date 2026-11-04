@@ -770,7 +770,9 @@ pub struct AgentDocArgs {
 
 #[derive(Debug, Args)]
 pub struct SetupArgs {
-    /// Write to `~/.claude/` instead of `<project>/.claude/`.
+    /// Write to `~/.claude/` instead of `<project>/.claude/` and `.mcp.json`.
+    /// It does not edit `~/.claude.json`: it prints the `claude mcp add` command
+    /// that registers the server for every project.
     #[arg(long)]
     pub global: bool,
     /// Report what would change without writing anything.

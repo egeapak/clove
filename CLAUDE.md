@@ -300,8 +300,16 @@ that case, install it from this checkout with
 `cargo install --path crates/clove --locked` (add `cargo install --path
 crates/cloved --locked` for the daemon) and restart the session, or use the
 CLI from a build (`cargo run -q -p clove-cli -- <command>`). When you add or
-remove an MCP tool, update the `permissions.allow` list in
-`.claude/settings.json` to match `CloveServer::tool_names()` in
-`crates/clove-mcp/src/server.rs`.
+remove an MCP tool, run `clove setup` in the repo root (or edit
+`permissions.allow` in `.claude/settings.json` by hand). The test
+`repo_claude_config_matches_setup` in `crates/clove/src/cmd/setup.rs` fails
+until the list matches `CloveServer::tool_names()`.
+
+Two limits apply:
+
+- `enabledMcpjsonServers` is ignored until you trust the folder in Claude Code.
+- In a cloud session that runs inside a claude.ai project, Claude Code does
+  not apply the permissions and hooks of `.claude/settings.json`. The clove
+  tools can still ask for permission there.
 
 @CLOVE.md

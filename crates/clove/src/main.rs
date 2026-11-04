@@ -103,7 +103,7 @@ fn dispatch(cli: Cli) -> (OutputFormat, Result<ExitCode, CloveError>) {
             let f = resolve_format(flag, None);
             (f, cmd::agent_doc::run(f, args).map(|_| ExitCode::Success))
         }
-        // `setup` configures Claude Code (settings.json + CLOVE.md) and must run
+        // `setup` configures Claude Code (.mcp.json, settings.json, CLOVE.md) and must run
         // before `clove init`, so it does not require a `.clove/` repository.
         Commands::Setup(args) => {
             let f = resolve_format(flag, None);

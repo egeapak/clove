@@ -2,11 +2,12 @@
 schema: 1
 id: clov-36RNX0GK
 title: clove setup registers the MCP server in settings.json, which Claude Code does not read for servers
-status: open
+status: closed
 type: bug
 priority: 2
 created: 2026-11-04T09:47:32.144Z
-updated: 2026-11-04T09:47:32.144Z
+updated: 2026-11-04T16:58:27.982Z
+closed: 2026-11-04T16:58:27.982Z
 labels: []
 deps: []
 relates: []
