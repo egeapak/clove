@@ -73,6 +73,12 @@ pub fn run(paths: &HubPaths) -> anyhow::Result<()> {
         // The control socket is a mutating RPC channel for every project the
         // user has — restrict it to the owner (D-daemon-SEC-1).
         restrict_to_owner(&paths.sock(), 0o600);
+        // Test knob: a hub that has bound but is slow to serve, as on a loaded
+        // machine. A client's connect succeeds and its handshake goes
+        // unanswered until the accept loop runs.
+        if let Some(delay) = crate::knobs::duration("CLOVED_SERVE_DELAY_MS") {
+            tokio::time::sleep(delay).await;
+        }
 
         let hub = Hub::new(std::env::var_os("CLOVED_DISABLE_WEB").is_none(), grace())
             .with_load_delay(crate::knobs::duration("CLOVED_LOAD_DELAY_MS").unwrap_or_default());
