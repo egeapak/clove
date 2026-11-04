@@ -2,11 +2,11 @@
 schema: 1
 id: clov-9QB78SJ5
 title: Make escargot-built test binaries safe for cargo-nextest
-status: open
+status: in_progress
 type: chore
 priority: 2
 created: 2026-11-03T08:11:48.348Z
-updated: 2026-11-03T17:24:10.268Z
+updated: 2026-11-04T10:04:25.819Z
 labels: []
 deps: []
 relates: []
