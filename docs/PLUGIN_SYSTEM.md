@@ -227,13 +227,21 @@ First match wins. Resolution is a pure `stat`-for-executable walk (no exec) so
 `clove --list` / help can enumerate cheaply. On Unix, require the file be
 executable (`X_OK`); on Windows, match `PATHEXT`. On Windows each search dir
 is tried with every `PATHEXT` extension in order (directory first, then
-extension, as a Windows command lookup does), compared case-insensitively; an
-unset or empty `PATHEXT` means `.COM;.EXE;.BAT;.CMD`, and `.exe` is always
+extension, as a Windows command lookup does), compared case-insensitively.
+Only the extensions clove can start count: `.com`, `.exe`, `.bat`, `.cmd`, and
+`.ps1`; other `PATHEXT` entries (`.VBS`, `.JS`, `.WSF`, `.MSC`, …) are ignored.
+An unset or empty `PATHEXT` means `.COM;.EXE;.BAT;.CMD`, and `.exe` is always
 included so the cargo-installed plugins are never hidden. A `.bat`/`.cmd`
-plugin runs through `cmd.exe` (Rust's standard library does this, with argument
-escaping). A `.ps1` plugin is found only when the user lists `.PS1` in
-`PATHEXT`, and runs as `powershell.exe -NoLogo -NoProfile -File <path> …`;
-clove does not change the execution policy. This mirrors cargo's
+plugin runs through `cmd.exe` (Rust's standard library does this and escapes
+the arguments; it refuses to spawn when an argument cannot be passed to
+`cmd.exe` safely, for example one that contains a newline, and the host reports
+that as an I/O error). A `.ps1` plugin is found only when the user lists `.PS1`
+in `PATHEXT`, and runs as `powershell.exe -NoLogo -NoProfile -File <path> …`;
+clove does not change the execution policy. Windows PowerShell 5.1 can change
+empty arguments and arguments that contain quotes, so a plugin that needs exact
+arguments should ship as an `.exe`. The `--clove-plugin-info` probe waits 3 s
+for a `.ps1` plugin (500 ms otherwise), because `powershell.exe` starts slowly.
+This mirrors cargo's
 `current_exe dir + PATH` strategy — importantly it does **not** require the user
 to have the cargo bin dir on `PATH`, which is a common friction point.
 

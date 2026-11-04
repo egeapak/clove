@@ -5,7 +5,7 @@
 //! exactly as `cargo foo` runs `cargo-foo`. This module owns the three pure,
 //! always-compiled pieces:
 //!
-//! - **name construction** ([`binary_name`]) and **path search**
+//! - **name construction** ([`binary_name_with`]) and **path search**
 //!   ([`resolve`] / [`list`]) — a `stat`-only walk (no exec, no spawn) so
 //!   `clove plugin list` can enumerate cheaply;
 //! - the **environment contract** ([`export_env`]) — every `CLOVE_*` var the
@@ -58,16 +58,12 @@ pub struct PluginInfo {
     pub path: Utf8PathBuf,
 }
 
-/// The candidate binary name for a dispatch path, e.g. `["sync", "github"]` →
-/// `clove-sync-github` (plus the platform executable suffix, `.exe` on Windows).
-#[cfg(test)]
-fn binary_name(segments: &[&str]) -> String {
-    binary_name_with(segments, std::env::consts::EXE_SUFFIX)
-}
-
-/// [`binary_name`] with the executable suffix injected — see
-/// [`crate::registry::install::installed_binary_path_with`] for why. The search
-/// itself tries every extension in [`exe_extensions`], one at a time.
+/// The candidate binary name for a dispatch path and one executable extension,
+/// e.g. `["sync", "github"]` + `.cmd` → `clove-sync-github.cmd`. The search
+/// ([`resolve_in`]) tries every extension in [`exe_extensions`], one at a time;
+/// the extension is injected (not read from the platform) so the rules are
+/// testable everywhere — see
+/// [`crate::registry::install::installed_binary_path_with`].
 fn binary_name_with(segments: &[&str], exe_suffix: &str) -> String {
     format!("clove-{}{exe_suffix}", segments.join("-"))
 }
@@ -142,10 +138,14 @@ fn is_executable(path: &Utf8Path) -> bool {
     }
 }
 
-/// The `PATHEXT` used when the variable is unset or lists nothing usable. This
-/// is the Windows default minus the legacy script hosts (`.VBS`, `.JS`, …),
-/// which clove would have no way to run.
+/// The `PATHEXT` used when the variable is unset or lists nothing usable.
 const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
+
+/// The extensions [`plugin_command`] can start. A `PATHEXT` entry outside this
+/// set is ignored: the stock Windows value also lists `.VBS`, `.JS`, `.WSF`,
+/// `.MSC`, …, and `CreateProcess` cannot start those, so a `clove-foo.js` must
+/// not be resolved (and must not shadow a later `clove-foo.exe`).
+const RUNNABLE_EXTENSIONS: &[&str] = &[".com", ".exe", ".bat", ".cmd", ".ps1"];
 
 /// The executable extensions to try, in precedence order, for one plugin stem.
 ///
@@ -163,8 +163,9 @@ fn exe_extensions() -> Vec<String> {
 
 /// Parse a `PATHEXT` value into lowercase extensions, in order and deduplicated.
 ///
-/// An entry that does not start with `.` is ignored, as Windows itself does. An
-/// unset or empty value falls back to [`DEFAULT_PATHEXT`]. `.exe` is always
+/// An entry that does not start with `.` is ignored, as Windows itself does, and
+/// so is an entry outside [`RUNNABLE_EXTENSIONS`]. An unset or empty value (or
+/// one with no usable entry) falls back to [`DEFAULT_PATHEXT`]. `.exe` is always
 /// present (appended when the value leaves it out), because every plugin that
 /// `cargo install` writes is an `.exe`, and an unusual `PATHEXT` must not hide
 /// the shipped plugins.
@@ -173,7 +174,7 @@ fn extensions_from_pathext(value: Option<&str>) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         for entry in v.split(';') {
             let ext = entry.trim().to_ascii_lowercase();
-            if ext.len() > 1 && ext.starts_with('.') && !out.contains(&ext) {
+            if RUNNABLE_EXTENSIONS.contains(&ext.as_str()) && !out.contains(&ext) {
                 out.push(ext);
             }
         }
@@ -213,10 +214,7 @@ fn split_exe_extension<'a>(file_name: &'a str, exts: &[String]) -> Option<(&'a s
 /// as `powershell.exe -NoLogo -NoProfile -File <path> …`. The user's execution
 /// policy still applies; clove does not bypass it.
 fn plugin_command(path: &Utf8Path) -> Command {
-    if path
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("ps1"))
-    {
+    if is_ps1(path) {
         let mut cmd = Command::new("powershell.exe");
         cmd.args(["-NoLogo", "-NoProfile", "-File"]).arg(path);
         cmd
@@ -312,6 +310,17 @@ fn list_in(dirs: &[Utf8PathBuf], exts: &[String]) -> Vec<PluginInfo> {
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut plugins: Vec<PluginInfo> = Vec::new();
 
+    // Windows file names are case-insensitive, so `clove-Foo.exe` and a later
+    // `clove-foo.cmd` are one plugin, as they are to [`resolve`]. A non-empty
+    // extension list means Windows rules (the tests inject one on every OS).
+    let fold_case = exts.iter().any(|e| !e.is_empty());
+    let dedup_key = |name: &str| {
+        if fold_case {
+            name.to_ascii_lowercase()
+        } else {
+            name.to_owned()
+        }
+    };
     for dir in dirs {
         let Ok(entries) = std::fs::read_dir(dir) else {
             continue;
@@ -319,7 +328,8 @@ fn list_in(dirs: &[Utf8PathBuf], exts: &[String]) -> Vec<PluginInfo> {
         // Within one directory the best-ranked extension wins (`PATHEXT`
         // order, as [`resolve_in`] tries them), whatever order `read_dir`
         // returns the files in. Keyed by name → (rank, path).
-        let mut best: std::collections::BTreeMap<String, (usize, Utf8PathBuf)> =
+        // Keyed by the dedup key (see `fold_case`) → (name, rank, path).
+        let mut best: std::collections::BTreeMap<String, (String, usize, Utf8PathBuf)> =
             std::collections::BTreeMap::new();
         for entry in entries.flatten() {
             let Ok(file_name) = entry.file_name().into_string() else {
@@ -344,15 +354,16 @@ fn list_in(dirs: &[Utf8PathBuf], exts: &[String]) -> Vec<PluginInfo> {
             if !is_executable(&path) {
                 continue;
             }
-            match best.get(name) {
-                Some((held, _)) if *held <= rank => {}
+            let key = dedup_key(name);
+            match best.get(&key) {
+                Some((_, held, _)) if *held <= rank => {}
                 _ => {
-                    best.insert(name.to_owned(), (rank, path));
+                    best.insert(key, (name.to_owned(), rank, path));
                 }
             }
         }
-        for (name, (_, path)) in best {
-            if seen.insert(name.clone()) {
+        for (key, (name, _, path)) in best {
+            if seen.insert(key) {
                 plugins.push(PluginInfo { name, path });
             }
         }
@@ -457,9 +468,25 @@ pub struct EnrichedPlugin {
 /// misbehaving plugin can never wedge `plugin list` / `<mux> --help`.
 const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// [`PROBE_TIMEOUT`], or `CLOVE_PLUGIN_PROBE_MS` in a `test-knobs` build.
-fn probe_timeout() -> std::time::Duration {
-    crate::knobs::duration("CLOVE_PLUGIN_PROBE_MS").unwrap_or(PROBE_TIMEOUT)
+/// The probe timeout for a `.ps1` plugin. A cold `powershell.exe` start alone
+/// often takes longer than [`PROBE_TIMEOUT`], which would list every working
+/// PowerShell plugin as `no_info`.
+const PROBE_TIMEOUT_PS1: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// [`PROBE_TIMEOUT`] ([`PROBE_TIMEOUT_PS1`] for a `.ps1` plugin), or
+/// `CLOVE_PLUGIN_PROBE_MS` in a `test-knobs` build.
+fn probe_timeout(path: &Utf8Path) -> std::time::Duration {
+    crate::knobs::duration("CLOVE_PLUGIN_PROBE_MS").unwrap_or(if is_ps1(path) {
+        PROBE_TIMEOUT_PS1
+    } else {
+        PROBE_TIMEOUT
+    })
+}
+
+/// Is `path` a PowerShell script (`.ps1`, any case)?
+fn is_ps1(path: &Utf8Path) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("ps1"))
 }
 
 /// The poll interval while waiting for the probe child to exit.
@@ -485,7 +512,7 @@ pub fn probe_info(path: &Utf8Path) -> Option<ProbedInfo> {
         .ok()?;
 
     let start = std::time::Instant::now();
-    let timeout = probe_timeout();
+    let timeout = probe_timeout(path);
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
@@ -801,17 +828,12 @@ mod tests {
     }
 
     #[test]
-    fn binary_name_joins_segments_and_prefix() {
-        // The suffix is empty on Unix and `.exe` on Windows; assert the stable
-        // prefix + join and that the platform suffix is appended.
+    fn binary_name_joins_segments_prefix_and_extension() {
         assert_eq!(
-            binary_name(&["sync", "github"]),
-            format!("clove-sync-github{}", std::env::consts::EXE_SUFFIX)
+            binary_name_with(&["sync", "github"], ""),
+            "clove-sync-github"
         );
-        assert_eq!(
-            binary_name(&["echo"]),
-            format!("clove-echo{}", std::env::consts::EXE_SUFFIX)
-        );
+        assert_eq!(binary_name_with(&["echo"], ".cmd"), "clove-echo.cmd");
     }
 
     fn exts(list: &[&str]) -> Vec<String> {
@@ -831,8 +853,15 @@ mod tests {
     #[test]
     fn pathext_is_parsed_in_order_lowercased_and_deduped() {
         assert_eq!(
-            extensions_from_pathext(Some(".COM;.EXE;.BAT;.CMD;.VBS;.PS1")),
-            exts(&[".com", ".exe", ".bat", ".cmd", ".vbs", ".ps1"])
+            extensions_from_pathext(Some(".COM;.EXE;.BAT;.CMD;.PS1")),
+            exts(&[".com", ".exe", ".bat", ".cmd", ".ps1"])
+        );
+        // The stock Windows value: the script hosts clove cannot start drop out.
+        assert_eq!(
+            extensions_from_pathext(Some(
+                ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC"
+            )),
+            exts(&[".com", ".exe", ".bat", ".cmd"])
         );
         // Blank entries, entries without a dot, and repeats are dropped.
         assert_eq!(
@@ -847,6 +876,7 @@ mod tests {
         assert_eq!(extensions_from_pathext(None), default);
         assert_eq!(extensions_from_pathext(Some("")), default);
         assert_eq!(extensions_from_pathext(Some(";nodot;")), default);
+        assert_eq!(extensions_from_pathext(Some(".JS;.VBS")), default);
         // A PATHEXT without `.exe` still finds the cargo-installed plugins.
         assert_eq!(
             extensions_from_pathext(Some(".CMD;.PS1")),
@@ -931,6 +961,11 @@ mod tests {
         touch_exec(&first.join("clove-bat.BAT"));
         touch_exec(&first.join("clove-notes.txt"));
         touch_exec(&first.join("clove-bare"));
+        // An empty subcommand name and a directory are never plugins.
+        touch_exec(&first.join("clove-.cmd"));
+        std::fs::create_dir_all(first.join("clove-dir.exe")).unwrap();
+        // Same plugin as `clove-both`, in another case: hidden by the earlier one.
+        touch_exec(&second.join("clove-BOTH.cmd"));
         // A later directory never outranks an earlier one, whatever the extension.
         touch_exec(&second.join("clove-bat.exe"));
         touch_exec(&second.join("clove-ps.ps1"));
@@ -947,6 +982,21 @@ mod tests {
                 ("both", first.join("clove-both.exe").as_path()),
                 ("ps", second.join("clove-ps.ps1").as_path()),
             ]
+        );
+    }
+
+    #[test]
+    fn ps1_plugins_get_a_longer_probe_timeout() {
+        if std::env::var_os("CLOVE_PLUGIN_PROBE_MS").is_some() {
+            return; // a test-knobs override replaces both defaults
+        }
+        assert_eq!(
+            probe_timeout(Utf8Path::new("C:/bin/clove-foo.Ps1")),
+            PROBE_TIMEOUT_PS1
+        );
+        assert_eq!(
+            probe_timeout(Utf8Path::new("/bin/clove-foo")),
+            PROBE_TIMEOUT
         );
     }
 
