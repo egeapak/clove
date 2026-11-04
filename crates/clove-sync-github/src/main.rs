@@ -205,6 +205,7 @@ fn run(
                 "remote_missing": summary.remote_missing,
                 "foreign": summary.foreign,
                 "skipped": report.skipped,
+                "bodies_corrected": report.bodies_corrected,
             }),
             json!({ "warnings": run_warnings(&report) }),
         ),
@@ -231,6 +232,9 @@ fn run(
             print_conflicts(&summary);
             print_comment_changes(&report.comments, "deleted");
             print_remote_missing(&summary);
+            for corrected in &report.bodies_corrected {
+                outln!("  corrected the body GitHub stored for {corrected}");
+            }
             for warning in run_warnings(&report) {
                 eprintln!("warning: {warning}");
             }

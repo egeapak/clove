@@ -119,6 +119,12 @@ empty or a real GitHub user.
       `invalid proxy URL in HTTPS_PROXY` setup error.
 - [ ] Create the throwaway item + a local comment; **sync** → new issue with labels
       and comment; `external_ref` written back.
+- [ ] Open the new issue and its comment on GitHub: each body is exactly the
+      local body (plus the `clove-meta` comment on the issue), with no text a
+      proxy or GitHub App appended. If the run printed `corrected the body
+      GitHub stored for …`, the edit back must have landed; a `GitHub changed
+      the body of … again after an edit` warning means something on the way
+      changes every write, so run the sync from another network.
 - [ ] Both sides at once: comment on the issue on GitHub; locally close it and add a
       comment → sync pushes the close and the local comment, pulls the remote comment.
 - [ ] Comment edits, both directions (on the throwaway issue, after a sync that
