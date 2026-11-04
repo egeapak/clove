@@ -15,6 +15,7 @@ import { related, ensureRelated, resetRelated } from '$lib/related.svelte';
 import { stubApi, StubError, item, META } from './fake-api';
 import ListPage from '../routes/list/+page.svelte';
 import RelatedItem from '$lib/components/RelatedItem.svelte';
+import BlockedBadge from '$lib/components/BlockedBadge.svelte';
 
 const ID = 'proj-7af3q2k9';
 const OTHER = 'proj-0000000B';
@@ -61,6 +62,9 @@ afterEach(() => {
 });
 
 describe('related-item cache', () => {
+  // These tests put items in the store; drop them so later tests start clean.
+  afterEach(() => store.replaceAll([]));
+
   it('refetches after a live update instead of keeping the first answer', async () => {
     ensureRelated(OTHER);
     await settle();
@@ -110,6 +114,36 @@ describe('related-item cache', () => {
     await settle();
     expect(calls).toEqual([]);
     expect(screen.getByText('missing item')).toBeTruthy();
+  });
+
+  it('fetches a dep once no stored item lists it as dangling', async () => {
+    const MISSING = 'proj-0000000D';
+    const calls = stubApi((path) => {
+      if (path === `/items/${MISSING}`) return item({ id: MISSING, title: 'Created later' });
+      throw new StubError(404, 'NOT_FOUND');
+    });
+    store.replaceAll([item({ id: ID, deps: [MISSING], blocked_by: [MISSING], dangling_deps: [MISSING] })]);
+    ensureRelated(MISSING);
+    await settle();
+    expect(calls).toEqual([]);
+
+    store.replaceAll([item({ id: ID, deps: [MISSING] })]);
+    store.liveRev += 1;
+    ensureRelated(MISSING);
+    await settle();
+    expect(calls).toEqual([`/items/${MISSING}`]);
+    expect(related(MISSING)?.title).toBe('Created later');
+  });
+
+  it('sends no request for a dangling id in a blocked badge', async () => {
+    const MISSING = 'proj-0000000D';
+    const calls = stubApi(() => {
+      throw new StubError(404, 'NOT_FOUND');
+    });
+    store.replaceAll([item({ id: ID, deps: [MISSING], blocked_by: [MISSING], dangling_deps: [MISSING] })]);
+    render(BlockedBadge, { blockedBy: [MISSING] });
+    await settle();
+    expect(calls).toEqual([]);
   });
 
   it('caches a 404 as missing', async () => {

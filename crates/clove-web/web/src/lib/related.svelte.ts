@@ -92,4 +92,6 @@ export function resetRelated(): void {
   fetched.clear();
   fetchedAt.clear();
   inFlight.clear();
+  danglingFrom = null;
+  danglingIds = new Set();
 }
