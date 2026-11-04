@@ -158,8 +158,8 @@ fn item_from_spec(spec: &ItemSpec) -> Item {
 }
 
 /// Backdate every item file's mtime (and the dir's) past the 2s "recent file"
-/// guard, so a `check_staleness` after a fresh `reindex` takes the clean fast
-/// path instead of hashing every file.
+/// guard, so a `check_staleness` after a fresh `reindex` finds every stored
+/// mtime equal and hashes no file.
 fn backdate(issues: &Utf8Path) {
     let past = filetime::FileTime::from_unix_time(1_600_000_000, 0);
     for entry in std::fs::read_dir(issues).unwrap() {

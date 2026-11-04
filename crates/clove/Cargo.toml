@@ -95,7 +95,7 @@ assert_cmd.workspace = true
 escargot.workspace = true         # build the sibling `cloved` bin for the daemon-auto-start test
 fd-lock.workspace = true          # hold the sync lock to test concurrent-sync rejection
 insta = { workspace = true, features = ["json"] }       # golden CLI snapshot tests (T-X01 acceptance gate)
-filetime = "0.2"                  # backdate mtimes: --deep must catch an old in-place edit
+filetime.workspace = true         # backdate mtimes: --deep must catch an old in-place edit
 tempfile.workspace = true
 jsonschema.workspace = true       # T-CLI14: validate JSON output against v1 schema
 rusqlite.workspace = true         # doctor: stamp an old index user_version to exercise INDEX_SCHEMA_MISMATCH

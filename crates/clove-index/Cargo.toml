@@ -27,7 +27,7 @@ smol_str.workspace = true    # inline short list-row strings (id/status/type): n
 [dev-dependencies]
 tempfile.workspace = true
 criterion.workspace = true
-filetime = "0.2"          # backdate file mtimes in staleness tests/benches
+filetime.workspace = true  # backdate file mtimes in staleness tests/benches
 
 [[bench]]
 name = "index"

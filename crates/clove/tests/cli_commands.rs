@@ -1019,6 +1019,7 @@ fn ls_deep_catches_old_in_place_edit() {
     assert_eq!(deep["_meta"]["total"], 1, "--deep missed the edit: {deep}");
     // The refresh that `--deep` applied is now in the index for every reader.
     let fast = json_ok(clove(dir.path()).args(["ls", "--q", "WWMARK"]));
+    assert_eq!(fast["_meta"]["source"], "index", "{fast}");
     assert_eq!(fast["_meta"]["total"], 1, "{fast}");
 }
 
