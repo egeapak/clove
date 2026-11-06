@@ -2,11 +2,12 @@
 schema: 1
 id: clov-NZA7M9YK
 title: 'clove_plugin::run_raw: move clove-sync-github''s hand-rolled plugin-info probe + from_env enveloping into the SDK'
-status: open
+status: closed
 type: chore
 priority: 4
 created: 2026-10-20T18:47:05.000Z
-updated: 2026-11-03T17:38:52.910Z
+updated: 2026-11-04T10:02:15.390Z
+closed: 2026-11-04T10:02:15.390Z
 labels: []
 deps: []
 relates: []

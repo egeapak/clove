@@ -1351,6 +1351,8 @@ fn dry_run_touches_neither_side() {
     // Plan reports both a pull and a push, but applies nothing.
     assert_eq!(v["data"]["push_create"].as_array().unwrap().len(), 1, "{v}");
     assert_eq!(v["data"]["pull_create"].as_array().unwrap().len(), 1, "{v}");
+    // The plan envelope carries the standard `_meta` shape.
+    assert_eq!(v["_meta"], json!({ "warnings": [] }), "{v}");
 
     // GitHub still has only the seeded issue; the local item has no ref.
     assert_eq!(mock.issue_count(), 1, "dry-run created no issue");

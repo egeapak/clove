@@ -91,8 +91,14 @@ fn external_plugin_is_dispatched_with_argv_and_env() {
     let v: Value = serde_json::from_slice(&out.stdout)
         .unwrap_or_else(|e| panic!("stdout is not JSON ({e}): {:?}", out));
 
-    // Standard success envelope from the plugin's `clove-plugin` harness.
+    // Standard success envelope from the plugin's `clove-plugin` harness, with
+    // the same `_meta` shape the built-ins emit.
     assert_eq!(v["ok"], true, "envelope: {v}");
+    assert_eq!(
+        v["_meta"],
+        serde_json::json!({ "warnings": [] }),
+        "envelope: {v}"
+    );
 
     // The forwarded argv (leading `echo` echo stripped by the plugin harness).
     let argv = v["data"]["argv"].as_array().expect("data.argv array");
@@ -167,6 +173,32 @@ fn unknown_subcommand_is_a_usage_error() {
     assert_eq!(v["ok"], false);
     assert_eq!(v["error"]["code"], "UNKNOWN_SUBCOMMAND");
     assert_eq!(v["error"]["exit"], 1);
+}
+
+/// A plugin run with no host env (`clove-echo` invoked directly) fails in the
+/// SDK harness: `run_raw` renders the standard error envelope in the format
+/// `CLOVE_FORMAT` asks for, with the validation exit code (4).
+#[test]
+fn plugin_without_host_env_renders_the_error_envelope() {
+    let (_dir, echo) = install_echo();
+    let mut cmd = Command::new(&echo);
+    // Drop only the host contract vars: a full `env_clear` also drops the
+    // variables Windows needs to start a process (`SystemRoot`).
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("CLOVE_") {
+            cmd.env_remove(key);
+        }
+    }
+    let assert = cmd
+        .env("CLOVE_FORMAT", "json")
+        .arg("hello")
+        .assert()
+        .failure()
+        .code(4);
+    let v: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(v["ok"], false, "envelope: {v}");
+    assert_eq!(v["error"]["code"], "VALIDATION_ERROR", "envelope: {v}");
+    assert_eq!(v["error"]["exit"], 4, "envelope: {v}");
 }
 
 /// The umbrella fallback (PLUGIN_SYSTEM.md §4.2): with only a `clove-sync-echo`
