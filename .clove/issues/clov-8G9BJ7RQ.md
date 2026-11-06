@@ -2,11 +2,12 @@
 schema: 1
 id: clov-8G9BJ7RQ
 title: 'sync github: a pushed issue whose GitHub body differs from the sent body is not corrected'
-status: open
+status: closed
 type: bug
 priority: 2
 created: 2026-11-04T09:46:20.952Z
-updated: 2026-11-04T09:46:20.952Z
+updated: 2026-11-04T10:06:03.695Z
+closed: 2026-11-04T10:06:03.695Z
 labels: [sync]
 deps: []
 relates: []

@@ -119,6 +119,12 @@ empty or a real GitHub user.
       `invalid proxy URL in HTTPS_PROXY` setup error.
 - [ ] Create the throwaway item + a local comment; **sync** → new issue with labels
       and comment; `external_ref` written back.
+- [ ] Open the new issue and its comment on GitHub: each body is exactly the
+      local body (plus the `clove-meta` comment on the issue), with no text a
+      proxy or GitHub App appended. If the run printed `corrected the body
+      GitHub stored for …`, the edit back must have landed; a `GitHub changed
+      the body of … again after an edit` warning means something on the way
+      changes every write, so run the sync from another network.
 - [ ] Both sides at once: comment on the issue on GitHub; locally close it and add a
       comment → sync pushes the close and the local comment, pulls the remote comment.
 - [ ] Comment edits, both directions (on the throwaway issue, after a sync that
@@ -233,6 +239,11 @@ Everything `release-smoke.sh` does not already cover:
       non-interactive shell ignores SIGINT, so `kill -INT` on it proves nothing.
       (The host IPC channel itself is exercised on all three platforms by
       `plugin_dispatch.rs` in CI, and every shipped plugin writes through it.)
+- [ ] Windows script plugins (on a real Windows host, not Wine): put a
+      `clove-hello.cmd` containing `@echo hello %*` in a dir on `PATH`; `clove
+      plugin list` shows `hello` and `clove hello a b` prints `hello a b`. With
+      `.PS1` added to `PATHEXT` and a `clove-hi.ps1` (`Write-Output "hi $args"`),
+      `clove hi x` prints `hi x`.
 
 ## 9. Close out
 

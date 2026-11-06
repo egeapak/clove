@@ -2206,6 +2206,20 @@ through the unified write path (`apply_edit`). `--dry-run` plans without touchin
 either side; `--no-comments` skips comment reconciliation. A running daemon can
 run the sync on a timer (`[daemon] github_sync_interval_min` + `github_sync_repo`).
 
+**Pushed bodies are checked.** After each issue create or update, and each
+comment post or edit, the sync compares the body in GitHub's response with the
+body it sent (CRLF line breaks and leading or trailing whitespace do not count).
+A proxy or a GitHub App can change a body on the way, for example by appending
+a footer. When the bodies differ, the sync edits the issue or comment back to
+the local body once, and lists it in `data.bodies_corrected` (a `corrected the
+body GitHub stored for …` line in the human output). When GitHub changes the
+edit too, or the edit fails, the sync keeps GitHub's body, adds a warning that
+names the issue or comment, and goes on with the run. In every case it records
+the fingerprint of the body GitHub stores (as GitHub returned it, line breaks
+and whitespace included), not of the body it sent. So a later run
+neither pulls that body into the local item nor edits it again, until the local
+side changes and is pushed again.
+
 **Proxy and TLS trust.** The GitHub client reads the proxy environment.
 `HTTPS_PROXY` serves an `https://` API base, `HTTP_PROXY` an `http://` one
 (GitHub Enterprise or the test mock), and `ALL_PROXY` is the fallback when the

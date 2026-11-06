@@ -262,6 +262,21 @@ pub struct CommentLink {
     /// an edit someone else made from one of its own writes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gh_updated_at: Option<DateTime<Utc>>,
+    /// [`link_hash`] of the body GitHub stores, when it is not the body clove
+    /// wrote there (a proxy or GitHub App changed the body on the way, and
+    /// the sync could not edit it back). `None` means GitHub stores the
+    /// `base_hash` body. Without it, the changed body would look like a
+    /// remote edit on the next sync and be pulled into the local comment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gh_base_hash: Option<u64>,
+}
+
+impl CommentLink {
+    /// [`link_hash`] of the body GitHub held at the last sync: a GitHub
+    /// comment whose body no longer hashes to it has been edited since.
+    pub fn remote_base_hash(&self) -> u64 {
+        self.gh_base_hash.unwrap_or(self.base_hash)
+    }
 }
 
 /// The current schema version of the persisted sync-state file.
@@ -747,6 +762,11 @@ pub struct SyncReport {
     pub skipped: Vec<SkippedItem>,
     /// Non-fatal notes, e.g. an assignee GitHub refused and the push dropped.
     pub warnings: Vec<String>,
+    /// Issues and comments whose body GitHub stored differently from the body
+    /// the push sent (a proxy or GitHub App changed it), and that the sync then
+    /// edited back to the local body. Each entry names the issue (`#3 (gh-3)`)
+    /// or the comment (`comment 1001 on #3 (gh-3)`).
+    pub bodies_corrected: Vec<String>,
 }
 
 /// One item a sync run could not push because GitHub rejected it.
@@ -1096,7 +1116,7 @@ pub fn plan_comments(
     for link in &entry.comment_links {
         let remote = gh.iter().find(|c| c.id == link.gh_id);
         let here = local.iter().find(|c| c.key == link.local_key);
-        let remote_edited = remote.is_some_and(|c| link_hash(&c.body) != link.base_hash);
+        let remote_edited = remote.is_some_and(|c| link_hash(&c.body) != link.remote_base_hash());
         let local_edited = here.is_some_and(|c| link_hash(&c.body) != link.base_hash);
         match (remote, here) {
             (Some(remote), Some(here)) => {
@@ -1111,6 +1131,7 @@ pub fn plan_comments(
                             link: CommentLink {
                                 base_hash: link_hash(&here.body),
                                 gh_updated_at: remote.updated_at,
+                                gh_base_hash: None,
                                 ..link.clone()
                             },
                             legacy_hash: None,
@@ -1183,6 +1204,7 @@ pub fn plan_comments(
                     local_key: twin.key.clone(),
                     base_hash: link_hash(&twin.body),
                     gh_updated_at: remote.updated_at,
+                    gh_base_hash: None,
                 },
                 legacy_hash: Some(hash),
             });
@@ -1215,6 +1237,7 @@ pub fn plan_comments(
                         local_key: twin.key.clone(),
                         base_hash: link_hash(&twin.body),
                         gh_updated_at: remote.updated_at,
+                        gh_base_hash: None,
                     },
                     legacy_hash: None,
                 });
@@ -2440,8 +2463,31 @@ mod tests {
             local_key: "a.md".to_owned(),
             base_hash: link_hash(body),
             gh_updated_at: Some(ts("2026-06-01T00:00:00Z")),
+            gh_base_hash: None,
         });
         entry
+    }
+
+    #[test]
+    fn a_remote_body_github_changed_on_the_way_is_not_a_remote_edit() {
+        // GitHub stores the pushed comment with a footer that the sync could
+        // not edit away: the link records that body as GitHub's side.
+        let mut entry = linked_entry("text");
+        entry.comment_links[0].gh_base_hash = Some(link_hash("text\n\nfooter"));
+        let remote = [gh_comment(10, "text\n\nfooter")];
+        let plan_same = plan(&remote, &[local_comment("a.md", "text")], &entry);
+        assert!(plan_same.update_local.is_empty(), "{plan_same:?}");
+        assert!(plan_same.update_remote.is_empty(), "{plan_same:?}");
+
+        // A real edit on GitHub still counts, and a local edit is still pushed.
+        let edited = plan(
+            &[gh_comment(10, "new text")],
+            &[local_comment("a.md", "text")],
+            &entry,
+        );
+        assert_eq!(edited.update_local.len(), 1, "{edited:?}");
+        let local = plan(&remote, &[local_comment("a.md", "local edit")], &entry);
+        assert_eq!(local.update_remote.len(), 1, "{local:?}");
     }
 
     fn plan(gh: &[GhComment], local: &[LocalComment], entry: &SyncEntry) -> CommentPlan {
@@ -2604,6 +2650,7 @@ mod tests {
             local_key: "a.md".to_owned(),
             base_hash: link_hash("v1"),
             gh_updated_at: None,
+            gh_base_hash: None,
         });
         assert_eq!(entry.comment_links.len(), 1);
         assert_eq!(entry.comment_links[0].gh_id, 77);

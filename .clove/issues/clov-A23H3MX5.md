@@ -2,11 +2,12 @@
 schema: 1
 id: clov-A23H3MX5
 title: plugin discovery on Windows matches only .exe, not PATHEXT (.cmd/.bat/.ps1)
-status: open
+status: closed
 type: feature
 priority: 4
 created: 2026-10-20T18:47:03.000Z
-updated: 2026-11-03T17:38:52.916Z
+updated: 2026-11-04T09:55:15.228Z
+closed: 2026-11-04T09:55:15.228Z
 labels: []
 deps: []
 relates: []
