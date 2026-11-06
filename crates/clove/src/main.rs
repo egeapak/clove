@@ -252,6 +252,8 @@ fn dispatch_external(
     let Some(path) = plugin::resolve(&[name.as_str()]) else {
         let f = resolve_format(flag, None);
         let installed: Vec<String> = plugin::list().into_iter().map(|p| p.name).collect();
+        // On Windows a `.cmd`/`.bat` (or, via `PATHEXT`, `.ps1`) plugin also
+        // resolves; the hint names the `.exe` that `cargo install` writes.
         let binary = format!("clove-{name}{}", std::env::consts::EXE_SUFFIX);
         return (
             f,

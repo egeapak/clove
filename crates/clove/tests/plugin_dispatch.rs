@@ -30,8 +30,8 @@ fn install_echo() -> (TempDir, PathBuf) {
 /// `clove-import-echo`, … to exercise the umbrella fallback). Returns the dest path.
 fn install_echo_as(dir: &Path, name: &str) -> PathBuf {
     let built = support::plugin("clove-echo");
-    // The host resolver looks for `clove-<provider>{EXE_SUFFIX}`, so the renamed
-    // copy must carry the platform executable suffix (`.exe` on Windows).
+    // The host resolver only accepts an executable extension (`PATHEXT` on
+    // Windows), so the renamed copy keeps the platform suffix (`.exe` there).
     let dest = dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
     std::fs::copy(built, &dest).expect("copy clove-echo fixture into the plugin dir");
     #[cfg(unix)]
@@ -284,6 +284,46 @@ fn unsupported_capability_is_exit_2() {
     assert_eq!(v["ok"], false, "envelope: {v}");
     assert_eq!(v["error"]["code"], "UNSUPPORTED_CAPABILITY", "{v}");
     assert_eq!(v["error"]["exit"], 2, "{v}");
+}
+
+/// A Windows script plugin (PLUGIN_SYSTEM.md §5): a `clove-<x>.cmd` on the
+/// search path is listed and dispatched, with argv passed through `cmd.exe`.
+#[cfg(windows)]
+#[test]
+fn a_cmd_script_plugin_is_listed_and_dispatched() {
+    let plugin_dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        plugin_dir.path().join("clove-hello.cmd"),
+        "@echo out %*\r\n",
+    )
+    .unwrap();
+    let repo = init_repo("proj");
+
+    let assert = clove(repo.path())
+        .env("CLOVE_PLUGIN_PATH", plugin_dir.path())
+        .env("PATHEXT", ".COM;.EXE;.BAT;.CMD;.VBS;.JS")
+        .args(["hello", "a", "b"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert_eq!(stdout.trim(), "out hello a b");
+
+    let assert = clove(plugin_dir.path())
+        .env("CLOVE_PLUGIN_PATH", plugin_dir.path())
+        .args(["--format", "json", "plugin", "list"])
+        .assert()
+        .success();
+    let v: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    let names: Vec<&str> = v["data"]
+        .as_array()
+        .expect("data array")
+        .iter()
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        names.contains(&"hello"),
+        "hello should be listed: {names:?}"
+    );
 }
 
 #[test]

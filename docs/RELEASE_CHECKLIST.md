@@ -229,6 +229,11 @@ Everything `release-smoke.sh` does not already cover:
       non-interactive shell ignores SIGINT, so `kill -INT` on it proves nothing.
       (The host IPC channel itself is exercised on all three platforms by
       `plugin_dispatch.rs` in CI, and every shipped plugin writes through it.)
+- [ ] Windows script plugins (on a real Windows host, not Wine): put a
+      `clove-hello.cmd` containing `@echo hello %*` in a dir on `PATH`; `clove
+      plugin list` shows `hello` and `clove hello a b` prints `hello a b`. With
+      `.PS1` added to `PATHEXT` and a `clove-hi.ps1` (`Write-Output "hi $args"`),
+      `clove hi x` prints `hi x`.
 
 ## 9. Close out
 

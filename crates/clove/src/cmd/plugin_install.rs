@@ -54,6 +54,15 @@ fn shadow_refusal(bin: &str, existing: &Utf8Path) -> String {
     )
 }
 
+/// The warning shown when an updated binary is not the one dispatch runs.
+fn shadowed_update_message(package: &str, bin: &str, existing: &Utf8Path) -> String {
+    format!(
+        "{package} was updated, but `{bin}` still resolves to {existing}, which is \
+         earlier on the plugin search path: clove keeps running that copy. Remove \
+         it, or take its directory off $CLOVE_PLUGIN_PATH, to use the update."
+    )
+}
+
 /// `clove plugin install <name>` or `--git <url>`.
 pub fn run_install(format: OutputFormat, args: &PluginInstallArgs) -> Result<(), CloveError> {
     match (&args.git, &args.name) {
@@ -827,6 +836,15 @@ pub fn run_update(format: OutputFormat, args: &PluginUpdateArgs) -> Result<(), C
             eprintln!("warning: {message}");
             warnings.push(message);
             continue;
+        }
+        // The update replaced clove's copy, but dispatch picks the first match
+        // on the search path. A copy earlier on it (the exe dir or
+        // `$CLOVE_PLUGIN_PATH`, which outrank `<clove-home>/bin`) keeps running
+        // the old code, so "updated" alone would be misleading.
+        if let Some(existing) = shadowed_binary(bin, &installed_path) {
+            let message = shadowed_update_message(&installed.package, bin, &existing);
+            eprintln!("warning: {message}");
+            warnings.push(message);
         }
         updated.push(json!({
             "package": installed.package,

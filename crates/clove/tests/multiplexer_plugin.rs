@@ -25,8 +25,8 @@ use tempfile::TempDir;
 fn install_echo_as(name: &str) -> (TempDir, PathBuf) {
     let built = support::plugin("clove-echo");
     let dir = tempfile::tempdir().unwrap();
-    // The host resolver looks for `clove-<provider>{EXE_SUFFIX}`, so the renamed
-    // copy must carry the platform executable suffix (`.exe` on Windows).
+    // The host resolver only accepts an executable extension (`PATHEXT` on
+    // Windows), so the renamed copy keeps the platform suffix (`.exe` there).
     let dest = dir
         .path()
         .join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
