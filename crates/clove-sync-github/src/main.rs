@@ -197,7 +197,7 @@ fn run(
         ),
         (OutputFormat::Human, Some(report)) => {
             outln!(
-                "{}: pulled {} new / {} updated, pushed {} new / {} updated, comments {} pulled / {} pushed / {} edited / {} deleted, {} in sync, {} conflicts",
+                "{}: pulled {} new / {} updated, pushed {} new / {} updated, comments {} pulled / {} pushed / {} edited / {} deleted, {} in sync, {}",
                 applied_label(direction, &cli.target),
                 report.pulled_created,
                 report.pulled_updated,
@@ -208,7 +208,7 @@ fn run(
                 report.comments.update_local + report.comments.update_remote,
                 report.comments.delete_local.len() + report.comments.delete_remote.len(),
                 report.in_sync,
-                report.conflicts,
+                conflict_count(report.conflicts, &report.comments),
             );
             print_conflicts(&summary);
             print_comment_changes(&report.comments, "deleted");
@@ -219,14 +219,14 @@ fn run(
         }
         (OutputFormat::Human, None) => {
             outln!(
-                "{}: pull {} new / {} updated, push {} new / {} updated, {} in sync, {} conflicts",
+                "{}: pull {} new / {} updated, push {} new / {} updated, {} in sync, {}",
                 dry_run_label(direction, &cli.target),
                 summary.pull_create.len(),
                 summary.pull_update.len(),
                 summary.push_create.len(),
                 summary.push_update.len(),
                 summary.in_sync,
-                summary.conflicts.len(),
+                conflict_count(summary.conflicts.len(), &summary.comments),
             );
             print_conflicts(&summary);
             print_remote_missing(&summary);
@@ -283,6 +283,20 @@ fn dry_run_label(direction: clove_import::Direction, target: &str) -> String {
         clove_import::Direction::Both => format!("dry-run {target}"),
         clove_import::Direction::PullOnly => format!("dry-run import {target}"),
         clove_import::Direction::PushOnly => format!("dry-run export {target}"),
+    }
+}
+
+/// The summary line's conflict count: item conflicts plus comment conflicts,
+/// because the run prints a `conflict` or `comment conflict` line for each one.
+/// When some are comment conflicts, the count says how many, for example
+/// `2 conflicts (1 comment)`.
+fn conflict_count(item_conflicts: usize, comments: &clove_import::sync::CommentSummary) -> String {
+    let comment_conflicts = comments.conflicts.len();
+    let total = item_conflicts + comment_conflicts;
+    if comment_conflicts == 0 {
+        format!("{total} conflicts")
+    } else {
+        format!("{total} conflicts ({comment_conflicts} comment)")
     }
 }
 

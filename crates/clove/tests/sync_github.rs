@@ -2610,6 +2610,28 @@ fn a_comment_edited_on_both_sides_follows_prefer() {
 }
 
 #[test]
+fn human_summary_counts_comment_conflicts() {
+    let (mock, dir, id) = linked_comment_pair();
+    mock.edit_comment(5, "remote one", "gh v2");
+    edit_local_comment(dir.path(), &id, "remote one", "local v2");
+
+    // The dry run and the applied run both print a `comment conflict` line, so
+    // the summary count must include it.
+    for extra in [&["--dry-run"][..], &[][..]] {
+        let mut args = vec!["sync", "github", "owner/repo", "--prefer", "manual"];
+        args.extend_from_slice(extra);
+        let out = clove(dir.path(), mock.addr).args(&args).output().unwrap();
+        assert!(out.status.success(), "sync failed: {out:?}");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.contains("comment conflict "), "{extra:?}: {stdout}");
+        assert!(
+            stdout.contains(", 1 conflicts (1 comment)"),
+            "{extra:?}: {stdout}"
+        );
+    }
+}
+
+#[test]
 fn a_comment_deleted_on_github_is_deleted_locally() {
     let (mock, dir, id) = linked_comment_pair();
     mock.delete_comment(5, "local one");

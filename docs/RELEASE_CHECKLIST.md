@@ -127,7 +127,9 @@ empty or a real GitHub user.
       second comment). Edit a comment file under `.clove/issues/<id>/comments/`,
       sync → the GitHub comment shows the new text (edited in place, no new
       comment, no "edited" duplicate). Edit both to different text: `--prefer
-      manual` reports it and changes neither; `--prefer local`/`remote` picks a side.
+      manual` reports it (`comment conflict … -> skipped`, and the summary line
+      counts it: `1 conflicts (1 comment)`) and changes neither; `--prefer
+      local`/`remote` picks a side.
 - [ ] Comment deletions, both directions: delete a comment on GitHub, run
       `--dry-run` → it lists `would delete local comment …` (wait until the
       issue list reports the new comment count — it lags 10–20 s, and until then
