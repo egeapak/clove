@@ -437,6 +437,7 @@ function mockDeptree(id: string): DepTreeNode {
       status: it?.status ?? 'open',
       ready: it?.ready ?? false,
       cycle_ref: cycle,
+      repeat_ref: false,
       children
     };
   }

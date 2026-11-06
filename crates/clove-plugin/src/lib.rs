@@ -12,9 +12,11 @@
 //!   (`PLUGIN_SYSTEM.md` §6.3). It calls [`PluginContext::from_env`], parses
 //!   argv into [`PluginArgs`], runs the closure, and renders the standard
 //!   `{ v, ok, data, _meta }` success / `{ v, ok: false, error }` failure
-//!   envelope honoring `cx.format`, returning the correct [`ExitCode`].
+//!   envelope honoring `cx.format`, returning the correct [`ExitCode`](std::process::ExitCode).
+//!   [`run_raw`] is the same harness without the rendering step, for a plugin
+//!   that writes its own human output.
 //!
-//! The envelope writer + `CloveError` classification live in [`envelope`] and
+//! The envelope writer + `CloveError` classification live in the `envelope` module ([`emit_success`], [`emit_error`]) and
 //! reuse [`clove_types::error_code`], so a plugin reports the identical
 //! `code`/`exit` a built-in would for the same failure.
 #![deny(clippy::print_stdout)] // print via `outln!`/`out!` (see `clove_plugin::stdout`)
@@ -33,7 +35,7 @@ pub use context::{PluginColor, PluginContext, PluginEnvError};
 pub use envelope::{emit_error, emit_success, emit_success_with_meta, ENVELOPE_VERSION};
 pub use host::{HostClient, HostError, HostInfo, HOST_API};
 pub use run::{
-    info_requested, run, run_with_info, unsupported_capability, PluginArgs, PluginInfo,
+    info_requested, run, run_raw, run_with_info, unsupported_capability, PluginArgs, PluginInfo,
     CLOVE_PLUGIN_API,
 };
 

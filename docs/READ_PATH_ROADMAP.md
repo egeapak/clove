@@ -780,9 +780,9 @@ came back; `_meta.per_column` marks the difference from a flat list.
   item key is required) and strict about the envelope, which never varies.
   `clove_show`, `clove_stats`, `clove_dep_tree` and the write tools publish
   nothing: an `outputSchema` is a promise on every call, and those payloads are
-  built elsewhere (the daemon, `clove-core`) or render differently per surface —
-  `dep_tree` is the proof, since its engine renderer emits a `repeat_ref` the
-  published `dep-tree.json` did not list (now documented as optional).
+  built elsewhere (the daemon, `clove-core`) or rendered differently per surface
+  at the time — `dep_tree`'s engine renderer emitted a `repeat_ref` that the CLI
+  renderer did not (since unified in §8, and required again in `dep-tree.json`).
 
 - ~~**MCP wire duplication**~~ — **re-examined alongside the `outputSchema`
   work, and deliberately left alone.** Publishing an `outputSchema` is what
@@ -817,12 +817,13 @@ None of these is a regression from this work — the first two are pre-existing 
   mtime and the exact size is caught only inside the 2 s window. Pinned by
   `deep_catches_old_inplace_edit_with_unchanged_directory` (clove-index) and
   `ls_deep_catches_old_in_place_edit` (CLI).
-- **`clove dep tree --format json` omits `repeat_ref`**, which the MCP and web
-  renderers emit. Three `tree_to_json` implementations remain (`cmd/dep.rs`,
-  `ops.rs`, `clove-engine`). §7 marked the key optional in `dep-tree.json` rather
-  than unifying them, so this is the one place "same query, same answer
-  everywhere" is untrue on *shape*. Harmless, but it is an exception, not a
-  guarantee.
+- ~~**`clove dep tree --format json` omits `repeat_ref`**~~ — **done**. The
+  three `tree_to_json` implementations (`cmd/dep.rs`, `ops.rs`, `clove-engine`)
+  are now one serializer, `DepTreeNode::to_json` (plus `flat_json` for the
+  `--flat` rows), so the CLI, MCP, and web emit the same shape. `repeat_ref` is
+  required again in `dep-tree.json`. Pinned by
+  `dep_tree_json_marks_a_shared_subtree_repeat_ref` (`cli_more.rs`) and the
+  schema check in `schema_validation.rs`.
 - ~~**The daemon tier is slower than the index tier for `blocked`.**~~ —
   **done** in protocol 10 (unreleased at the time, so no further bump).
   `GraphRequest::Blocked` carried no filter or window, so the engine hydrated the

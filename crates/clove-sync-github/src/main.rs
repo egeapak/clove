@@ -7,20 +7,20 @@
 //! drives `clove_import::sync_net::sync_github` — the *same* entry point the
 //! in-process `cmd/sync.rs` used. Its `sync github` stdout/stderr and exit codes
 //! are kept byte-for-byte identical to that built-in so scripts, agents, and the
-//! existing mock suite cannot tell the difference (only the JSON `_meta` differs:
-//! an empty object here, as every plugin emits, vs the host's `{ "warnings": [] }`
-//! — no consumer keys on it).
+//! existing mock suite cannot tell the difference.
 //!
 //! One binary, three capabilities (`PLUGIN_SYSTEM.md` §4.2): the same reconcile
 //! planner serves the full two-way `sync github` (`Direction::Both`) and the
 //! one-way views `import github` (`PullOnly`) and `export github` (`PushOnly`),
-//! reached via the host's umbrella fallback. `main` picks the [`Direction`] from
+//! reached via the host's umbrella fallback. `main` picks the
+//! [`Direction`](clove_import::Direction) from
 //! `$CLOVE_COMMAND`.
 //!
 //! Unlike `clove-plugin`'s [`run_with_info`](clove_plugin::run_with_info) harness
 //! (which renders *human* output by pretty-printing the data JSON), sync needs the
 //! host's bespoke human summary + conflict/remote-missing notes, so this `main`
-//! uses the lower-level [`emit_success`]/[`emit_error`] directly.
+//! uses [`run_raw`](clove_plugin::run_raw) and renders with the lower-level
+//! [`emit_success`]/[`emit_error`] itself.
 #![deny(clippy::print_stdout)] // print via `outln!`/`out!` (see `clove_plugin::stdout`)
 
 use clove_plugin::outln;
@@ -28,15 +28,16 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use clove_plugin::{
-    clap_exit_code, emit_error, emit_success, emit_success_with_meta, parse_format, PluginArgs,
-    PluginContext, PluginInfo,
+    clap_exit_code, emit_error, emit_success, emit_success_with_meta, parse_format, PluginContext,
+    PluginInfo,
 };
 use clove_types::CloveError;
 use clove_types::OutputFormat;
 use serde_json::json;
 
 /// The metadata `clove plugin list` / `--clove-plugin-info` reports. Emitted via
-/// the shared `clove_plugin::info_requested` so the JSON shape (incl. the §2
+/// `clove_plugin::run_raw` (which calls the shared
+/// `clove_plugin::info_requested`) so the JSON shape (incl. the §2
 /// compat fields) is authored in exactly one place — this plugin hand-rolls only
 /// its *human* rendering, never the info blob.
 const INFO: PluginInfo = PluginInfo {
@@ -80,68 +81,49 @@ struct Cli {
 }
 
 fn main() -> ExitCode {
-    // 1. Answer the §7 metadata probe *before* env materialization so `clove
-    //    plugin list` can describe the plugin with no repo context.
-    if clove_plugin::info_requested(&INFO) {
-        return ExitCode::SUCCESS;
-    }
+    // `run_raw` answers the §7 metadata probe, materializes the typed §6.2
+    // context (rendering the standard error envelope if that fails), and strips
+    // the cargo-style leading `sync github` echo. Rendering stays here: sync
+    // needs its own human summary.
+    clove_plugin::run_raw(INFO, |cx, tail| {
+        // 1. Pick the reconcile direction from the capability the host dispatched
+        //    us for (§4.2): `sync` is two-way, `import` pulls, `export` pushes.
+        //    Anything else means a structural umbrella dispatch reached us for a
+        //    capability we do not implement — reject it with the standard exit-2
+        //    envelope *before* parsing, so an unsupported dispatch fails as
+        //    UNSUPPORTED_CAPABILITY rather than a clap usage error over the
+        //    (irrelevant) missing target. This mirrors the guard-before-parse
+        //    order in clove-import-{tk,beads}.
+        let direction = match cx.command.as_str() {
+            "sync" => clove_import::Direction::Both,
+            "import" => clove_import::Direction::PullOnly,
+            "export" => clove_import::Direction::PushOnly,
+            _ => {
+                let err = clove_plugin::unsupported_capability(&INFO, cx);
+                return ExitCode::from(emit_error(cx.format, &err, cx.quiet));
+            }
+        };
 
-    let argv: Vec<String> = std::env::args().skip(1).collect();
+        // 2. Parse the tail.
+        let cli = match Cli::try_parse_from(&tail.args) {
+            Ok(cli) => cli,
+            Err(err) => {
+                // clap already renders usage/help; map its kind to clove's exit
+                // table (0 for --help/--version, 1 for a usage error — not clap's
+                // native 2, which means NotFound in clove).
+                let _ = err.print();
+                return ExitCode::from(clap_exit_code(&err));
+            }
+        };
 
-    // 2. Materialize the typed §6.2 context. On failure the typed context is
-    //    unavailable, so read the format/quiet hints directly (§6.5) and render
-    //    the standard error envelope with the validation exit code (4).
-    let cx = match PluginContext::from_env() {
-        Ok(cx) => cx,
-        Err(env_err) => {
-            let format = std::env::var("CLOVE_FORMAT")
-                .ok()
-                .and_then(|value| OutputFormat::parse(&value))
-                .unwrap_or_default();
-            let quiet = std::env::var("CLOVE_QUIET").is_ok_and(|value| value == "1");
-            let err: CloveError = env_err.into();
-            return ExitCode::from(emit_error(format, &err, quiet));
+        // 3. Run and render. A `--format` after the provider overrides the
+        //    env-provided one (§6.3), for both success and error output.
+        let format = cli.format.unwrap_or(cx.format);
+        match run(cx, cli, format, direction) {
+            Ok(code) => ExitCode::from(code),
+            Err(err) => ExitCode::from(emit_error(format, &err, cx.quiet)),
         }
-    };
-
-    // 3. Pick the reconcile direction from the capability the host dispatched us
-    //    for (§4.2): `sync` is two-way, `import` pulls, `export` pushes. Anything
-    //    else means a structural umbrella dispatch reached us for a capability we
-    //    do not implement — reject it with the standard exit-2 envelope *before*
-    //    parsing, so an unsupported dispatch fails as UNSUPPORTED_CAPABILITY rather
-    //    than a clap usage error over the (irrelevant) missing target. This mirrors
-    //    the guard-before-parse order in clove-import-{tk,beads}.
-    let direction = match cx.command.as_str() {
-        "sync" => clove_import::Direction::Both,
-        "import" => clove_import::Direction::PullOnly,
-        "export" => clove_import::Direction::PushOnly,
-        _ => {
-            let err = clove_plugin::unsupported_capability(&INFO, &cx);
-            return ExitCode::from(emit_error(cx.format, &err, cx.quiet));
-        }
-    };
-
-    // 4. Strip the cargo-style leading `sync github` echo (absent when invoked
-    //    directly as `clove-sync-github OWNER/REPO`) then parse the tail.
-    let tail = PluginArgs::from_argv(&argv, &cx.command, cx.provider.as_deref());
-    let cli = match Cli::try_parse_from(&tail.args) {
-        Ok(cli) => cli,
-        Err(err) => {
-            // clap already renders usage/help; map its kind to clove's exit
-            // table (0 for --help/--version, 1 for a usage error — not clap's
-            // native 2, which means NotFound in clove).
-            let _ = err.print();
-            return ExitCode::from(clap_exit_code(&err));
-        }
-    };
-
-    // 5. Run and render. A `--format` after the provider overrides the
-    //    env-provided one (§6.3), for both success and error output.
-    let format = cli.format.unwrap_or(cx.format);
-    match run(&cx, cli, format, direction) {
-        Ok(code) => ExitCode::from(code),
-        Err(err) => ExitCode::from(emit_error(format, &err, cx.quiet)),
-    }
+    })
 }
 
 /// Drive the reconcile in `direction` and render its result exactly as the host's
@@ -215,7 +197,7 @@ fn run(
         ),
         (OutputFormat::Human, Some(report)) => {
             outln!(
-                "{}: pulled {} new / {} updated, pushed {} new / {} updated, comments {} pulled / {} pushed / {} edited / {} deleted, {} in sync, {} conflicts",
+                "{}: pulled {} new / {} updated, pushed {} new / {} updated, comments {} pulled / {} pushed / {} edited / {} deleted, {} in sync, {}",
                 applied_label(direction, &cli.target),
                 report.pulled_created,
                 report.pulled_updated,
@@ -226,7 +208,7 @@ fn run(
                 report.comments.update_local + report.comments.update_remote,
                 report.comments.delete_local.len() + report.comments.delete_remote.len(),
                 report.in_sync,
-                report.conflicts,
+                conflict_count(report.conflicts, &report.comments),
             );
             print_conflicts(&summary);
             print_comment_changes(&report.comments, "deleted");
@@ -237,14 +219,14 @@ fn run(
         }
         (OutputFormat::Human, None) => {
             outln!(
-                "{}: pull {} new / {} updated, push {} new / {} updated, {} in sync, {} conflicts",
+                "{}: pull {} new / {} updated, push {} new / {} updated, {} in sync, {}",
                 dry_run_label(direction, &cli.target),
                 summary.pull_create.len(),
                 summary.pull_update.len(),
                 summary.push_create.len(),
                 summary.push_update.len(),
                 summary.in_sync,
-                summary.conflicts.len(),
+                conflict_count(summary.conflicts.len(), &summary.comments),
             );
             print_conflicts(&summary);
             print_remote_missing(&summary);
@@ -301,6 +283,20 @@ fn dry_run_label(direction: clove_import::Direction, target: &str) -> String {
         clove_import::Direction::Both => format!("dry-run {target}"),
         clove_import::Direction::PullOnly => format!("dry-run import {target}"),
         clove_import::Direction::PushOnly => format!("dry-run export {target}"),
+    }
+}
+
+/// The summary line's conflict count: item conflicts plus comment conflicts,
+/// because the run prints a `conflict` or `comment conflict` line for each one.
+/// When some are comment conflicts, the count says how many, for example
+/// `2 conflicts (1 comment)`.
+fn conflict_count(item_conflicts: usize, comments: &clove_import::sync::CommentSummary) -> String {
+    let comment_conflicts = comments.conflicts.len();
+    let total = item_conflicts + comment_conflicts;
+    if comment_conflicts == 0 {
+        format!("{total} conflicts")
+    } else {
+        format!("{total} conflicts ({comment_conflicts} comment)")
     }
 }
 
@@ -459,11 +455,11 @@ mod tests {
             "egeapak/clove".to_owned(),
             "--dry-run".to_owned(),
         ];
-        let tail = PluginArgs::from_argv(&host, "sync", Some("github"));
+        let tail = clove_plugin::PluginArgs::from_argv(&host, "sync", Some("github"));
         assert_eq!(tail.args, vec!["egeapak/clove", "--dry-run"]);
 
         let direct = vec!["egeapak/clove".to_owned()];
-        let tail = PluginArgs::from_argv(&direct, "sync", Some("github"));
+        let tail = clove_plugin::PluginArgs::from_argv(&direct, "sync", Some("github"));
         assert_eq!(tail.args, vec!["egeapak/clove"]);
     }
 

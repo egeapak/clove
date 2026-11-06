@@ -11,8 +11,8 @@
 //!
 //! Unlike `clove-plugin`'s `run_with_info` harness (which renders *human* output
 //! by pretty-printing the data JSON), import needs the host's bespoke human
-//! summary and `_meta.warnings`, so this `main` uses the lower-level
-//! [`emit_success_with_meta`]/[`emit_error`] directly.
+//! summary and `_meta.warnings`, so this `main` uses `run_raw` and renders with
+//! the lower-level [`emit_success_with_meta`]/[`emit_error`] itself.
 #![deny(clippy::print_stdout)] // print via `outln!`/`out!` (see `clove_plugin::stdout`)
 
 use clove_plugin::outln;
@@ -23,14 +23,15 @@ use clap::Parser;
 use clove_import::{render, HostStore, ImportCtx, Importer, TkImporter};
 use clove_plugin::{
     clap_exit_code, emit_error, emit_success_with_meta, parse_format, unsupported_capability,
-    PluginArgs, PluginContext, PluginInfo,
+    PluginContext, PluginInfo,
 };
 use clove_types::CloveError;
 use clove_types::OutputFormat;
 use serde_json::json;
 
 /// The metadata `clove plugin list` / `--clove-plugin-info` reports, emitted via
-/// the shared `clove_plugin::info_requested` so the JSON shape (incl. the §2
+/// `clove_plugin::run_raw` (which calls the shared
+/// `clove_plugin::info_requested`) so the JSON shape (incl. the §2
 /// compat fields) is authored in exactly one place.
 const INFO: PluginInfo = PluginInfo {
     name: "clove-import-tk",
@@ -57,57 +58,37 @@ struct Cli {
 }
 
 fn main() -> ExitCode {
-    // 1. Answer the §7 metadata probe *before* env materialization so `clove
-    //    plugin list` can describe the plugin with no repo context.
-    if clove_plugin::info_requested(&INFO) {
-        return ExitCode::SUCCESS;
-    }
-
-    let argv: Vec<String> = std::env::args().skip(1).collect();
-
-    // 2. Materialize the typed §6.2 context. On failure the typed context is
-    //    unavailable, so read the format/quiet hints directly (§6.5) and render
-    //    the standard error envelope with the validation exit code (4).
-    let cx = match PluginContext::from_env() {
-        Ok(cx) => cx,
-        Err(env_err) => {
-            let format = std::env::var("CLOVE_FORMAT")
-                .ok()
-                .and_then(|value| OutputFormat::parse(&value))
-                .unwrap_or_default();
-            let quiet = std::env::var("CLOVE_QUIET").is_ok_and(|value| value == "1");
-            let err: CloveError = env_err.into();
-            return ExitCode::from(emit_error(format, &err, quiet));
+    // `run_raw` answers the §7 metadata probe, materializes the typed §6.2
+    // context (rendering the standard error envelope if that fails), and strips
+    // the cargo-style leading `import tk` echo. Rendering stays here.
+    clove_plugin::run_raw(INFO, |cx, tail| {
+        // 1. tk is import-only. The umbrella fallback for `export tk` would route
+        //    to this binary (export → clove-export-tk miss → clove-sync-tk miss →
+        //    clove-import-tk), so reject any non-`import` capability up front with
+        //    the standard exit-2 envelope rather than silently running the
+        //    importer (§4.2).
+        if cx.command != "import" {
+            let err = unsupported_capability(&INFO, cx);
+            return ExitCode::from(emit_error(cx.format, &err, cx.quiet));
         }
-    };
 
-    // 3. tk is import-only. The umbrella fallback for `export tk` would route to
-    //    this binary (export → clove-export-tk miss → clove-sync-tk miss →
-    //    clove-import-tk), so reject any non-`import` capability up front with the
-    //    standard exit-2 envelope rather than silently running the importer (§4.2).
-    if cx.command != "import" {
-        let err = unsupported_capability(&INFO, &cx);
-        return ExitCode::from(emit_error(cx.format, &err, cx.quiet));
-    }
+        // 2. Parse the tail.
+        let cli = match Cli::try_parse_from(&tail.args) {
+            Ok(cli) => cli,
+            Err(err) => {
+                let _ = err.print();
+                return ExitCode::from(clap_exit_code(&err));
+            }
+        };
 
-    // 4. Strip the cargo-style leading `import tk` echo (absent when invoked
-    //    directly as `clove-import-tk <src>`) then parse the tail.
-    let tail = PluginArgs::from_argv(&argv, &cx.command, cx.provider.as_deref());
-    let cli = match Cli::try_parse_from(&tail.args) {
-        Ok(cli) => cli,
-        Err(err) => {
-            let _ = err.print();
-            return ExitCode::from(clap_exit_code(&err));
+        // 3. Run and render. A `--format` after the provider overrides the
+        //    env-provided one (§6.3), for both success and error output.
+        let format = cli.format.unwrap_or(cx.format);
+        match run(cx, cli, format) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => ExitCode::from(emit_error(format, &err, cx.quiet)),
         }
-    };
-
-    // 5. Run and render. A `--format` after the provider overrides the
-    //    env-provided one (§6.3), for both success and error output.
-    let format = cli.format.unwrap_or(cx.format);
-    match run(&cx, cli, format) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(err) => ExitCode::from(emit_error(format, &err, cx.quiet)),
-    }
+    })
 }
 
 /// Drive the tk import and render its result exactly as the host's
@@ -237,11 +218,11 @@ mod tests {
             ".tickets".to_owned(),
             "--dry-run".to_owned(),
         ];
-        let tail = PluginArgs::from_argv(&host, "import", Some("tk"));
+        let tail = clove_plugin::PluginArgs::from_argv(&host, "import", Some("tk"));
         assert_eq!(tail.args, vec![".tickets", "--dry-run"]);
 
         let direct = vec![".tickets".to_owned()];
-        let tail = PluginArgs::from_argv(&direct, "import", Some("tk"));
+        let tail = clove_plugin::PluginArgs::from_argv(&direct, "import", Some("tk"));
         assert_eq!(tail.args, vec![".tickets"]);
     }
 }

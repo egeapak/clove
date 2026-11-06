@@ -15,8 +15,8 @@
 //!
 //! Unlike `clove-plugin`'s `run_with_info` harness (which renders *human* output
 //! by pretty-printing the data JSON), import needs the host's bespoke human
-//! summary and `_meta.warnings`, so this `main` uses the lower-level
-//! [`emit_success_with_meta`]/[`emit_error`] directly.
+//! summary and `_meta.warnings`, so this `main` uses `run_raw` and renders with
+//! the lower-level [`emit_success_with_meta`]/[`emit_error`] itself.
 #![deny(clippy::print_stdout)] // print via `outln!`/`out!` (see `clove_plugin::stdout`)
 
 use clove_plugin::outln;
@@ -35,7 +35,8 @@ use clove_types::OutputFormat;
 use serde_json::json;
 
 /// The metadata `clove plugin list` / `--clove-plugin-info` reports, emitted via
-/// the shared `clove_plugin::info_requested` so the JSON shape (incl. the §2
+/// `clove_plugin::run_raw` (which calls the shared
+/// `clove_plugin::info_requested`) so the JSON shape (incl. the §2
 /// compat fields) is authored in exactly one place.
 const INFO: PluginInfo = PluginInfo {
     name: "clove-import-beads",
@@ -78,43 +79,21 @@ struct ExportCli {
 }
 
 fn main() -> ExitCode {
-    // 1. Answer the §7 metadata probe *before* env materialization so `clove
-    //    plugin list` can describe the plugin with no repo context.
-    if clove_plugin::info_requested(&INFO) {
-        return ExitCode::SUCCESS;
-    }
-
-    let argv: Vec<String> = std::env::args().skip(1).collect();
-
-    // 2. Materialize the typed §6.2 context. On failure the typed context is
-    //    unavailable, so read the format/quiet hints directly (§6.5) and render
-    //    the standard error envelope with the validation exit code (4).
-    let cx = match PluginContext::from_env() {
-        Ok(cx) => cx,
-        Err(env_err) => {
-            let format = std::env::var("CLOVE_FORMAT")
-                .ok()
-                .and_then(|value| OutputFormat::parse(&value))
-                .unwrap_or_default();
-            let quiet = std::env::var("CLOVE_QUIET").is_ok_and(|value| value == "1");
-            let err: CloveError = env_err.into();
-            return ExitCode::from(emit_error(format, &err, quiet));
-        }
-    };
-
-    // 3. Strip the cargo-style leading `<mux> beads` echo (absent when invoked
-    //    directly), then branch on the capability the host dispatched us for
-    //    (§4.2): `import` drives the importer, `export` the inverse exporter.
-    //    Anything else is a structural umbrella miss → exit-2 envelope.
-    let tail = PluginArgs::from_argv(&argv, &cx.command, cx.provider.as_deref());
-    match cx.command.as_str() {
-        "import" => dispatch_import(&cx, &tail),
-        "export" => dispatch_export(&cx, &tail),
+    // `run_raw` answers the §7 metadata probe, materializes the typed §6.2
+    // context (rendering the standard error envelope if that fails), and strips
+    // the cargo-style leading `<mux> beads` echo. Rendering stays here.
+    //
+    // Branch on the capability the host dispatched us for (§4.2): `import`
+    // drives the importer, `export` the inverse exporter. Anything else is a
+    // structural umbrella miss → exit-2 envelope.
+    clove_plugin::run_raw(INFO, |cx, tail| match cx.command.as_str() {
+        "import" => dispatch_import(cx, &tail),
+        "export" => dispatch_export(cx, &tail),
         _ => {
-            let err = unsupported_capability(&INFO, &cx);
+            let err = unsupported_capability(&INFO, cx);
             ExitCode::from(emit_error(cx.format, &err, cx.quiet))
         }
-    }
+    })
 }
 
 /// Parse the `import beads` tail and drive the importer.

@@ -169,7 +169,10 @@ impl CloveServer {
     }
 
     #[tool(description = "Render the dependency tree rooted at an item, with \
-                          per-node status, `ready`, and `cycle_ref` markers.")]
+                          per-node status, `ready`, `cycle_ref`, and \
+                          `repeat_ref` markers. `repeat_ref` marks a subtree \
+                          that is already expanded elsewhere in the tree; it \
+                          has no children here.")]
     async fn clove_dep_tree(
         &self,
         Parameters(a): Parameters<DepTreeArgs>,

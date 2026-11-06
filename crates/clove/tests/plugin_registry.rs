@@ -361,6 +361,10 @@ fn human_list_all_labels_its_sections_even_with_no_plugins_installed() {
     let out = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     let err = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(out.contains("Installed"), "no Installed section: {out}");
+    assert!(
+        !out.contains("no plugins installed"),
+        "the bare-list message must not appear under --all: {out}"
+    );
     assert!(err.contains("warning:"), "no warning on stderr: {err}");
 }
 

@@ -127,7 +127,9 @@ empty or a real GitHub user.
       second comment). Edit a comment file under `.clove/issues/<id>/comments/`,
       sync → the GitHub comment shows the new text (edited in place, no new
       comment, no "edited" duplicate). Edit both to different text: `--prefer
-      manual` reports it and changes neither; `--prefer local`/`remote` picks a side.
+      manual` reports it (`comment conflict … -> skipped`, and the summary line
+      counts it: `1 conflicts (1 comment)`) and changes neither; `--prefer
+      local`/`remote` picks a side.
 - [ ] Comment deletions, both directions: delete a comment on GitHub, run
       `--dry-run` → it lists `would delete local comment …` (wait until the
       issue list reports the new comment count — it lags 10–20 s, and until then
@@ -167,6 +169,9 @@ Drive with a real browser (Playwright MCP is fine). Check the console on every p
       (legible in a light and a dark theme, chip stays inside the plot at both
       edges, bar tooltips and bar clicks still work); it disappears when the
       pointer leaves the plot or enters the label column.
+- [ ] Detail dependency tree matches `clove dep tree <id>` for an item with a shared
+      dependency: the repeated node shows `(repeat)` (the CLI shows `(*)`) and no
+      children, and a cycle shows `(cycle)`.
 - [ ] Write path: add a label in the detail sidebar → it lands in the item file.
 - [ ] Live push: change the item from the CLI while (a) the List view and (b) its
       detail page — opened **both** from the board **and** by direct URL/refresh — is
@@ -209,6 +214,11 @@ Everything `release-smoke.sh` does not already cover:
       via `query` JSON and the web `?synced=` / `?parent=`) agree with the files; against
       a stale (older-protocol) daemon they still answer, falling back.
 - [ ] `clove edit <id>` with `$EDITOR` set to a real editor command.
+- [ ] `clove plugin list` with no plugin installed (an isolated `CLOVE_HOME`, a
+      `clove` binary copied into an empty directory, `CLOVE_PLUGIN_PATH` unset, and
+      a `PATH` that holds no `clove-*` binary) prints `no plugins installed`
+      and names `clove plugin search` and `clove plugin list --all`; it never
+      prints nothing.
 - [ ] Plugin process model (the host now spawns plugins instead of `exec`):
       Ctrl-C during `clove sync github … --dry-run` stops it at once with no
       leftover `clove-sync-github` process (`pgrep -f clove-sync-github`);
