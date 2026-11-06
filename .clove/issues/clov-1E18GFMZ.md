@@ -6,13 +6,15 @@ status: closed
 type: chore
 priority: 2
 created: 2026-11-04T14:38:02.843Z
-updated: 2026-11-04T17:05:40.662Z
+updated: 2026-11-06T22:42:07.827Z
 closed: 2026-11-04T17:05:40.662Z
 labels: []
 deps: []
 relates: []
 duplicates: []
 supersedes: []
+source_system: github
+external_ref: gh-186
 ---
 The daemon and plugin suites in crates/clove/tests build cloved and the plugins with escargot inside test processes (crates/clove/tests/support/mod.rs). Each process can run its own cargo build, and different suites ask for different feature sets, so tests do not all run the same binaries.
 Change: a nextest setup script (.config/nextest.toml) builds cloved and the plugins once per run with --all-features, before any test. The plugins go beside the clove binary under test; cloved goes into its own dir that the setup script passes to the tests through NEXTEST_ENV. support::cloved()/plugin() only look the binaries up, and escargot is removed. cargo nextest is the supported test runner; docs (CLAUDE.md, CONTRIBUTING.md, docs/RELEASE*.md) say so, and plain cargo test fails these suites with a message that names nextest.
