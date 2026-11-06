@@ -556,6 +556,11 @@ fn available_json(plugin: &RegistryPlugin) -> Value {
     })
 }
 
+/// What a bare human `plugin list` prints when no plugin is installed.
+const NO_PLUGINS_INSTALLED: &str =
+    "no plugins installed (find one with `clove plugin search <query>` \
+     or `clove plugin list --all`)";
+
 /// Render the human `NAME / VERSION / RUN AS / ABOUT` table (§3).
 ///
 /// A plugin that failed the probe (`no_info`) shows `—` for version and
@@ -572,9 +577,7 @@ fn render_human(
         eprintln!("warning: {warning}");
     }
 
-    // Only the bare `plugin list` stays silent on an empty machine. Once the
-    // registry is in play there are sections to label, so printing nothing at
-    // all would read as a broken command.
+    // Once the registry is in play there are sections to label.
     //
     // Derived from `--all`/`--refresh` having been asked for, not from whether
     // the answer happened to be non-empty: a *successful* discovery that found
@@ -583,7 +586,11 @@ fn render_human(
     // and its first dependent.
     let show_sections = consulted_registry;
 
+    // The bare `plugin list` on an empty machine has no sections to label, but
+    // printing nothing at all reads as a broken command. Say so, and name the
+    // two commands that find a plugin to install.
     if installed.is_empty() && !show_sections {
+        outln!("{NO_PLUGINS_INSTALLED}");
         return;
     }
 

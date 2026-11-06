@@ -876,6 +876,49 @@ fn dep_tree_depth_zero_is_unlimited() {
     s.shutdown();
 }
 
+/// `clove_dep_tree` and `clove dep tree --format json` return the same
+/// document, key for key, including `repeat_ref` on a shared subtree. The CLI
+/// output is validated against `dep-tree.json` in `schema_validation.rs`, so
+/// this pins the MCP payload to the same published shape.
+#[test]
+fn dep_tree_matches_the_cli_json() {
+    let dir = init_repo();
+    let mut s = Session::start(dir.path());
+    let new = |s: &mut Session, title: &str, deps: &[&str]| -> String {
+        let created = s.call(2, "clove_new", json!({ "title": title, "deps": deps }));
+        created["structuredContent"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    // Diamond: A -> {B, C} -> D -> E, so D repeats under one parent.
+    let e = new(&mut s, "Eee", &[]);
+    let d = new(&mut s, "Ddd", &[&e]);
+    let b = new(&mut s, "Bbb", &[&d]);
+    let c = new(&mut s, "Ccc", &[&d]);
+    let a = new(&mut s, "Aaa", &[&b, &c]);
+
+    let mcp = s.call(3, "clove_dep_tree", json!({ "id": a }))["structuredContent"].clone();
+    s.shutdown();
+
+    let out = clove(dir.path())
+        .args(["--format", "json", "dep", "tree", &a])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let cli: Value = serde_json::from_slice(&out.stdout).unwrap();
+
+    assert_eq!(mcp, cli["data"], "MCP and CLI dep trees differ");
+    assert!(
+        mcp.to_string().contains(r#""repeat_ref":true"#),
+        "the diamond must produce a repeat_ref node: {mcp}"
+    );
+}
+
 #[test]
 fn tool_error_is_reported_as_is_error() {
     let dir = init_repo();

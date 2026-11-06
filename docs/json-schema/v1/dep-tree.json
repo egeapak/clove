@@ -6,7 +6,7 @@
   "$defs": {
     "node": {
       "type": "object",
-      "required": ["id", "title", "status", "ready", "cycle_ref", "children"],
+      "required": ["id", "title", "status", "ready", "cycle_ref", "repeat_ref", "children"],
       "properties": {
         "id": { "type": "string", "pattern": "^[a-z][a-z0-9]{0,7}-[0-9A-Z]{8}$" },
         "title": { "type": "string" },
@@ -14,7 +14,7 @@
         "ready": { "type": "boolean" },
         "cycle_ref": { "type": "boolean" },
         "repeat_ref": {
-          "description": "This node's subtree is rendered elsewhere in the tree and is elided here. Optional: the engine and the MCP `clove_dep_tree` tool emit it, the CLI renderer does not.",
+          "description": "This node's subtree is rendered elsewhere in the tree and is elided here.",
           "type": "boolean"
         },
         "children": {

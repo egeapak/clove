@@ -15,9 +15,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   id, the envelope `ok` is `false` and a top-level `error` is set if any id
   failed, and the exit code is the exit code of the first failed id. JSONL
   prints one line per id.
+- `clove_plugin::run_raw(info, |cx, args| -> ExitCode)`: the plugin harness
+  without the rendering step. It answers `--clove-plugin-info`, renders the
+  error envelope when the host env is missing, and strips the leading
+  command/provider echo; the closure renders and returns the exit code.
+  `clove-sync-github`, `clove-import-tk`, and `clove-import-beads` use it.
 
 ### Changed
 
+- `clove_plugin::emit_success` (and so `run`/`run_with_info`) emits
+  `_meta: {"warnings": []}` instead of `_meta: {}`, the same shape the import
+  plugins emit. This includes the `clove sync github --dry-run` JSON envelope.
 - The DCO sign-off is optional for now. The `DCO sign-off` CI job runs only
   when the repository variable `REQUIRE_DCO` is `true` (`CONTRIBUTING.md`).
 - The agent directives that `clove setup` writes (`CLOVE.md`), the MCP server
@@ -63,6 +71,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   has bound its socket but is not serving it yet, as happens on a loaded
   machine. A handshake that times out is now retried, like a refused connect,
   until the start's 10-second limit (gh-167).
+- `clove dep tree --format json` now includes `repeat_ref` on every node, and
+  `--flat` includes it on every row, as the MCP `clove_dep_tree` tool and the
+  web already did. `repeat_ref` is required again in
+  `docs/json-schema/v1/dep-tree.json`.
+- The web dependency tree marks a subtree that is shown elsewhere in the tree
+  with `(repeat)`. Before, that node was drawn with no children and no marker,
+  so it looked like an item with no dependencies. The MCP `clove_dep_tree`
+  description now names the `repeat_ref` marker.
 - Issue and comment lists are now paged by page number on the
   `/repos/{owner}/{repo}/…` route instead of following GitHub's `Link: next`
   URL (`/repositories/{id}/…`), which some proxies refuse.

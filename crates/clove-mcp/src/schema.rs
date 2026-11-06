@@ -21,9 +21,9 @@
 //! contract is that `structuredContent` validates against it — so a tool whose
 //! result this crate does not fully own (`clove_show` and the write tools return
 //! whatever the daemon or `clove-core` built; `clove_stats` is the whole
-//! analytics report; `clove_dep_tree` is a recursive node the CLI and the engine
-//! render with different key sets) advertises nothing rather than a schema that
-//! is right most of the time.
+//! analytics report; `clove_dep_tree` is a recursive node `clove-core` builds,
+//! described by `docs/json-schema/v1/dep-tree.json` rather than here) advertises
+//! nothing rather than a schema that is right most of the time.
 //!
 //! Errors are unaffected: a failed tool call returns `isError` with a text
 //! message and NO `structuredContent`, which is the shape MCP defines for

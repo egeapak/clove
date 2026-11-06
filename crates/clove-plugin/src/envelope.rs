@@ -18,13 +18,20 @@ pub const ENVELOPE_VERSION: u32 = 1;
 
 /// Print a successful envelope for `data`, honoring `format`.
 ///
-/// JSON / JSONL emit `{ v, ok: true, data, _meta }` on stdout (with an empty
-/// `_meta` object — a plugin has no host-level meta to add). Human mode prints a
-/// concise pretty-printed rendering of `data` on stdout.
+/// JSON / JSONL emit `{ v, ok: true, data, _meta }` on stdout, with
+/// `_meta: { "warnings": [] }` — the same shape the import plugins and most
+/// host built-ins emit, so a consumer can always read `_meta.warnings`. Human
+/// mode prints a concise pretty-printed rendering of `data` on stdout.
 ///
-/// A thin wrapper over [`emit_success_with_meta`] with an empty `_meta`.
+/// A thin wrapper over [`emit_success_with_meta`] with `{ "warnings": [] }`.
 pub fn emit_success(format: OutputFormat, data: Value) {
-    emit_success_with_meta(format, data, json!({}));
+    emit_success_with_meta(format, data, default_meta());
+}
+
+/// The `_meta` of a success envelope that has nothing to report:
+/// `{ "warnings": [] }`.
+fn default_meta() -> Value {
+    json!({ "warnings": [] })
 }
 
 /// Print a successful envelope for `data` with an explicit `_meta`, honoring
@@ -105,6 +112,11 @@ mod tests {
         assert_eq!(envelope["error"]["code"], "ITEM_NOT_FOUND");
         assert_eq!(envelope["error"]["exit"], 2);
         assert_eq!(envelope["v"], 1);
+    }
+
+    #[test]
+    fn default_meta_carries_empty_warnings() {
+        assert_eq!(default_meta(), json!({ "warnings": [] }));
     }
 
     #[test]
