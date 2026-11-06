@@ -208,7 +208,15 @@ fn dep_tree_nests_children_along_dependencies() {
     let v = json_ok(clove(dir.path()).args(["dep", "tree", &a]));
     let root = &v["data"];
     // Each node carries the documented shape.
-    for key in ["id", "title", "status", "ready", "cycle_ref", "children"] {
+    for key in [
+        "id",
+        "title",
+        "status",
+        "ready",
+        "cycle_ref",
+        "repeat_ref",
+        "children",
+    ] {
         assert!(root.get(key).is_some(), "missing {key}: {root}");
     }
     assert_eq!(root["id"], a);
@@ -220,6 +228,50 @@ fn dep_tree_nests_children_along_dependencies() {
     // Leaf with no deps is ready; nodes above it are not.
     assert_eq!(c_node["ready"], true);
     assert_eq!(root["ready"], false);
+}
+
+#[test]
+fn dep_tree_json_marks_a_shared_subtree_repeat_ref() {
+    let dir = init_repo();
+    // Diamond: A -> {B, C}, B -> D, C -> D, D -> E. D's subtree is expanded
+    // under one parent and only referenced (`repeat_ref`) under the other.
+    // Children sort by id, which is random, so the test does not assume which.
+    let e = new_item(dir.path(), "Eee", &[]);
+    let d = new_item(dir.path(), "Ddd", &["--dep", &e]);
+    let b = new_item(dir.path(), "Bbb", &["--dep", &d]);
+    let c = new_item(dir.path(), "Ccc", &["--dep", &d]);
+    let a = new_item(dir.path(), "Aaa", &["--dep", &b, "--dep", &c]);
+
+    let v = json_ok(clove(dir.path()).args(["dep", "tree", &a]));
+    let parents = v["data"]["children"].as_array().unwrap();
+    assert_eq!(parents.len(), 2, "{v}");
+    let d_nodes: Vec<&serde_json::Value> = parents
+        .iter()
+        .map(|p| &p["children"][0])
+        .inspect(|n| assert_eq!(n["id"], d))
+        .collect();
+    let (expanded, repeated): (Vec<_>, Vec<_>) =
+        d_nodes.into_iter().partition(|n| n["repeat_ref"] == false);
+    assert_eq!(expanded.len(), 1, "{v}");
+    assert_eq!(repeated.len(), 1, "{v}");
+    assert_eq!(expanded[0]["children"][0]["id"], e);
+    assert_eq!(repeated[0]["children"].as_array().unwrap().len(), 0);
+    assert_eq!(repeated[0]["cycle_ref"], false);
+
+    // The flat form carries the same marker per row.
+    let flat = json_ok(clove(dir.path()).args(["dep", "tree", &a, "--flat"]));
+    let d_rows: Vec<&serde_json::Value> = flat["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["id"] == d)
+        .collect();
+    assert_eq!(d_rows.len(), 2, "{flat}");
+    assert_eq!(
+        d_rows.iter().filter(|r| r["repeat_ref"] == true).count(),
+        1,
+        "{flat}"
+    );
 }
 
 #[test]

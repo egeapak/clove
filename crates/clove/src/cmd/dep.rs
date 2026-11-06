@@ -94,7 +94,7 @@ fn tree(
                 flatten(&root, 0, &mut flat);
                 Value::Array(flat)
             } else {
-                tree_to_json(&root)
+                root.to_json()
             };
             print_json_success(data, json!({ "warnings": [] }));
         }
@@ -152,26 +152,10 @@ fn cycle(
     }
 }
 
-fn tree_to_json(node: &DepTreeNode) -> Value {
-    json!({
-        "id": node.id.as_str(),
-        "title": node.title,
-        "status": node.status.as_str(),
-        "ready": node.ready,
-        "cycle_ref": node.cycle_ref,
-        "children": node.children.iter().map(tree_to_json).collect::<Vec<_>>(),
-    })
-}
-
 fn flatten(node: &DepTreeNode, depth: usize, out: &mut Vec<Value>) {
-    out.push(json!({
-        "id": node.id.as_str(),
-        "title": node.title,
-        "status": node.status.as_str(),
-        "ready": node.ready,
-        "cycle_ref": node.cycle_ref,
-        "depth": depth,
-    }));
+    let mut row = node.flat_json();
+    row["depth"] = json!(depth);
+    out.push(row);
     for child in &node.children {
         flatten(child, depth + 1, out);
     }

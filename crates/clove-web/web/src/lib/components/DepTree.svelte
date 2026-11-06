@@ -22,7 +22,8 @@
   <a class="id" href="../items/{node.id}" use:tooltip={`${node.id} · ${node.title}`}>{shortId(node.id)}</a>
   <span class="ttl" class:cur={node.id === currentId}>{node.title}{#if node.id === currentId} <b>(this)</b>{/if}</span>
   {#if node.ready && node.status !== 'closed'}<span class="ready">ready</span>{/if}
-  {#if node.cycle_ref}<span class="cycle">(cycle)</span>{/if}
+  {#if node.cycle_ref}<span class="cycle">(cycle)</span>
+  {:else if node.repeat_ref}<span class="repeat" use:tooltip={'Its dependencies are shown above'}>(repeat)</span>{/if}
 </div>
 {#if !node.cycle_ref}
   {#each node.children as child, i (child.id)}
@@ -57,6 +58,10 @@
   }
   .cycle {
     color: var(--red);
+    font-size: 10px;
+  }
+  .repeat {
+    color: var(--text-dim);
     font-size: 10px;
   }
 </style>

@@ -504,6 +504,10 @@ traversal loops.
 
 `dep tree <id>` uses depth-bounded DFS (default `--depth 5`, configurable). Tracks visited
 IDs to detect cycles; marks repeated nodes with `cycle_ref: true` without recursing further.
+A subtree that is already expanded elsewhere in the same tree (a shared sub-DAG) is shown
+once and marked `repeat_ref: true` at every later occurrence, without its children
+(`cargo tree`'s `(*)`). Every surface (CLI, MCP, web) serializes nodes with
+`DepTreeNode::to_json`, so the JSON shape is the same everywhere.
 
 Human output: Unicode tree identical to `cargo tree` (`├──`, `└──`, `│   ` indentation).
 

@@ -63,6 +63,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   has bound its socket but is not serving it yet, as happens on a loaded
   machine. A handshake that times out is now retried, like a refused connect,
   until the start's 10-second limit (gh-167).
+- `clove dep tree --format json` now includes `repeat_ref` on every node, and
+  `--flat` includes it on every row, as the MCP `clove_dep_tree` tool and the
+  web already did. `repeat_ref` is required again in
+  `docs/json-schema/v1/dep-tree.json`.
+- The web dependency tree marks a subtree that is shown elsewhere in the tree
+  with `(repeat)`. Before, that node was drawn with no children and no marker,
+  so it looked like an item with no dependencies. The MCP `clove_dep_tree`
+  description now names the `repeat_ref` marker.
 - Issue and comment lists are now paged by page number on the
   `/repos/{owner}/{repo}/…` route instead of following GitHub's `Link: next`
   URL (`/repositories/{id}/…`), which some proxies refuse.
