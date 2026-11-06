@@ -575,14 +575,23 @@ async fn push_create(
     // sync would create a duplicate on both sides.
     let external_ref = crate::github::external_ref_for(created.number);
     let local_updated = link_local(store, &push.clove_id, &external_ref)?;
-    state.record(&external_ref, Some(created.updated_at), local_updated);
     // The issue GitHub just created is OPEN regardless of `item.closed` — hash
     // the open variant until the close below actually lands.
-    let open_item = crate::github::ExportItem {
-        closed: false,
-        ..item.clone()
+    let record_open = |state: &mut SyncState, issue: &Issue, item: &crate::github::ExportItem| {
+        state.record(&external_ref, Some(issue.updated_at), local_updated);
+        let open_item = crate::github::ExportItem {
+            closed: false,
+            ..item.clone()
+        };
+        state.record_content_hash(&external_ref, crate::sync::export_fingerprint(&open_item));
     };
-    state.record_content_hash(&external_ref, crate::sync::export_fingerprint(&open_item));
+    record_open(state, &created, item);
+
+    // GitHub may store a different body than the one sent (a proxy or GitHub
+    // App changed it on the way): edit it back, and hash what GitHub now stores.
+    let created = correct_issue_body(&handler, created, &item.body, &push.clove_id, report).await;
+    let item = &stored_item(item, &created);
+    record_open(state, &created, item);
 
     // GitHub created the issue OPEN. If the local item is closed, close it too so
     // the two sides actually match after a create-of-a-closed-item. The close is a
@@ -747,9 +756,81 @@ async fn push_update(
         }
     };
 
+    let updated = correct_issue_body(&handler, updated, &item.body, &push.clove_id, report).await;
     state.record(&external_ref, Some(updated.updated_at), push.local_updated);
-    state.record_content_hash(&external_ref, crate::sync::export_fingerprint(item));
+    state.record_content_hash(
+        &external_ref,
+        crate::sync::export_fingerprint(&stored_item(item, &updated)),
+    );
     Ok(PushOutcome::Done(external_ref))
+}
+
+/// Whether GitHub stored `stored` for a body clove sent as `sent`: the same
+/// text, up to CRLF line breaks and leading or trailing whitespace (which the
+/// content fingerprint ignores too).
+fn body_stored_as_sent(sent: &str, stored: Option<&str>) -> bool {
+    let normalize = |body: &str| body.replace("\r\n", "\n").trim().to_owned();
+    normalize(sent) == normalize(stored.unwrap_or_default())
+}
+
+/// `item` with the body GitHub stores (`issue.body`), so its fingerprint is
+/// the one the next fetch maps to, also when GitHub changed the line breaks
+/// or whitespace of the body clove sent.
+fn stored_item(item: &crate::github::ExportItem, issue: &Issue) -> crate::github::ExportItem {
+    crate::github::ExportItem {
+        body: issue.body.clone().unwrap_or_default(),
+        ..item.clone()
+    }
+}
+
+/// Check the body GitHub returned for an issue clove just wrote, and edit the
+/// issue back to `sent` when GitHub stores something else (a proxy or GitHub
+/// App can append text, such as a footer, on the way).
+///
+/// Returns the latest issue response; the caller records the fingerprint of
+/// its body ([`stored_item`]). One edit is tried per push. When the edit is
+/// changed too, or fails, the run keeps GitHub's body and warns, so a later run
+/// neither pulls that body back nor edits it again until the local item
+/// changes. A failed edit never aborts the run: the push itself landed, and
+/// its bookkeeping must still be recorded.
+async fn correct_issue_body(
+    handler: &octocrab::issues::IssueHandler<'_>,
+    issue: Issue,
+    sent: &str,
+    clove_id: &str,
+    report: &mut SyncReport,
+) -> Issue {
+    if body_stored_as_sent(sent, issue.body.as_deref()) {
+        return issue;
+    }
+    let label = issue_label(issue.number);
+    let operation = format!("issue body edit of {label} for {clove_id}");
+    match call_item(true, &operation, || {
+        handler.update(issue.number).body(sent).send()
+    })
+    .await
+    {
+        Ok(edited) => {
+            let edited: Issue = edited;
+            if body_stored_as_sent(sent, edited.body.as_deref()) {
+                report.bodies_corrected.push(label);
+            } else {
+                report.warnings.push(format!(
+                    "GitHub changed the body of {label} for {clove_id} again after an edit; \
+                     it keeps a body other than the local one"
+                ));
+            }
+            edited
+        }
+        Err(failure) => {
+            report.warnings.push(format!(
+                "GitHub stores a body for {label} other than the local body of {clove_id}, \
+                 and the edit back failed: {}",
+                failure.into_error()
+            ));
+            issue
+        }
+    }
 }
 
 /// How an error names a GitHub issue: `#3 (gh-3)`, the number and the
@@ -953,6 +1034,7 @@ async fn apply_comment_threads(
         let mut deleted_local = 0usize;
         let mut deleted_remote = 0usize;
         let mut thread_applied = true;
+        let context = format!("on {} for {id}", issue_label(number));
 
         for conflict in &plan.conflicts {
             report.comments.conflicts.push(CommentConflictRef {
@@ -980,6 +1062,7 @@ async fn apply_comment_threads(
                 local_key: edit.key.clone(),
                 base_hash: link_hash(&edit.body),
                 gh_updated_at: gh_updated(edit.gh_id),
+                gh_base_hash: None,
             });
             report.comments.update_local += 1;
         }
@@ -994,11 +1077,16 @@ async fn apply_comment_threads(
             .await;
             match sent {
                 Ok(updated) => {
+                    let (updated, gh_base_hash) = correct_comment_body(
+                        crab, owner, repo, updated, &edit.body, &context, report,
+                    )
+                    .await;
                     entry.set_comment_link(CommentLink {
                         gh_id: edit.gh_id,
                         local_key: edit.key.clone(),
                         base_hash: link_hash(&edit.body),
                         gh_updated_at: updated.updated_at,
+                        gh_base_hash,
                     });
                     advance_remote_clock(entry, updated.updated_at);
                     report.comments.update_remote += 1;
@@ -1064,6 +1152,7 @@ async fn apply_comment_threads(
                 local_key: key,
                 base_hash: link_hash(&comment.body),
                 gh_updated_at: comment.updated_at,
+                gh_base_hash: None,
             });
             pulled += 1;
         }
@@ -1078,18 +1167,31 @@ async fn apply_comment_threads(
             .await;
             match sent {
                 Ok(created) => {
+                    let created_at = created.created_at;
+                    let (created, gh_base_hash) = correct_comment_body(
+                        crab,
+                        owner,
+                        repo,
+                        created,
+                        &comment.body,
+                        &context,
+                        report,
+                    )
+                    .await;
                     entry.set_comment_link(CommentLink {
                         gh_id: created.id.into_inner(),
                         local_key: comment.key.clone(),
                         base_hash: link_hash(&comment.body),
                         gh_updated_at: created.updated_at.or(Some(created.created_at)),
+                        gh_base_hash,
                     });
+                    advance_remote_clock(entry, created.updated_at);
                     // Posting a comment bumps the issue's `updated_at` on GitHub.
                     // Advance the recorded remote fingerprint to the new comment's
                     // timestamp so the next sync doesn't see a spurious remote
                     // change and pull-update (or false-conflict) the item whose
                     // only "remote change" was clove's own comment push.
-                    advance_remote_clock(entry, Some(created.created_at));
+                    advance_remote_clock(entry, Some(created_at));
                     pushed += 1;
                 }
                 Err(CallFailure::Rejected { error, .. }) => {
@@ -1118,6 +1220,62 @@ async fn apply_comment_threads(
         }
     }
     Ok(all_applied)
+}
+
+/// Check the body GitHub returned for a comment clove just wrote, and edit the
+/// comment back to `sent` when GitHub stores something else (see
+/// [`correct_issue_body`]: one edit per write, then a warning; a failed edit
+/// never aborts the run).
+///
+/// Returns the latest comment response, and the [`CommentLink::gh_base_hash`]
+/// to record: `Some` when the body GitHub stores does not hash like `sent`.
+async fn correct_comment_body(
+    crab: &Octocrab,
+    owner: &str,
+    repo: &str,
+    comment: octocrab::models::issues::Comment,
+    sent: &str,
+    context: &str,
+    report: &mut SyncReport,
+) -> (octocrab::models::issues::Comment, Option<u64>) {
+    let comment = if body_stored_as_sent(sent, comment.body.as_deref()) {
+        comment
+    } else {
+        let gh_id = comment.id.into_inner();
+        let label = format!("comment {gh_id} {context}");
+        let operation = format!("comment body edit of {label}");
+        // octocrab's `update_comment` POSTs; the edit endpoint is a PATCH.
+        let route = format!("/repos/{owner}/{repo}/issues/comments/{gh_id}");
+        let payload = serde_json::json!({ "body": sent });
+        match call_item(true, &operation, || {
+            crab.patch::<octocrab::models::issues::Comment, _, _>(&route, Some(&payload))
+        })
+        .await
+        {
+            Ok(edited) => {
+                if body_stored_as_sent(sent, edited.body.as_deref()) {
+                    report.bodies_corrected.push(label);
+                } else {
+                    report.warnings.push(format!(
+                        "GitHub changed the body of {label} again after an edit; \
+                         it keeps a body other than the local one"
+                    ));
+                }
+                edited
+            }
+            Err(failure) => {
+                report.warnings.push(format!(
+                    "GitHub stores a body for {label} other than the local one, \
+                     and the edit back failed: {}",
+                    failure.into_error()
+                ));
+                comment
+            }
+        }
+    };
+    let stored_hash = link_hash(comment.body.as_deref().unwrap_or_default());
+    let gh_base_hash = (stored_hash != link_hash(sent)).then_some(stored_hash);
+    (comment, gh_base_hash)
 }
 
 /// Move the recorded remote clock forward to `at`: a comment write bumps the

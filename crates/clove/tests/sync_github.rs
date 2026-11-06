@@ -83,6 +83,13 @@ struct State {
     /// Titles GitHub refuses: an issue create/PATCH carrying one gets a 422 on
     /// the `title` field (a rejection that is not about assignees).
     rejected_titles: Vec<String>,
+    /// Text appended to stored bodies, as a proxy that adds a footer on the
+    /// way does. Which writes get it is `footer_on_edits`.
+    footer: String,
+    /// `false`: only a push's own write (issue create, issue update with a
+    /// title, comment post) gets the footer, so an edit of the body alone
+    /// corrects it. `true`: every body write gets it, edits included.
+    footer_on_edits: bool,
 
     // --- Pagination (`paginate`) ---
     /// While `Some(n)`, the issue list and each issue's comment list return `n`
@@ -97,6 +104,15 @@ struct State {
 }
 
 impl State {
+    /// `body` as stored: with the footer appended, when one is set and the
+    /// write is a push's own write (`edit` false) or edits get it too.
+    fn stored_body(&self, body: &str, edit: bool) -> String {
+        if self.footer.is_empty() || (edit && !self.footer_on_edits) {
+            return body.to_owned();
+        }
+        format!("{body}{}", self.footer)
+    }
+
     /// The next monotonic RFC3339 timestamp (base 2030 + clock seconds).
     fn tick(&mut self) -> String {
         self.clock += 1;
@@ -134,6 +150,8 @@ impl MockGitHub {
             comment_delete_count: 0,
             rejected_assignees: Vec::new(),
             rejected_titles: Vec::new(),
+            footer: String::new(),
+            footer_on_edits: false,
             page_size: None,
             link_next: None,
             host: String::new(),
@@ -243,6 +261,13 @@ impl MockGitHub {
             .unwrap()
             .rejected_titles
             .retain(|t| t != title);
+    }
+
+    /// Append `footer` to stored bodies; `on_edits` see `State::footer_on_edits`.
+    fn append_footer(&self, footer: &str, on_edits: bool) {
+        let mut s = self.state.lock().unwrap();
+        s.footer = footer.to_owned();
+        s.footer_on_edits = on_edits;
     }
 
     fn issue_post_count(&self) -> u64 {
@@ -511,7 +536,14 @@ fn route_repo_comment(
                 s.comment_delete_count += 1;
                 return ("204 No Content", Value::Null);
             }
-            comments[index]["body"] = json!(body["body"].as_str().unwrap_or(""));
+            let stored = s.stored_body(body["body"].as_str().unwrap_or(""), true);
+            let found = s.comments.values_mut().find_map(|cs| {
+                cs.iter()
+                    .position(|c| c["id"] == json!(id))
+                    .map(|i| (cs, i))
+            });
+            let (comments, index) = found.expect("found above");
+            comments[index]["body"] = json!(stored);
             comments[index]["updated_at"] = json!(updated);
             let edited = comments[index].clone();
             s.comment_patch_count += 1;
@@ -569,7 +601,7 @@ fn route(
                 let id = s.next_comment_id;
                 s.next_comment_id += 1;
                 let created = s.tick();
-                let body_text = body["body"].as_str().unwrap_or("").to_owned();
+                let body_text = s.stored_body(body["body"].as_str().unwrap_or(""), false);
                 let comment = make_comment(id, "tester", &body_text, &created);
                 s.comments.entry(number).or_default().push(comment.clone());
                 // Real GitHub bumps the issue's `updated_at` when a comment is
@@ -608,7 +640,7 @@ fn route(
             s.next_number += 1;
             let updated = s.tick();
             let title = body["title"].as_str().unwrap_or("").to_owned();
-            let issue_body = body["body"].as_str().unwrap_or("").to_owned();
+            let issue_body = s.stored_body(body["body"].as_str().unwrap_or(""), false);
             let labels = str_array(&body["labels"]);
             let assignees = str_array(&body["assignees"]);
             let issue = make_issue(
@@ -647,13 +679,22 @@ fn route(
                 return rejection;
             }
             let updated = s.tick();
-            let Some(issue) = s.issues.iter_mut().find(|i| i["number"] == json!(number)) else {
+            if !s.issues.iter().any(|i| i["number"] == json!(number)) {
                 return ("404 Not Found", json!({ "message": "no such issue" }));
-            };
+            }
+            let stored = body
+                .get("body")
+                .and_then(Value::as_str)
+                .map(|b| s.stored_body(b, body.get("title").is_none()));
+            let issue = s
+                .issues
+                .iter_mut()
+                .find(|i| i["number"] == json!(number))
+                .expect("checked above");
             if let Some(t) = body.get("title").and_then(Value::as_str) {
                 issue["title"] = json!(t);
             }
-            if let Some(b) = body.get("body").and_then(Value::as_str) {
+            if let Some(b) = stored {
                 issue["body"] = json!(b);
             }
             if let Some(st) = body.get("state").and_then(Value::as_str) {
@@ -3206,4 +3247,278 @@ fn an_unusable_proxy_url_is_a_setup_error() {
         "{text}"
     );
     assert!(!text.contains("secret"), "{text}");
+}
+
+// ---------------------------------------------------------------------------
+// Bodies GitHub stores differently from the pushed body
+// ---------------------------------------------------------------------------
+
+/// The footer a proxy appends to every body it forwards.
+const FOOTER: &str = "\n\n---\n_Generated by a proxy_";
+
+/// The mock-side request counters that a sync with nothing to do leaves alone.
+fn write_counts(mock: &MockGitHub) -> (u64, u64, u64) {
+    (
+        mock.issue_post_count(),
+        mock.patch_count(),
+        mock.comment_patch_count(),
+    )
+}
+
+/// A created issue and a posted comment whose bodies GitHub stored with a
+/// footer are edited back to the local bodies, and the report names both.
+#[test]
+fn a_changed_body_on_create_is_edited_back() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    clove(dir.path(), mock.addr)
+        .args(["new", "Footered", "-b", "The body."])
+        .assert()
+        .success();
+    let id = only_item_id(dir.path(), mock.addr);
+    clove(dir.path(), mock.addr)
+        .args(["comment", &id, "A local comment"])
+        .assert()
+        .success();
+    mock.append_footer(FOOTER, false);
+
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["pushed_created"], 1, "{v}");
+    let corrected = v["data"]["bodies_corrected"].as_array().unwrap();
+    assert_eq!(corrected.len(), 2, "{v}");
+    assert_eq!(corrected[0], "#1 (gh-1)", "{v}");
+    assert!(
+        corrected[1]
+            .as_str()
+            .unwrap()
+            .starts_with("comment 1000 on #1 (gh-1)"),
+        "{v}"
+    );
+    assert!(v["_meta"]["warnings"].as_array().unwrap().is_empty(), "{v}");
+    let body = mock.issue(1).unwrap()["body"].as_str().unwrap().to_owned();
+    assert!(body.starts_with("The body."), "{body}");
+    assert!(!body.contains("Generated by"), "{body}");
+    assert_eq!(mock.comment_bodies(1), vec!["A local comment".to_owned()]);
+
+    // Nothing is left to do: no create, no edit, no comment edit.
+    let before = write_counts(&mock);
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["in_sync"], 1, "{v}");
+    assert_eq!(v["data"]["bodies_corrected"], json!([]), "{v}");
+    assert_eq!(write_counts(&mock), before);
+}
+
+/// An update whose body GitHub stored with a footer is edited back.
+#[test]
+fn a_changed_body_on_update_is_edited_back() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    clove(dir.path(), mock.addr)
+        .args(["new", "Original", "-b", "Version one."])
+        .assert()
+        .success();
+    sync(dir.path(), mock.addr, &[]);
+    let id = only_item_id(dir.path(), mock.addr);
+    backdate_sync_baseline(dir.path());
+    // A body edit in the item file (no `set` token edits the body); the
+    // backdated baseline makes it newer than the last sync.
+    let path = dir.path().join(".clove/issues").join(format!("{id}.md"));
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, text.replace("Version one.", "Version two.")).unwrap();
+    mock.append_footer(FOOTER, false);
+
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["pushed_updated"], 1, "{v}");
+    assert_eq!(v["data"]["bodies_corrected"], json!(["#1 (gh-1)"]), "{v}");
+    let body = mock.issue(1).unwrap()["body"].as_str().unwrap().to_owned();
+    assert!(body.starts_with("Version two."), "{body}");
+    assert!(!body.contains("Generated by"), "{body}");
+
+    let before = write_counts(&mock);
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["in_sync"], 1, "{v}");
+    assert_eq!(write_counts(&mock), before);
+}
+
+/// When GitHub changes the edit too, the sync warns once per body, keeps
+/// GitHub's body, and a later run neither edits it again nor pulls the footer
+/// into the local item or comment, also after the issue's clock moves.
+#[test]
+fn a_body_changed_again_after_the_edit_warns_and_does_not_loop() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    clove(dir.path(), mock.addr)
+        .args(["new", "Always footered", "-b", "The body."])
+        .assert()
+        .success();
+    let id = only_item_id(dir.path(), mock.addr);
+    clove(dir.path(), mock.addr)
+        .args(["comment", &id, "A local comment"])
+        .assert()
+        .success();
+    mock.append_footer(FOOTER, true);
+
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["pushed_created"], 1, "{v}");
+    assert_eq!(v["data"]["bodies_corrected"], json!([]), "{v}");
+    let warnings: Vec<&str> = v["_meta"]["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w.as_str().unwrap())
+        .collect();
+    assert_eq!(warnings.len(), 2, "{v}");
+    assert!(
+        warnings[0].contains("#1 (gh-1)") && warnings[0].contains(&id),
+        "{warnings:?}"
+    );
+    assert!(
+        warnings[1].contains("comment 1000 on #1 (gh-1)"),
+        "{warnings:?}"
+    );
+    // One edit each, then the sync stops trying.
+    assert_eq!(mock.patch_count(), 1);
+    assert_eq!(mock.comment_patch_count(), 1);
+    let body = mock.issue(1).unwrap()["body"].as_str().unwrap().to_owned();
+    assert!(body.ends_with(FOOTER), "{body}");
+
+    let before = write_counts(&mock);
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["in_sync"], 1, "{v}");
+    assert!(v["_meta"]["warnings"].as_array().unwrap().is_empty(), "{v}");
+    assert_eq!(write_counts(&mock), before);
+
+    // A third-party touch moves the issue's clock without changing its content:
+    // still in sync, and the footer stays out of the local item and comment.
+    mock.edit(1, |_| {});
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["pulled_updated"], 0, "{v}");
+    assert_eq!(v["data"]["comments_updated_local"], 0, "{v}");
+    assert_eq!(write_counts(&mock), before);
+    let local = show(dir.path(), mock.addr, &id);
+    assert_eq!(
+        local["body"].as_str().unwrap().trim(),
+        "The body.",
+        "{local}"
+    );
+    assert_eq!(
+        local_comment_bodies(dir.path(), mock.addr, &id),
+        vec!["A local comment".to_owned()]
+    );
+}
+
+/// A closed item created while GitHub adds a footer: the body is edited back
+/// before the close, the issue ends closed, and a second run makes no writes.
+#[test]
+fn a_changed_body_on_a_closed_create_is_edited_back_and_closed() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    clove(dir.path(), mock.addr)
+        .args(["new", "Done already", "-b", "The body."])
+        .assert()
+        .success();
+    let id = only_item_id(dir.path(), mock.addr);
+    clove(dir.path(), mock.addr)
+        .args(["close", &id])
+        .assert()
+        .success();
+    mock.append_footer(FOOTER, false);
+
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["bodies_corrected"], json!(["#1 (gh-1)"]), "{v}");
+    assert!(mock.is_closed(1));
+    let body = mock.issue(1).unwrap()["body"].as_str().unwrap().to_owned();
+    assert!(!body.contains("Generated by"), "{body}");
+
+    let before = write_counts(&mock);
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["in_sync"], 1, "{v}");
+    assert_eq!(write_counts(&mock), before);
+}
+
+/// A pushed comment edit that GitHub changes, edit back included: a warning,
+/// and later runs neither edit it again nor pull the footer into the file.
+#[test]
+fn a_changed_comment_edit_warns_and_does_not_loop() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    clove(dir.path(), mock.addr)
+        .args(["new", "Has a comment", "-b", "The body."])
+        .assert()
+        .success();
+    let id = only_item_id(dir.path(), mock.addr);
+    clove(dir.path(), mock.addr)
+        .args(["comment", &id, "First text"])
+        .assert()
+        .success();
+    sync(dir.path(), mock.addr, &[]);
+    edit_local_comment(dir.path(), &id, "First text", "Second text");
+    mock.append_footer(FOOTER, true);
+
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["comments_updated_remote"], 1, "{v}");
+    let warnings = v["_meta"]["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1, "{v}");
+    assert!(
+        warnings[0]
+            .as_str()
+            .unwrap()
+            .contains("again after an edit"),
+        "{v}"
+    );
+
+    let before = write_counts(&mock);
+    mock.edit(1, |_| {});
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["comments_updated_local"], 0, "{v}");
+    assert_eq!(write_counts(&mock), before);
+    assert_eq!(
+        local_comment_bodies(dir.path(), mock.addr, &id),
+        vec!["Second text".to_owned()]
+    );
+}
+
+/// The edit back of a posted comment fails, as a 4xx about the comment or as
+/// a server error after the retries. The run still records the posted
+/// comment's link and warns, so the next run neither posts it again nor pulls
+/// GitHub's copy as a second local comment.
+#[test]
+fn a_failed_comment_edit_back_keeps_the_link() {
+    for status in [422, 500] {
+        let mock = MockGitHub::start();
+        let dir = init_repo();
+        clove(dir.path(), mock.addr)
+            .args(["new", "Has a comment", "-b", "The body."])
+            .assert()
+            .success();
+        let id = only_item_id(dir.path(), mock.addr);
+        clove(dir.path(), mock.addr)
+            .args(["comment", &id, "A local comment"])
+            .assert()
+            .success();
+        mock.append_footer(FOOTER, false);
+        mock.set_comment_write_fail_status(Some(status));
+
+        let v = sync(dir.path(), mock.addr, &[]);
+        assert_eq!(v["data"]["comments_pushed"], 1, "{status}: {v}");
+        let warnings = v["_meta"]["warnings"].as_array().unwrap();
+        assert_eq!(warnings.len(), 1, "{status}: {v}");
+        assert!(
+            warnings[0].as_str().unwrap().contains("edit back failed"),
+            "{status}: {v}"
+        );
+
+        mock.set_comment_write_fail_status(None);
+        let before = write_counts(&mock);
+        let v = sync(dir.path(), mock.addr, &[]);
+        assert_eq!(v["data"]["comments_pushed"], 0, "{status}: {v}");
+        assert_eq!(v["data"]["comments_pulled"], 0, "{status}: {v}");
+        assert_eq!(write_counts(&mock), before, "{status}");
+        assert_eq!(mock.comment_bodies(1).len(), 1, "{status}");
+        assert_eq!(
+            local_comment_bodies(dir.path(), mock.addr, &id),
+            vec!["A local comment".to_owned()],
+            "{status}"
+        );
+    }
 }
