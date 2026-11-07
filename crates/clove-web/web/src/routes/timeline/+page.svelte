@@ -114,24 +114,50 @@
     });
   });
 
-  // axis ticks, about one per 140px of track
+  // The plot's rendered width. The grid column can grow past trackW
+  // (minmax(var(--track-w), 1fr)), so spacing ticks by trackW alone leaves a
+  // wide screen with a sparse axis. Before layout (and in jsdom) it is 0, so
+  // fall back to trackW.
+  let axisEl = $state<HTMLDivElement | undefined>();
+  let axisW = $state(0);
+  const plotW = $derived(axisW > 0 ? axisW : trackW);
+  $effect(() => {
+    const el = axisEl;
+    if (!el) return;
+    const read = () => (axisW = el.clientWidth);
+    read();
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(read);
+    ro.observe(el);
+    return () => ro.disconnect();
+  });
+
+  // axis ticks, about one per 140px of plot. A centred label at either end of
+  // the plot would hang half outside it (the first under the sticky label
+  // column, the last past the right border), so the edge labels align inward,
+  // the same way the cursor chip is clamped.
   const ticks = $derived.by(() => {
-    const out: { left: number; label: string }[] = [];
+    const out: { left: number; label: string; edge: 'start' | 'end' | null }[] = [];
     const { min, max } = domain;
-    const n = Math.max(4, Math.round(trackW / 140));
+    const n = Math.max(4, Math.round(plotW / 140));
     for (let k = 0; k <= n; k++) {
       const t = min + ((max - min) * k) / n;
       out.push({
         left: (k / n) * 100,
-        label: formatAxisDate(t)
+        label: formatAxisDate(t),
+        edge: k === 0 ? 'start' : k === n ? 'end' : null
       });
     }
     return out;
   });
 
+  // The "today" label sits right of its line. When the line is too close to
+  // the right edge for the label to fit, put the label on the left instead.
+  const TODAY_LABEL_W = 48;
+  const todayFlip = $derived(((100 - pct(domain.now)) / 100) * plotW < TODAY_LABEL_W);
+
   // Hover guide: the pointer's fraction across the plot (axis/track column), or
   // null when it is elsewhere. Pointer events cover mouse, touch and pen.
-  let axisEl = $state<HTMLDivElement | undefined>();
   let cursorFraction = $state<number | null>(null);
   const cursorLabel = $derived(
     cursorFraction === null ? '' : formatAxisDate(dateAtFraction(domain.min, domain.max, cursorFraction))
@@ -210,7 +236,14 @@
   <div class="tl-corner"></div>
   <div class="tl-axis" bind:this={axisEl}>
     {#each ticks as t (t.left)}
-      <div class="tick mono" style="left:{t.left}%">{t.label}</div>
+      <div
+        class="tick mono"
+        class:tick-start={t.edge === 'start'}
+        class:tick-end={t.edge === 'end'}
+        style="left:{t.left}%"
+      >
+        {t.label}
+      </div>
     {/each}
     {#if cursorFraction !== null}
       <div class="cursor-line" style="left:{cursorFraction * 100}%"></div>
@@ -251,7 +284,7 @@
       <div class="cursor-line" data-testid="timeline-cursor-line" style="left:{cursorFraction * 100}%"></div>
     {/if}
     <!-- today -->
-    <div class="today" style="left:{pct(domain.now)}%"><span>today</span></div>
+    <div class="today" class:flip={todayFlip} style="left:{pct(domain.now)}%"><span>today</span></div>
     <!-- dep arrows -->
     <svg class="arrows" viewBox="0 0 100 {svgH}" preserveAspectRatio="none" aria-hidden="true">
       <defs>
@@ -391,6 +424,14 @@
     color: var(--text-dim);
     transform: translateX(-50%);
     white-space: nowrap;
+  }
+  .tick-start {
+    padding-left: 4px;
+    transform: none;
+  }
+  .tick-end {
+    padding-right: 4px;
+    transform: translateX(-100%);
   }
   .cursor-line {
     position: absolute;
@@ -588,6 +629,10 @@
     color: var(--accent);
     background: var(--surface-app);
     padding: 0 3px;
+  }
+  .today.flip span {
+    left: auto;
+    right: 4px;
   }
   .tput {
     margin-top: 14px;

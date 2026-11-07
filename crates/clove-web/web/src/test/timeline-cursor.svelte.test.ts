@@ -3,6 +3,7 @@ import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { render, cleanup, fireEvent } from '@testing-library/svelte';
 import { stubApi, META, item } from './fake-api';
 import { formatAxisDate } from '$lib/timeline';
+import { store } from '$lib/store.svelte';
 import TimelinePage from '../routes/timeline/+page.svelte';
 
 const NOW = Date.parse('2026-04-11T12:00:00Z');
@@ -106,5 +107,78 @@ describe('timeline hover guide', () => {
     const labels = container.querySelector('.tl-labels') as HTMLElement;
     await fireEvent.pointerMove(labels, { clientX: PLOT.left + 100, pointerType: 'mouse' });
     expect(chip(container)).toBeNull();
+  });
+});
+
+describe('timeline axis ticks', () => {
+  it('aligns the first and last tick labels inward so they stay inside the plot', async () => {
+    const { axis } = await renderTimeline();
+    const ticks = [...axis.querySelectorAll<HTMLElement>('.tick')];
+    expect(ticks.length).toBeGreaterThanOrEqual(5);
+    const first = ticks[0];
+    const last = ticks[ticks.length - 1];
+    expect(first.style.left).toBe('0%');
+    expect(first.classList.contains('tick-start')).toBe(true);
+    expect(last.style.left).toBe('100%');
+    expect(last.classList.contains('tick-end')).toBe(true);
+    expect(last.textContent?.trim()).toBe(formatAxisDate(DOMAIN_MAX));
+    for (const t of ticks.slice(1, -1)) {
+      expect(t.classList.contains('tick-start') || t.classList.contains('tick-end')).toBe(false);
+    }
+  });
+});
+
+// The shared store keeps the last test's items and does not refetch for the
+// same query, so each call reloads it and checks the page draws its own row.
+async function renderWithItems(id: string, created: string) {
+  stubApi((path) => {
+    if (path === '/meta') return META;
+    if (path === '/items') return [item({ id, created, updated: created })];
+    if (path === '/stats/history') return [];
+    throw new Error('unexpected request ' + path);
+  });
+  const view = render(TimelinePage);
+  await store.refetch();
+  await vi.waitFor(() => {
+    const labels = [...view.container.querySelectorAll('.rowlabel')];
+    expect(labels.map((a) => a.getAttribute('href'))).toEqual([expect.stringContaining(id)]);
+  });
+  return view;
+}
+
+describe('timeline plot width', () => {
+  it('spaces the axis ticks by the rendered axis width, not the minimum track width', async () => {
+    let resize: (() => void) | undefined;
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        constructor(cb: () => void) {
+          resize = cb;
+        }
+        observe() {}
+        disconnect() {}
+      }
+    );
+    const { container } = await renderWithItems('clov-WIDEAXIS', '2026-01-01T00:00:00Z');
+    const axis = container.querySelector('.tl-axis') as HTMLElement;
+    // Before layout clientWidth is 0, so the track width decides: about 1519px -> 11 gaps.
+    expect(axis.querySelectorAll('.tick').length).toBe(12);
+    Object.defineProperty(axis, 'clientWidth', { configurable: true, value: 2800 });
+    resize?.();
+    await vi.waitFor(() => expect(axis.querySelectorAll('.tick').length).toBe(21));
+    const last = [...axis.querySelectorAll<HTMLElement>('.tick')].at(-1)!;
+    expect(last.classList.contains('tick-end')).toBe(true);
+  });
+
+  it('keeps the "today" label right of its line when there is room', async () => {
+    const { container } = await renderWithItems('clov-LONGHIST', '2026-01-01T00:00:00Z');
+    expect(container.querySelector('.today')!.classList.contains('flip')).toBe(false);
+  });
+
+  it('moves the "today" label left of its line near the right edge of the plot', async () => {
+    // A 10-day history gets the minimum 640px track, so today sits about 24px
+    // from the right edge: too close for the label.
+    const { container } = await renderWithItems('clov-SHORTHIS', '2026-04-01T00:00:00Z');
+    expect(container.querySelector('.today')!.classList.contains('flip')).toBe(true);
   });
 });
