@@ -1,8 +1,15 @@
 //! `clove setup`: wire clove into Claude Code. Mirrors `engramdb setup` but
-//! clove has no hooks, so it only (1) registers the `clove mcp` server + its
-//! tool permissions in `settings.json`, (2) writes a `CLOVE.md` agent-directives
-//! file, and (3) appends an `@CLOVE.md` reference to `CLAUDE.md`. Idempotent, with
-//! `--dry-run` and `--global` (`~/.claude/`) vs project (`<cwd>/.claude/`) scope.
+//! clove has no hooks, so it only (1) registers the `clove mcp` server in the
+//! project's `.mcp.json` (the file Claude Code reads project MCP servers from),
+//! (2) enables that server and grants its tool permissions in `settings.json`,
+//! (3) writes a `CLOVE.md` agent-directives file, and (4) appends an `@CLOVE.md`
+//! reference to `CLAUDE.md`. Idempotent, with `--dry-run` and `--global`
+//! (`~/.claude/`) vs project (`<cwd>/.claude/`) scope.
+//!
+//! Claude Code reads MCP server definitions only from `<project>/.mcp.json` and
+//! `~/.claude.json`, never from the `mcpServers` key of a `settings.json`.
+//! `~/.claude.json` is Claude Code's own state file, so `--global` does not edit
+//! it: it prints the `claude mcp add --scope user` command instead.
 
 use camino::{Utf8Path, Utf8PathBuf};
 use clove_core::OutputFormat;
@@ -98,7 +105,7 @@ The `clove_*` MCP tools do the same things (`clove_ready`, `clove_list`,
 /// The line appended to `CLAUDE.md` to import the directives above.
 const CLOVE_MD_REF: &str = "@CLOVE.md";
 
-/// The `settings.json` `mcpServers` key. Matches the installed command name so
+/// The `.mcp.json` `mcpServers` key. Matches the installed command name so
 /// the resulting `mcp__clove__*` tool-permission strings read naturally. This is
 /// a *separate* registration from the marketplace plugin's `tracker` key (which
 /// resolves under `mcp__plugin_clove_tracker__*`); the two never collide.
@@ -106,6 +113,14 @@ const MCP_SERVER_KEY: &str = "clove";
 
 /// Prefix for a permission entry: `mcp__` + [`MCP_SERVER_KEY`] + `__`.
 const SETTINGS_MCP_PREFIX: &str = "mcp__clove__";
+
+/// The command `--global` prints, since setup does not edit `~/.claude.json`.
+const GLOBAL_MCP_ADD: &str = "claude mcp add --scope user clove -- clove mcp";
+
+/// The server entry written to `.mcp.json`.
+fn mcp_server_entry() -> Value {
+    json!({ "command": "clove", "args": ["mcp"] })
+}
 
 /// Fallback tool list for builds without the `mcp` feature, where the live
 /// router is not linked and cannot be asked.
@@ -172,10 +187,22 @@ pub fn run(
     let claude_dir = resolve_claude_dir(&project_dir, global, claude_dir_override)?;
 
     let mut actions: Vec<String> = Vec::new();
-    let settings_changed = write_settings(&claude_dir, dry_run, &mut actions)?;
+    // Project scope registers the server in the `.mcp.json` next to `.claude/`.
+    let mcp_json_changed = if global {
+        actions.push(format!(
+            "To register the clove MCP server for every project, run: {GLOBAL_MCP_ADD}"
+        ));
+        false
+    } else {
+        let project_root = claude_dir
+            .parent()
+            .map_or_else(|| project_dir.clone(), Utf8Path::to_owned);
+        write_mcp_json(&project_root, dry_run, &mut actions)?
+    };
+    let settings_changed = write_settings(&claude_dir, !global, dry_run, &mut actions)?;
     let clove_md_changed = write_clove_md(&claude_dir, dry_run, &mut actions)?;
     let claude_md_changed = update_claude_md(&claude_dir, dry_run, &mut actions)?;
-    let changed = settings_changed || clove_md_changed || claude_md_changed;
+    let changed = mcp_json_changed || settings_changed || clove_md_changed || claude_md_changed;
 
     match format {
         OutputFormat::Json | OutputFormat::Jsonl => print_json_success(
@@ -220,11 +247,44 @@ fn resolve_claude_dir(
     Ok(project_dir.join(".claude"))
 }
 
-/// Register the `clove mcp` server and its tool permissions in `settings.json`,
-/// merging into (never clobbering) any existing config. Returns whether anything
-/// changed.
+/// Register the `clove mcp` server in `<project_root>/.mcp.json`, merging into
+/// (never clobbering) any existing config. An existing `clove` entry is kept as
+/// it is. Returns whether anything changed.
+fn write_mcp_json(
+    project_root: &Utf8Path,
+    dry_run: bool,
+    actions: &mut Vec<String>,
+) -> Result<bool, CloveError> {
+    let path = project_root.join(".mcp.json");
+    let mut config = read_settings(&path)?;
+    {
+        let root = settings_object_mut(&mut config, &path)?;
+        let servers = ensure_object_entry(root, "mcpServers", "mcpServers", &path)?;
+        if servers.contains_key(MCP_SERVER_KEY) {
+            actions.push(".mcp.json already registers the clove MCP server.".into());
+            return Ok(false);
+        }
+        servers.insert(MCP_SERVER_KEY.to_owned(), mcp_server_entry());
+    }
+    if dry_run {
+        actions.push("Would register the clove MCP server in .mcp.json.".into());
+        return Ok(true);
+    }
+    create_dir_all(project_root)?;
+    write_json(&path, &config)?;
+    actions.push("Registered the clove MCP server in .mcp.json.".into());
+    Ok(true)
+}
+
+/// Grant the clove tool permissions in `settings.json` and, for a project,
+/// enable the `.mcp.json` server (`enabledMcpjsonServers`), merging into (never
+/// clobbering) any existing config. It also removes the `mcpServers.clove`
+/// entry that older versions of `clove setup` wrote here, which Claude Code
+/// never read, when that entry is exactly the one setup wrote. Returns whether
+/// anything changed.
 fn write_settings(
     claude_dir: &Utf8Path,
+    enable_project_server: bool,
     dry_run: bool,
     actions: &mut Vec<String>,
 ) -> Result<bool, CloveError> {
@@ -232,15 +292,33 @@ fn write_settings(
     let mut settings = read_settings(&settings_path)?;
     let mut changed = false;
 
-    // MCP server entry.
+    // Stale server entry from older versions of `clove setup`.
     {
         let root = settings_object_mut(&mut settings, &settings_path)?;
-        let servers = ensure_object_entry(root, "mcpServers", "mcpServers", &settings_path)?;
-        if !servers.contains_key(MCP_SERVER_KEY) {
-            servers.insert(
-                MCP_SERVER_KEY.to_owned(),
-                json!({ "command": "clove", "args": ["mcp"] }),
-            );
+        if let Some(Value::Object(servers)) = root.get_mut("mcpServers") {
+            if servers.get(MCP_SERVER_KEY) == Some(&mcp_server_entry()) {
+                servers.remove(MCP_SERVER_KEY);
+                if servers.is_empty() {
+                    root.remove("mcpServers");
+                }
+                actions
+                    .push("Removed the unused mcpServers.clove entry from settings.json.".into());
+                changed = true;
+            }
+        }
+    }
+
+    // Enable the project's `.mcp.json` server, so it starts without a prompt.
+    if enable_project_server {
+        let root = settings_object_mut(&mut settings, &settings_path)?;
+        let enabled = ensure_array_entry(
+            root,
+            "enabledMcpjsonServers",
+            "enabledMcpjsonServers",
+            &settings_path,
+        )?;
+        if !enabled.iter().any(|v| v == MCP_SERVER_KEY) {
+            enabled.push(json!(MCP_SERVER_KEY));
             changed = true;
         }
     }
@@ -268,26 +346,34 @@ fn write_settings(
     }
 
     if !changed {
-        actions
-            .push("settings.json already registers the clove MCP server and permissions.".into());
+        actions.push("settings.json already enables the clove MCP tools.".into());
         return Ok(false);
     }
     if dry_run {
-        actions.push(
-            "Would register the clove MCP server + tool permissions in settings.json.".into(),
-        );
+        actions.push("Would enable the clove MCP tools in settings.json.".into());
         return Ok(true);
     }
 
     create_dir_all(claude_dir)?;
-    let formatted =
-        serde_json::to_string_pretty(&settings).map_err(|e| CloveError::InvalidField {
-            field: "settings.json".to_owned(),
-            reason: format!("could not serialize settings.json: {e}"),
-        })?;
-    write_atomic(&settings_path, &formatted)?;
-    actions.push("Registered the clove MCP server + tool permissions in settings.json.".into());
+    write_json(&settings_path, &settings)?;
+    actions.push("Enabled the clove MCP tools in settings.json.".into());
     Ok(true)
+}
+
+/// Pretty-print `value` and atomically write it to `path`.
+fn write_json(path: &Utf8Path, value: &Value) -> Result<(), CloveError> {
+    let mut formatted =
+        serde_json::to_string_pretty(value).map_err(|e| CloveError::InvalidField {
+            field: file_label(path),
+            reason: format!("could not serialize {path}: {e}"),
+        })?;
+    formatted.push('\n');
+    write_atomic(path, &formatted)
+}
+
+/// The file name used in an error's `field` (`settings.json`, `.mcp.json`).
+fn file_label(path: &Utf8Path) -> String {
+    path.file_name().unwrap_or("settings.json").to_owned()
 }
 
 /// Write `CLOVE.md` (create or refresh stale content). Returns whether it changed.
@@ -380,7 +466,7 @@ fn json_type_name(value: &Value) -> &'static str {
 /// the offending key so it can be fixed by hand.
 fn shape_error(path: &Utf8Path, key_path: &str, expected: &str, found: &Value) -> CloveError {
     CloveError::InvalidField {
-        field: format!("settings.json:{key_path}"),
+        field: format!("{}:{key_path}", file_label(path)),
         reason: format!(
             "{path}: expected \"{key_path}\" to be a JSON {expected}, found {} — \
              fix or remove the key and re-run `clove setup`",
@@ -400,13 +486,13 @@ fn is_semantically_empty(value: &Value) -> bool {
     }
 }
 
-/// Read and parse `settings.json`. A missing file yields `{}`; a non-object top
+/// Read and parse a JSON config file (`settings.json`, `.mcp.json`). A missing file yields `{}`; a non-object top
 /// level (or invalid JSON) is a hard error rather than a silent clobber.
 fn read_settings(path: &Utf8Path) -> Result<Value, CloveError> {
     let settings: Value = if path.exists() {
         let content = read_to_string(path)?;
         serde_json::from_str(&content).map_err(|e| CloveError::InvalidField {
-            field: "settings.json".to_owned(),
+            field: file_label(path),
             reason: format!("{path}: not valid JSON ({e}) — fix the file and re-run `clove setup`"),
         })?
     } else {
@@ -414,7 +500,7 @@ fn read_settings(path: &Utf8Path) -> Result<Value, CloveError> {
     };
     if !settings.is_object() {
         return Err(CloveError::InvalidField {
-            field: "settings.json".to_owned(),
+            field: file_label(path),
             reason: format!(
                 "{path}: expected the top-level value to be a JSON object, found {} — \
                  fix the file and re-run `clove setup`",
@@ -629,14 +715,15 @@ mod tests {
     // --- settings.json ---
 
     #[test]
-    fn settings_creates_server_and_permissions() {
+    fn settings_enables_server_and_permissions() {
         let tmp = TempDir::new().unwrap();
         let d = dir(&tmp);
         let mut a = Vec::new();
-        assert!(write_settings(&d, false, &mut a).unwrap());
+        assert!(write_settings(&d, true, false, &mut a).unwrap());
         let s = settings_at(&d);
-        assert_eq!(s["mcpServers"]["clove"]["command"], "clove");
-        assert_eq!(s["mcpServers"]["clove"]["args"], json!(["mcp"]));
+        // Claude Code does not read servers from settings.json.
+        assert!(s.get("mcpServers").is_none());
+        assert_eq!(s["enabledMcpjsonServers"], json!(["clove"]));
         let allow = s["permissions"]["allow"].as_array().unwrap();
         let names = mcp_tool_names();
         // Both sides of the comparisons below come from `mcp_tool_names()`, so
@@ -655,9 +742,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let d = dir(&tmp);
         let mut a = Vec::new();
-        write_settings(&d, false, &mut a).unwrap();
+        write_settings(&d, true, false, &mut a).unwrap();
         let before = std::fs::read_to_string(d.join("settings.json")).unwrap();
-        assert!(!write_settings(&d, false, &mut a).unwrap());
+        assert!(!write_settings(&d, true, false, &mut a).unwrap());
         let after = std::fs::read_to_string(d.join("settings.json")).unwrap();
         assert_eq!(before, after);
     }
@@ -672,10 +759,10 @@ mod tests {
         )
         .unwrap();
         let mut a = Vec::new();
-        assert!(write_settings(&d, false, &mut a).unwrap());
+        assert!(write_settings(&d, true, false, &mut a).unwrap());
         let s = settings_at(&d);
         assert_eq!(s["mcpServers"]["other"]["command"], "x");
-        assert_eq!(s["mcpServers"]["clove"]["command"], "clove");
+        assert!(s["mcpServers"].get("clove").is_none());
         let allow = s["permissions"]["allow"].as_array().unwrap();
         assert!(allow.iter().any(|v| v == &json!("Bash(ls:*)")));
         assert_eq!(allow.len(), 1 + mcp_tool_names().len());
@@ -686,7 +773,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let d = dir(&tmp);
         let mut a = Vec::new();
-        assert!(write_settings(&d, true, &mut a).unwrap());
+        assert!(write_settings(&d, true, true, &mut a).unwrap());
         assert!(!d.join("settings.json").exists());
     }
 
@@ -696,13 +783,13 @@ mod tests {
         let d = dir(&tmp);
         write_file(
             &d.join("settings.json"),
-            r#"{"mcpServers":null,"permissions":{"allow":[]}}"#,
+            r#"{"enabledMcpjsonServers":null,"permissions":{"allow":[]}}"#,
         )
         .unwrap();
         let mut a = Vec::new();
-        assert!(write_settings(&d, false, &mut a).unwrap());
+        assert!(write_settings(&d, true, false, &mut a).unwrap());
         let s = settings_at(&d);
-        assert_eq!(s["mcpServers"]["clove"]["command"], "clove");
+        assert_eq!(s["enabledMcpjsonServers"], json!(["clove"]));
         assert_eq!(
             s["permissions"]["allow"].as_array().unwrap().len(),
             mcp_tool_names().len()
@@ -713,14 +800,14 @@ mod tests {
     fn settings_rejects_bad_shape_without_writing() {
         let tmp = TempDir::new().unwrap();
         let d = dir(&tmp);
-        write_file(&d.join("settings.json"), r#"{"mcpServers":"nope"}"#).unwrap();
+        write_file(&d.join("settings.json"), r#"{"permissions":"nope"}"#).unwrap();
         let mut a = Vec::new();
-        let err = write_settings(&d, false, &mut a).unwrap_err();
+        let err = write_settings(&d, true, false, &mut a).unwrap_err();
         assert!(matches!(err, CloveError::InvalidField { .. }));
         // The original file is untouched.
         assert_eq!(
             std::fs::read_to_string(d.join("settings.json")).unwrap(),
-            r#"{"mcpServers":"nope"}"#
+            r#"{"permissions":"nope"}"#
         );
     }
 
@@ -730,9 +817,116 @@ mod tests {
         let d = dir(&tmp);
         write_file(&d.join("settings.json"), "{ not json").unwrap();
         let mut a = Vec::new();
-        let err = write_settings(&d, false, &mut a).unwrap_err();
+        let err = write_settings(&d, true, false, &mut a).unwrap_err();
         match err {
             CloveError::InvalidField { reason, .. } => assert!(reason.contains("not valid JSON")),
+            other => panic!("expected InvalidField, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn settings_removes_the_stale_server_entry_only() {
+        let tmp = TempDir::new().unwrap();
+        let d = dir(&tmp);
+        // What older versions of `clove setup` wrote.
+        write_file(
+            &d.join("settings.json"),
+            r#"{"mcpServers":{"clove":{"command":"clove","args":["mcp"]}}}"#,
+        )
+        .unwrap();
+        let mut a = Vec::new();
+        assert!(write_settings(&d, true, false, &mut a).unwrap());
+        assert!(settings_at(&d).get("mcpServers").is_none());
+
+        // A hand-edited entry is not ours to remove.
+        write_file(
+            &d.join("settings.json"),
+            r#"{"mcpServers":{"clove":{"command":"/opt/clove","args":["mcp"]}}}"#,
+        )
+        .unwrap();
+        write_settings(&d, true, false, &mut a).unwrap();
+        assert_eq!(
+            settings_at(&d)["mcpServers"]["clove"]["command"],
+            "/opt/clove"
+        );
+    }
+
+    #[test]
+    fn settings_global_scope_does_not_enable_a_project_server() {
+        let tmp = TempDir::new().unwrap();
+        let d = dir(&tmp);
+        let mut a = Vec::new();
+        assert!(write_settings(&d, false, false, &mut a).unwrap());
+        let s = settings_at(&d);
+        assert!(s.get("enabledMcpjsonServers").is_none());
+        assert!(!s["permissions"]["allow"].as_array().unwrap().is_empty());
+    }
+
+    // --- .mcp.json ---
+
+    fn mcp_json_at(dir: &Utf8Path) -> Value {
+        serde_json::from_str(&std::fs::read_to_string(dir.join(".mcp.json")).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn mcp_json_creates_and_is_idempotent() {
+        let tmp = TempDir::new().unwrap();
+        let d = dir(&tmp);
+        let mut a = Vec::new();
+        assert!(write_mcp_json(&d, false, &mut a).unwrap());
+        assert_eq!(mcp_json_at(&d)["mcpServers"]["clove"], mcp_server_entry());
+        let before = std::fs::read_to_string(d.join(".mcp.json")).unwrap();
+        assert!(!write_mcp_json(&d, false, &mut a).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(d.join(".mcp.json")).unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn mcp_json_merges_and_keeps_an_existing_clove_entry() {
+        let tmp = TempDir::new().unwrap();
+        let d = dir(&tmp);
+        write_file(
+            &d.join(".mcp.json"),
+            r#"{"mcpServers":{"other":{"command":"x"}}}"#,
+        )
+        .unwrap();
+        let mut a = Vec::new();
+        assert!(write_mcp_json(&d, false, &mut a).unwrap());
+        let m = mcp_json_at(&d);
+        assert_eq!(m["mcpServers"]["other"]["command"], "x");
+        assert_eq!(m["mcpServers"]["clove"], mcp_server_entry());
+
+        write_file(
+            &d.join(".mcp.json"),
+            r#"{"mcpServers":{"clove":{"command":"/opt/clove","args":["mcp"]}}}"#,
+        )
+        .unwrap();
+        assert!(!write_mcp_json(&d, false, &mut a).unwrap());
+        assert_eq!(
+            mcp_json_at(&d)["mcpServers"]["clove"]["command"],
+            "/opt/clove"
+        );
+    }
+
+    #[test]
+    fn mcp_json_dry_run_writes_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let d = dir(&tmp);
+        let mut a = Vec::new();
+        assert!(write_mcp_json(&d, true, &mut a).unwrap());
+        assert!(!d.join(".mcp.json").exists());
+    }
+
+    #[test]
+    fn mcp_json_rejects_bad_shape_naming_the_file() {
+        let tmp = TempDir::new().unwrap();
+        let d = dir(&tmp);
+        write_file(&d.join(".mcp.json"), r#"{"mcpServers":"nope"}"#).unwrap();
+        let mut a = Vec::new();
+        match write_mcp_json(&d, false, &mut a).unwrap_err() {
+            CloveError::InvalidField { field, .. } => assert_eq!(field, ".mcp.json:mcpServers"),
             other => panic!("expected InvalidField, got {other:?}"),
         }
     }
@@ -761,19 +955,30 @@ mod tests {
     // --- full run ---
 
     #[test]
-    fn run_creates_all_three_and_is_idempotent() {
+    fn run_creates_all_four_and_is_idempotent() {
         let tmp = TempDir::new().unwrap();
-        let d = dir(&tmp);
+        let project = dir(&tmp);
+        let d = project.join(".claude");
         run(OutputFormat::Json, false, false, Some(&d), true).unwrap();
+        // The server goes in the project's `.mcp.json`, next to `.claude/`.
+        assert_eq!(
+            mcp_json_at(&project)["mcpServers"]["clove"],
+            mcp_server_entry()
+        );
         assert!(d.join("settings.json").exists());
         assert!(d.join("CLOVE.md").exists());
         assert!(d.join("CLAUDE.md").exists());
 
+        let mcp_before = std::fs::read_to_string(project.join(".mcp.json")).unwrap();
         let settings_before = std::fs::read_to_string(d.join("settings.json")).unwrap();
         let clove_before = std::fs::read_to_string(d.join("CLOVE.md")).unwrap();
         let claude_before = std::fs::read_to_string(d.join("CLAUDE.md")).unwrap();
 
         run(OutputFormat::Json, false, false, Some(&d), true).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(project.join(".mcp.json")).unwrap(),
+            mcp_before
+        );
         assert_eq!(
             std::fs::read_to_string(d.join("settings.json")).unwrap(),
             settings_before
@@ -789,10 +994,22 @@ mod tests {
     }
 
     #[test]
+    fn run_global_writes_no_mcp_json() {
+        let tmp = TempDir::new().unwrap();
+        let project = dir(&tmp);
+        let d = project.join(".claude");
+        run(OutputFormat::Json, true, false, Some(&d), true).unwrap();
+        assert!(!project.join(".mcp.json").exists());
+        assert!(d.join("settings.json").exists());
+    }
+
+    #[test]
     fn run_dry_run_writes_nothing() {
         let tmp = TempDir::new().unwrap();
-        let d = dir(&tmp);
+        let project = dir(&tmp);
+        let d = project.join(".claude");
         run(OutputFormat::Json, false, true, Some(&d), true).unwrap();
+        assert!(!project.join(".mcp.json").exists());
         assert!(!d.join("settings.json").exists());
         assert!(!d.join("CLOVE.md").exists());
         assert!(!d.join("CLAUDE.md").exists());
@@ -865,6 +1082,46 @@ mod tests {
                 "CLOVE.md names `clove {word}`, which is not a clove subcommand"
             );
         }
+    }
+
+    /// The repo's own Claude Code config (`.mcp.json` and the tracked
+    /// `.claude/settings.json`) must be what `clove setup` writes, so a new MCP
+    /// tool cannot ship without its permission grant.
+    #[test]
+    fn repo_claude_config_matches_setup() {
+        let root = Utf8Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mcp_json = mcp_json_at(&root);
+        assert_eq!(
+            mcp_json["mcpServers"][MCP_SERVER_KEY],
+            mcp_server_entry(),
+            ".mcp.json must register the clove server as `clove setup` does"
+        );
+        let settings = settings_at(&root.join(".claude"));
+        assert!(
+            settings["enabledMcpjsonServers"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|v| v == MCP_SERVER_KEY)),
+            ".claude/settings.json must enable the clove server"
+        );
+        let mut granted: Vec<String> = settings["permissions"]["allow"]
+            .as_array()
+            .expect(".claude/settings.json must have permissions.allow")
+            .iter()
+            .filter_map(Value::as_str)
+            .filter_map(|p| p.strip_prefix(SETTINGS_MCP_PREFIX))
+            .map(str::to_owned)
+            .collect();
+        granted.sort();
+        assert!(
+            !granted.is_empty(),
+            "no clove grants found; test went vacuous"
+        );
+        assert_eq!(
+            granted,
+            mcp_tool_names(),
+            ".claude/settings.json permissions.allow drifted from the clove MCP tools; \
+             run `clove setup` in the repo root or update the list"
+        );
     }
 
     #[cfg(feature = "mcp")]

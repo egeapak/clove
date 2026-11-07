@@ -26,6 +26,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `clove_plugin::emit_success` (and so `run`/`run_with_info`) emits
   `_meta: {"warnings": []}` instead of `_meta: {}`, the same shape the import
   plugins emit. This includes the `clove sync github --dry-run` JSON envelope.
+- `clove setup` registers the MCP server in the project's `.mcp.json`, the
+  file Claude Code reads project servers from, and enables it with
+  `enabledMcpjsonServers` in `.claude/settings.json`. Before, it wrote the
+  server to the `mcpServers` key of `settings.json`, which Claude Code does not
+  read, so the server did not start. Setup removes that old entry when it is
+  unchanged. `clove setup --global` does not edit `~/.claude.json`; it prints
+  `claude mcp add --scope user clove -- clove mcp` instead.
 - The DCO sign-off is optional for now. The `DCO sign-off` CI job runs only
   when the repository variable `REQUIRE_DCO` is `true` (`CONTRIBUTING.md`).
 - The agent directives that `clove setup` writes (`CLOVE.md`), the MCP server

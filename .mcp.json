@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "clove": {
+      "command": "clove",
+      "args": ["mcp"]
+    }
+  }
+}

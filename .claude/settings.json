@@ -1,0 +1,24 @@
+{
+  "enabledMcpjsonServers": [
+    "clove"
+  ],
+  "permissions": {
+    "allow": [
+      "mcp__clove__clove_blocked",
+      "mcp__clove__clove_comment",
+      "mcp__clove__clove_comments",
+      "mcp__clove__clove_dep_add",
+      "mcp__clove__clove_dep_remove",
+      "mcp__clove__clove_dep_tree",
+      "mcp__clove__clove_edit",
+      "mcp__clove__clove_list",
+      "mcp__clove__clove_new",
+      "mcp__clove__clove_ready",
+      "mcp__clove__clove_search",
+      "mcp__clove__clove_set_parent",
+      "mcp__clove__clove_show",
+      "mcp__clove__clove_stats",
+      "mcp__clove__clove_status"
+    ]
+  }
+}

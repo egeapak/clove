@@ -278,4 +278,38 @@ with `clove new`, and record progress with `clove status` / `clove comment`. The
 agent-facing directives are in `@CLOVE.md`; the full command reference is
 `clove agent-doc`.
 
+### The clove MCP server is on by default here
+
+The repo ships the Claude Code config for it, so a session in this repo gets
+the clove tools with no plugin install:
+
+- `.mcp.json` registers a stdio server named `clove` (`clove mcp`).
+- `.claude/settings.json` enables it (`enabledMcpjsonServers`) and allows its
+  tools, so the `mcp__clove__clove_*` calls run without a permission prompt.
+  `.gitignore` tracks this file; `.claude/settings.local.json` stays local.
+
+Use the MCP tools as the default way to track work: `clove_ready`,
+`clove_search`, `clove_new`, `clove_status`, `clove_comment`, `clove_dep_add`.
+Use the `clove` CLI only for what MCP does not cover, such as `clove sync` or
+`clove agent-doc`. Do not keep a separate TODO list. File work as clove items, not
+as GitHub issues: `clove sync github egeapak/clove` links items to issues.
+
+The server needs the `clove` binary on `PATH` (and `cloved` for coordinated
+writes). If `clove` is not installed, then the MCP server does not start. In
+that case, install it from this checkout with
+`cargo install --path crates/clove --locked` (add `cargo install --path
+crates/cloved --locked` for the daemon) and restart the session, or use the
+CLI from a build (`cargo run -q -p clove-cli -- <command>`). When you add or
+remove an MCP tool, run `clove setup` in the repo root (or edit
+`permissions.allow` in `.claude/settings.json` by hand). The test
+`repo_claude_config_matches_setup` in `crates/clove/src/cmd/setup.rs` fails
+until the list matches `CloveServer::tool_names()`.
+
+Two limits apply:
+
+- `enabledMcpjsonServers` is ignored until you trust the folder in Claude Code.
+- In a cloud session that runs inside a claude.ai project, Claude Code does
+  not apply the permissions and hooks of `.claude/settings.json`. The clove
+  tools can still ask for permission there.
+
 @CLOVE.md

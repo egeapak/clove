@@ -21,10 +21,12 @@
 .DS_Store
 *.swp
 
-# Local Claude Code config: ignore everything except the shared CLAUDE.md
-# (settings.local.json and handoffs/ stay local; .claude/CLAUDE.md is tracked).
+# Local Claude Code config: ignore everything except the shared files
+# (settings.local.json and handoffs/ stay local; .claude/CLAUDE.md and
+# .claude/settings.json, which enables the clove MCP server, are tracked).
 .claude/*
 !.claude/CLAUDE.md
+!.claude/settings.json
 
 # Generated TUI screenshots (tooling output; not committed)
 /docs/screenshots/
