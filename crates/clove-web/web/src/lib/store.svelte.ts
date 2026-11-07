@@ -142,6 +142,23 @@ class Store {
     this.loaded = true;
   }
 
+  /**
+   * Test hook: forget the window, the declared query and pending edits, so the
+   * next `setQuery` loads again. Without it a route test that declares the same
+   * query as an earlier test sees that test's rows and no request.
+   */
+  resetForTests() {
+    this.items = new Map();
+    this.order = [];
+    this.query = null;
+    this.pending.clear();
+    this.total = 0;
+    this.offset = 0;
+    this.limit = 0;
+    this.loaded = false;
+    this.loadError = null;
+  }
+
   /** Layer every pending patch (in order) over `base`, stamping `updated`. */
   private merge(entry: { base: Item; patches: Array<{ patch: Partial<Item> }> }): Item {
     let merged = entry.base;

@@ -1406,3 +1406,96 @@ async fn the_list_filters_on_parent() {
         assert!(status.contains("422"), "{bad}: {status} {body}");
     }
 }
+
+/// `missing_refs` names every reference with no backing item — any relation
+/// kind, on an item of any status — and both tiers agree on it.
+///
+/// `dangling_deps` cannot carry this: it is the dangling subset of `blocked_by`,
+/// so a closed item reports none. The SPA reads `missing_refs` to show such a
+/// reference as missing without requesting it (a request would answer 404).
+#[tokio::test]
+async fn missing_refs_cover_every_relation_on_any_status() {
+    let (tmp, state, main_id, dep_id) = fixture();
+    let issues = state.issues_dir.clone();
+    let gone_dep = clove_types::CloveId::new("proj-0000000D").unwrap();
+    let gone_parent = clove_types::CloveId::new("proj-0000000P").unwrap();
+    let gone_rel = clove_types::CloveId::new("proj-0000000R").unwrap();
+
+    let mut main = state
+        .store
+        .get(&clove_types::CloveId::new(&main_id).unwrap())
+        .unwrap();
+    main.frontmatter.status = clove_types::ItemStatus::Closed;
+    main.frontmatter.closed = Some(main.frontmatter.updated);
+    main.frontmatter.deps.push(gone_dep.clone());
+    main.frontmatter.parent = Some(gone_parent.clone());
+    main.frontmatter.relates = vec![
+        gone_rel.clone(),
+        clove_types::CloveId::new(&dep_id).unwrap(),
+    ];
+    main.frontmatter.supersedes = vec![gone_dep.clone()];
+    state.store.update(&main, chrono::Utc::now()).unwrap();
+
+    let expected = serde_json::json!([
+        gone_dep.to_string(),
+        gone_parent.to_string(),
+        gone_rel.to_string()
+    ]);
+    let row = |v: &serde_json::Value| -> serde_json::Value {
+        v["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == main_id)
+            .cloned()
+            .unwrap()
+    };
+
+    let app = build_router(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let (_s, body) = get(addr, "/api/v1/items?sort=id&status=open,closed").await;
+    let files: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(files["_meta"]["source"], "files", "body: {body}");
+    let main_row = row(&files);
+    assert_eq!(main_row["missing_refs"], expected, "body: {body}");
+    assert_eq!(
+        main_row["dangling_deps"],
+        serde_json::json!([]),
+        "a closed item is not blocked, so dangling_deps stays empty"
+    );
+
+    let (_s, body) = get(addr, &format!("/api/v1/items/{main_id}")).await;
+    let detail: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(detail["data"]["missing_refs"], expected, "body: {body}");
+
+    clove_index::reindex(&issues, &issues.parent().unwrap().join("index.db")).unwrap();
+    let indexed_state = AppState::new(
+        state.store.clone(),
+        issues,
+        "proj".to_owned(),
+        "test",
+        false,
+        ItemType::Feature,
+    );
+    let app = build_router(indexed_state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let (_s, body) = get(addr, "/api/v1/items?sort=id&status=open,closed").await;
+    let indexed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        indexed["_meta"]["source"], "index",
+        "the index must answer, or the comparison is vacuous: {body}"
+    );
+    assert_eq!(
+        indexed["data"], files["data"],
+        "the tier must not change a field"
+    );
+    assert_eq!(row(&indexed)["missing_refs"], expected);
+
+    drop(tmp);
+}

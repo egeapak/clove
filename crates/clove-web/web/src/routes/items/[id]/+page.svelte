@@ -100,8 +100,13 @@
     api
       .item(curId)
       .then((it) => {
+        // A newer load superseded this one. Its answer must not reach the store
+        // either: `upsert` keeps an equal `updated`, and a change elsewhere (a
+        // dep created) leaves this item's `updated` alone, so a late, older
+        // answer would bring back stale graph terms.
+        if (token !== itemLoad) return;
         store.upsert(it);
-        if (token === itemLoad && curId === id) full = it;
+        if (curId === id) full = it;
       })
       .catch((e) => {
         console.warn('[clove] failed to load item', curId, e);

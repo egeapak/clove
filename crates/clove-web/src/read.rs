@@ -19,7 +19,7 @@ use clove_engine::{ListAnswer, Projection, Rows};
 use clove_types::{CloveId, ItemFrontmatter};
 use serde_json::{json, Value};
 
-use crate::dto::{frontmatter_value, item_value, with_terms, GraphContext};
+use crate::dto::{frontmatter_value, item_value, missing_refs_on_disk, with_terms, GraphContext};
 use crate::error::{ok, ok_data, ApiError, ApiResult};
 use crate::AppState;
 
@@ -71,7 +71,8 @@ fn values_of(answer: ListAnswer, state: &AppState) -> Result<Vec<Value>, ApiErro
             .iter()
             .map(|row| {
                 let terms = clove_core::ops::graph_terms_detailed(&state.store, &row.frontmatter)?;
-                Ok(Value::Object(with_terms(&row.frontmatter, &terms)))
+                let missing = missing_refs_on_disk(&state.store, &row.frontmatter);
+                Ok(Value::Object(with_terms(&row.frontmatter, &terms, missing)))
             })
             .collect(),
     }
@@ -379,7 +380,8 @@ pub async fn get_item(
     let obj = blocking(move || {
         let item = store.get(&id)?;
         let terms = clove_core::ops::graph_terms_detailed(&store, &item.frontmatter)?;
-        Ok(item_value(&item, &issues_dir, &terms))
+        let missing = missing_refs_on_disk(&store, &item.frontmatter);
+        Ok(item_value(&item, &issues_dir, &terms, missing))
     })
     .await?;
     Ok(ok(

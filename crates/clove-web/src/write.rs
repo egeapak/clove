@@ -13,7 +13,7 @@ use clove_types::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::dto::item_value;
+use crate::dto::{item_value, missing_refs_on_disk};
 use crate::error::{ok, ApiError, ApiResult};
 use crate::AppState;
 
@@ -39,7 +39,8 @@ where
 /// file in the repo to report whether the one item just written was ready.
 fn respond_item(state: &AppState, item: &Item) -> ApiResult {
     let terms = clove_core::ops::graph_terms_detailed(&state.store, &item.frontmatter)?;
-    let obj = item_value(item, &state.issues_dir, &terms);
+    let missing = missing_refs_on_disk(&state.store, &item.frontmatter);
+    let obj = item_value(item, &state.issues_dir, &terms, missing);
     Ok(ok(Value::Object(obj), json!({ "source": state.source })))
 }
 
