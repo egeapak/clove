@@ -1491,6 +1491,118 @@ mod tests {
     }
 
     #[test]
+    fn form_hscroll_keeps_labels_and_cursor_on_glyph() {
+        // Regression: a caret past the right edge of a long value scrolled the
+        // whole form sideways, so every field label was clipped. Only the caret
+        // line's value may scroll: each label (and the body indent) keeps its
+        // unscrolled cell, the scrolled value is marked with `…`, and the
+        // hardware cursor sits on the caret glyph — identically in glyph and
+        // live mode. Wide chars (`日`, cut mid-char at one of the popup widths)
+        // and an emoji with a variation selector (one 2-column grapheme) check
+        // that the caret column, the cut, and ratatui's rendering agree.
+        use ratatui::backend::{Backend, TestBackend};
+        use ratatui::layout::Position;
+        use ratatui::Terminal;
+
+        const LABELS: [&str; 8] = [
+            "Title:",
+            "Type:",
+            "Priority:",
+            "Assignee:",
+            "Labels:",
+            "Parent:",
+            "Deps:",
+            "Body:",
+        ];
+        // The popup's top-left `┌` (its title is ` New item `).
+        fn popup_origin(t: &Terminal<TestBackend>) -> (u16, u16) {
+            let buf = t.backend().buffer();
+            let sym = |x: u16, y: u16| buf.cell((x, y)).map(|c| c.symbol()).unwrap_or("");
+            let (w, h) = (buf.area.width, buf.area.height);
+            (0..h)
+                .flat_map(|y| (0..w).map(move |x| (x, y)))
+                .find(|&(x, y)| sym(x, y) == "┌" && sym(x + 2, y) == "N")
+                .expect("form popup rendered")
+        }
+        // Each label's first cell, searched inside the popup.
+        fn label_cells(t: &Terminal<TestBackend>) -> Vec<(u16, u16)> {
+            let buf = t.backend().buffer();
+            let sym = |x: u16, y: u16| buf.cell((x, y)).map(|c| c.symbol()).unwrap_or("");
+            let (w, h) = (buf.area.width, buf.area.height);
+            let (px, py) = popup_origin(t);
+            LABELS
+                .iter()
+                .map(|label| {
+                    (py..h)
+                        .flat_map(|y| (px..w).map(move |x| (x, y)))
+                        .find(|&(x, y)| {
+                            label
+                                .chars()
+                                .enumerate()
+                                .all(|(i, c)| sym(x + i as u16, y) == c.to_string())
+                        })
+                        .unwrap_or_else(|| panic!("label {label} visible in the popup"))
+                })
+                .collect()
+        }
+        fn render(app: &mut App, w: u16, glyph: bool) -> (Terminal<TestBackend>, Position) {
+            app.caret_glyph = glyph;
+            let mut t = Terminal::new(TestBackend::new(w, 30)).unwrap();
+            t.draw(|f| crate::ui::render(f, app)).unwrap();
+            let pos = t.backend_mut().get_cursor_position().unwrap();
+            (t, pos)
+        }
+
+        let ascii = "日本 a long value that runs far past the right edge of the popup 日本 end";
+        let cjk = "日".repeat(40);
+        let emoji = "❤\u{FE0F}x".repeat(30);
+        for field in [Field::Title, Field::Body] {
+            for text in [ascii, cjk.as_str(), emoji.as_str()] {
+                for width in [80, 50, 51] {
+                    let (_dir, store) = fixture();
+                    let mut app = App::new(store);
+                    app.start_new();
+                    while app.form.focused() != field {
+                        app.form_next_field();
+                    }
+                    let (base, _) = render(&mut app, width, true);
+                    let base_labels = label_cells(&base);
+                    for c in text.chars() {
+                        app.form.insert_char(c);
+                    }
+                    let ctx = format!("{field:?} {text:?} at width {width}");
+
+                    let (t, pos) = render(&mut app, width, true);
+                    let buf = t.backend().buffer();
+                    assert_eq!(
+                        buf.cell((pos.x, pos.y)).unwrap().symbol(),
+                        "▏",
+                        "{ctx}: hardware cursor on the caret glyph"
+                    );
+                    assert_eq!(label_cells(&t), base_labels, "{ctx}: labels stay put");
+                    let row: String = (0..width)
+                        .map(|x| buf.cell((x, pos.y)).unwrap().symbol())
+                        .collect();
+                    assert!(row.contains('…'), "{ctx}: scrolled value is marked");
+                    // The value starts right after its label column (11 cells) or,
+                    // on a body line, after the 2-cell indent; both sit after the
+                    // left border + 1 padding cell.
+                    let (px, _) = popup_origin(&t);
+                    let value_x = px + 2 + if field == Field::Body { 2 } else { 11 };
+                    assert_eq!(
+                        buf.cell((value_x, pos.y)).unwrap().symbol(),
+                        "…",
+                        "{ctx}: the `…` sits where the value starts: {row:?}"
+                    );
+
+                    let (_, live_pos) = render(&mut app, width, false);
+                    assert_eq!(live_pos, pos, "{ctx}: live cursor matches glyph cursor");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn form_glyph_and_live_modes_render_identically_except_the_caret() {
         // Regression: a body ending in a newline must render the same lines with
         // the glyph on (snapshot/PNG) and off (live), so the hardware cursor never

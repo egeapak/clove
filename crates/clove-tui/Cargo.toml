@@ -15,6 +15,7 @@ clove-types.workspace = true
 clove-core.workspace = true
 ratatui.workspace = true        # terminal UI; re-exports crossterm at `ratatui::crossterm`
 unicode-width.workspace = true  # display-column widths (truncation, wrapping, form caret)
+unicode-segmentation.workspace = true  # grapheme widths for the form caret (as ratatui renders)
 pulldown-cmark.workspace = true # Markdown body rendering in the detail pane
 anyhow.workspace = true
 camino.workspace = true

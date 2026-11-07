@@ -198,6 +198,11 @@ read with `tmux capture-pane -p`.
 - [ ] Help (`?`), filter menu (`f`), search (`/`).
 - [ ] Edit form (`e`): change a field on the throwaway item, `Ctrl-S` → it lands in
       the file; `q` exits cleanly. `clove tui </dev/null` errors without panicking.
+- [ ] Form horizontal scroll: press `n` and type a title of about 100 characters.
+      In `capture-pane -p`, the title scrolls behind a leading `…` and every
+      field label stays in its column. `tmux display -p -t t '#{cursor_x}'`
+      (capture-pane does not show the cursor) is inside the popup, on the
+      title row's last character + 1. `Esc` closes the form.
 
 ## 7. MCP
 
