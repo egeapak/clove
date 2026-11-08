@@ -2,11 +2,12 @@
 schema: 1
 id: clov-6ZK5R0W3
 title: 'web timeline: throughput ''All'' range shows the same 90 days as ''90d'''
-status: open
+status: closed
 type: bug
 priority: 2
 created: 2026-11-08T12:36:31.823Z
-updated: 2026-11-08T12:36:31.823Z
+updated: 2026-11-08T22:07:11.217Z
+closed: 2026-11-08T22:07:11.217Z
 labels: []
 deps: []
 relates: []

@@ -2,11 +2,12 @@
 schema: 1
 id: clov-M24P2MP4
 title: 'web timeline: cursor date chip slides under the label column at the left edge when the plot is scrolled'
-status: open
+status: closed
 type: bug
 priority: 2
 created: 2026-11-08T12:36:31.807Z
-updated: 2026-11-08T12:36:31.807Z
+updated: 2026-11-08T22:07:11.216Z
+closed: 2026-11-08T22:07:11.216Z
 labels: []
 deps: []
 relates: []

@@ -2,11 +2,12 @@
 schema: 1
 id: clov-2V5WHQ3W
 title: clove dep tree says 'no item' for an item written a moment earlier while cloved serves the project
-status: open
+status: closed
 type: bug
 priority: 2
 created: 2026-11-08T12:36:31.795Z
-updated: 2026-11-08T12:36:31.795Z
+updated: 2026-11-08T22:07:11.215Z
+closed: 2026-11-08T22:07:11.215Z
 labels: []
 deps: []
 relates: []
