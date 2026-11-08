@@ -261,6 +261,40 @@ fn tier1_tier2_commands_route_through_daemon_with_parity() {
     drop(daemon);
 }
 
+/// `dep tree` and `dep cycle` read the daemon's cached graph. A write made a
+/// moment earlier must be in it, with no wait: the graph used to lag until the
+/// watcher's debounced batch landed, so `clove new X; clove dep tree X` said
+/// "no item with id X" while `ls` through the same daemon already listed X.
+#[test]
+fn dep_tree_through_the_daemon_sees_a_write_made_just_before() {
+    let bin = cloved_bin();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    assert!(run_in(root, &["init"]).status.success());
+    let daemon = spawn_daemon(&root.join(".clove"), &bin);
+
+    for round in 0..5 {
+        let a = new_id(&run_in(root, &["new", &format!("a{round}"), "-f", "json"]).stdout);
+        let tree = run_in(root, &["dep", "tree", &a, "-f", "json"]);
+        assert!(
+            tree.status.success(),
+            "round {round}: dep tree of a new item failed: {}",
+            String::from_utf8_lossy(&tree.stderr)
+        );
+        assert_eq!(tree_shape(&tree.stdout), format!("{a}:"));
+
+        let b = new_id(&run_in(root, &["new", &format!("b{round}"), "-f", "json"]).stdout);
+        assert!(run_in(root, &["dep", "add", &a, &b]).status.success());
+        assert_eq!(
+            tree_shape(&run_in(root, &["dep", "tree", &a, "-f", "json"]).stdout),
+            format!("{a}:{b}"),
+            "round {round}: dep tree misses the edge just added"
+        );
+    }
+
+    drop(daemon);
+}
+
 fn ids_total_source(out: &[u8]) -> (Vec<String>, u64, String) {
     let v: serde_json::Value = serde_json::from_slice(out).unwrap();
     let (ids, source) = ids_and_source(out);
