@@ -186,7 +186,9 @@ export const api = {
 
   async history(): Promise<StatsHistoryPoint[]> {
     return withMock(
-      () => req<StatsHistoryPoint[]>('/stats/history'),
+      // `days=all`: the whole history, so the timeline's "All" range is not
+      // the server's default 90 days (the 30d/90d ranges slice it locally).
+      () => req<StatsHistoryPoint[]>('/stats/history?days=all'),
       () => mockHistory()
     );
   },

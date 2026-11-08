@@ -348,6 +348,42 @@ async fn stats_history_synthesizes_daily_series() {
 }
 
 #[tokio::test]
+async fn stats_history_days_all_reaches_back_to_the_oldest_item() {
+    let (tmp, addr, _id) = spawn().await;
+    let count = |body: &str| body.matches("\"date\"").count();
+
+    // A young store: `all` still gives the default 90 days, so the timeline's
+    // 30d/90d ranges keep their zero-filled days.
+    let (status, body) = get(addr, "/api/v1/stats/history?days=all").await;
+    assert!(status.contains("200"), "status: {status}");
+    assert_eq!(count(&body), 90, "body: {body}");
+
+    // An item created 200 days ago: `all` covers every day since (200 days,
+    // today included), where the default stays at 90.
+    let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+    ItemStore::new(root)
+        .create(
+            "proj",
+            NewItem {
+                title: "Old".to_owned(),
+                item_type: ItemType::Chore,
+                priority: Priority(2),
+                labels: vec![],
+                deps: vec![],
+                parent: None,
+                assignee: None,
+                body: String::new(),
+            },
+            chrono::Utc::now() - chrono::Duration::days(199),
+        )
+        .unwrap();
+    let (_, body) = get(addr, "/api/v1/stats/history?days=all").await;
+    assert_eq!(count(&body), 200, "body: {body}");
+    let (_, body) = get(addr, "/api/v1/stats/history").await;
+    assert_eq!(count(&body), 90, "body: {body}");
+}
+
+#[tokio::test]
 async fn stats_history_serves_recorded_snapshots_when_present() {
     use clove_core::{compute_stats, GraphStore, StatsOptions};
     use clove_index::Index;
@@ -1161,6 +1197,7 @@ async fn a_malformed_number_is_a_validation_error() {
         "/api/v1/stats?no_epics=yes",
         "/api/v1/stats/history?limit=abc",
         "/api/v1/stats/history?days=-30",
+        "/api/v1/stats/history?days=al",
     ] {
         let (status, body) = get(addr, path).await;
         assert!(
