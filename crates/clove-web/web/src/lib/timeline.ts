@@ -14,3 +14,18 @@ export function dateAtFraction(min: number, max: number, fraction: number): numb
 export function formatAxisDate(epochMs: number): string {
   return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(new Date(epochMs));
 }
+
+/**
+ * Centre (px from the plot's left edge) for the hover chip at plot position
+ * `x`, kept fully inside the visible part of the plot: `[visibleStart,
+ * visibleEnd]` in the same plot coordinates. When the timeline scrolls
+ * sideways the sticky label column hides the plot's left part, so the plot's
+ * own edges are not enough. A visible span narrower than the chip pins it to
+ * the span's start.
+ */
+export function chipCenter(x: number, half: number, visibleStart: number, visibleEnd: number): number {
+  const lo = visibleStart + half;
+  const hi = visibleEnd - half;
+  if (hi < lo) return lo;
+  return Math.min(hi, Math.max(lo, x));
+}

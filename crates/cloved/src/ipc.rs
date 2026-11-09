@@ -355,6 +355,18 @@ impl Dispatcher {
     /// arms stay exhaustive — a catch-all `unreachable!()` in an RPC handler
     /// turns a future variant into a daemon panic instead of a compile error.
     fn handle_graph(&self, req: GraphRequest) -> Result<GraphResponse, RpcError> {
+        // Freshen the index first, as `handle_query` does. A CLI write that did
+        // not go through this daemon reaches the index only when the watcher's
+        // debounced batch lands, so without this a `dep tree` right after
+        // `clove new` / `dep add` read a graph that lacked the write. The lock
+        // is released before `with_graph`, which takes it again to rebuild.
+        {
+            let mut index = self
+                .index
+                .lock()
+                .map_err(|_| RpcError::new("internal", "index lock poisoned"))?;
+            self.refresh(&mut index);
+        }
         let unreadable = || RpcError::new("graph_failed", "could not read index");
         match req {
             GraphRequest::Cycles => self

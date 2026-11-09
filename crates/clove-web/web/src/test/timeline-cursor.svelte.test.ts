@@ -92,12 +92,43 @@ describe('timeline hover guide', () => {
     expect((line(container) as HTMLElement).style.left).toBe('100%');
   });
 
-  it('keeps the chip inside the plot via an inline clamp and ignores pointer events', async () => {
+  it('keeps the chip inside the plot and ignores pointer events', async () => {
     const { container, axis } = await renderTimeline();
     await fireEvent.pointerMove(axis, { clientX: PLOT.left, pointerType: 'mouse' });
-    const el = chip(container) as HTMLElement;
-    expect(el.getAttribute('style')).toContain('clamp(var(--chip-half)');
-    expect(el.getAttribute('style')).toContain('calc(100% - var(--chip-half))');
+    // Before layout the widths are 0: the chip is clamped to the plot's start.
+    expect((chip(container) as HTMLElement).style.left).toBe('36px');
+  });
+
+  it('keeps the chip right of the label column when the plot is scrolled', async () => {
+    const resizes: (() => void)[] = [];
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        constructor(cb: () => void) {
+          resizes.push(cb);
+        }
+        observe() {}
+        disconnect() {}
+      }
+    );
+    const { container, axis } = await renderTimeline();
+    const scroller = container.querySelector('.tl-scroll') as HTMLElement;
+    const corner = container.querySelector('.tl-corner') as HTMLElement;
+    // A 1000px plot behind a 300px label column in an 800px window, scrolled
+    // 500px: the visible plot is 500..1000.
+    Object.defineProperty(axis, 'clientWidth', { configurable: true, value: 1000 });
+    Object.defineProperty(scroller, 'clientWidth', { configurable: true, value: 800 });
+    Object.defineProperty(scroller, 'scrollLeft', { configurable: true, value: 500 });
+    Object.defineProperty(corner, 'offsetWidth', { configurable: true, value: 300 });
+    resizes.forEach((f) => f());
+    await fireEvent.scroll(scroller);
+
+    await fireEvent.pointerMove(axis, { clientX: PLOT.left + 510, pointerType: 'mouse' });
+    await vi.waitFor(() => expect((chip(container) as HTMLElement).style.left).toBe('536px'));
+    await fireEvent.pointerMove(axis, { clientX: PLOT.left + 995, pointerType: 'mouse' });
+    expect((chip(container) as HTMLElement).style.left).toBe('964px');
+    await fireEvent.pointerMove(axis, { clientX: PLOT.left + 700, pointerType: 'mouse' });
+    expect((chip(container) as HTMLElement).style.left).toBe('700px');
   });
 
   it('hides while the pointer is over the sticky label column', async () => {
@@ -148,12 +179,12 @@ async function renderWithItems(id: string, created: string) {
 
 describe('timeline plot width', () => {
   it('spaces the axis ticks by the rendered axis width, not the minimum track width', async () => {
-    let resize: (() => void) | undefined;
+    const resizes: (() => void)[] = [];
     vi.stubGlobal(
       'ResizeObserver',
       class {
         constructor(cb: () => void) {
-          resize = cb;
+          resizes.push(cb);
         }
         observe() {}
         disconnect() {}
@@ -164,7 +195,7 @@ describe('timeline plot width', () => {
     // Before layout clientWidth is 0, so the track width decides: about 1519px -> 11 gaps.
     expect(axis.querySelectorAll('.tick').length).toBe(12);
     Object.defineProperty(axis, 'clientWidth', { configurable: true, value: 2800 });
-    resize?.();
+    resizes.forEach((f) => f());
     await vi.waitFor(() => expect(axis.querySelectorAll('.tick').length).toBe(21));
     const last = [...axis.querySelectorAll<HTMLElement>('.tick')].at(-1)!;
     expect(last.classList.contains('tick-end')).toBe(true);

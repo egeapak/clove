@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { dateAtFraction, fractionAtX, formatAxisDate } from './timeline';
+import { chipCenter, dateAtFraction, fractionAtX, formatAxisDate } from './timeline';
 
 describe('fractionAtX', () => {
   it('maps the plot edges and middle', () => {
@@ -43,5 +43,24 @@ describe('formatAxisDate', () => {
     expect(formatAxisDate(t)).toBe(
       new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(new Date(t))
     );
+  });
+});
+
+describe('chipCenter', () => {
+  it('leaves a chip that fits where the pointer is', () => {
+    expect(chipCenter(500, 36, 0, 1000)).toBe(500);
+  });
+  it('keeps the chip inside the plot edges when nothing is scrolled', () => {
+    expect(chipCenter(3, 36, 0, 1000)).toBe(36);
+    expect(chipCenter(998, 36, 0, 1000)).toBe(964);
+  });
+  it('keeps the chip right of the label column when the plot is scrolled', () => {
+    // Scrolled 723px: the visible plot starts at 723, so a pointer at its left
+    // edge must not centre the chip at 726 (half of it under the labels).
+    expect(chipCenter(726, 36, 723, 1716)).toBe(759);
+    expect(chipCenter(1714, 36, 723, 1716)).toBe(1680);
+  });
+  it('pins the chip to the start of a span narrower than the chip', () => {
+    expect(chipCenter(10, 36, 0, 50)).toBe(36);
   });
 });

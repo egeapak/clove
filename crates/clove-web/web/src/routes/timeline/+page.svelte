@@ -9,7 +9,7 @@
   import { shortId, typeIcon, statusGlyph, statusColorVar, statusLabel } from '$lib/glyphs';
   import { dailyHistory, lastDays } from '$lib/history';
   import { tooltip } from '$lib/tooltip';
-  import { dateAtFraction, formatAxisDate, fractionAtX } from '$lib/timeline';
+  import { chipCenter, dateAtFraction, formatAxisDate, fractionAtX } from '$lib/timeline';
   import { tick } from 'svelte';
 
   let history = $state<StatsHistoryPoint[]>([]);
@@ -177,6 +177,39 @@
     cursorFraction = null;
   }
 
+  // The chip stays inside the part of the plot the user can see. Scrolled
+  // sideways, the sticky label column covers the plot's first `scrollLeft`
+  // pixels, so clamping to the plot's own edges hid the start of the date.
+  // Before layout (and in jsdom) the widths are 0: fall back to the plot.
+  const CHIP_HALF = 36;
+  let scrollLeft = $state(0);
+  let scrollW = $state(0);
+  let labelW = $state(0);
+  let cornerEl = $state<HTMLDivElement | undefined>();
+  // Measured like the axis (bind:clientWidth needs ResizeObserver, which jsdom lacks).
+  $effect(() => {
+    const sc = scrollEl;
+    const corner = cornerEl;
+    if (!sc || !corner) return;
+    const read = () => {
+      scrollW = sc.clientWidth;
+      labelW = corner.offsetWidth;
+      scrollLeft = sc.scrollLeft;
+    };
+    read();
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(read);
+    ro.observe(sc);
+    ro.observe(corner);
+    return () => ro.disconnect();
+  });
+  const chipLeft = $derived.by(() => {
+    if (cursorFraction === null) return 0;
+    const visibleStart = scrollW > 0 ? scrollLeft : 0;
+    const visibleEnd = scrollW > 0 ? Math.min(plotW, scrollLeft + scrollW - labelW) : plotW;
+    return chipCenter(cursorFraction * plotW, CHIP_HALF, visibleStart, visibleEnd);
+  });
+
   // map id -> row index (for dep arrows)
   const rowIndex = $derived(new Map(rows.map((r, i) => [r.id, i])));
   const ROW_H = 38;
@@ -223,7 +256,7 @@
 </div>
 
 <div class="tl panel">
-<div class="tl-scroll" bind:this={scrollEl}>
+<div class="tl-scroll" bind:this={scrollEl} onscroll={() => (scrollLeft = scrollEl?.scrollLeft ?? 0)}>
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   class="tl-grid"
@@ -233,7 +266,7 @@
   onpointerleave={clearCursor}
   onpointercancel={clearCursor}
 >
-  <div class="tl-corner"></div>
+  <div class="tl-corner" bind:this={cornerEl}></div>
   <div class="tl-axis" bind:this={axisEl}>
     {#each ticks as t (t.left)}
       <div
@@ -250,7 +283,7 @@
       <div
         class="cursor-chip mono"
         data-testid="timeline-cursor-chip"
-        style="left:clamp(var(--chip-half), {cursorFraction * 100}%, calc(100% - var(--chip-half)))"
+        style="left:{chipLeft}px"
       >
         {cursorLabel}
       </div>
@@ -442,7 +475,8 @@
     z-index: 5;
     pointer-events: none;
   }
-  /* Themed like .clove-tooltip; clamped inline so the chip stays inside the plot. */
+  /* Themed like .clove-tooltip; placed by chipLeft so it stays inside the
+     visible plot. The width is 2 × CHIP_HALF in the script. */
   .cursor-chip {
     --chip-half: 36px;
     position: absolute;

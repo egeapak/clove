@@ -629,6 +629,9 @@ fn recorded_history_points(
     Some((points, total))
 }
 
+/// Days of synthesized history `GET /stats/history` returns without `?days=`.
+const DEFAULT_HISTORY_DAYS: i64 = 90;
+
 /// `GET /api/v1/stats/history` — the throughput/levels history for the timeline.
 ///
 /// Prefers the durable snapshots recorded in `.clove/index.db` (real point-in-time
@@ -637,6 +640,9 @@ fn recorded_history_points(
 /// open}`) synthesized from item `created`/`closed` timestamps, always correct from
 /// files alone; `open` is the running net-open count seeded from items predating the
 /// window. `_meta.synthesized` tells the client which path produced the series.
+///
+/// The synthesized series covers `?days=N` days ending today (default 90, at most
+/// 365), or with `?days=all` every day from the oldest item's creation (at least 90).
 pub async fn get_stats_history(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
@@ -672,13 +678,30 @@ pub async fn get_stats_history(
 
     // `?days=` is strict for the same reason as `?limit=` (a typo used to mean
     // "90 days" silently); the clamp then bounds a legal-but-absurd request.
-    let days: i64 = usize_param(&params, "days")?
-        .map(|n| n.min(i64::MAX as usize) as i64)
-        .unwrap_or(90)
-        .clamp(1, 365);
+    // `?days=all` reaches back to the oldest item instead (never fewer than the
+    // default), so the timeline's "All" range is not the same 90 days as "90d".
+    let all_days = params.get("days").map(String::as_str) == Some("all");
+    let days: i64 = if all_days {
+        DEFAULT_HISTORY_DAYS
+    } else {
+        usize_param(&params, "days")?
+            .map(|n| n.min(i64::MAX as usize) as i64)
+            .unwrap_or(DEFAULT_HISTORY_DAYS)
+            .clamp(1, 365)
+    };
 
     let (frontmatters, _ctx) = load(&state)?;
     let today = chrono::Utc::now().date_naive();
+    let days = if all_days {
+        let oldest = frontmatters
+            .iter()
+            .map(|fm| fm.created.date_naive())
+            .min()
+            .unwrap_or(today);
+        days.max((today - oldest).num_days() + 1)
+    } else {
+        days
+    };
     let window_start = today - Duration::days(days - 1);
 
     let mut created_by: BTreeMap<chrono::NaiveDate, i64> = BTreeMap::new();
