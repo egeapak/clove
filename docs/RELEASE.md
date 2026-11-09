@@ -1,4 +1,4 @@
-# Release runbook — clove v0.2.0
+# Release runbook — clove v0.3.0
 
 The owner-only steps to cut a clove release: publish the workspace to crates.io
 **and** ship pre-built binaries via a GitHub Release + Homebrew tap. Tracks
@@ -217,7 +217,7 @@ A valid topological publish order:
 > `clove plugin install sync-github`, and that shorthand must not be live before
 > the name it resolves to is ours.
 
-Internal deps already declare both `path` **and** `version = "0.2.0"` (see
+Internal deps already declare both `path` **and** `version = "0.3.0"` (see
 `[workspace.dependencies]` in the root `Cargo.toml`), which is exactly what
 crates.io requires — no Cargo.toml surgery is needed before publishing.
 
@@ -307,7 +307,7 @@ for c in clove-types clove-core clove-plugin clove-index clove-import clove-ipc 
   v=$(curl -s -A "$UA" "https://crates.io/api/v1/crates/$c" \
       | grep -o '"max_version":"[^"]*"' | head -1)
   echo "$c -> ${v:-MISSING}"
-done            # expect max_version 0.2.0 for all sixteen
+done            # expect max_version 0.3.0 for all sixteen
 ```
 
 Then check the two registry behaviours `clove plugin` depends on
@@ -363,14 +363,14 @@ crate, stop and investigate before announcing.
 
 ## 5. Tag the release
 
-Version is already `0.2.0` (inherited via `[workspace.package]`). Tag the
+Version is already `0.3.0` (inherited via `[workspace.package]`). Tag the
 released commit and push — this drives the binary and web UI asset builds in
 step 6, and it must happen **before** any crate is published: `publish.sh`
 refuses to run unless `HEAD` is the tagged commit.
 
 ```sh
-git tag -a v0.2.0 -m "clove v0.2.0"
-git push origin v0.2.0
+git tag -a v0.3.0 -m "clove v0.3.0"
+git push origin v0.3.0
 ```
 
 ---
@@ -401,7 +401,7 @@ a separate `cargo install`:
 After the tag push:
 
 1. Watch the run: `gh run watch` (or the Actions tab).
-2. Confirm the GitHub Release for `v0.2.0` has all platform archives + `.sha256`
+2. Confirm the GitHub Release for `v0.3.0` has all platform archives + `.sha256`
    files attached.
 3. Run the manual release checklist, [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md),
    against the draft's binaries; resolve or explicitly accept every finding.
@@ -442,7 +442,7 @@ clove version`. A new platform archive in `release.yml` needs a matching
   parent epic #28 "Prepare clove for first public release" once its checklist is
   done).
 - **Open the next dev cycle**: bump `[workspace.package] version` to the next
-  pre-release (e.g. `0.2.0-dev`) in the root `Cargo.toml` so `master` is never
+  pre-release (e.g. `0.4.0-dev`) in the root `Cargo.toml` so `master` is never
   mistaken for a published version.
 - **Reconcile the tracker** if you closed issues by hand:
   `GITHUB_TOKEN="$(gh auth token)" clove sync github egeapak/clove`.
@@ -451,16 +451,16 @@ clove version`. A new platform archive in `release.yml` needs a matching
 
 ## Rollback / mistakes
 
-- **Bad version already published?** `cargo yank --version 0.2.0 clove-cli`
+- **Bad version already published?** `cargo yank --version 0.3.0 clove-cli`
   (repeat per crate). Yanking prevents *new* dependents from selecting it but
   does **not** delete it — existing `Cargo.lock`s still resolve. There is no
-  un-publish; fix forward with `0.1.6`.
+  un-publish; fix forward with `0.3.1`.
 - **Never delete or edit the GitHub Release or its `clove-web-dist-*` assets once
   `clove-web` is on crates.io.** That version's `--features web` build downloads
   them, so removing them breaks it permanently (yanking does not help existing
   users); the checksum is the only guard, so a replaced asset fails the build.
 - **Wrong tag?** Before any crate is published, delete and re-push, or cut a new tag:
-  `git tag -d v0.2.0 && git push origin :refs/tags/v0.2.0`.
+  `git tag -d v0.3.0 && git push origin :refs/tags/v0.3.0`.
 
 ---
 
