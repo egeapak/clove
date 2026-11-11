@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-09
+
 ### Added
 
 - `clove start`, `clove close`, and `clove status` accept one or more ids
@@ -20,6 +22,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   error envelope when the host env is missing, and strips the leading
   command/provider echo; the closure renders and returns the exit code.
   `clove-sync-github`, `clove-import-tk`, and `clove-import-beads` use it.
+- On Windows, plugin discovery (`clove <x>`, `clove plugin list`) tries every
+  `PATHEXT` extension clove can start (`.com`, `.exe`, `.bat`, `.cmd`,
+  `.ps1`), not only `.exe`. An unset or empty `PATHEXT` means
+  `.COM;.EXE;.BAT;.CMD`, and `.exe` is always kept.
+- `clove sync github` checks the body GitHub stored after it creates or
+  updates an issue or a comment. When a proxy or GitHub App changed the body
+  on the way (for example, an appended footer), sync edits it back once and
+  lists it in `data.bodies_corrected`. If the edit back fails, sync adds a
+  warning and goes on with the run.
+- The web API (`clove serve`) adds `missing_refs` to every item row: every id
+  in `deps`, `parent`, `relates`, `duplicates`, and `supersedes` that has no
+  backing item, for an item of any status.
+- `GET /stats/history` accepts `?days=all`: every day from the oldest item's
+  `created` date, at least 90 days.
 
 ### Changed
 
@@ -57,6 +73,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   of conversation context that items and comments must not contain, and say
   that an item filed and left open needs no comment.
 
+- Index schema 6 → 7 (`items.file_size`). The index rebuilds itself once on
+  upgrade.
+- cargo-nextest is the supported test runner. `cargo xtask test-all` runs
+  `cargo nextest run --workspace --all-features` and then the doctests. A
+  plain `cargo test` fails the daemon and plugin suites with a message that
+  names nextest.
+
 ### Fixed
 
 - `CLOVE.md` named a `clove list` command that does not exist; it now names
@@ -89,6 +112,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Issue and comment lists are now paged by page number on the
   `/repos/{owner}/{repo}/…` route instead of following GitHub's `Link: next`
   URL (`/repositories/{id}/…`), which some proxies refuse.
+- `--deep` always runs the per-file staleness pass. Before, an in-place edit
+  older than 2 seconds was missed, a running `cloved` answered `--deep` list
+  reads with its fast check, and `clove blocked` ignored `--deep`. The
+  per-file pass now hashes a file when its mtime or its size changed, and a
+  clean check stores the new mtimes, so later checks do not hash the same
+  files again.
+- `clove dep tree` through a running `cloved` shows an item or an edge that
+  was written just before. Before, the daemon's cached graph lagged the write
+  by about 200 ms and the command could fail with `no item with id`.
+- A pull-created item from `clove sync github` keeps the clove id from the
+  issue's `clove-meta` when the id is valid and unused locally, and takes the
+  issue's `created_at` as its `created`. Before, sync minted a new id, so deps
+  and id mentions that named the old id broke.
+- The `clove sync github` summary line counts comment conflicts too
+  (`1 conflicts (1 comment)`). JSON output is unchanged.
+- A human `clove plugin list` with no plugin installed says so, and names
+  `clove plugin search` and `clove plugin list --all`. Before, it printed
+  nothing.
+- The web UI shows a missing reference without requesting it, so a board
+  with dangling deps no longer logs `404` errors. An item page no longer
+  shows the data of an item that was loaded before it.
+- Web timeline: the axis ticks and the today label stay inside the plot, the
+  cursor date chip stays right of the label column when the plot is
+  scrolled, and the throughput `All` range covers the whole history instead
+  of the last 90 days.
+- TUI form: a long value that scrolls sideways keeps the field labels
+  visible. Before, the labels were cut (`itle:`, `atus:`).
 
 ## [0.2.0] - 2026-10-21
 
