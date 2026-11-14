@@ -63,6 +63,10 @@ struct State {
     /// Number of upcoming issue PATCHes that fail 503 (transient) before behaving
     /// normally — used to confirm idempotent updates *are* retried on 5xx.
     patch_transient_fails: usize,
+    /// Number of upcoming issue-list GETs that fail 503 (transient).
+    list_transient_fails: usize,
+    /// Count of issue-list GETs actually received.
+    list_get_count: u64,
     /// While `Some(n)`, a comment POST to issue `n` responds 500 and adds nothing.
     fail_comment_post_for: Option<u64>,
     /// Count of issue-create POSTs actually received.
@@ -142,6 +146,8 @@ impl MockGitHub {
             create_commit_then_fail: 0,
             patch_fail_status: None,
             patch_transient_fails: 0,
+            list_transient_fails: 0,
+            list_get_count: 0,
             fail_comment_post_for: None,
             issue_post_count: 0,
             patch_count: 0,
@@ -229,6 +235,15 @@ impl MockGitHub {
     /// Arm the next `n` issue PATCHes to fail 503 (transient) before succeeding.
     fn arm_patch_transient_fails(&self, n: usize) {
         self.state.lock().unwrap().patch_transient_fails = n;
+    }
+
+    /// Arm the next `n` issue-list GETs to fail 503 (transient) before succeeding.
+    fn arm_list_transient_fails(&self, n: usize) {
+        self.state.lock().unwrap().list_transient_fails = n;
+    }
+
+    fn list_get_count(&self) -> u64 {
+        self.state.lock().unwrap().list_get_count
     }
 
     /// Make comment POSTs to `number` fail with 500 (no mutation) until cleared.
@@ -587,6 +602,11 @@ fn route(
         return match method {
             "GET" => {
                 s.comment_get_count += 1;
+                // Real GitHub answers 404 (or 410) for the comments of an issue
+                // that was deleted or transferred away.
+                if !s.issues.iter().any(|i| i["number"] == json!(number)) {
+                    return ("404 Not Found", json!({ "message": "Not Found" }));
+                }
                 let all = s.comments.get(&number).cloned().unwrap_or_default();
                 let route = format!("issues/{number}/comments");
                 ("200 OK", Value::Array(page_of(&mut s, target, &route, all)))
@@ -619,6 +639,11 @@ fn route(
 
     match (method, number) {
         ("GET", None) => {
+            s.list_get_count += 1;
+            if s.list_transient_fails > 0 {
+                s.list_transient_fails -= 1;
+                return (status_line(503), json!({ "message": "try again later" }));
+            }
             // Real GitHub reports each issue's live comment count in the list;
             // the sync's comment-fetch skip relies on it.
             let mut issues = s.issues.clone();
@@ -1220,6 +1245,52 @@ fn pull_create_makes_local_item() {
     assert_eq!(item["source_system"], "github");
 }
 
+/// A dep that an issue's `clove-meta` declares on an item the store does not
+/// have is not written (no dangling edge) and not recorded as synced: a later
+/// sync, once the target exists, adds it.
+#[test]
+fn a_pulled_dep_on_a_missing_item_is_left_out_and_tried_again() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    mock.seed(1, "Dependent", "Dependent.", "open");
+    mock.edit(1, |i| {
+        i["body"] = json!(
+            "Dependent.\n\n<!-- clove-meta: {\"id\":\"proj-7FE19H73\",\"deps\":[\"proj-6RC64GSZ\"]} -->"
+        );
+    });
+
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["pulled_created"], 1, "{v}");
+    assert!(
+        v["_meta"]["warnings"].to_string().contains("proj-6RC64GSZ"),
+        "{v}"
+    );
+    let deps_of = |id: &str| {
+        show(dir.path(), mock.addr, id)["deps"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    };
+    assert!(deps_of("proj-7FE19H73").is_empty());
+    let out = clove(dir.path(), mock.addr)
+        .args(["doctor", "--format", "json"])
+        .output()
+        .unwrap();
+    let doctor = String::from_utf8_lossy(&out.stdout);
+    assert!(!doctor.contains("DANGLING_REF"), "{doctor}");
+
+    // The target arrives; the dep is added and the pair settles.
+    mock.seed(2, "Target", "Target.", "open");
+    mock.edit(2, |i| {
+        i["body"] = json!("Target.\n\n<!-- clove-meta: {\"id\":\"proj-6RC64GSZ\"} -->");
+    });
+    sync(dir.path(), mock.addr, &[]);
+    assert_eq!(deps_of("proj-7FE19H73"), vec![json!("proj-6RC64GSZ")]);
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["pulled_updated"], 0, "{v}");
+    assert_eq!(v["data"]["pushed_updated"], 0, "{v}");
+}
+
 #[test]
 fn pull_create_keeps_clove_meta_ids_so_deps_stay_valid() {
     let mock = MockGitHub::start();
@@ -1787,6 +1858,144 @@ fn remote_missing_is_reported_not_fatal() {
     );
 }
 
+/// The comment phase must not fetch the thread of an issue that is gone: GitHub
+/// answers 404 there, and that would fail every later sync and leave the threads
+/// sorted after it unreconciled.
+#[test]
+fn a_deleted_issue_does_not_break_the_comment_sync_of_the_others() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    for title in ["Gone", "Stays"] {
+        clove(dir.path(), mock.addr)
+            .args(["new", title, "--type", "bug"])
+            .assert()
+            .success();
+    }
+    sync(dir.path(), mock.addr, &[]); // gh-1 and gh-2
+    let gone = (1..=2)
+        .find(|n| mock.issue(*n).unwrap()["title"] == "Gone")
+        .unwrap();
+    let stays = 3 - gone;
+    mock.remove_issue(gone);
+    mock.seed_comment(stays, "alice", "still reconciled");
+
+    let gets_before = mock.comment_get_count();
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["remote_missing"][0], format!("gh-{gone}"), "{v}");
+    assert_eq!(v["data"]["comments_pulled"], 1, "{v}");
+    assert_eq!(
+        mock.comment_get_count() - gets_before,
+        1,
+        "only the surviving issue's thread is fetched"
+    );
+    // A dry run plans the same way.
+    let v = sync(dir.path(), mock.addr, &["--dry-run"]);
+    assert_eq!(v["data"]["remote_missing"][0], format!("gh-{gone}"), "{v}");
+}
+
+/// A `gh-<number>` link does not name its repository. Items last synced with
+/// `owner/repo` must not be paired with another repository's issues of the same
+/// numbers: that sync is refused and changes nothing, unless `--adopt-links`.
+/// The synced repository is recorded in a tracked file, so a fresh clone (which
+/// has no sync state) still refuses another repository, also when no issue
+/// carries `clove-meta`.
+#[test]
+fn a_clone_without_sync_state_refuses_a_repository_other_than_the_recorded_one() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    mock.seed(1, "Remote", "body", "open");
+    sync(dir.path(), mock.addr, &["--no-comments"]);
+    let marker = dir.path().join(".clove/sync-github.json");
+    assert!(
+        std::fs::read_to_string(&marker)
+            .unwrap()
+            .contains("owner/repo"),
+        "the synced repository is recorded"
+    );
+    // A fresh clone: the items and the record arrive, the sync state does not.
+    std::fs::remove_dir_all(dir.path().join(".clove/sync")).unwrap();
+
+    mock.edit(1, |issue| {
+        issue["title"] = json!("Other repository's issue")
+    });
+    let out = clove(dir.path(), mock.addr)
+        .args(["sync", "--format", "json", "github", "othr/repo"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{out:?}");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        text.contains("owner/repo") && text.contains("--adopt-links"),
+        "{text}"
+    );
+    let id = only_item_id(dir.path(), mock.addr);
+    assert_eq!(show(dir.path(), mock.addr, &id)["title"], "Remote");
+
+    // The recorded repository still syncs.
+    let v = sync(
+        dir.path(),
+        mock.addr,
+        &["--no-comments", "--prefer", "remote"],
+    );
+    assert_eq!(v["ok"], true, "{v}");
+}
+
+#[test]
+fn syncing_linked_items_against_another_repository_is_refused() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    clove(dir.path(), mock.addr)
+        .args(["new", "Linked", "--type", "bug"])
+        .assert()
+        .success();
+    sync(dir.path(), mock.addr, &[]); // gh-1, recorded in owner/repo's state
+    let id = only_item_id(dir.path(), mock.addr);
+
+    // The mock serves the same issues for any repository name; make issue 1 look
+    // like the other repository's unrelated issue.
+    mock.edit(1, |issue| {
+        issue["title"] = json!("Unrelated issue of the other repository");
+        issue["body"] = json!("Not ours.");
+    });
+    let patches = mock.patch_count();
+    let other = |extra: &[&str]| {
+        let mut args = vec!["sync", "--format", "json", "github", "other/repo"];
+        args.extend_from_slice(extra);
+        clove(dir.path(), mock.addr).args(&args).output().unwrap()
+    };
+
+    for extra in [&[][..], &["--dry-run"][..]] {
+        let out = other(extra);
+        assert!(!out.status.success(), "must refuse: {out:?}");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            text.contains("owner/repo") && text.contains("--adopt-links"),
+            "{text}"
+        );
+    }
+    assert_eq!(mock.patch_count(), patches, "nothing pushed");
+    assert_eq!(show(dir.path(), mock.addr, &id)["title"], "Linked");
+    assert!(
+        !dir.path()
+            .join(".clove/sync/github/other_repo.json")
+            .exists(),
+        "no state written for the refused repository"
+    );
+
+    // The explicit override syncs.
+    let out = other(&["--adopt-links", "--prefer", "local"]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(mock.issue(1).unwrap()["title"], "Linked");
+}
+
 #[test]
 fn unassign_locally_clears_the_github_assignee() {
     let mock = MockGitHub::start();
@@ -2123,6 +2332,153 @@ fn idempotent_update_retries_transient_5xx() {
         "two transient failures then success = three attempts"
     );
     assert_eq!(mock.issue(1).unwrap()["title"], "Renamed");
+}
+
+/// The issue list is a read: a transient failure of a page is retried instead
+/// of failing the sync before it starts.
+#[test]
+fn issue_list_is_retried_on_5xx() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    mock.seed(1, "Remote", "body", "open");
+
+    mock.arm_list_transient_fails(2); // two 503s, then success
+    let v = sync(dir.path(), mock.addr, &["--no-comments"]);
+    assert_eq!(v["data"]["pulled_created"], 1, "{v}");
+    assert_eq!(
+        mock.list_get_count(),
+        3,
+        "two transient failures then success"
+    );
+}
+
+/// A create whose response was lost left the issue on GitHub and the local item
+/// unlinked. The next sync links the two (the issue's `clove-meta` names the
+/// item and the content is equal) instead of creating a second issue and a
+/// second local item.
+#[test]
+fn a_lost_create_response_is_linked_on_the_next_sync_not_duplicated() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    clove(dir.path(), mock.addr)
+        .args(["new", "Task", "--type", "bug"])
+        .assert()
+        .success();
+    let id = only_item_id(dir.path(), mock.addr);
+
+    mock.arm_create_commit_then_fail(1);
+    assert!(!sync_raw(dir.path(), mock.addr, &[]).status.success());
+    assert_eq!(mock.issue_count(), 1);
+
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["pushed_created"], 0, "{v}");
+    assert_eq!(v["data"]["pulled_created"], 0, "{v}");
+    assert_eq!(mock.issue_count(), 1, "no second issue");
+    assert_eq!(local_item_count(dir.path(), mock.addr), 1, "no second item");
+    assert_eq!(show(dir.path(), mock.addr, &id)["external_ref"], "gh-1");
+
+    // The pair is in sync from here on.
+    let v = sync(dir.path(), mock.addr, &[]);
+    assert_eq!(v["data"]["in_sync"], 1, "{v}");
+    assert_eq!(v["data"]["pushed_updated"], 0, "{v}");
+    assert_eq!(v["data"]["pulled_updated"], 0, "{v}");
+}
+
+/// An issue whose `clove-meta` names an unlinked local item but whose content
+/// differs is not linked to it: anyone who can open an issue can write that id.
+#[test]
+fn an_issue_naming_an_unlinked_item_with_other_content_is_not_linked() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    clove(dir.path(), mock.addr)
+        .args(["new", "Task", "--type", "bug"])
+        .assert()
+        .success();
+    let id = only_item_id(dir.path(), mock.addr);
+    mock.seed(
+        1,
+        "Hijack",
+        &format!("other\n\n<!-- clove-meta: {{\"id\":\"{id}\"}} -->"),
+        "open",
+    );
+
+    sync(dir.path(), mock.addr, &["--no-comments"]);
+    assert_eq!(show(dir.path(), mock.addr, &id)["title"], "Task");
+    assert_eq!(show(dir.path(), mock.addr, &id)["external_ref"], "gh-2");
+    assert_eq!(local_item_count(dir.path(), mock.addr), 2);
+}
+
+/// A change of only the assignee on GitHub is pulled. The content fingerprint
+/// leaves the assignee out, so the sync records the assignee logins apart.
+#[test]
+fn a_remote_change_of_only_the_assignee_is_pulled() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    mock.seed(1, "Remote", "body", "open");
+    sync(dir.path(), mock.addr, &["--no-comments"]);
+    let id = only_item_id(dir.path(), mock.addr);
+    assert!(show(dir.path(), mock.addr, &id)["assignee"].is_null());
+
+    mock.edit(1, |_| {});
+    mock.set_assignees(1, &["alice"]);
+    let v = sync(dir.path(), mock.addr, &["--no-comments"]);
+    assert_eq!(v["data"]["pulled_updated"], 1, "{v}");
+    assert_eq!(show(dir.path(), mock.addr, &id)["assignee"], "alice");
+
+    // A bump of `updated_at` with the same assignee is not a change.
+    mock.edit(1, |_| {});
+    let v = sync(dir.path(), mock.addr, &["--no-comments"]);
+    assert_eq!(v["data"]["pulled_updated"], 0, "{v}");
+    assert_eq!(v["data"]["in_sync"], 1, "{v}");
+}
+
+/// An issue without `clove-meta` says nothing about the priority: a pull of
+/// its edit keeps the local priority.
+#[test]
+fn a_pull_from_an_issue_without_meta_keeps_the_local_priority() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    mock.seed(1, "Remote", "body", "open");
+    sync(dir.path(), mock.addr, &["--no-comments"]);
+    let id = only_item_id(dir.path(), mock.addr);
+    clove(dir.path(), mock.addr)
+        .args(["set", &id, "priority=0"])
+        .assert()
+        .success();
+
+    mock.edit(1, |issue| issue["title"] = json!("Remote, renamed"));
+    let v = sync(
+        dir.path(),
+        mock.addr,
+        &["--no-comments", "--prefer", "remote"],
+    );
+    assert_eq!(v["data"]["pulled_updated"], 1, "{v}");
+    let item = show(dir.path(), mock.addr, &id);
+    assert_eq!(item["title"], "Remote, renamed");
+    assert_eq!(item["priority"], 0, "{item}");
+}
+
+/// A synced item deleted locally is not created again by the next sync while
+/// its issue is unchanged; the deletion is reported. An edit of the issue
+/// pulls it again.
+#[test]
+fn a_locally_deleted_item_is_reported_not_pulled_again() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    mock.seed(1, "Remote", "body", "open");
+    sync(dir.path(), mock.addr, &["--no-comments"]);
+    let id = only_item_id(dir.path(), mock.addr);
+    std::fs::remove_file(dir.path().join(format!(".clove/issues/{id}.md"))).unwrap();
+
+    let v = sync(dir.path(), mock.addr, &["--no-comments"]);
+    assert_eq!(v["data"]["pulled_created"], 0, "{v}");
+    assert_eq!(v["data"]["local_missing"], json!(["gh-1"]), "{v}");
+    assert_eq!(local_item_count(dir.path(), mock.addr), 0);
+    assert!(!mock.is_closed(1), "the issue is left alone");
+
+    mock.edit(1, |issue| issue["title"] = json!("Edited"));
+    let v = sync(dir.path(), mock.addr, &["--no-comments"]);
+    assert_eq!(v["data"]["pulled_created"], 1, "{v}");
 }
 
 /// C-sync-7: an unparseable local item file must abort the sync rather than being
