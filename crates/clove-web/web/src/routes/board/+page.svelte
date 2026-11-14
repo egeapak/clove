@@ -6,7 +6,7 @@
   import { toasts } from '$lib/toast.svelte';
   import Card from '$lib/components/Card.svelte';
   import StatusGlyph from '$lib/components/StatusGlyph.svelte';
-  import { Virtual } from '$lib/virtual.svelte';
+  import { Virtual, visibleRows } from '$lib/virtual.svelte';
   import { tooltip, type TooltipContent } from '$lib/tooltip';
   import { shortId, statusGlyph, statusColorVar } from '$lib/glyphs';
 
@@ -191,8 +191,8 @@
           <div class="empty dim">No items</div>
         {:else}
           <div class="col-sizer" style="height:{v.total}px">
-            {#each v.items as row (row.key)}
-              {@const item = col.items[row.index]}
+            <!-- Never index `col.items` here: see `visibleRows`. -->
+            {#each visibleRows(v.items, col.items) as { v: row, item } (row.key)}
               <div
                 role="listitem"
                 class="card-wrap"

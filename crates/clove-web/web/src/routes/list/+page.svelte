@@ -16,7 +16,7 @@
   import { relativeTime, priorityLabel } from '$lib/glyphs';
   import { parseQuery, parsePage } from '$lib/query';
   import { defaultDir } from '$lib/filter';
-  import { Virtual } from '$lib/virtual.svelte';
+  import { Virtual, visibleRows } from '$lib/virtual.svelte';
   import { tooltip } from '$lib/tooltip';
 
   // Fallbacks when /meta isn't available yet.
@@ -226,6 +226,8 @@
   });
 
   const vItems = $derived(virtual.items);
+  // Never index `rows` from the template: see `visibleRows`.
+  const vRows = $derived(visibleRows(vItems, rows));
   const padTop = $derived(vItems.length ? vItems[0].start : 0);
   const padBottom = $derived(vItems.length ? virtual.total - vItems[vItems.length - 1].end : 0);
 </script>
@@ -369,9 +371,8 @@
       </thead>
       <tbody>
         {#if padTop > 0}<tr class="spacer" style="height:{padTop}px" aria-hidden="true"><td colspan={colCount}></td></tr>{/if}
-        {#each vItems as row (row.key)}
+        {#each vRows as { v: row, item } (row.key)}
           {@const i = row.index}
-          {@const item = rows[i]}
           <tr
             class:cursor={i === cursor}
             onclick={() => goto(`${base}/items/${item.id}`)}

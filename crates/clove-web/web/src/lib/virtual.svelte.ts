@@ -68,3 +68,21 @@ export class Virtual<S extends Element = HTMLElement, I extends Element = HTMLEl
   // For dynamic (measured) heights: pass each row element to the observer.
   measure = (node: I | null) => this.#virtualizer.measureElement(node);
 }
+
+/**
+ * Pair each virtual item with the row it stands for, dropping any whose index
+ * is past the end of `rows`.
+ *
+ * The virtualizer's count is pushed from an `$effect`, which runs *after*
+ * render. When the rows shrink, the window therefore still names the old
+ * indexes for one render pass; a row that dereferenced `rows[v.index]` there
+ * read `undefined` and threw, which froze the whole view. Render from this
+ * instead of indexing `rows` in the template.
+ */
+export function visibleRows<T>(items: readonly VirtualItem[], rows: readonly T[]): Array<{ v: VirtualItem; item: T }> {
+  const out: Array<{ v: VirtualItem; item: T }> = [];
+  for (const v of items) {
+    if (v.index < rows.length) out.push({ v, item: rows[v.index] });
+  }
+  return out;
+}
