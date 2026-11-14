@@ -47,7 +47,8 @@ multiplexers extend this per-provider: `clove sync github` → `clove-sync-githu
 `clove-<mux>-<provider>` plugin only for a foreign provider (`tk`/`beads` are the
 `clove-import-tk`/`clove-import-beads` plugins). `sync` has **no** built-in
 providers (github is the `clove-sync-github` plugin). Global flags (`--format`,
-…) must precede the provider. The host↔plugin contract (the
+…) must precede the provider (the host also reads one that directly follows the
+provider; after the first provider argument everything is forwarded). The host↔plugin contract (the
 `CLOVE_*` env, the shared `{v,ok,data,_meta}` envelope, exit codes) lives in
 `clove-plugin`: a plugin `main` calls `PluginContext::from_env()` /
 `clove_plugin::run_with_info`, and the host writes the env from

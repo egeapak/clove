@@ -30,7 +30,7 @@ pub fn apply_assignments_to(
 
 pub fn run(ctx: &Ctx, format: OutputFormat, args: EditArgs) -> Result<(), CloveError> {
     let id = parse_id(&args.id)?;
-    let body = body_argument(&args)?;
+    let body = body_argument(args.body.as_deref(), args.body_file.as_deref())?;
 
     if args.fields.is_empty() && body.is_none() {
         let saved = open_in_editor(ctx, &id)?;
@@ -48,9 +48,12 @@ pub fn run(ctx: &Ctx, format: OutputFormat, args: EditArgs) -> Result<(), CloveE
 }
 
 /// The replacement body from `--body` or `--body-file` (`-` is stdin), if any.
-fn body_argument(args: &EditArgs) -> Result<Option<String>, CloveError> {
-    let Some(path) = &args.body_file else {
-        return Ok(args.body.clone());
+pub(crate) fn body_argument(
+    body: Option<&str>,
+    body_file: Option<&camino::Utf8Path>,
+) -> Result<Option<String>, CloveError> {
+    let Some(path) = body_file else {
+        return Ok(body.map(str::to_owned));
     };
     let read = if path.as_str() == "-" {
         std::io::read_to_string(std::io::stdin())
@@ -58,7 +61,7 @@ fn body_argument(args: &EditArgs) -> Result<Option<String>, CloveError> {
         std::fs::read_to_string(path)
     };
     read.map(Some).map_err(|source| CloveError::Io {
-        path: path.clone(),
+        path: path.to_owned(),
         source,
     })
 }

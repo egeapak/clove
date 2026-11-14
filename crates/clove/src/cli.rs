@@ -424,8 +424,11 @@ pub struct NewArgs {
     #[arg(short = 'a', long, value_name = "WHO")]
     pub assignee: Option<String>,
     /// Set the item body.
-    #[arg(short = 'b', long, value_name = "TEXT")]
+    #[arg(short = 'b', long, value_name = "TEXT", conflicts_with = "body_file")]
     pub body: Option<String>,
+    /// Set the item body from the contents of FILE (`-` reads stdin).
+    #[arg(long, value_name = "FILE")]
+    pub body_file: Option<Utf8PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -808,16 +811,22 @@ pub struct DoctorArgs {
 /// A router mirroring [`ExportArgs`]: the built-in native formats (`json`,
 /// `jsonl`, clove's own restore) parse `rest` themselves (see `cmd::import`), and
 /// any other provider (`tk`, `beads`, …) falls through to a
-/// `clove-import-<provider>` plugin, with `rest` forwarded verbatim. Global flags
-/// (e.g. `--format`) must precede the provider token, since everything after it
-/// is captured raw for plugin forwarding.
+/// `clove-import-<provider>` plugin, with `rest` forwarded verbatim.
+///
+/// Put global flags (e.g. `--format`) before the provider token. The host still
+/// reads a global flag that directly follows the provider
+/// (`clove import json --format json f`), because the forwarded arguments start
+/// at the first token that is not a global flag. From that token on, everything
+/// is captured raw, so `clove import json f --format json` forwards `--format`.
+/// The same rule holds for `export` and `sync`.
 #[derive(Debug, Args)]
 pub struct ImportArgs {
     /// The source provider (built-in `json`/`jsonl`, or a
     /// `clove-import-<provider>` plugin, e.g. `tk` or `beads`).
     pub provider: String,
-    /// Everything after the provider — the `<src>` and any provider flags
-    /// (`--dry-run`) — forwarded to the plugin.
+    /// The `<src>` and any provider flags (`--dry-run`), forwarded to the
+    /// plugin. Starts at the first token after the provider that is not a
+    /// clove global flag.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub rest: Vec<String>,
 }
@@ -842,9 +851,9 @@ pub struct ExportArgs {
 ///
 /// A pure router mirroring [`ImportArgs`]/[`ExportArgs`]: `sync` has **no**
 /// built-in providers — every provider (including `github`) resolves to a
-/// `clove-sync-<provider>` plugin, with `rest` forwarded verbatim. Global flags
-/// (e.g. `--format`) must precede the provider token, since everything after it
-/// is captured raw for plugin forwarding.
+/// `clove-sync-<provider>` plugin, with `rest` forwarded verbatim. Put global
+/// flags (e.g. `--format`) before the provider token; see [`ImportArgs`] for
+/// where the forwarded arguments start.
 #[derive(Debug, Args)]
 pub struct SyncArgs {
     /// The provider to sync with (a `clove-sync-<provider>` plugin, e.g.
