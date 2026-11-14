@@ -710,7 +710,18 @@ pub fn list_rows(
     filters: &crate::Filters,
     order: crate::view::Order,
 ) -> Result<Vec<ItemFrontmatter>, CloveError> {
-    list_rows_with_graph(store, filters, order).map(|(rows, _)| rows)
+    if order.needs_ranks() {
+        return list_rows_with_graph(store, filters, order).map(|(rows, _)| rows);
+    }
+    // No topological rank in the sort key and no caller for the graph: skip
+    // the whole-store graph build.
+    let (frontmatters, _errors) = store.scan_frontmatter()?;
+    let mut matched: Vec<ItemFrontmatter> = frontmatters
+        .into_iter()
+        .filter(|fm| filters.matches(fm))
+        .collect();
+    order.apply(&mut matched, &std::collections::HashMap::new());
+    Ok(matched)
 }
 
 /// [`list_rows`] plus the whole-store graph it had to build anyway.
@@ -1093,6 +1104,30 @@ mod tests {
         )
         .unwrap();
         CloveId::new(v["id"].as_str().unwrap()).unwrap()
+    }
+
+    /// `list_rows` skips the graph for a sort that reads no rank; the rows are
+    /// the ones the graph-building path returns.
+    #[test]
+    fn list_rows_without_ranks_matches_the_graph_path() {
+        let (_d, store) = store();
+        let a = new_id(&store, "a");
+        let b = new_id(&store, "b");
+        let c = new_id(&store, "c");
+        dep_add(&store, &a, &b, Utc::now()).unwrap();
+        dep_add(&store, &b, &c, Utc::now()).unwrap();
+        let filters = crate::Filters::default();
+        for field in [
+            "rank", "priority", "created", "updated", "id", "status", "type",
+        ] {
+            for dir in ["asc", "desc"] {
+                let order = crate::view::Order::parse(Some(field), Some(dir)).unwrap();
+                let plain = list_rows(&store, &filters, order).unwrap();
+                let (with_graph, _) = list_rows_with_graph(&store, &filters, order).unwrap();
+                assert_eq!(plain, with_graph, "sort {field} {dir}");
+                assert_eq!(plain.len(), 3);
+            }
+        }
     }
 
     #[test]
