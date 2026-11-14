@@ -53,7 +53,7 @@ user's real ones.
 
 ```sh
 scripts/release/release-smoke.sh <extracted-dir> X.Y.Z     # CLI/MCP/web/daemon footprint
-TMPDIR=/tmp CLOVE_HOME=$(mktemp -d /tmp/cvd.XXXX)/h scripts/ci/daemon-smoke.sh <extracted-dir>   # hub flow
+TMPDIR=/tmp scripts/ci/daemon-smoke.sh <extracted-dir>     # hub flow (sets its own CLOVE_HOME and CLOVE_RUNTIME_DIR)
 ```
 
 - [ ] The release binaries carry the web feature: `clove serve` answers (it exits
@@ -148,8 +148,9 @@ empty or a real GitHub user.
       gone from the issue. Delete on GitHub but edit the file (and the
       reverse): nothing is deleted, the edited text is re-created on the other side.
       `--no-comments` leaves all of it alone.
-- [ ] Upgrade case: copy a `.clove/sync/github/*.json` written by 0.1.5, run the
-      0.2.0 sync → no duplicated or re-pushed comments, then an edit propagates.
+- [ ] Upgrade case: copy a `.clove/sync/github/*.json` written by the previous
+      release, run this release's sync → no duplicated or re-pushed comments, then
+      an edit propagates.
 - [ ] Reopen on GitHub → sync pulls `open`; close locally → sync pushes `CLOSED`
       (the same-second case is covered by
       `sync::tests::local_edit_in_the_same_second_as_the_last_pull_is_pushed`; by hand,
@@ -198,6 +199,9 @@ read with `tmux capture-pane -p`.
 - [ ] Help (`?`), filter menu (`f`), search (`/`).
 - [ ] Edit form (`e`): change a field on the throwaway item, `Ctrl-S` → it lands in
       the file; `q` exits cleanly. `clove tui </dev/null` errors without panicking.
+- [ ] New form (`n`): type a title, `Tab` to the body and type two lines,
+      `Ctrl-S` → the item is selected in the list, and `clove ls` and
+      `clove show <id>` have the title and both body lines. Close it afterwards.
 - [ ] Form horizontal scroll: press `n` and type a title of about 100 characters.
       In `capture-pane -p`, the title scrolls behind a leading `…` and every
       field label stays in its column. `tmux display -p -t t '#{cursor_x}'`
