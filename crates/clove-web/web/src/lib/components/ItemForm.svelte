@@ -109,6 +109,7 @@
     {/if}
     <input
       bind:value={labelDraft}
+      aria-label="Label to add"
       placeholder="add label, Enter to add…"
       onkeydown={onLabelKey}
       onblur={addLabels}
@@ -124,7 +125,7 @@
       </div>
     </div>
     {#if bodyTab === 'write'}
-      <textarea bind:value={form.body} rows="10" placeholder="Markdown…"></textarea>
+      <textarea bind:value={form.body} aria-label="Body" rows="10" placeholder="Markdown…"></textarea>
     {:else}
       <div class="preview">
         {#if form.body.trim()}

@@ -194,9 +194,14 @@ class Store {
    * HTTP responses can arrive out of order, and dropping "the oldest" patch on
    * settle while rolling back by token corrupted the ledger — a patch could
    * leak into `pending` forever and silently overwrite later server values).
+   *
+   * `base` is the caller's copy of the item, used when the cache has none: the
+   * window holds one page, and a live refetch drops whatever is outside it, so
+   * the detail route's item is often not here. Without it the edit was a silent
+   * no-op — nothing shown, the server's answer discarded, no rollback.
    */
-  optimistic(id: string, patch: Partial<Item>): OptimisticEdit {
-    const before = this.items.get(id);
+  optimistic(id: string, patch: Partial<Item>, base?: Item): OptimisticEdit {
+    const before = this.items.get(id) ?? base;
     if (!before) return { rollback: () => {}, settle: () => {} };
     let entry = this.pending.get(id);
     if (!entry) {
