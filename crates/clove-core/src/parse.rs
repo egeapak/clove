@@ -370,6 +370,25 @@ fn scan_line_for_anchor(line: &[u8], flow_depth: &mut usize) -> bool {
             index += 1;
             continue;
         }
+        // A plain scalar that starts at a block-context node position runs to
+        // the end of the line, or to the `: ` that makes it a mapping key. The
+        // YAML parser reads everything in it as text, so `[`, `{`, `&` and `*`
+        // there are literal (`title: Deref [*ptr] crashes` is what the writer
+        // emits for that title) and must not open a flow collection or count
+        // as an anchor. Flow context is excluded: a plain scalar there ends at
+        // the next flow indicator.
+        if *flow_depth == 0
+            && starts_plain_scalar(line, index)
+            && at_node_start(line, index, *flow_depth)
+        {
+            match plain_scalar_key_end(line, index) {
+                Some(after_colon) => {
+                    index = after_colon;
+                    continue;
+                }
+                None => return false,
+            }
+        }
         match byte {
             // A quote only *opens* a quoted scalar at a node position; a quote
             // mid-scalar (`it's`) is literal text and must not swallow the
@@ -390,6 +409,34 @@ fn scan_line_for_anchor(line: &[u8], flow_depth: &mut usize) -> bool {
         index += 1;
     }
     false
+}
+
+/// Whether the byte at `index` can begin a plain (unquoted) scalar: not
+/// whitespace and not a YAML indicator. `-`, `?` and `:` begin one only when a
+/// non-space character follows (`-x`), otherwise they are structure (`- x`).
+fn starts_plain_scalar(line: &[u8], index: usize) -> bool {
+    match line[index] {
+        b' ' | b'\t' | b'\r' => false,
+        b'[' | b']' | b'{' | b'}' | b',' | b'#' | b'&' | b'*' | b'!' | b'|' | b'>' | b'\''
+        | b'"' | b'%' | b'@' | b'`' => false,
+        b'-' | b'?' | b':' => line
+            .get(index + 1)
+            .is_some_and(|next| !matches!(next, b' ' | b'\t' | b'\r')),
+        _ => true,
+    }
+}
+
+/// For a plain scalar starting at `start` in block context: the index just
+/// past the `:` that ends it as a mapping key (`- name: &a x`), or `None` when
+/// the scalar runs to the end of the line (a value).
+fn plain_scalar_key_end(line: &[u8], start: usize) -> Option<usize> {
+    (start..line.len()).find_map(|i| {
+        let ends_key = line[i] == b':'
+            && line
+                .get(i + 1)
+                .is_none_or(|next| matches!(next, b' ' | b'\t' | b'\r'));
+        ends_key.then_some(i + 1)
+    })
 }
 
 /// Whether `index` is a YAML *node start* position: after `key: `, after a
@@ -557,8 +604,40 @@ mod tests {
     }
 
     #[test]
+    fn guard_ignores_brackets_inside_plain_scalars_the_writer_produces() {
+        // The writer renders these as plain block scalars. A `[`/`{` inside
+        // one is text: it must not open a flow collection, and an unbalanced
+        // one must not leak flow context into the lines that follow.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = camino::Utf8Path::from_path(tmp.path()).unwrap();
+        for text in [
+            "Deref [*ptr] crashes",
+            "closure {&mut x} borrow",
+            "list [a, &b] parse",
+            "see [a, *b]",
+            "unbalanced [ then, &later",
+            "-x [*y]",
+        ] {
+            let mut item = sample_item();
+            item.frontmatter.title = text.to_owned();
+            item.frontmatter.assignee = Some(format!("bob [*x] {text}"));
+            item.frontmatter.external_ref = Some("ref, &x".to_owned());
+            let path = dir.join(format!("{}.md", item.frontmatter.id));
+            write_item_file(&item, &path).unwrap();
+            let parsed = parse_item_file(&path)
+                .unwrap_or_else(|err| panic!("writer output for {text:?} must re-parse: {err}"));
+            assert_eq!(parsed.frontmatter, item.frontmatter);
+        }
+    }
+
+    #[test]
     fn guard_still_rejects_real_anchors_and_aliases() {
         for fm in [
+            "key: !!seq [&a x, *a]", // a tag before the flow collection
+            "- name: &a x",          // a plain key does not hide its value
+            "- name [x: &a y",       // nor does a bracket inside the key
+            "labels:\n  [&a x, *a]", // flow collection on its own line
+            "key: {a: &b 1}",
             "key: &a x",
             "deps: [*a]",
             "deps: [&a x, *a, *a]",
@@ -575,6 +654,10 @@ mod tests {
             "title: hello, *world*",
             "title: foo:*bar",
             "title: it's *fine* and R&D",
+            "title: Deref [*ptr] crashes",
+            "title: closure {&mut x} borrow",
+            "title: open [ bracket\nassignee: a, &b",
+            "labels:\n  - see [a, *b]",
             "title: |-\n  see: *note*\n  - *milk*\nother: x",
         ] {
             assert!(!contains_yaml_anchor_or_alias(fm.as_bytes()), "{fm}");
