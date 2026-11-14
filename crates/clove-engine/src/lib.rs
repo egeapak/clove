@@ -29,9 +29,11 @@
 //! - **daemon** — a live `cloved` answers from its hot index and cached graph.
 //!   Skipped by [`Tiers::daemon`] (`--no-index`, and the daemon-hosted web,
 //!   which *is* the daemon and must not call itself).
-//! - **index** — `.clove/index.db`, freshened inline when it is lightly stale
-//!   and bypassed when it is too far behind, broken, or cannot *shape* the
-//!   query (see [`query_too_complex`]).
+//! - **index** — `.clove/index.db`, brought up to date inline before it answers
+//!   (a few changes one by one, most of the store as a rebuild) and bypassed
+//!   when it is broken, cannot be refreshed, or cannot *shape* the query (see
+//!   [`query_too_complex`]). A bypass for an error is named in the answer's
+//!   warnings.
 //! - **files** — always correct, always available, and the only tier `search`
 //!   has at all (read-path roadmap §6.1).
 
@@ -47,14 +49,31 @@ use clove_types::{CloveError, CloveId, ItemFrontmatter};
 use rayon::prelude::*;
 use serde_json::Value;
 
-/// Above this many out-of-date items, skip the incremental refresh and fall back
-/// to a file scan (DESIGN §6.4).
+/// Up to this many out-of-date items are always refreshed one by one. Above it
+/// the engine still refreshes, and rebuilds the index instead when the changes
+/// are also more than a quarter of the indexed store (DESIGN §6.4).
 pub const STALE_REFRESH_LIMIT: usize = 20;
 
 /// Above this many items in a page, hydrate in parallel. Mirrors
 /// `ItemStore::scan_frontmatter`'s own threshold, so a hydrated page and a
 /// scanned store parse the same way.
 const PARALLEL_HYDRATE_THRESHOLD: usize = 500;
+
+/// Below this many rows a tiered page is always hydrated: the per-file reads are
+/// too few to matter, and the store-size probe below is not worth making.
+const HYDRATE_PAGE_FLOOR: usize = 1000;
+
+/// A tiered `list`/`ready` page is hydrated only while it holds fewer than one
+/// in this many of the store's items. Reading a page file by file costs about
+/// 2.5 times as much per file as the whole-store scan does (measured: 545 ms
+/// against 220 ms for all of a 20k store), so past roughly a third of the store
+/// the file tier answers sooner.
+const HYDRATE_STORE_SHARE: usize = 3;
+
+/// The same share for `blocked`, whose rows cost more: each one also reads its
+/// dependencies' files again for `blocked_by` (measured: 1884 ms against 937 ms
+/// at 80k with about a fifth of the store blocked).
+const HYDRATE_STORE_SHARE_BLOCKED: usize = 10;
 
 /// The keys a lean row carries — the columns `clove ls` renders, and the only
 /// fields the index and daemon tiers can answer from without reading files.
@@ -323,6 +342,9 @@ pub struct Engine {
     /// client is kept and only its (cheap, on the open connection) `ping` is
     /// repeated; a dead or restarted daemon drops the cache and re-probes.
     daemon: Arc<Mutex<Option<DaemonClient>>>,
+    /// [`HYDRATE_PAGE_FLOOR`], as a field so a test can lower it instead of
+    /// building a store of thousands of items.
+    hydrate_floor: usize,
 }
 
 impl Engine {
@@ -337,7 +359,17 @@ impl Engine {
             db_path,
             tiers,
             daemon: Arc::new(Mutex::new(None)),
+            hydrate_floor: HYDRATE_PAGE_FLOOR,
         }
+    }
+
+    /// Lower the page size above which a tiered page is weighed against the
+    /// store size (see `cheaper_from_files`). For tests only: the default is
+    /// what production reads use.
+    #[doc(hidden)]
+    pub fn with_hydrate_floor(mut self, floor: usize) -> Engine {
+        self.hydrate_floor = floor;
+        self
     }
 
     /// The file store this engine reads (surfaces still need it for writes and
@@ -434,25 +466,33 @@ impl Engine {
         window: Page,
         projection: Projection,
     ) -> Result<ListAnswer, CloveError> {
+        let mut fallback_warnings = Vec::new();
         if projection.allows_tiers() {
             // Both tiers filter, order, count and window in SQL; only the page is
             // read back from disk to carry `blocked_by`.
             let tiered = match self.lean_via_daemon(QueryKind::Blocked, filters, order, window) {
                 Some(answer) => Some((Source::Daemon, answer)),
-                None => self
-                    .lean_via_index(QueryMode::Blocked, filters, order, window)?
-                    .map(|answer| (Source::Index, answer)),
+                None => {
+                    let (answer, warnings) =
+                        self.lean_via_index(QueryMode::Blocked, filters, order, window);
+                    fallback_warnings = warnings;
+                    answer.map(|answer| (Source::Index, answer))
+                }
             };
             if let Some((source, (rows, total, warnings))) = tiered {
                 let (page, _) = window.apply(rows);
-                let hydrated = self.hydrate(page.iter().map(|row| row.id.as_str()));
-                return Ok(ListAnswer {
-                    source,
-                    rows: Rows::Full(self.with_blocked_by(hydrated)?),
-                    total,
-                    warnings,
-                    graph: None,
-                });
+                // A page that is a large share of the store is cheaper from the
+                // file tier below, which builds the graph once for every row.
+                if !self.cheaper_from_files(page.len(), HYDRATE_STORE_SHARE_BLOCKED) {
+                    let hydrated = self.hydrate(page.iter().map(|row| row.id.as_str()));
+                    return Ok(ListAnswer {
+                        source,
+                        rows: Rows::Full(self.with_blocked_by(hydrated)?),
+                        total,
+                        warnings,
+                        graph: None,
+                    });
+                }
             }
         }
 
@@ -470,7 +510,7 @@ impl Engine {
                     .collect(),
             ),
             total,
-            warnings: Vec::new(),
+            warnings: fallback_warnings,
             graph: Some(graph),
         })
     }
@@ -609,26 +649,33 @@ impl Engine {
         projection: Projection,
         file_rows: impl FnOnce() -> Result<(Vec<FullRow>, Vec<String>, GraphStore), CloveError>,
     ) -> Result<ListAnswer, CloveError> {
+        let mut fallback_warnings = Vec::new();
         if projection.allows_tiers() {
-            if let Some((rows, total, warnings)) =
-                self.lean_via_daemon(kind, filters, order, window)
-            {
-                return self.finish_lean(Source::Daemon, rows, total, warnings, window, projection);
-            }
-            if let Some((rows, total, warnings)) =
-                self.lean_via_index(mode, filters, order, window)?
-            {
-                return self.finish_lean(Source::Index, rows, total, warnings, window, projection);
+            let tiered = match self.lean_via_daemon(kind, filters, order, window) {
+                Some(answer) => Some((Source::Daemon, answer)),
+                None => {
+                    let (answer, warnings) = self.lean_via_index(mode, filters, order, window);
+                    fallback_warnings = warnings;
+                    answer.map(|answer| (Source::Index, answer))
+                }
+            };
+            if let Some((source, (rows, total, warnings))) = tiered {
+                if let Some(answer) =
+                    self.finish_lean(source, rows, total, warnings, window, projection)
+                {
+                    return Ok(answer);
+                }
             }
         }
         let (rows, warnings, graph) = file_rows()?;
         let total = rows.len();
         let (page, _) = window.apply(rows);
+        fallback_warnings.extend(warnings);
         Ok(ListAnswer {
             source: Source::Files,
             rows: Rows::Full(page),
             total,
-            warnings,
+            warnings: fallback_warnings,
             graph: Some(graph),
         })
     }
@@ -639,6 +686,9 @@ impl Engine {
     /// Hydration happens **after** the window, which is the whole reason a
     /// full-object surface can afford a tier at all: the filtering, ordering,
     /// and counting stay in SQL and only the page touches the disk.
+    ///
+    /// `None` means the page is too large a share of the store to hydrate (see
+    /// [`Self::cheaper_from_files`]), so the caller answers from the file tier.
     fn finish_lean(
         &self,
         source: Source,
@@ -647,7 +697,7 @@ impl Engine {
         warnings: Vec<String>,
         window: Page,
         projection: Projection,
-    ) -> Result<ListAnswer, CloveError> {
+    ) -> Option<ListAnswer> {
         // The tier returns the `offset + limit` prefix (or, when a residue
         // forced an unlimited fetch, everything), so the offset is applied here.
         let (page, _) = window.apply(rows);
@@ -655,20 +705,51 @@ impl Engine {
             Projection::Lean => Rows::Lean(page),
             // `Files` never reaches here (`allows_tiers` is false), but treating
             // it as `Full` keeps this total rather than a panic.
-            Projection::Full | Projection::Files => Rows::Full(
-                self.hydrate(page.iter().map(|row| row.id.as_str()))
-                    .into_iter()
-                    .map(FullRow::bare)
-                    .collect(),
-            ),
+            Projection::Full | Projection::Files => {
+                if self.cheaper_from_files(page.len(), HYDRATE_STORE_SHARE) {
+                    return None;
+                }
+                Rows::Full(
+                    self.hydrate(page.iter().map(|row| row.id.as_str()))
+                        .into_iter()
+                        .map(FullRow::bare)
+                        .collect(),
+                )
+            }
         };
-        Ok(ListAnswer {
+        Some(ListAnswer {
             source,
             rows,
             total,
             warnings,
             graph: None,
         })
+    }
+
+    /// Whether reading `page_len` item files one by one costs more than the
+    /// whole-store scan of the file tier.
+    ///
+    /// A tier is worth its hydration only while the page is a small part of the
+    /// store. An unlimited window (`--limit 0`, the web board) or a very large
+    /// one turns "read the page back" into "read most of the store back", file
+    /// by file, which is slower than the scan it was meant to avoid. `share` is
+    /// the break-even: the page must hold fewer than one in `share` of the
+    /// store's items.
+    ///
+    /// The store size is one `readdir`, and only for a page above
+    /// [`HYDRATE_PAGE_FLOOR`], so an ordinary page never pays for the probe.
+    fn cheaper_from_files(&self, page_len: usize, share: usize) -> bool {
+        if page_len <= self.hydrate_floor {
+            return false;
+        }
+        let Ok(entries) = std::fs::read_dir(&self.issues_dir) else {
+            return false;
+        };
+        let store_len = entries
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".md"))
+            .count();
+        page_len.saturating_mul(share) > store_len
     }
 
     /// May a read that the daemon answers from its index or hot graph go to
@@ -703,44 +784,45 @@ impl Engine {
 
     /// Try to satisfy a lean list query from the local index.
     ///
-    /// Returns `None` to fall back to the files: a disabled tier, a missing or
-    /// broken index, one too stale to refresh cheaply, or a query SQLite cannot
-    /// *shape* (see [`query_too_complex`]).
+    /// The answer is `None` to fall back to the files: a disabled tier, a
+    /// missing or broken index, one that could not be brought up to date, or a
+    /// query SQLite cannot *shape* (see [`query_too_complex`]). The second value
+    /// holds the warnings that explain an unexpected fallback, for the file
+    /// answer to carry.
+    ///
+    /// **No index error fails the read.** The index is a cache and the file tier
+    /// is always correct, so a refresh that hits `SQLITE_BUSY`, an item file
+    /// that vanishes between the check and the apply, or a query that errors is
+    /// a reason to use the files and say so, not to refuse.
     fn lean_via_index(
         &self,
         mode: QueryMode,
         filters: &Filters,
         order: Order,
         window: Page,
-    ) -> Result<Option<LeanAnswer>, CloveError> {
+    ) -> (Option<LeanAnswer>, Vec<String>) {
         if !self.tiers.index || !self.db_path.exists() {
-            return Ok(None);
+            return (None, Vec::new());
         }
+        let fall_back = |what: &str, err: &dyn std::fmt::Display| {
+            (
+                None,
+                vec![format!("{what} ({err}); answered from the files")],
+            )
+        };
         let mut index = match Index::open_or_rebuild(&self.db_path, &self.issues_dir) {
             Ok(index) => index,
             // A broken index is non-fatal: fall back to files.
-            Err(_) => return Ok(None),
+            Err(e) => return fall_back("the index could not be opened", &e),
         };
 
         if self.tiers.auto_refresh {
-            let report = if self.tiers.deep {
-                index.check_staleness(&self.issues_dir)
-            } else {
-                index.check_staleness_fast(&self.issues_dir)
-            }
-            .map_err(|e| index_error(e, &self.db_path))?;
-
-            if report.change_count() > STALE_REFRESH_LIMIT {
-                // Too far behind to refresh inline — use the files instead.
-                return Ok(None);
-            }
-            // Apply bookkeeping-only reports too (touched files, an outdated
-            // `meta` row), or later reads repeat the per-file pass forever.
-            if report.needs_apply() {
-                index
-                    .apply_staleness(&report, &self.issues_dir)
-                    .map_err(|e| index_error(e, &self.db_path))?;
-            }
+            index = match self.refresh(index) {
+                Ok(index) => index,
+                Err(e) => {
+                    return fall_back("the index could not be refreshed; run `clove reindex`", &e)
+                }
+            };
         }
 
         // The exhaustive push-down: SQL for what SQLite can express, an
@@ -758,15 +840,61 @@ impl Engine {
         // error out where `--no-index` answers normally. The index is a cache;
         // "this query is too big for SQLite" is a reason to use the other path,
         // not to refuse.
-        match index.query_filtered(&filter, residue.as_ref(), window) {
-            Ok((rows, total)) => Ok(Some((
-                rows.iter().map(LeanRow::from).collect(),
-                total,
+        // `ready` names the items it left out for a missing dependency. The
+        // file tier derives that from its graph; this is the same list from the
+        // index, so `_meta.warnings` does not depend on which tier answered.
+        let answer = index
+            .query_filtered(&filter, residue.as_ref(), window)
+            .and_then(|(rows, total)| {
+                let warnings = match mode {
+                    QueryMode::Ready => index.ready_warnings(&filter, residue.as_ref())?,
+                    QueryMode::List | QueryMode::Blocked => Vec::new(),
+                };
+                Ok((rows, total, warnings))
+            });
+        match answer {
+            Ok((rows, total, warnings)) => (
+                Some((rows.iter().map(LeanRow::from).collect(), total, warnings)),
                 Vec::new(),
-            ))),
-            Err(e) if query_too_complex(&e) => Ok(None),
-            Err(e) => Err(index_error(e, &self.db_path)),
+            ),
+            Err(e) if query_too_complex(&e) => (None, Vec::new()),
+            Err(e) => fall_back("the index query failed", &e),
         }
+    }
+
+    /// Bring `index` up to date with the item files, whatever the distance.
+    ///
+    /// A few changes are applied one by one. A report that touches more than
+    /// [`STALE_REFRESH_LIMIT`] items **and** more than a quarter of the indexed
+    /// store is cheaper as a full rebuild, which costs about the same per item
+    /// and skips the per-row bookkeeping.
+    ///
+    /// Both leave the index current, which is the point: an index that was only
+    /// *bypassed* when it fell far behind (a `git pull` of 25 items, 25 `clove
+    /// new` calls) stayed behind, so every later read repeated the per-file
+    /// staleness pass and then scanned the store anyway, until someone ran
+    /// `clove reindex` by hand.
+    fn refresh(&self, mut index: Index) -> Result<Index, clove_index::IndexError> {
+        let report = if self.tiers.deep {
+            index.check_staleness(&self.issues_dir)
+        } else {
+            index.check_staleness_fast(&self.issues_dir)
+        }?;
+
+        let changes = report.change_count();
+        if changes > STALE_REFRESH_LIMIT && changes.saturating_mul(4) > index.item_count()? {
+            // Close this connection before the rebuild and open a new one
+            // after it, so the query never runs on a handle from before.
+            drop(index);
+            clove_index::reindex(&self.issues_dir, &self.db_path)?;
+            return Index::open(&self.db_path);
+        }
+        // Apply bookkeeping-only reports too (touched files, an outdated
+        // `meta` row), or later reads repeat the per-file pass forever.
+        if report.needs_apply() {
+            index.apply_staleness(&report, &self.issues_dir)?;
+        }
+        Ok(index)
     }
 
     /// Run `call` against the daemon, if one is reachable.
@@ -866,15 +994,6 @@ pub fn query_too_complex(e: &clove_index::IndexError) -> bool {
     msg.contains("Expression tree is too large")
         || msg.contains("too many SQL variables")
         || msg.contains("parser stack overflow")
-}
-
-/// Surface a `clove-index` error through `CloveError` so a caller's exit-code
-/// mapping applies (index errors map to the I/O class).
-fn index_error(err: clove_index::IndexError, path: &Utf8Path) -> CloveError {
-    CloveError::Io {
-        path: path.to_owned(),
-        source: std::io::Error::other(err.to_string()),
-    }
 }
 
 #[cfg(test)]

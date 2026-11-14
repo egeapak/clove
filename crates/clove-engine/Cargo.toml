@@ -30,3 +30,5 @@ clove-index.workspace = true
 clove-types.workspace = true
 camino.workspace = true
 chrono.workspace = true
+# Tests break the index on purpose (a renamed column) to pin the file fallback.
+rusqlite.workspace = true

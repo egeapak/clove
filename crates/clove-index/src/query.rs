@@ -416,8 +416,15 @@ pub fn query_filtered(
     match post {
         None => {
             filter.limit = window.sql_fetch();
-            let total = count_items(conn, &filter)?;
-            Ok((query_list(conn, &filter)?, total))
+            let rows = query_list(conn, &filter)?;
+            // The `COUNT` pass evaluates the whole `WHERE` again (in `ready`
+            // and `blocked` mode, the edge subqueries for every candidate), so
+            // it runs only when the rows cannot give the total themselves.
+            let total = match total_from_fetch(rows.len(), filter.limit) {
+                Some(total) => total,
+                None => count_items(conn, &filter)?,
+            };
+            Ok((rows, total))
         }
         Some(post) => {
             filter.limit = None;
@@ -432,7 +439,70 @@ pub fn query_filtered(
     }
 }
 
+/// The unpaginated total, when a query that fetched `fetched` rows under
+/// `LIMIT limit` already proves it: with no limit, or a page that came back
+/// short, every match was fetched. A full page proves nothing (`None`).
+fn total_from_fetch(fetched: usize, limit: Option<usize>) -> Option<usize> {
+    match limit {
+        None => Some(fetched),
+        Some(limit) if fetched < limit => Some(fetched),
+        Some(_) => None,
+    }
+}
+
+/// The warnings a `ready` answer carries: the active items that match `filter`
+/// (and `post`) but are left out because a hard dependency is missing.
+///
+/// The index-path twin of the warning `clove_core::ops::ready_rows_with_graph`
+/// builds from the graph, worded by the same
+/// [`clove_core::ops::ready_dangling_warning`]. `filter.mode`, `filter.order`
+/// and `filter.limit` are ignored: the set is every match, in id order.
+pub fn ready_warnings(
+    conn: &Connection,
+    filter: &Filter,
+    post: Option<&PostFilter>,
+) -> Result<Vec<String>, IndexError> {
+    // The `List` clause with the status set narrowed to the active statuses is
+    // the `ready` candidate set before any graph term is applied.
+    let mut filter = filter.clone();
+    filter.mode = QueryMode::List;
+    let active: Vec<ItemStatus> = [ItemStatus::Open, ItemStatus::InProgress]
+        .into_iter()
+        .filter(|s| filter.status.is_empty() || filter.status.contains(s))
+        .collect();
+    filter.status = active;
+    if filter.status.is_empty() {
+        return Ok(Vec::new()); // e.g. `ready --status closed`
+    }
+    let (where_sql, params) = where_clause(&filter);
+    let sql = format!(
+        "SELECT {ITEM_COLUMNS} FROM items{where_sql} AND has_dangling_deps = TRUE ORDER BY id"
+    );
+    let param_refs: Vec<&dyn ToSql> = params.iter().map(|b| b.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(param_refs.as_slice(), ItemRow::from_row)?;
+    let mut ids = Vec::new();
+    for row in rows {
+        let row = row?;
+        if post.is_none_or(|post| post.matches_row(&row)) {
+            ids.push(row.id);
+        }
+    }
+    Ok(clove_core::ops::ready_dangling_warning(&ids)
+        .into_iter()
+        .collect())
+}
+
 impl crate::db::Index {
+    /// [`ready_warnings`] against this index.
+    pub fn ready_warnings(
+        &self,
+        filter: &Filter,
+        post: Option<&PostFilter>,
+    ) -> Result<Vec<String>, IndexError> {
+        ready_warnings(self.conn(), filter, post)
+    }
+
     /// Run a filtered query against the index (T-S07).
     pub fn query_items(&self, filter: &Filter) -> Result<Vec<ItemRow>, IndexError> {
         query_items(self.conn(), filter)
@@ -1089,5 +1159,66 @@ mod tests {
             .map(|r| r.id.clone())
             .collect();
         assert_eq!(desc, vec![a, c, b]);
+    }
+
+    #[test]
+    fn a_count_is_needed_only_for_a_full_page() {
+        assert_eq!(total_from_fetch(0, None), Some(0));
+        assert_eq!(total_from_fetch(7, None), Some(7));
+        assert_eq!(total_from_fetch(7, Some(8)), Some(7));
+        assert_eq!(total_from_fetch(8, Some(8)), None);
+    }
+
+    /// The total is the unpaginated match count for every window shape, in
+    /// every mode, whether or not the `COUNT` pass ran.
+    #[test]
+    fn query_filtered_totals_match_count_items_for_every_window() {
+        let fx = setup();
+        write_item(
+            &fx.issues,
+            "proj-00000001",
+            "closed",
+            1,
+            "feature",
+            &[],
+            &[],
+        );
+        for i in 2..=9 {
+            // Even ids wait for an open item, odd ids for the closed one.
+            let dep = if i % 2 == 0 {
+                "proj-0000000B"
+            } else {
+                "proj-00000001"
+            };
+            let id = format!("proj-0000000{i}");
+            write_item(&fx.issues, &id, "open", 2, "feature", &[dep], &[]);
+        }
+        write_item(&fx.issues, "proj-0000000B", "open", 2, "bug", &[], &[]);
+        reindex(&fx.issues, &fx.db).unwrap();
+        let index = crate::db::Index::open(&fx.db).unwrap();
+
+        for mode in [QueryMode::List, QueryMode::Ready, QueryMode::Blocked] {
+            let filter = Filter {
+                mode,
+                ..Filter::default()
+            };
+            let want = index.count_items(&filter).unwrap();
+            assert!(want >= 4, "{mode:?}: {want}");
+            for (offset, limit) in [
+                (0, None),
+                (0, Some(100)),
+                (0, Some(want)),
+                (0, Some(2)),
+                (1, Some(2)),
+                (want, Some(2)),
+                (0, Some(want + 1)),
+            ] {
+                let window = Page::new(offset, limit, 0);
+                let (rows, total) = index.query_filtered(&filter, None, window).unwrap();
+                assert_eq!(total, want, "{mode:?} offset {offset} limit {limit:?}");
+                let fetch = window.sql_fetch().unwrap_or(usize::MAX);
+                assert_eq!(rows.len(), want.min(fetch));
+            }
+        }
     }
 }
