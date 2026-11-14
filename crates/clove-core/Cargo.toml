@@ -2,11 +2,11 @@
 name = "clove-core"
 description = "clove core: item model, file store, dependency-graph engine, ID generation"
 edition.workspace = true
+rust-version.workspace = true
 version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 # Benches are declared explicitly below; `benches/fixtures.rs`-style helpers are

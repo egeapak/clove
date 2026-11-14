@@ -57,7 +57,7 @@ jobs:
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
-          toolchain: stable
+          toolchain: 1.100.0
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
@@ -93,7 +93,7 @@ jobs:
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
-          toolchain: stable
+          toolchain: 1.100.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           save-if: ${{ github.ref == 'refs/heads/master' }}
@@ -154,7 +154,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
-          toolchain: stable
+          toolchain: 1.100.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           save-if: ${{ github.ref == 'refs/heads/master' }}
@@ -207,7 +207,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
-          toolchain: stable
+          toolchain: 1.100.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           save-if: ${{ github.ref == 'refs/heads/master' }}
@@ -234,7 +234,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
-          toolchain: stable
+          toolchain: 1.100.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           save-if: ${{ github.ref == 'refs/heads/master' }}
@@ -297,6 +297,24 @@ jobs:
           cargo build --release -p clove-sync-github
           echo "== clove-sync-github plugin =="; ls -l target/release/clove-sync-github
 
+  msrv:
+    name: minimum supported Rust version
+    runs-on: ubuntu-latest
+    env:
+      CLOVE_SKIP_WEB_BUILD: "1"
+    steps:
+      - uses: actions/checkout@v4
+      # The version is `rust-version` in the root Cargo.toml
+      # (xtask/tests/versions.rs checks that the two agree).
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: 1.91.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      # `+1.91.0` is required: rust-toolchain.toml would select the pinned
+      # version otherwise.
+      - name: Build the workspace with the minimum version
+        run: cargo +1.91.0 check --workspace --all-features --locked
+
   notices:
     name: third-party notices (cargo-about)
     runs-on: ubuntu-latest
@@ -304,7 +322,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
-          toolchain: stable
+          toolchain: 1.100.0
       # The release workflow writes THIRD_PARTY_LICENSES.txt with
       # `cargo about generate --fail`, after the tag is pushed. Run the same
       # command here, for every release target, so a dependency whose license

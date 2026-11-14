@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/egeapak/clove/actions/workflows/ci.yml/badge.svg)](https://github.com/egeapak/clove/actions/workflows/ci.yml)
 [![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-blue.svg)](#license)
-[![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](rust-toolchain.toml)
+[![Rust](https://img.shields.io/badge/rust-1.91%2B-orange.svg)](Cargo.toml)
 
 A fast, git-native, **dependency-aware** work-item tracker for AI coding agents and humans.
 

@@ -8,11 +8,11 @@
 name = "clove-import-tk"
 description = "clove plugin: import items from a tk .tickets/ directory (clove import tk)"
 edition.workspace = true
+rust-version.workspace = true
 version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 publish = true
