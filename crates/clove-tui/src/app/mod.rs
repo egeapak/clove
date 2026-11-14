@@ -1076,6 +1076,51 @@ mod tests {
         assert_eq!(tree.children.len(), 1);
     }
 
+    /// The detail pane scrolls to the very end of a body whose lines are
+    /// indented. The scroll clamp used an estimate that ignored leading spaces,
+    /// so wrapped code lines were counted too short and the last body lines
+    /// stayed out of reach.
+    #[test]
+    fn detail_scrolls_to_the_end_of_an_indented_body() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        app.select_first();
+        let id = app.selected_frontmatter().unwrap().id.clone();
+        let code: String = (1..=60)
+            .map(|n| format!("let v{n} = [{}];\n", "word, ".repeat(n)))
+            .collect();
+        let body = format!("intro\n\n```\n{code}```\n\nTHE-LAST-LINE\n");
+        clove_core::apply_edit(
+            &app.data.store,
+            &id,
+            &clove_types::EditRequest {
+                body: Some(body),
+                ..Default::default()
+            },
+            Utc::now(),
+        )
+        .unwrap();
+        app.refresh();
+        assert_eq!(app.selected_frontmatter().unwrap().id, id);
+
+        for (w, h) in [(60, 24), (80, 24), (100, 24), (120, 24), (40, 48)] {
+            app.focus = Focus::Detail;
+            app.detail.detail_scroll = u16::MAX;
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+            terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            let screen: String = buffer.content().iter().map(|c| c.symbol()).collect();
+            assert!(
+                screen.contains("THE-LAST-LINE"),
+                "{w}x{h}: scrolled to {} and the end of the body is not on screen",
+                app.detail.detail_scroll
+            );
+        }
+    }
+
     #[test]
     fn renders_every_view_without_panic() {
         use ratatui::backend::TestBackend;
