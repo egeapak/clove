@@ -22,6 +22,7 @@ macro_rules! status {
 use clap::{Parser, Subcommand};
 
 #[cfg(feature = "git-sync")]
+mod fresh;
 mod git_sync;
 mod github_remote;
 #[cfg(feature = "github-sync")]
@@ -31,6 +32,7 @@ mod hub;
 mod ipc;
 mod knobs;
 mod lifecycle;
+mod readers;
 mod reindexer;
 mod slot;
 mod snapshot;

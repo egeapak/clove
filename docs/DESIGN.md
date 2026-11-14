@@ -1752,7 +1752,10 @@ it still stopping; see §8.3), `status`, `change_generation`, `query`,
 `graph`) while the project's watch is not yet in place (§8.6). Both of the
 latter two additions — `hub_status.token_records` and `WATCHER_ARMING` — are
 additive within protocol 8: an older client ignores the field and falls back
-on the refusal like on any daemon error.
+on the refusal like on any daemon error. `INDEX_BEHIND` is the same kind of
+refusal for an index read that the daemon cannot make current inside the call:
+more item files changed than a read may apply (the watcher applies them), the
+check failed, or the watch on `.clove/issues` is lost.
 
 **`PROTOCOL_VERSION`** gates a mixed-version pair; the client fails a mismatch
 and falls back, which is safe because the daemon is a cache, not a source of
@@ -1817,6 +1820,16 @@ then is the state `watching` and reads are answered. So a write made the moment
 a load returns — through the daemon or behind its back — is served once the
 project watches, never lost until the next change.
 
+While watching, the daemon keeps the set of item files the watch reported and
+the `.clove/issues` modification time it last saw. A read costs one `stat` when
+nothing was reported; otherwise the daemon checks only the reported files, and
+does the full directory pass only when the directory changed with no report. A
+read that cannot be made current is refused with `INDEX_BEHIND` (§8.4). When
+`.clove/issues` is removed or replaced, the watch is lost: the daemon unloads
+the project, and the next call loads it again with a fresh sweep and watch. A
+failed batch is retried (five times, one second apart) before the project is
+unloaded.
+
 ### 8.7 Git Auto-Sync (Disabled by Default)
 
 Enabled via `[daemon] git_sync = true` in `config.toml`.
@@ -1840,7 +1853,7 @@ the git index update.
 ```toml
 [daemon]
 git_sync = false          # opt-in auto-commit
-watch_debounce_ms = 200   # per-file debounce window
+watch_debounce_ms = 200   # per-file debounce window (a burst is flushed after 10x this, at least 1 s)
 idle_shutdown_min = 240   # default 4h; 0 = never; N = unload this project after N idle minutes
 stats_snapshot_min = 60   # auto-record a `clove stats` history point every N min; 0 = off
 ```

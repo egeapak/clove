@@ -20,7 +20,15 @@ use clove_index::Index;
 /// into the index's history. Returns `true` if a snapshot was recorded. Best
 /// effort: a scan/record failure is swallowed (a missed analytics point is never
 /// worth crashing the daemon).
-pub fn snapshot_once(repo_root: &Utf8Path, index: &Arc<Mutex<Index>>) -> bool {
+///
+/// `readers` moves the connection first if another process replaced
+/// `index.db`: a snapshot recorded through the old handle would go into a file
+/// that no longer has a name.
+pub fn snapshot_once(
+    repo_root: &Utf8Path,
+    index: &Arc<Mutex<Index>>,
+    readers: Option<&crate::readers::Readers>,
+) -> bool {
     let store = ItemStore::new(repo_root.to_owned());
     let Ok((frontmatters, _errors)) = store.scan_frontmatter() else {
         return false;
@@ -29,7 +37,12 @@ pub fn snapshot_once(repo_root: &Utf8Path, index: &Arc<Mutex<Index>>) -> bool {
     let now = Utc::now();
     let report = compute_stats(&frontmatters, &graph, now, StatsOptions::default());
     match index.lock() {
-        Ok(idx) => idx.record_snapshot(now, &report).is_ok(),
+        Ok(mut idx) => {
+            if let Some(readers) = readers {
+                readers.follow(&mut idx);
+            }
+            idx.record_snapshot(now, &report).is_ok()
+        }
         Err(_) => false,
     }
 }
@@ -52,6 +65,7 @@ pub fn snapshot_interval(stats_snapshot_min: u64) -> Option<Duration> {
 pub async fn snapshot_loop(
     repo_root: camino::Utf8PathBuf,
     index: Arc<Mutex<Index>>,
+    readers: Arc<crate::readers::Readers>,
     interval: Option<Duration>,
 ) {
     let Some(interval) = interval else {
@@ -64,7 +78,10 @@ pub async fn snapshot_loop(
         ticker.tick().await;
         let repo_root = repo_root.clone();
         let index = Arc::clone(&index);
-        let _ = tokio::task::spawn_blocking(move || snapshot_once(&repo_root, &index)).await;
+        let readers = Arc::clone(&readers);
+        let _ =
+            tokio::task::spawn_blocking(move || snapshot_once(&repo_root, &index, Some(&readers)))
+                .await;
     }
 }
 
@@ -97,8 +114,8 @@ mod tests {
         clove_index::reindex(&issues, &db).unwrap();
         let index = Arc::new(Mutex::new(Index::open(&db).unwrap()));
 
-        assert!(snapshot_once(&root, &index));
-        assert!(snapshot_once(&root, &index));
+        assert!(snapshot_once(&root, &index, None));
+        assert!(snapshot_once(&root, &index, None));
 
         let idx = index.lock().unwrap();
         assert_eq!(idx.snapshot_count().unwrap(), 2);
