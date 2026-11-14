@@ -6,6 +6,165 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `clove edit --body` / `--body-file` and `clove new --body-file` (`-` reads
+  stdin).
+- `clove sync github` records its repository in `.clove/sync-github.json` and
+  refuses another repository. `--adopt-links` overrides.
+- `cargo xtask publish-order`, `guard-sdk-licenses`, `guard-no-web`,
+  `guard-tls`, and `guard-glibc`.
+
+### Changed
+
+- **The web UI and its API need an access token.** The URL that `clove serve`
+  prints ends in `?token=…`; a request without the token gets 401. Scripts
+  send `Authorization: Bearer <token>`. The daemon's `web_url` carries the
+  token.
+- **The daemon acts on `[daemon] git_sync` and periodic GitHub sync only after
+  `git config clove.automation true` in the clone.** `clove doctor` reports
+  `DAEMON_AUTOMATION_NOT_ALLOWED` until then. Existing users of these keys
+  must run that command once per clone.
+- `--clove-dir` with a path that is not a `.clove` directory is refused (exit
+  4).
+- `ls`, `ready`, and `query` JSON rows carry the whole frontmatter from every
+  tier; use `--fields` for the lean row.
+- Usage errors under `--format json|jsonl` print a `USAGE_ERROR` envelope on
+  stdout.
+- MCP tools refuse an unknown argument (for example `labels`, or `offset` on
+  `clove_comments`) with an error that lists the valid names. Tool schemas
+  carry `additionalProperties: false`.
+- Web API: an empty PATCH or an unknown PATCH field is 422; write responses
+  report `_meta.source: "files"`; a comment without an author uses the shared
+  author rule; `?force=` accepts the shared boolean spellings.
+- `clove dep add` and `clove parent` read only the items on the path that they
+  validate. An unparseable file elsewhere in the store no longer blocks them.
+- `clove sync github` reports an item deleted locally under `local_missing`
+  and does not pull it again while its issue is unchanged.
+- Daemon list queries run in parallel on read connections. A daemon write and
+  the next read no longer scan the whole store.
+- When `/tmp/clove-<uid>` exists and is not the user's private directory, the
+  daemon uses `<clove-home>/run`.
+- Web: a bare id (`#7AF3Q2K9`) is autolinked only in upper case. The prefixed
+  form (`#proj-7af3q2k9`) still accepts either case.
+- Web: the timeline renders only the rows near the viewport, and the New item
+  modal asks before Escape or a backdrop click discards a draft.
+- The TUI renders an item's Markdown body once per item and width, not on
+  every frame.
+- Performance: the frontmatter scan no longer reads item bodies; `list_rows`
+  skips the graph for sorts that read no rank; a large full-row page is read
+  from the files; `ready`, `blocked`, and `ls` skip the `COUNT` query when the
+  page is not full; `dep tree` no longer ranks the whole graph; `clove export`
+  streams items.
+- Build: the toolchain is pinned to Rust 1.100.0, and the minimum supported
+  Rust version is 1.91.
+- Release: Linux binaries are built on Ubuntu 22.04 and need glibc 2.35 or
+  newer. A tag is built only when CI succeeded on the tagged commit.
+
+### Fixed
+
+- A title, assignee, or external ref with `[`/`{` before `*` or `&` (for
+  example `Deref [*ptr] crashes`) no longer makes the item unreadable.
+- An item write that exceeds the 64 KiB frontmatter or 4 MiB body limit is
+  refused, where before it wrote an unreadable file. A comment over 4 MiB is
+  refused.
+- Titles with several trailing line breaks and labels with Unicode line
+  separators round-trip. An item file with a UTF-8 BOM parses.
+- Delete without force refuses a parent that has children, and refuses while
+  any item file is unparseable.
+- Item files are 0644 when new and keep their mode on update.
+  `.clove/.gitignore` ignores `issues/.tmp*`.
+- The dependency cycle error shows the whole cycle path.
+- A non-UTF-8 comment no longer hides its thread.
+- `clove reindex` rebuilds the index inside `index.db`. A read during a
+  rebuild can no longer leave an empty index or lose the stats history.
+- A read no longer fails when the index cannot be refreshed or queried. The
+  files answer, with a warning. An index that is more than 20 changes behind
+  is refreshed or rebuilt by the next read.
+- `clove ready` gives the same dangling-dependency warning from the index and
+  from the files.
+- An edit that happens during a staleness check is no longer missed by the
+  next check.
+- The daemon indexes an item file that an editor saves in place, reloads the
+  project when `.clove/issues` is removed and created again (for example by
+  `git checkout`), and follows an `index.db` that another process replaced.
+- A daemon read that cannot be brought up to date is refused with
+  `INDEX_BEHIND`, and the client reads the index or the files itself.
+- A daemon-side create uses the current `id_prefix` and `default_type` from
+  `config.toml`.
+- Daemon answers larger than 8 MiB are no longer dropped (the limit is 64
+  MiB).
+- A starting hub removes the `hub.pid` of a dead hub at once. A watcher batch
+  that fails is retried, and a burst of file events is flushed after 10 times
+  `watch_debounce_ms`.
+- Human list commands print a note on stderr when the page is truncated.
+- `clove export` names item files that it could not export in `_meta.warnings`
+  and on stderr.
+- `clove import json|jsonl` validates every item before it writes any.
+- `clove edit` in an editor saves through the store (validation, `updated`,
+  index) and rolls back an invalid edit.
+- Conflicting flags are refused in `stats`, `assign`, and `agent-doc`; an
+  empty comment is refused; `agent-doc --out` works in JSON format; a
+  non-UTF-8 argument no longer panics.
+- `merge-driver` treats a failed `git merge-file` as an error.
+- `doctor --fix` rebuilds the index through a running daemon.
+- `dep tree` no longer reports "not found" when the daemon graph is behind;
+  `dep tree` and `dep cycle` honor `--deep`.
+- `clove import tk` and `clove import beads` translate the source tracker's
+  ids in parent, deps, and links to the imported items. Beads `depends_on_id`
+  edges are read. A second import no longer duplicates an item whose upstream
+  ref or unmapped fields changed.
+- `clove sync github`: a deleted linked issue no longer fails the comment
+  sync; a lost create response no longer leads to a duplicate issue and item;
+  an assignee-only change on GitHub is pulled; a pull from an issue without
+  `clove-meta` keeps the local priority; pulled deps are existence- and
+  cycle-checked, and a failed dep is retried; a comment with CRLF line breaks
+  is not duplicated on a first sync; the issue list is retried on transient
+  errors.
+- Web: the list and board no longer freeze when a filter, a status change, or
+  a card move reduces the number of rows.
+- Web: the list filter box keeps a trailing space; `?page=` survives Back;
+  invalid URL values are dropped. List titles are real links, and the `j`/`k`
+  cursor scrolls into view.
+- Web: the item and edit pages show "not found" or a Retry panel, not
+  "Loading…" forever. A failed comment is removed from the thread and the
+  draft is restored.
+- Web: inline edits work for items outside the loaded window; item page state
+  no longer carries over to the next item; form controls on the item pages
+  have accessible names; the board keeps keyboard focus on a moved card.
+- Web: an id inside a markdown link label or after a URL slash is no longer
+  autolinked.
+- Web server: store work no longer blocks the async workers; unlimited list
+  and board reads do one file scan; a missing `/_app/` file is 404; only
+  `/_app/immutable/` is cached as immutable.
+- `clove-web` rebuilds when `crates/clove-web/dist` changes.
+- The TUI edit form no longer reverts fields changed elsewhere while the form
+  was open, saving an unchanged form writes nothing, and a malformed or
+  unknown parent or dep id is rejected before any write. A failed save always
+  shows its error.
+- The TUI detail pane renders nested lists, tables, and link URLs, and scrolls
+  to the end of bodies with indented code. The filter menu keeps active values
+  that no item has any more; Up/Down move between Body lines in the form; the
+  help overlay scrolls on short terminals.
+
+### Security
+
+- Human CLI output no longer prints terminal control sequences from item text.
+- `index.db` is opened with `trusted_schema=OFF` and defensive mode. An index
+  that contains a view or a trigger is rebuilt.
+- Item reads refuse symlinks and non-regular files. `clove setup` and `clove
+  init --merge-driver` do not write through symlinks in a project.
+- A published `clove-web` verifies its downloaded web UI against a SHA-256
+  pinned in the crate, not against the `.sha256` in the Release.
+- Workflow tokens are read-only by default, and third-party actions are pinned
+  to commits. CI runs a daily advisory check.
+- `rusqlite` 0.41, which bundles SQLite 3.54 (RUSTSEC-2026-0459).
+
+### Removed
+
+- The unmaintained `.woodpecker/` pipelines and the redundant
+  `package.homepage` manifest key.
+
 ## [0.3.0] - 2026-11-09
 
 ### Added
