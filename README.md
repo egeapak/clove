@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/egeapak/clove/actions/workflows/ci.yml/badge.svg)](https://github.com/egeapak/clove/actions/workflows/ci.yml)
 [![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-blue.svg)](#license)
-[![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](rust-toolchain.toml)
+[![Rust](https://img.shields.io/badge/rust-1.91%2B-orange.svg)](Cargo.toml)
 
 A fast, git-native, **dependency-aware** work-item tracker for AI coding agents and humans.
 
@@ -61,7 +61,9 @@ single, dependency-light, cross-platform binary.
 
 **Prebuilt binaries** (with the web UI) are attached to each
 [GitHub Release](https://github.com/egeapak/clove/releases) for Linux, macOS
-(arm64 + x86_64) and Windows: `clove`, `cloved` and the integration plugins.
+(arm64 + x86_64) and Windows: `clove`, `cloved` and the integration plugins. The
+Linux binaries need glibc 2.35 or newer (Ubuntu 22.04, Debian 12, RHEL 10); on
+an older distribution, build from source.
 
 **Homebrew** (macOS, Linux x86_64) installs those same binaries, with the plugins
 as separate formulae:
@@ -280,8 +282,9 @@ The plugin wires up the `clove mcp` server automatically (tools surface as
 ## Build & test
 
 ```sh
-cargo build --release                    # lean binaries: clove (CLI), cloved (daemon)
-cargo build --release -p clove-sync-github   # the GitHub sync plugin (adds octocrab/TLS)
+cargo build --release -p clove-cli -p cloved   # lean binaries: clove (CLI), cloved (daemon)
+cargo build --release -p clove-sync-github    # the GitHub sync plugin (adds octocrab/TLS)
+cargo build --release                    # every workspace member: the two above, all plugins, the web UI crate
 cargo xtask test-all                     # nextest (unit + integration, incl. github sync), then doctests
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all --check
@@ -306,10 +309,13 @@ cd crates/clove-web/web && npm run check && npm run test   # svelte-check + vite
 | `crates/clove-types` | pure shared data types (model/id/error/validation + the create/edit request types) |
 | `crates/clove-core` | file store, dependency-graph engine, high-level ops (pure; no SQLite) |
 | `crates/clove-index` | optional SQLite index (list queries, staleness, incremental derived state, stats history) |
+| `crates/clove-engine` | the read tier: one daemon → index → files cascade behind every list, search and show surface |
+| `crates/clove-service` | the transport-independent tool engine behind `clove-mcp` and the plugin host channel |
 | `crates/clove` | the `clove` CLI (crate `clove-cli`) |
 | `crates/cloved` | the optional `cloved` daemon (file-watch, IPC, optional git sync, web serving) |
 | `crates/clove-import` | built-in `json`/`jsonl` export, the 3-way merge driver, the `tk`/`beads` importer logic (reused by the import plugins), and the pure GitHub field-mapping + reconciliation (its `github` feature — the octocrab network layer — is enabled only by the `clove-sync-github` plugin) |
 | `crates/clove-plugin` | support crate for cargo-style subcommand plugins (typed `PluginContext` from the `CLOVE_*` env contract + envelope/exit-code harness) |
+| `crates/clove-plugin-echo` | test fixture: a plugin that reports the argv and environment the host gave it (not published) |
 | `crates/clove-sync-github` | the `clove-sync-github` plugin: two-way GitHub Issues sync, installed separately (`cargo install clove-sync-github`) so the core carries no octocrab weight — `clove sync github <owner/repo>` resolves it |
 | `crates/clove-import-tk` / `crates/clove-import-beads` | the `clove-import-tk` / `clove-import-beads` plugins: import from a `tk` `.tickets/` dir or a Beads `issues.jsonl`, installed separately (`cargo install clove-import-tk`) — `clove import tk\|beads` resolves them |
 | `crates/clove-ipc` | CLI ↔ daemon wire protocol (`tarpc`) |

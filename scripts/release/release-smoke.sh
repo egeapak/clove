@@ -8,11 +8,16 @@ set -uo pipefail
 bin_dir=${1:?bin dir}
 want_version=${2:?version}
 export PATH="$bin_dir:/usr/bin:/bin:/usr/sbin:/sbin"
-work=$(mktemp -d /tmp/cvrel.XXXXXX)
+# Without a scratch directory, every command below would run in the caller's
+# directory: `clove init`, `new` and `close` against the store there, and
+# `daemon stop --all` against the caller's hub. So each setup step stops the
+# script when it fails (the checks themselves must not: they count failures).
+work=$(mktemp -d /tmp/cvrel.XXXXXX) || { echo "error: cannot create a scratch directory under /tmp" >&2; exit 1; }
+[ -n "$work" ] && [ -d "$work" ] || { echo "error: mktemp returned no directory" >&2; exit 1; }
 export HOME="$work/home" CLOVE_HOME="$work/clovehome" CLOVE_RUNTIME_DIR="$work/run"
 export CLOVE_AUTHOR=smoke@example.com
 unset CLOVE_FORMAT
-mkdir -p "$HOME"
+mkdir -p "$HOME" || { echo "error: cannot create $HOME" >&2; exit 1; }
 
 pass=0
 failed=0
@@ -35,7 +40,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$work/p" && cd "$work/p" && git init -q .
+mkdir -p "$work/p" && cd "$work/p" && git init -q . \
+	|| { echo "error: cannot set up the scratch repository in $work/p" >&2; exit 1; }
+case "$PWD" in
+"$work"/*) ;;
+*) echo "error: not inside the scratch directory ($PWD)" >&2; exit 1 ;;
+esac
 
 j() { clove -f json "$@"; }
 id_of() { jq -r .data.id; }
@@ -79,7 +89,8 @@ serve_pid=$!
 for _ in $(seq 1 50); do grep -q 'http://' "$work/serve.log" 2>/dev/null && break; sleep 0.2; done
 url=$(grep -o 'http://[0-9.:]*' "$work/serve.log" | head -1)
 check "serve SPA" bash -c "curl -fsS '$url/' | grep -qi '<html'"
-check "serve SPA is the real build, not the placeholder" bash -c "! curl -fsS '$url/' | grep -qi placeholder"
+# A failed curl must fail this check: without the page there is no proof.
+check "serve SPA is the real build, not the placeholder" bash -c "page=\$(curl -fsS '$url/') && [ -n \"\$page\" ] && ! printf '%s' \"\$page\" | grep -qi placeholder"
 check "serve API" bash -c "curl -fsS '$url/api/v1/items' | grep -q 'Alpha task'"
 kill "$serve_pid" 2>/dev/null
 wait "$serve_pid" 2>/dev/null

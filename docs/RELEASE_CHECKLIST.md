@@ -53,7 +53,7 @@ user's real ones.
 
 ```sh
 scripts/release/release-smoke.sh <extracted-dir> X.Y.Z     # CLI/MCP/web/daemon footprint
-TMPDIR=/tmp CLOVE_HOME=$(mktemp -d /tmp/cvd.XXXX)/h scripts/ci/daemon-smoke.sh <extracted-dir>   # hub flow
+TMPDIR=/tmp scripts/ci/daemon-smoke.sh <extracted-dir>     # hub flow (sets its own CLOVE_HOME and CLOVE_RUNTIME_DIR)
 ```
 
 - [ ] The release binaries carry the web feature: `clove serve` answers (it exits
@@ -62,9 +62,12 @@ TMPDIR=/tmp CLOVE_HOME=$(mktemp -d /tmp/cvd.XXXX)/h scripts/ci/daemon-smoke.sh <
 - [ ] **macOS x86_64** — the binary is x86_64-only, so it runs under Rosetta by
       itself. Do *not* use `arch -x86_64 bash` (Homebrew's bash is arm64-only).
 - [ ] **Linux x86_64** — `docker run --rm --platform linux/amd64 -v <scratch>:/s:ro
-      -v $PWD/scripts:/scripts:ro debian:stable-slim bash -c 'apt-get update -qq &&
+      -v $PWD/scripts:/scripts:ro ubuntu:22.04 bash -c 'apt-get update -qq &&
       apt-get install -y -qq --no-install-recommends git jq curl ca-certificates procps
       >/dev/null && bash /scripts/release/release-smoke.sh … && bash /scripts/ci/daemon-smoke.sh …'`.
+      `ubuntu:22.04` has glibc 2.35, the oldest glibc that the Linux binary
+      supports (`release.yml`, "Check the glibc floor"), so this run also shows
+      that the binary starts at the floor.
 - [ ] **Windows x86_64** — the full `daemon-smoke.sh` runs in CI (`daemon (windows)`
       job) on every PR; confirm it was green for the tagged commit. Locally, Wine in
       an amd64 Debian container runs the release `.exe`s well enough for targeted
@@ -148,8 +151,9 @@ empty or a real GitHub user.
       gone from the issue. Delete on GitHub but edit the file (and the
       reverse): nothing is deleted, the edited text is re-created on the other side.
       `--no-comments` leaves all of it alone.
-- [ ] Upgrade case: copy a `.clove/sync/github/*.json` written by 0.1.5, run the
-      0.2.0 sync → no duplicated or re-pushed comments, then an edit propagates.
+- [ ] Upgrade case: copy a `.clove/sync/github/*.json` written by the previous
+      release, run this release's sync → no duplicated or re-pushed comments, then
+      an edit propagates.
 - [ ] Reopen on GitHub → sync pulls `open`; close locally → sync pushes `CLOSED`
       (the same-second case is covered by
       `sync::tests::local_edit_in_the_same_second_as_the_last_pull_is_pushed`; by hand,
@@ -217,6 +221,9 @@ read with `tmux capture-pane -p`.
       shows the link URL, and `PgDn` reaches the last body line.
 - [ ] Help on a short terminal (`-y 12`): the title reads `Help · ↑↓ scroll`
       and `↓` reaches the `priority` row.
+- [ ] New form (`n`): type a title, `Tab` to the body and type two lines,
+      `Ctrl-S` → the item is selected in the list, and `clove ls` and
+      `clove show <id>` have the title and both body lines. Close it afterwards.
 - [ ] Form horizontal scroll: press `n` and type a title of about 100 characters.
       In `capture-pane -p`, the title scrolls behind a leading `…` and every
       field label stays in its column. `tmux display -p -t t '#{cursor_x}'`

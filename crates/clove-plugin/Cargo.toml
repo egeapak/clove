@@ -11,11 +11,11 @@
 name = "clove-plugin"
 description = "clove plugin support: typed PluginContext + envelope/exit-code harness for clove-* subcommand plugins"
 edition.workspace = true
+rust-version.workspace = true
 version.workspace = true
 license = "MIT OR Apache-2.0"
 authors.workspace = true
 repository.workspace = true
-homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 

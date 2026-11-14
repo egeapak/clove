@@ -2,11 +2,11 @@
 name = "clove-tui"
 description = "clove: terminal UI for browsing and editing work items"
 edition.workspace = true
+rust-version.workspace = true
 version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 

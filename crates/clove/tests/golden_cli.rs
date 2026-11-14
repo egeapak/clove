@@ -7,6 +7,8 @@
 //! depend on whether an index happens to exist, and item ordering is sorted in
 //! the test so snapshots are stable regardless of internal iteration order.
 
+mod support;
+
 use std::path::Path;
 use std::process::Command;
 
@@ -17,6 +19,7 @@ use tempfile::TempDir;
 /// A `clove` invocation rooted at `dir` with a clean, deterministic environment.
 fn clove(dir: &Path) -> Command {
     let mut cmd = Command::cargo_bin("clove").unwrap();
+    cmd.envs(support::isolated_env(dir));
     cmd.current_dir(dir);
     cmd.env_remove("CLOVE_FORMAT");
     cmd.env_remove("EDITOR");

@@ -2,6 +2,7 @@
 name = "xtask"
 description = "clove build/bench tooling (cargo xtask)"
 edition.workspace = true
+rust-version.workspace = true
 version.workspace = true
 license.workspace = true
 publish = false
@@ -10,6 +11,4 @@ publish = false
 anyhow.workspace = true
 camino.workspace = true
 clove-core.workspace = true
-
-[dev-dependencies]
 serde_json.workspace = true

@@ -38,6 +38,7 @@ fn install_echo_as(name: &str) -> (TempDir, PathBuf) {
 /// install root and registry cache.
 fn clove(dir: &Path) -> Command {
     let mut cmd = Command::cargo_bin("clove").unwrap();
+    cmd.envs(support::isolated_env(dir));
     // Generous plugin timeouts (honoured only by a `test-knobs` build): a slow
     // plugin start under load must not flip a result. The tests that target a
     // timeout set a small value of their own.

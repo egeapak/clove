@@ -18,13 +18,40 @@ on:
     tags:
       - "v*"
 
+# Only the `release` job writes (it creates the draft Release). The build jobs
+# run third-party actions and `cargo install`, so they get a read-only token.
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # A tag can point at any commit. Build nothing unless the CI workflow has
+  # finished with success on exactly this commit (CI runs on every push to
+  # master, so tag a commit that is on master and wait for its run). If this job
+  # fails because CI is still running, wait for CI and re-run the failed job.
+  ci-green:
+    name: CI passed on the tagged commit
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: The CI run of this commit succeeded
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          conclusions=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml \
+            --commit "$GITHUB_SHA" --event push --json status,conclusion \
+            --jq '.[] | "\(.status)/\(.conclusion)"')
+          echo "CI runs for $GITHUB_SHA: ${conclusions:-none}"
+          if ! printf '%s\n' "$conclusions" | grep -qx 'completed/success'; then
+            echo "CI has not passed on $GITHUB_SHA (${GITHUB_REF_NAME}); not building a release from it" >&2
+            exit 1
+          fi
+
   build:
     name: build (${{ matrix.suffix }})
     needs: web-dist
@@ -33,7 +60,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # The Linux binary links against the glibc of its build image, so the
+          # image sets the oldest distribution that can run it. ubuntu-22.04 has
+          # glibc 2.35; "Check the glibc floor" below fails when the binary
+          # needs more. When this image is retired, move to the oldest image
+          # that remains and raise the floor there, in README.md and in
+          # docs/RELEASE_CHECKLIST.md.
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             suffix: linux-x86_64
           # `macos-13` was retired on 2025-12-04; that label now queues forever
@@ -57,10 +90,11 @@ jobs:
           name: web-dist-tree
           path: crates/clove-web/dist
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
+          toolchain: 1.100.0
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
       - name: Install cargo-about
         # Pinned; generates THIRD_PARTY_LICENSES.txt (about.toml / about.hbs).
@@ -77,6 +111,16 @@ jobs:
         # turn on the `web` feature, so the binaries carry the web UI. Drop the plugin packages to
         # publish a lean, integration-free bundle instead.
         run: cargo build --release --target ${{ matrix.target }} -p clove-cli -p cloved -p clove-sync-github -p clove-import-tk -p clove-import-beads --features "clove-cli/full,cloved/full"
+
+      - name: Check the glibc floor
+        if: runner.os == 'Linux'
+        run: |
+          cargo xtask guard-glibc 2.35 \
+            target/${{ matrix.target }}/release/clove \
+            target/${{ matrix.target }}/release/cloved \
+            target/${{ matrix.target }}/release/clove-sync-github \
+            target/${{ matrix.target }}/release/clove-import-tk \
+            target/${{ matrix.target }}/release/clove-import-beads
 
       - name: Package
         shell: bash
@@ -118,6 +162,7 @@ jobs:
 
   web-dist:
     name: pack web UI for crates.io builds
+    needs: ci-green
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -161,6 +206,8 @@ jobs:
     name: publish GitHub Release
     needs: [build, web-dist]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -168,7 +215,7 @@ jobs:
           pattern: clove-*   # not web-dist-tree, the raw SPA the platform builds shared
           merge-multiple: true
       - name: Publish
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           draft: true   # review the assets, then publish from the Releases page
           generate_release_notes: true

@@ -9,6 +9,8 @@
 //!
 //! Exercises the 3-way merge driver (DESIGN.md §9.2).
 
+mod support;
+
 use std::path::Path;
 use std::process::Command;
 
@@ -18,6 +20,7 @@ use tempfile::TempDir;
 /// A `clove` command rooted at `dir`, with a deterministic environment.
 fn clove(dir: &Path) -> Command {
     let mut cmd = Command::cargo_bin("clove").unwrap();
+    cmd.envs(support::isolated_env(dir));
     cmd.current_dir(dir);
     cmd.env_remove("CLOVE_FORMAT");
     cmd.env_remove("EDITOR");
