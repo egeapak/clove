@@ -44,13 +44,7 @@ pub fn current_dir() -> Result<Utf8PathBuf, CloveError> {
 /// `.clove/` is used (with linked-worktree fallback in `clove-core`).
 pub fn discover(clove_dir_override: Option<&Utf8Path>) -> Result<Ctx, CloveError> {
     let (root, clove_dir) = match clove_dir_override {
-        Some(dir) => {
-            let root = dir
-                .parent()
-                .map(Utf8Path::to_owned)
-                .unwrap_or_else(|| Utf8PathBuf::from("."));
-            (root, dir.to_owned())
-        }
+        Some(dir) => clove_dir_override_root(dir)?,
         None => {
             let cwd = current_dir()?;
             let root = find_repo_root(&cwd).ok_or(CloveError::NoRepo { searched: cwd })?;
@@ -71,6 +65,36 @@ pub fn discover(clove_dir_override: Option<&Utf8Path>) -> Result<Ctx, CloveError
         db_path,
         store,
         config,
+    })
+}
+
+/// Split a `--clove-dir PATH` override into `(repo root, clove dir)`.
+///
+/// The store, the config, and the write lock always live in `<root>/.clove`
+/// (`ItemStore::new(root)`), while the index, the daemon key, and the plugin
+/// environment follow the override. The two only agree when `PATH` *is*
+/// `<parent>/.clove` — by name, or as a symlink to it — so any other path is
+/// refused instead of being half-honored (items written to a sibling `.clove`
+/// while the index and plugins look at `PATH`).
+pub fn clove_dir_override_root(dir: &Utf8Path) -> Result<(Utf8PathBuf, Utf8PathBuf), CloveError> {
+    let root = match dir.parent() {
+        Some(parent) if !parent.as_str().is_empty() => parent.to_owned(),
+        _ => Utf8PathBuf::from("."),
+    };
+    let named = dir.file_name() == Some(".clove");
+    let aliased = || {
+        let own = std::fs::canonicalize(dir).ok();
+        own.is_some() && own == std::fs::canonicalize(root.join(".clove")).ok()
+    };
+    if named || aliased() {
+        return Ok((root, dir.to_owned()));
+    }
+    Err(CloveError::InvalidField {
+        field: "--clove-dir".to_owned(),
+        reason: format!(
+            "`{dir}` is not a `.clove` directory: the path must end in `.clove` \
+             (or be a symlink to the `.clove` beside it)"
+        ),
     })
 }
 

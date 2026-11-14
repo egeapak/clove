@@ -15,7 +15,7 @@ use crate::cli::ShowArgs;
 use crate::context::Ctx;
 use crate::item_json::{item_object, parse_fields, project};
 use crate::output::print_json_success;
-use crate::util::parse_id;
+use crate::util::{parse_id, term_line, term_text};
 
 pub fn run(ctx: &Ctx, format: OutputFormat, args: ShowArgs) -> Result<(), CloveError> {
     let id = parse_id(&args.id)?;
@@ -65,15 +65,15 @@ fn print_human(
     obj: &serde_json::Map<String, Value>,
 ) {
     let fm = &item.frontmatter;
-    outln!("{}  {}", fm.id.as_str(), fm.title);
+    outln!("{}  {}", fm.id.as_str(), term_line(&fm.title));
     outln!("  status:   {}", fm.status.as_str());
     outln!("  type:     {}", fm.item_type.as_str());
     outln!("  priority: {}", fm.priority.get());
     if let Some(a) = &fm.assignee {
-        outln!("  assignee: {a}");
+        outln!("  assignee: {}", term_line(a));
     }
     if !fm.labels.is_empty() {
-        outln!("  labels:   {}", fm.labels.join(", "));
+        outln!("  labels:   {}", term_line(&fm.labels.join(", ")));
     }
     if !fm.deps.is_empty() {
         let deps: Vec<&str> = fm.deps.iter().map(|d| d.as_str()).collect();
@@ -84,6 +84,6 @@ fn print_human(
     }
     outln!("  comments: {comment_count}");
     if !item.body.trim().is_empty() {
-        outln!("\n{}", item.body.trim_end());
+        outln!("\n{}", term_text(item.body.trim_end()));
     }
 }

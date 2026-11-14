@@ -781,7 +781,7 @@ Missing `index.db`:
   no index — it has no index tier and no daemon tier to degrade from. See §7.8 "Search
   semantics" and read-path roadmap §6.1; its `_meta.source` is therefore always `"files"`.
 
-All JSON responses include `"_meta": { "source": "daemon" | "index" | "files", "took_ms": N }`.
+The list commands report the tier that answered in `"_meta": { "source": "daemon" | "index" | "files" }`.
 
 ### 6.8 The read tier (`clove-engine`)
 
@@ -804,8 +804,8 @@ everywhere else.
 
 | `Projection` | Meaning | Used by |
 |---|---|---|
-| `Lean` | The five columns `ls` renders suffice, so an index/daemon row is returned as-is and **no** item file is read. | `clove ls`/`ready`/`query` |
-| `Full` | Full frontmatter is required. A tier still answers the *query* — filtering, ordering, and counting stay in SQL — and only the returned page is read back from disk (frontmatter only, in parallel above 500 rows). | `clove blocked`, the MCP read tools, the web |
+| `Lean` | The five columns `ls` renders suffice, so an index/daemon row is returned as-is and **no** item file is read. | `clove ls`/`ready`/`query` in human format, or with `--fields` inside the lean row |
+| `Full` | Full frontmatter is required. A tier still answers the *query* — filtering, ordering, and counting stay in SQL — and only the returned page is read back from disk (frontmatter only, in parallel above 500 rows). | `clove blocked`, `clove ls`/`ready`/`query` in JSON or JSONL without `--fields` (so a row has the same keys from every tier), the MCP read tools, the web |
 | `Files` | Full frontmatter required **and** no tier may answer. A caller policy, not a property of the store. | `clove ls --fields id,created` (a field outside the lean row) |
 
 **Fallback conditions** for the list reads, in one place (`clove dep tree` and
@@ -866,21 +866,23 @@ it — so their `--help` text names the scope instead of leaving it silent.
 ### 7.2 Complete Command Table
 
 ```
-clove init [--prefix STR] [--no-gitignore] [--merge-driver]
-clove new <title> [-t|--type bug|feature|chore|docs|epic]
+clove init [--prefix STR] [--merge-driver]
+clove new <title> [--type bug|feature|chore|docs|epic]
           [-p|--priority 0-4] [-l|--label KEY:VAL ...]
-          [-d|--dep ID ...] [--parent ID] [--assignee STR]
-          [--body STR | --body-file PATH] [--format json]
+          [--dep ID ...] [--parent ID] [-a|--assignee STR]
+          [-b|--body STR | --body-file PATH] [--format json]
 clove show <id> [--format json] [--fields FIELD,...]
 clove edit <id>                             # opens $EDITOR
 clove edit <id> --field KEY=VALUE [--field KEY=VALUE ...]  # non-interactive
+clove edit <id> [-b|--body STR | --body-file PATH]         # replace the body (PATH `-` = stdin);
+                                                            # combines with --field in one write
 clove set <id> <field>=<value> [<field>=<value> ...]        # agent alias
 clove status <id>... <open|in_progress|closed> [--format json]
 clove start <id>...                         # alias: status in_progress
 clove close <id>...                         # alias: status closed
 clove label <id> add <label>
 clove label <id> rm <label>
-clove assign <id> <assignee>
+clove assign <id> <assignee> | --clear
 clove parent <id> <parent-id> | --clear     # cycle-checked, like dep add
 clove priority <id> <0-4>
 clove dep add <id> <dep-id>
@@ -915,7 +917,7 @@ clove stats [--top N] [--no-epics] [--snapshot]      # work-item analytics + dae
             [--history [--since RFC3339] [--limit N] [--offset N]] [--format json]
 clove comment <id> <message> [--format json]
 clove comments <id> [--limit N] [--skip-newest N] [--format json]
-clove reindex [--force] [--format json]
+clove reindex [--format json]
 clove import [--format json] <json|jsonl> <file> [--dry-run] [--overwrite]  # BUILT-IN native restore (inverse of export);
 clove import [--format json] <beads|tk> <src> [--dry-run]   # tk/beads are clove-import-<p> plugins;
 clove export [--format json] <json|jsonl> [--out FILE]      # export json/jsonl are built-in; clove global flags precede the
@@ -924,18 +926,17 @@ clove export [--format json] beads [--out FILE]             # export beads → c
 clove sync   [--format json] github <owner/repo> [--dry-run]        # two-way; clove-sync-github plugin
 clove import [--format json] github <owner/repo> [--dry-run]        # pull-only view of the sync (same plugin)
 clove export [--format json] github <owner/repo> [--dry-run]        # push-only view of the sync (same plugin)
-clove agent-doc [--format markdown|json] [--out FILE]
+clove agent-doc [--format human|json] [--out FILE]   # human = the Markdown document
 clove agent-doc --check [--file PATH]       # verify embedded doc vs binary
-clove migrate [--yes] [--dry-run]
 clove doctor [--fix] [--strict] [--format json]
 clove daemon start|stop [--all]|status [--format json]
-clove completions <bash|zsh|fish|powershell>
 clove version [--format json]
 ```
 
-**`clove edit --field`** supports: `status`, `priority`, `assignee`, `type`,
-`labels+=key:val` (append), `labels-=key:val` (remove). This is the agent-safe non-interactive
-edit path; `$EDITOR` is never opened from an agent subprocess.
+**`clove edit --field`** supports: `title`, `status`, `priority`, `assignee`, `type`,
+`labels+=key:val` (append), `labels-=key:val` (remove); the body is set with
+`--body` / `--body-file`. This is the agent-safe non-interactive edit path;
+`$EDITOR` is never opened from an agent subprocess.
 
 ### 7.3 JSON Output Envelope
 
@@ -948,10 +949,8 @@ Every response is a top-level object. Never a bare array.
   "ok": true,
   "data": <payload>,
   "_meta": {
-    "took_ms": 4,
     "source": "index",
-    "warnings": [],
-    "stale_index": false
+    "warnings": []
   }
 }
 ```
@@ -1018,9 +1017,6 @@ That splits the two kinds of command:
     "comment_count": 2,
     "ready": false,
     "blocked_by": ["proj-3k2"],
-    "dangling_deps": [],
-    "warnings": [],
-    "children_summary": null,
     "source_system": null,
     "external_ref": null
   }
@@ -1127,7 +1123,7 @@ the model one copy), so both stay.
 | 3 | CycleDetected | `dep add` when a cycle-path is detected; also used with `--fail-on-cycle` flag on `dep cycle` |
 | 4 | ValidationError | Bad field value, ID collision, invalid priority |
 | 5 | IoError | `.clove/` missing, file unreadable, filesystem error; also `REGISTRY_ERROR` — the plugin registry, `cargo` or `git` unreachable, returned by `plugin install`/`uninstall`/`update`. `plugin list`/`search` instead degrade to a warning at exit 0, since discovery is optional |
-| 6 | IndexError | Stale index with `--strict`; index unrecoverable |
+| 6 | IndexError | Reserved; never returned. An index failure surfaces as IoError (5), and `doctor --strict` findings exit 4 |
 | 7 | DaemonError | Daemon communication failure |
 
 ### 7.7 Health Check (`clove doctor`)

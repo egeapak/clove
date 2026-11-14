@@ -47,7 +47,8 @@ multiplexers extend this per-provider: `clove sync github` → `clove-sync-githu
 `clove-<mux>-<provider>` plugin only for a foreign provider (`tk`/`beads` are the
 `clove-import-tk`/`clove-import-beads` plugins). `sync` has **no** built-in
 providers (github is the `clove-sync-github` plugin). Global flags (`--format`,
-…) must precede the provider. The host↔plugin contract (the
+…) must precede the provider (the host also reads one that directly follows the
+provider; after the first provider argument everything is forwarded). The host↔plugin contract (the
 `CLOVE_*` env, the shared `{v,ok,data,_meta}` envelope, exit codes) lives in
 `clove-plugin`: a plugin `main` calls `PluginContext::from_env()` /
 `clove_plugin::run_with_info`, and the host writes the env from
@@ -110,9 +111,12 @@ filters, sorts, and windows, with `Source` assertions that stop it going vacuous
 
 ## GitHub sync (`clove-import`)
 
-`clove sync github <owner/repo>` is the **single GitHub path** (two-way; the old
-one-way `import github` / `export github` were removed). `import`/`export` remain
-for the file formats only (tk/beads, json/jsonl). The crate splits — like the
+`clove sync github <owner/repo>` is the **single GitHub reconcile** (two-way).
+`clove import github` / `clove export github` are its pull-only / push-only
+views, served by the same `clove-sync-github` plugin through the umbrella
+fallback (`PLUGIN_SYSTEM.md` §4.2); there is no separate one-way GitHub code
+path. The built-in `import`/`export` providers are the file formats only
+(json/jsonl; tk/beads are plugins). The crate splits — like the
 rest — into **pure, always-compiled** logic vs. the **`github`-feature** network
 layer:
 
