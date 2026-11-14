@@ -980,7 +980,9 @@ async fn list_answers_from_the_index_and_reports_the_tier() {
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-    let (_s, body) = get(addr, "/api/v1/items?sort=id").await;
+    // Windowed: an unwindowed read is pinned to the file tier (see
+    // `unlimited_reads_use_one_file_scan`).
+    let (_s, body) = get(addr, "/api/v1/items?sort=id&limit=100").await;
     let indexed: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(
         indexed["_meta"]["source"], "index",
@@ -1012,13 +1014,13 @@ async fn list_answers_from_the_index_and_reports_the_tier() {
     assert_eq!(dep["blocked_by"], serde_json::json!([]));
 
     // `?mode=` shares the same cascade rather than filtering in memory here.
-    let (_s, body) = get(addr, "/api/v1/items?mode=blocked").await;
+    let (_s, body) = get(addr, "/api/v1/items?mode=blocked&limit=100").await;
     let blocked: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(blocked["_meta"]["source"], "index", "body: {body}");
     assert_eq!(blocked["_meta"]["total"], 1);
     assert_eq!(blocked["data"][0]["id"], main_id);
 
-    let (_s, body) = get(addr, "/api/v1/items?mode=ready").await;
+    let (_s, body) = get(addr, "/api/v1/items?mode=ready&limit=100").await;
     let ready: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(ready["_meta"]["source"], "index", "body: {body}");
     assert_eq!(ready["data"][0]["id"], dep_id);
@@ -1522,7 +1524,7 @@ async fn missing_refs_cover_every_relation_on_any_status() {
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-    let (_s, body) = get(addr, "/api/v1/items?sort=id&status=open,closed").await;
+    let (_s, body) = get(addr, "/api/v1/items?sort=id&status=open,closed&limit=100").await;
     let indexed: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(
         indexed["_meta"]["source"], "index",
@@ -1535,4 +1537,210 @@ async fn missing_refs_cover_every_relation_on_any_status() {
     assert_eq!(row(&indexed)["missing_refs"], expected);
 
     drop(tmp);
+}
+
+/// A second server over the same repository, after building its index.
+async fn spawn_indexed(state: &AppState) -> std::net::SocketAddr {
+    let issues = state.issues_dir.clone();
+    clove_index::reindex(&issues, &issues.parent().unwrap().join("index.db")).unwrap();
+    let indexed_state = AppState::new(
+        state.store.clone(),
+        issues,
+        "proj".to_owned(),
+        "test",
+        false,
+        ItemType::Feature,
+    );
+    let app = build_router(indexed_state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    addr
+}
+
+/// An unwindowed list (the web default) and the board return every matching
+/// item. A tier answers that the expensive way — it reads every item file to
+/// hydrate the rows, then each row's dependency files again for the graph
+/// terms — where one file scan reads each file once. So those two requests are
+/// pinned to the file tier even beside a live index; a windowed request keeps
+/// the tiers. The rows are the same either way.
+#[tokio::test]
+async fn unlimited_reads_use_one_file_scan() {
+    let (_tmp, state, _main_id, _dep_id) = fixture();
+    let addr = spawn_indexed(&state).await;
+    let json = |body: &str| -> serde_json::Value { serde_json::from_str(body).unwrap() };
+
+    let (_s, body) = get(addr, "/api/v1/items?sort=id&limit=10").await;
+    let windowed = json(&body);
+    assert_eq!(
+        windowed["_meta"]["source"], "index",
+        "a windowed read must still use the index, or this test is vacuous: {body}"
+    );
+
+    for query in [
+        "?sort=id",
+        "?sort=id&limit=0",
+        "?sort=id&mode=ready&limit=0",
+    ] {
+        let (_s, body) = get(addr, &format!("/api/v1/items{query}")).await;
+        let all = json(&body);
+        assert_eq!(all["_meta"]["source"], "files", "{query}: {body}");
+        if !query.contains("mode") {
+            assert_eq!(all["data"], windowed["data"], "{query}: same rows");
+        }
+    }
+
+    let (_s, body) = get(addr, "/api/v1/board").await;
+    assert_eq!(json(&body)["_meta"]["source"], "files", "board: {body}");
+}
+
+/// `_meta.source` names a tier on the write responses too. They are rendered
+/// from the item files, so the answer is `files`; they used to carry the
+/// serving mode (`standalone`, or `daemon` under `cloved`), which is not a
+/// value of the published `daemon|index|files` enum.
+#[tokio::test]
+async fn write_responses_report_the_files_tier() {
+    let (_tmp, addr, main_id, dep_id) = spawn_ids().await;
+    let source = |body: &str| -> String {
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        v["_meta"]["source"].as_str().unwrap_or_default().to_owned()
+    };
+    let item = format!("/api/v1/items/{main_id}");
+
+    let (status, body) = send(addr, "POST", "/api/v1/items", Some(r#"{"title":"New"}"#)).await;
+    assert!(status.contains("200"), "{status} {body}");
+    assert_eq!(source(&body), "files", "create: {body}");
+
+    let (_s, body) = send(addr, "PATCH", &item, Some(r#"{"title":"Renamed"}"#)).await;
+    assert_eq!(source(&body), "files", "patch: {body}");
+
+    let labels = format!("{item}/labels");
+    let (_s, body) = send(addr, "PUT", &labels, Some(r#"{"add":["x"]}"#)).await;
+    assert_eq!(source(&body), "files", "labels: {body}");
+
+    let comments = format!("{item}/comments");
+    let (_s, body) = send(addr, "POST", &comments, Some(r#"{"body":"hi"}"#)).await;
+    assert_eq!(source(&body), "files", "comment: {body}");
+
+    let dep = format!("{item}/deps/{dep_id}");
+    let (_s, body) = send(addr, "DELETE", &dep, None).await;
+    assert_eq!(source(&body), "files", "remove dep: {body}");
+
+    let (_s, body) = send(addr, "DELETE", &item, None).await;
+    assert_eq!(source(&body), "files", "delete: {body}");
+}
+
+/// A comment posted with no `author` is attributed by the rule `clove comment`
+/// and the MCP `clove_comment` tool share (`CLOVE_AUTHOR`, the git identity,
+/// `$USER`), not to the literal `web`. An author the client names is kept.
+#[tokio::test]
+async fn comment_without_author_uses_the_shared_author_rule() {
+    let (tmp, state, main_id, _dep_id) = fixture();
+    // A repository identity, so the rule has something to resolve whatever
+    // the environment of the test run is.
+    let git = |args: &[&str]| {
+        let ok = std::process::Command::new("git")
+            .args(args)
+            .current_dir(tmp.path())
+            .output()
+            .is_ok_and(|o| o.status.success());
+        assert!(ok, "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "web-test@example.com"]);
+    let expected = clove_core::comments::comment_author(state.store.repo_root());
+    assert_ne!(expected, "unknown", "the fixture identity resolves");
+    assert_ne!(expected, "web");
+
+    let app = build_router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let path = format!("/api/v1/items/{main_id}/comments");
+    let (status, body) = send(addr, "POST", &path, Some(r#"{"body":"first"}"#)).await;
+    assert!(status.contains("200"), "{status} {body}");
+    let (status, body) = send(
+        addr,
+        "POST",
+        &path,
+        Some(r#"{"body":"second","author":"alice"}"#),
+    )
+    .await;
+    assert!(status.contains("200"), "{status} {body}");
+
+    let (_s, body) = get(addr, &path).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let author_of = |text: &str| -> String {
+        v["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["body"].as_str().is_some_and(|b| b.trim() == text))
+            .unwrap_or_else(|| panic!("no comment `{text}`: {body}"))["author"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    // The store keeps an author as a file-name slug (`a@b.c` → `a-b-c`).
+    let slug: String = expected
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    assert_eq!(author_of("first"), slug, "{body}");
+    assert_eq!(author_of("second"), "alice", "{body}");
+}
+
+/// A PATCH that edits nothing is an error, as it is for `clove set` and the
+/// MCP `clove_edit` tool. An empty object, or one naming only a key this
+/// endpoint does not edit (`parent` has its own endpoint), used to return 200
+/// and the unchanged item — indistinguishable from a successful edit.
+#[tokio::test]
+async fn patch_rejects_empty_and_unknown_fields() {
+    let (_tmp, addr, main_id, dep_id) = spawn_ids().await;
+    let item = format!("/api/v1/items/{main_id}");
+
+    let (status, body) = send(addr, "PATCH", &item, Some("{}")).await;
+    assert!(status.contains("422"), "empty: {status} {body}");
+    assert!(body.contains("VALIDATION_ERROR"), "{body}");
+    assert!(body.contains("no fields to edit"), "{body}");
+
+    let parent = format!(r#"{{"parent":"{dep_id}"}}"#);
+    let (status, body) = send(addr, "PATCH", &item, Some(&parent)).await;
+    assert!(status.contains("400"), "unknown key: {status} {body}");
+    assert!(body.contains("parent"), "names the key: {body}");
+
+    // An unknown key beside a real one is refused too, and nothing is written.
+    let mixed = r#"{"title":"Changed","deps":[]}"#;
+    let (status, body) = send(addr, "PATCH", &item, Some(mixed)).await;
+    assert!(status.contains("400"), "mixed: {status} {body}");
+    let (_s, body) = get(addr, &item).await;
+    assert!(body.contains("Add webhook handler"), "unchanged: {body}");
+
+    // `assignee: null` alone is a real edit (clear), not an empty one.
+    let (status, body) = send(addr, "PATCH", &item, Some(r#"{"assignee":null}"#)).await;
+    assert!(status.contains("200"), "clear assignee: {status} {body}");
+}
+
+/// `?force=` goes through the same boolean parser as every other flag of this
+/// API: `1` is true (it used to be read as false, so the delete was refused),
+/// and a value that is not a boolean is an error.
+#[tokio::test]
+async fn delete_force_accepts_the_shared_boolean_spellings() {
+    let (_tmp, addr, _main_id, dep_id) = spawn_ids().await;
+    let item = format!("/api/v1/items/{dep_id}");
+
+    let (status, body) = send(addr, "DELETE", &format!("{item}?force=yes"), None).await;
+    assert!(status.contains("422"), "not a boolean: {status} {body}");
+    assert!(body.contains("VALIDATION_ERROR"), "{body}");
+
+    let (status, body) = send(addr, "DELETE", &format!("{item}?force=0"), None).await;
+    assert!(
+        status.contains("409"),
+        "force=0 is no force: {status} {body}"
+    );
+
+    let (status, body) = send(addr, "DELETE", &format!("{item}?force=1"), None).await;
+    assert!(status.contains("200"), "force=1: {status} {body}");
+    assert!(body.contains("\"deleted\":true"), "{body}");
 }
