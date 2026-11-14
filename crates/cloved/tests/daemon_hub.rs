@@ -268,6 +268,7 @@ fn http_get(addr: &str, path: &str) -> (u16, Option<String>, String) {
 }
 
 /// [`http_get`] presenting the hub's web access `token` (none when empty).
+#[cfg(feature = "web")]
 fn http_get_as(addr: &str, path: &str, token: &str) -> (u16, Option<String>, String) {
     let mut stream = std::net::TcpStream::connect(addr).unwrap();
     let auth = match token {
