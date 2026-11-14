@@ -250,11 +250,11 @@ pub fn dep_add(
         }
         let frontmatters = scan_or_fail(store)?;
         let (graph, _dangling) = GraphStore::build(&frontmatters);
-        if graph.check_would_cycle(id, dep_id) {
+        if let Some(cycle) = graph.would_cycle_path(id, dep_id) {
             return Err(CloveError::DependencyCycle {
                 from: id.to_string(),
                 to: dep_id.to_string(),
-                cycle: vec![id.to_string(), dep_id.to_string()],
+                cycle: cycle.iter().map(CloveId::to_string).collect(),
             });
         }
         if item.frontmatter.deps.contains(dep_id) {
@@ -1223,11 +1223,14 @@ mod tests {
             dep_add(&store, &a, &a, Utc::now()),
             Err(CloveError::SelfDependency { .. })
         ));
-        // Negative: cycle (b → a, when a → b already).
-        assert!(matches!(
-            dep_add(&store, &b, &a, Utc::now()),
-            Err(CloveError::DependencyCycle { .. })
-        ));
+        // Negative: cycle (b → a, when a → b already). The error carries the
+        // closed path, not only the rejected edge.
+        match dep_add(&store, &b, &a, Utc::now()) {
+            Err(CloveError::DependencyCycle { cycle, .. }) => {
+                assert_eq!(cycle, vec![b.to_string(), a.to_string(), b.to_string()]);
+            }
+            other => panic!("expected DependencyCycle, got {other:?}"),
+        }
         // Negative: missing dependency target.
         let missing = CloveId::new("proj-ZZZZZZZZ").unwrap();
         assert!(matches!(
