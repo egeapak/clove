@@ -577,3 +577,112 @@ fn a_page_that_is_most_of_the_store_is_answered_from_the_files() {
         .unwrap();
     assert_eq!(got.source, Source::Index);
 }
+
+/// Add `count` open items straight to the store, behind the index's back.
+fn add_items(fx: &Fixture, count: usize, tag: &str) {
+    let store = ItemStore::new(fx.root.clone());
+    for i in 0..count {
+        store
+            .create(
+                "proj",
+                NewItem {
+                    title: format!("{tag} {i}"),
+                    item_type: ItemType::Feature,
+                    priority: Priority(2),
+                    labels: Vec::new(),
+                    deps: Vec::new(),
+                    parent: None,
+                    assignee: None,
+                    body: String::new(),
+                },
+                chrono::Utc::now(),
+            )
+            .unwrap();
+    }
+}
+
+/// An index that falls more than `STALE_REFRESH_LIMIT` items behind is brought
+/// up to date by the next read, not bypassed.
+///
+/// It used to be bypassed and left as it was: after 25 `clove new` calls every
+/// read reported `files`, with no warning, until a manual `clove reindex`, and
+/// paid the per-file staleness pass plus a whole-store scan each time.
+#[test]
+fn an_index_far_behind_is_refreshed_by_the_next_read() {
+    let fx = fixture();
+    let indexed = fx.indexed();
+    let all = Filters::default();
+    let list = |engine: &Engine| {
+        engine
+            .list(&all, Order::default(), Page::unlimited(), Projection::Lean)
+            .unwrap()
+    };
+    let indexed_rows = || {
+        clove_index::Index::open(&fx.clove_dir.join("index.db"))
+            .unwrap()
+            .item_count()
+            .unwrap()
+    };
+    assert!(25 > clove_engine::STALE_REFRESH_LIMIT);
+
+    // 25 new items behind a 6-item index: most of the store, so a rebuild.
+    add_items(&fx, 25, "pulled");
+    let got = list(&indexed);
+    assert_eq!(got.source, Source::Index, "the index must heal and answer");
+    assert_eq!(got.total, 31);
+    assert!(got.warnings.is_empty(), "{:?}", got.warnings);
+    assert_eq!(indexed_rows(), 31, "the refresh is stored, not redone");
+
+    // Grow the indexed store, then fall 21 items behind a 131-item index: a
+    // small share, so the changes are applied one by one.
+    add_items(&fx, 100, "bulk");
+    assert_eq!(list(&indexed).total, 131);
+    add_items(&fx, 21, "late");
+    let got = list(&indexed);
+    assert_eq!(got.source, Source::Index);
+    assert_eq!(got.total, 152);
+    assert_eq!(indexed_rows(), 152);
+
+    // And the answer is still the file answer.
+    let want = list(&fx.files());
+    assert_eq!(rows_of(&got.rows), rows_of(&want.rows));
+}
+
+/// An index error is a reason to use the files, never to fail the read: the
+/// index is a cache and the file tier is always correct.
+///
+/// `lean_via_index` used to propagate a failed staleness apply or query as an
+/// I/O error, so one `SQLITE_BUSY` made `clove ls` exit non-zero.
+#[test]
+fn an_index_error_falls_back_to_the_files_with_a_warning() {
+    let fx = fixture();
+    // Break the query, not the open: every list selects `title`.
+    rusqlite::Connection::open(fx.clove_dir.join("index.db"))
+        .unwrap()
+        .execute_batch("ALTER TABLE items RENAME COLUMN title TO headline;")
+        .unwrap();
+
+    let all = Filters::default();
+    for query in ["list", "ready", "blocked"] {
+        let run = |engine: &Engine| {
+            let (order, window) = (Order::default(), Page::unlimited());
+            match query {
+                "ready" => engine.ready(&all, order, window, Projection::Full),
+                "blocked" => engine.blocked(&all, order, window, Projection::Full),
+                _ => engine.list(&all, order, window, Projection::Full),
+            }
+            .unwrap()
+        };
+        let got = run(&fx.indexed());
+        let want = run(&fx.files());
+        assert_eq!(got.source, Source::Files, "{query}");
+        assert_eq!(rows_of(&got.rows), rows_of(&want.rows), "{query}");
+        assert!(
+            got.warnings
+                .iter()
+                .any(|w| w.contains("answered from the files")),
+            "{query}: the fallback must be named, got {:?}",
+            got.warnings
+        );
+    }
+}

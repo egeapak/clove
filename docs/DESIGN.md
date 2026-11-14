@@ -724,9 +724,15 @@ same transaction. Direct SQL writes to `items` outside this function are forbidd
 
 ### 6.4 Auto-Refresh Threshold
 
-On any read command: run Level 1 staleness check (~10 µs). If stale_count ≤ 20: apply
-incremental resync inline before running the query (transparent to user). If stale_count > 20
-OR > 5% of total items: print one-line warning to stderr and use file-scan fallback.
+On any read command: run Level 1 staleness check (~10 µs), then bring the index up to date
+before running the query (transparent to user). Up to 20 changed items are always applied
+incrementally. More than 20 are applied incrementally too, unless they are also more than a
+quarter of the indexed items; then the index is rebuilt (§6.6), which costs about the same per
+item. An index is never left behind: bypassing it instead made every later read repeat the
+staleness pass and then scan the files, until a manual `clove reindex`.
+
+If the refresh or the query fails (a locked database, a file that vanished mid-apply), the
+read answers from the files and names the error in `_meta.warnings`; it does not fail.
 `index.auto_refresh = false` in `config.toml` disables auto-refresh entirely (for agents that
 control all writes).
 
@@ -812,11 +818,13 @@ everywhere else.
 `clove stats` still gate on `--no-index` themselves — they do not route through
 the engine): `--no-index` (which disables the
 daemon tier too — the flag promises a file scan, and a daemon answering from its
-hot index is no more of one); no daemon or any IPC error; a missing, broken, or
-too-stale index (> 20 changed items); and a query SQLite cannot *shape*
-(`Expression tree is too large`, `too many SQL variables`, `parser stack
-overflow` — the index is a cache, so "too big for SQLite" selects the other path
-rather than failing).
+hot index is no more of one); no daemon or any IPC error; a missing or broken
+index, or one whose refresh or query failed (named in `_meta.warnings`); a query
+SQLite cannot *shape* (`Expression tree is too large`, `too many SQL variables`,
+`parser stack overflow` — the index is a cache, so "too big for SQLite" selects
+the other path rather than failing); and a `Full` page that is a large share of
+the store (more than 1000 rows and more than a third of the items, a tenth for
+`blocked`), which the file scan answers sooner than per-file hydration.
 
 **The engine applies the window before it returns**, so a caller renders what it
 is given and cannot double-page. `total` is always the pre-window match count,

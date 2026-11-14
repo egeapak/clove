@@ -29,9 +29,11 @@
 //! - **daemon** — a live `cloved` answers from its hot index and cached graph.
 //!   Skipped by [`Tiers::daemon`] (`--no-index`, and the daemon-hosted web,
 //!   which *is* the daemon and must not call itself).
-//! - **index** — `.clove/index.db`, freshened inline when it is lightly stale
-//!   and bypassed when it is too far behind, broken, or cannot *shape* the
-//!   query (see [`query_too_complex`]).
+//! - **index** — `.clove/index.db`, brought up to date inline before it answers
+//!   (a few changes one by one, most of the store as a rebuild) and bypassed
+//!   when it is broken, cannot be refreshed, or cannot *shape* the query (see
+//!   [`query_too_complex`]). A bypass for an error is named in the answer's
+//!   warnings.
 //! - **files** — always correct, always available, and the only tier `search`
 //!   has at all (read-path roadmap §6.1).
 
@@ -47,8 +49,9 @@ use clove_types::{CloveError, CloveId, ItemFrontmatter};
 use rayon::prelude::*;
 use serde_json::Value;
 
-/// Above this many out-of-date items, skip the incremental refresh and fall back
-/// to a file scan (DESIGN §6.4).
+/// Up to this many out-of-date items are always refreshed one by one. Above it
+/// the engine still refreshes, and rebuilds the index instead when the changes
+/// are also more than a quarter of the indexed store (DESIGN §6.4).
 pub const STALE_REFRESH_LIMIT: usize = 20;
 
 /// Above this many items in a page, hydrate in parallel. Mirrors
@@ -463,14 +466,18 @@ impl Engine {
         window: Page,
         projection: Projection,
     ) -> Result<ListAnswer, CloveError> {
+        let mut fallback_warnings = Vec::new();
         if projection.allows_tiers() {
             // Both tiers filter, order, count and window in SQL; only the page is
             // read back from disk to carry `blocked_by`.
             let tiered = match self.lean_via_daemon(QueryKind::Blocked, filters, order, window) {
                 Some(answer) => Some((Source::Daemon, answer)),
-                None => self
-                    .lean_via_index(QueryMode::Blocked, filters, order, window)?
-                    .map(|answer| (Source::Index, answer)),
+                None => {
+                    let (answer, warnings) =
+                        self.lean_via_index(QueryMode::Blocked, filters, order, window);
+                    fallback_warnings = warnings;
+                    answer.map(|answer| (Source::Index, answer))
+                }
             };
             if let Some((source, (rows, total, warnings))) = tiered {
                 let (page, _) = window.apply(rows);
@@ -503,7 +510,7 @@ impl Engine {
                     .collect(),
             ),
             total,
-            warnings: Vec::new(),
+            warnings: fallback_warnings,
             graph: Some(graph),
         })
     }
@@ -642,12 +649,15 @@ impl Engine {
         projection: Projection,
         file_rows: impl FnOnce() -> Result<(Vec<FullRow>, Vec<String>, GraphStore), CloveError>,
     ) -> Result<ListAnswer, CloveError> {
+        let mut fallback_warnings = Vec::new();
         if projection.allows_tiers() {
             let tiered = match self.lean_via_daemon(kind, filters, order, window) {
                 Some(answer) => Some((Source::Daemon, answer)),
-                None => self
-                    .lean_via_index(mode, filters, order, window)?
-                    .map(|answer| (Source::Index, answer)),
+                None => {
+                    let (answer, warnings) = self.lean_via_index(mode, filters, order, window);
+                    fallback_warnings = warnings;
+                    answer.map(|answer| (Source::Index, answer))
+                }
             };
             if let Some((source, (rows, total, warnings))) = tiered {
                 if let Some(answer) =
@@ -660,11 +670,12 @@ impl Engine {
         let (rows, warnings, graph) = file_rows()?;
         let total = rows.len();
         let (page, _) = window.apply(rows);
+        fallback_warnings.extend(warnings);
         Ok(ListAnswer {
             source: Source::Files,
             rows: Rows::Full(page),
             total,
-            warnings,
+            warnings: fallback_warnings,
             graph: Some(graph),
         })
     }
@@ -773,44 +784,45 @@ impl Engine {
 
     /// Try to satisfy a lean list query from the local index.
     ///
-    /// Returns `None` to fall back to the files: a disabled tier, a missing or
-    /// broken index, one too stale to refresh cheaply, or a query SQLite cannot
-    /// *shape* (see [`query_too_complex`]).
+    /// The answer is `None` to fall back to the files: a disabled tier, a
+    /// missing or broken index, one that could not be brought up to date, or a
+    /// query SQLite cannot *shape* (see [`query_too_complex`]). The second value
+    /// holds the warnings that explain an unexpected fallback, for the file
+    /// answer to carry.
+    ///
+    /// **No index error fails the read.** The index is a cache and the file tier
+    /// is always correct, so a refresh that hits `SQLITE_BUSY`, an item file
+    /// that vanishes between the check and the apply, or a query that errors is
+    /// a reason to use the files and say so, not to refuse.
     fn lean_via_index(
         &self,
         mode: QueryMode,
         filters: &Filters,
         order: Order,
         window: Page,
-    ) -> Result<Option<LeanAnswer>, CloveError> {
+    ) -> (Option<LeanAnswer>, Vec<String>) {
         if !self.tiers.index || !self.db_path.exists() {
-            return Ok(None);
+            return (None, Vec::new());
         }
+        let fall_back = |what: &str, err: &dyn std::fmt::Display| {
+            (
+                None,
+                vec![format!("{what} ({err}); answered from the files")],
+            )
+        };
         let mut index = match Index::open_or_rebuild(&self.db_path, &self.issues_dir) {
             Ok(index) => index,
             // A broken index is non-fatal: fall back to files.
-            Err(_) => return Ok(None),
+            Err(e) => return fall_back("the index could not be opened", &e),
         };
 
         if self.tiers.auto_refresh {
-            let report = if self.tiers.deep {
-                index.check_staleness(&self.issues_dir)
-            } else {
-                index.check_staleness_fast(&self.issues_dir)
-            }
-            .map_err(|e| index_error(e, &self.db_path))?;
-
-            if report.change_count() > STALE_REFRESH_LIMIT {
-                // Too far behind to refresh inline — use the files instead.
-                return Ok(None);
-            }
-            // Apply bookkeeping-only reports too (touched files, an outdated
-            // `meta` row), or later reads repeat the per-file pass forever.
-            if report.needs_apply() {
-                index
-                    .apply_staleness(&report, &self.issues_dir)
-                    .map_err(|e| index_error(e, &self.db_path))?;
-            }
+            index = match self.refresh(index) {
+                Ok(index) => index,
+                Err(e) => {
+                    return fall_back("the index could not be refreshed; run `clove reindex`", &e)
+                }
+            };
         }
 
         // The exhaustive push-down: SQL for what SQLite can express, an
@@ -829,14 +841,48 @@ impl Engine {
         // "this query is too big for SQLite" is a reason to use the other path,
         // not to refuse.
         match index.query_filtered(&filter, residue.as_ref(), window) {
-            Ok((rows, total)) => Ok(Some((
-                rows.iter().map(LeanRow::from).collect(),
-                total,
+            Ok((rows, total)) => (
+                Some((rows.iter().map(LeanRow::from).collect(), total, Vec::new())),
                 Vec::new(),
-            ))),
-            Err(e) if query_too_complex(&e) => Ok(None),
-            Err(e) => Err(index_error(e, &self.db_path)),
+            ),
+            Err(e) if query_too_complex(&e) => (None, Vec::new()),
+            Err(e) => fall_back("the index query failed", &e),
         }
+    }
+
+    /// Bring `index` up to date with the item files, whatever the distance.
+    ///
+    /// A few changes are applied one by one. A report that touches more than
+    /// [`STALE_REFRESH_LIMIT`] items **and** more than a quarter of the indexed
+    /// store is cheaper as a full rebuild, which costs about the same per item
+    /// and skips the per-row bookkeeping.
+    ///
+    /// Both leave the index current, which is the point: an index that was only
+    /// *bypassed* when it fell far behind (a `git pull` of 25 items, 25 `clove
+    /// new` calls) stayed behind, so every later read repeated the per-file
+    /// staleness pass and then scanned the store anyway, until someone ran
+    /// `clove reindex` by hand.
+    fn refresh(&self, mut index: Index) -> Result<Index, clove_index::IndexError> {
+        let report = if self.tiers.deep {
+            index.check_staleness(&self.issues_dir)
+        } else {
+            index.check_staleness_fast(&self.issues_dir)
+        }?;
+
+        let changes = report.change_count();
+        if changes > STALE_REFRESH_LIMIT && changes.saturating_mul(4) > index.item_count()? {
+            // Close this connection before the rebuild and open a new one
+            // after it, so the query never runs on a handle from before.
+            drop(index);
+            clove_index::reindex(&self.issues_dir, &self.db_path)?;
+            return Index::open(&self.db_path);
+        }
+        // Apply bookkeeping-only reports too (touched files, an outdated
+        // `meta` row), or later reads repeat the per-file pass forever.
+        if report.needs_apply() {
+            index.apply_staleness(&report, &self.issues_dir)?;
+        }
+        Ok(index)
     }
 
     /// Run `call` against the daemon, if one is reachable.
@@ -936,15 +982,6 @@ pub fn query_too_complex(e: &clove_index::IndexError) -> bool {
     msg.contains("Expression tree is too large")
         || msg.contains("too many SQL variables")
         || msg.contains("parser stack overflow")
-}
-
-/// Surface a `clove-index` error through `CloveError` so a caller's exit-code
-/// mapping applies (index errors map to the I/O class).
-fn index_error(err: clove_index::IndexError, path: &Utf8Path) -> CloveError {
-    CloveError::Io {
-        path: path.to_owned(),
-        source: std::io::Error::other(err.to_string()),
-    }
 }
 
 #[cfg(test)]
