@@ -652,10 +652,10 @@ filters on — see §6.5; v5 `items_fts.labels`; v6 **dropped `items_fts`/`fts_m
 also took the index from ~21 MB to ~4.8 MB and `clove reindex` from ~1.46 s to ~0.39 s on a
 10,000-item store).
 
-On a mismatch, `Index::open_or_rebuild` **rebuilds from the files**: `reindex` builds a
-temp database under the reindex lock and renames it over the live one, so a rebuild that
+On a mismatch, `Index::open_or_rebuild` **rebuilds from the files**: `reindex` replaces the
+cache tables inside the file under the reindex lock (§6.6), so a rebuild that
 cannot run leaves the old database in place and the next open retries. The older
-`Index::open_or_create` discards and returns an *empty* index — it has no store to
+`Index::open_or_create` empties the cache tables and returns an *empty* index — it has no store to
 rebuild from — and that discard is unrecoverable, since the replacement carries the
 current version and no later open can distinguish empty from up-to-date. Read paths must
 use `open_or_rebuild`. The same `index.db`
@@ -756,27 +756,32 @@ ORDER BY i.priority ASC, i.topological_rank ASC;
 
 ### 6.6 Reindex Protocol
 
-`clove reindex` writes to `index.db.tmp`, rebuilds, then renames to `index.db`. This means a
-crashed reindex never corrupts the live index. Concurrent reindex prevention: PID-based
-lockfile at `.clove/reindex.lock`.
+`clove reindex` rebuilds the cache tables **inside `index.db`, in one transaction**.
+A crashed reindex rolls back to the old contents, readers keep their snapshot until the
+commit, and a process that holds a connection open (the daemon) reads the rebuilt rows after
+it. The file is never unlinked while SQLite can read it: a reader that opens a missing path
+creates an empty database there. The `snapshots` history table is not part of the cache and
+is not touched. Concurrent reindex prevention: an advisory lock on `.clove/reindex.lock`.
 
 Steps:
-1. Open `index.db.tmp`.
-2. `BEGIN EXCLUSIVE` transaction.
-3. Create all tables and indexes.
-4. Parse all `.md` files in parallel (rayon, above 500 items; sequential below).
-5. Insert in batches of 500.
-6. Update `file_mtimes` for all files.
-7. Compute topological sort; update `topological_rank`.
-8. `COMMIT`. Write `meta` row last (so a crash before this step leaves `schema_version` unset,
-   detectable as corrupt).
-9. `PRAGMA wal_checkpoint(TRUNCATE)`.
-10. `rename(index.db.tmp, index.db)`.
+1. Take the lock. Read the `issues/` mtime, then parse all `.md` files in parallel (rayon,
+   above 500 items; sequential below). Item bodies are dropped as soon as a file is hashed.
+2. Open `index.db` and `BEGIN IMMEDIATE`.
+3. Drop every schema object except `snapshots`; create the cache tables; set `user_version`.
+4. Insert all rows and `file_mtimes`, with the topological rank and the derived flags.
+5. Write the `meta` row, create the covering index, `COMMIT`.
+6. `PRAGMA wal_checkpoint(TRUNCATE)` (best effort; a reader on an older snapshot defers it).
+
+Only a file that SQLite cannot use at all (not a database, or an object that cannot be
+dropped) is deleted and rebuilt from empty; its stats history is carried over as far as it
+can still be read.
 
 Target: < 1 second for 10,000 items on an SSD.
 
-**`PRAGMA synchronous=OFF`** during reindex (reset to NORMAL after) for maximum throughput,
-with the understanding that a crash during reindex is detected via `PRAGMA user_version` check.
+**Untrusted schema.** `index.db` is git-ignored, but can still arrive with a repository.
+Every connection sets `trusted_schema=OFF` and `SQLITE_DBCONFIG_DEFENSIVE`. An index at the
+current schema version that contains a view or a trigger, or lacks a cache table, is treated
+as corrupt and rebuilt from the files.
 
 ### 6.7 Missing Index Fallback
 
@@ -1587,8 +1592,7 @@ malicious clone can plant any of them as a symlink to a file the user cares
 about. The lock files (`daemon.lock`, `reindex.lock`, `write.lock`, the sync
 state's `.lock`) are opened with `O_NOFOLLOW` and never truncated; `index.db`
 (and its `-wal`/`-shm`) is refused outright when it is a symlink, since SQLite
-would write through it; `index.db.tmp` is unlinked (the link, not its target)
-before it is created; `daemon.token` is read `O_NOFOLLOW` and created through an
+would write through it; `daemon.token` is read `O_NOFOLLOW` and created through an
 `O_EXCL` temp file linked into place without replacing anything; and every
 other file — items, comments, the GitHub sync state, `.gitignore` (repaired by
 `clove doctor --fix`, written by `clove init`), `config.toml` — is written
