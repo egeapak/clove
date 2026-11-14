@@ -89,7 +89,6 @@ fn open_in_editor(ctx: &Ctx, id: &clove_types::CloveId) -> Result<clove_types::I
         source,
     };
     let original = std::fs::read(&path).map_err(io_err)?;
-    let before = parse_item_file(&path).ok();
 
     let editor = std::env::var("CLOVE_EDITOR")
         .or_else(|_| std::env::var("VISUAL"))
@@ -118,17 +117,58 @@ fn open_in_editor(ctx: &Ctx, id: &clove_types::CloveId) -> Result<clove_types::I
     }
 
     let now = now_millis();
-    let old_status = before.as_ref().map(|item| item.frontmatter.status);
-    let saved = ctx.store.update_with(id, now, |item| {
-        // A status typed into the file carries no `closed` timestamp (or a
-        // stale one); keep the status↔`closed` invariant the way every other
-        // status change does.
-        if old_status.is_some_and(|old| old != item.frontmatter.status) {
-            clove_types::set_status(&mut item.frontmatter, item.frontmatter.status, now);
-        }
-        Ok(())
-    });
+    // A status typed into the file carries no `closed` timestamp (or a stale
+    // one), and such a file does not even parse. Bring the `closed` line in
+    // step first, the way every other status change does.
+    if let Some(fixed) = std::str::from_utf8(&edited)
+        .ok()
+        .and_then(|text| sync_closed_line(text, now))
+    {
+        std::fs::write(&path, fixed).map_err(io_err)?;
+    }
+    let saved = ctx.store.update_with(id, now, |_| Ok(()));
     saved.map_err(|error| reject_edit(&path, &original, &edited, error))
+}
+
+/// Keep the frontmatter's `closed:` line in step with its `status:` line, as
+/// `set_status` does for a structured edit: a closed item gets `closed: <now>`
+/// when it has none, and an open or in-progress item loses a leftover
+/// `closed:` value. Returns the corrected text, or `None` when nothing needs to
+/// change (including any text whose frontmatter this cannot read — the store's
+/// own parser then reports the problem).
+fn sync_closed_line(text: &str, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
+    let mut lines: Vec<&str> = text.split_inclusive('\n').collect();
+    if lines.first()?.trim_end() != "---" {
+        return None;
+    }
+    let end = 1 + lines[1..].iter().position(|l| l.trim_end() == "---")?;
+    let value_of = |key: &str| {
+        lines[1..end].iter().enumerate().find_map(|(i, line)| {
+            let value = line.strip_prefix(key)?.strip_prefix(':')?;
+            Some((i + 1, value.trim().trim_matches(['\'', '"']).to_owned()))
+        })
+    };
+    let (status_at, status) = value_of("status")?;
+    let closed = value_of("closed");
+    let has_closed = closed
+        .as_ref()
+        .is_some_and(|(_, v)| !matches!(v.as_str(), "" | "null" | "~"));
+
+    let stamp;
+    match (status.as_str(), has_closed) {
+        ("closed", false) => {
+            stamp = format!("closed: {}\n", clove_types::canonical_rfc3339(now));
+            match closed {
+                Some((at, _)) => lines[at] = &stamp,
+                None => lines.insert(status_at + 1, &stamp),
+            }
+        }
+        ("open" | "in_progress", true) => {
+            lines.remove(closed?.0);
+        }
+        _ => return None,
+    }
+    Some(lines.concat())
 }
 
 /// Undo an editor session whose result the store refused: restore the original
@@ -220,7 +260,38 @@ fn split_editor_words(editor: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::split_editor_words;
+    use super::{split_editor_words, sync_closed_line};
+
+    #[test]
+    fn sync_closed_line_follows_the_status_line() {
+        let now = "2026-03-04T05:06:07.008Z".parse().unwrap();
+        // Closed with no timestamp: one is added after the status line.
+        let fixed = sync_closed_line("---\nid: a\nstatus: closed\ntype: bug\n---\nbody\n", now);
+        assert_eq!(
+            fixed.as_deref(),
+            Some("---\nid: a\nstatus: closed\nclosed: 2026-03-04T05:06:07.008Z\ntype: bug\n---\nbody\n")
+        );
+        // Reopened with a leftover timestamp: the line goes.
+        let fixed = sync_closed_line(
+            "---\nstatus: open\nclosed: 2026-01-01T00:00:00.000Z\n---\n",
+            now,
+        );
+        assert_eq!(fixed.as_deref(), Some("---\nstatus: open\n---\n"));
+        // Already consistent, or not a frontmatter document: untouched.
+        for text in [
+            "---\nstatus: open\n---\n",
+            "---\nstatus: closed\nclosed: 2026-01-01T00:00:00.000Z\n---\n",
+            "no frontmatter\nstatus: closed\n",
+            "---\nstatus: closed\n",
+        ] {
+            assert_eq!(sync_closed_line(text, now), None, "{text:?}");
+        }
+        // A `status:` line in the body is not frontmatter.
+        assert_eq!(
+            sync_closed_line("---\nstatus: open\n---\nstatus: closed\n", now),
+            None
+        );
+    }
 
     #[test]
     fn split_editor_words_handles_arguments_and_quoted_paths() {
