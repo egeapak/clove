@@ -18,9 +18,8 @@ the whole runbook once before running any `cargo publish`.
 
 > **Order of operations.** The crates download the web UI from the GitHub Release
 > at build time, so the release has to exist before the crates do:
-> 1. Prepare: bump the version (the workspace `Cargo.toml` **and**
->    `.claude-plugin/plugin.json`; `xtask/tests/claude_plugin.rs` fails until they
->    match), CHANGELOG, PR, merge (§1).
+> 1. Prepare: bump the version in its four places (§8 lists them;
+>    `cargo nextest run -p xtask` fails until they match), CHANGELOG, PR, merge (§1).
 > 2. Tag `v<version>` (§5) — `release.yml` builds the binaries **and** the web UI
 >    assets (`clove-web-dist-v<version>.tar.gz` + `.sha256`) into a draft Release (§6).
 > 3. Run [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md) against the draft, then
@@ -188,6 +187,7 @@ cargo metadata --no-deps --format-version 1 \
 Internal deps already declare both `path` **and** the workspace `version` (see
 `[workspace.dependencies]` in the root `Cargo.toml`), which is exactly what
 crates.io requires — no Cargo.toml surgery is needed before publishing.
+`xtask/tests/versions.rs` fails when one of them falls behind.
 
 ---
 
@@ -398,9 +398,17 @@ clove version`. A new platform archive in `release.yml` needs a matching
 - **Announce** the Release / crates.io links; close issue **#22** (and its
   parent epic #28 "Prepare clove for first public release" once its checklist is
   done).
-- **Open the next dev cycle**: bump `[workspace.package] version` to the next
-  pre-release (e.g. `0.4.0-dev`) in the root `Cargo.toml` so `master` is never
-  mistaken for a published version.
+- **Open the next dev cycle**: bump the version to the next pre-release (e.g.
+  `0.4.0-dev`) so `master` is never mistaken for a published version. The
+  version lives in four places, and the `xtask` tests fail until all four agree
+  (`xtask/tests/versions.rs`, `xtask/tests/claude_plugin.rs`):
+  - `[workspace.package] version` in the root `Cargo.toml`;
+  - the `version` of every internal crate under `[workspace.dependencies]` in
+    the same file;
+  - `crates/clove-web/web/package.json` and `package-lock.json`
+    (`npm version <version> --no-git-tag-version` in `crates/clove-web/web`
+    changes both);
+  - `.claude-plugin/plugin.json`.
 - **Reconcile the tracker** if you closed issues by hand:
   `GITHUB_TOKEN="$(gh auth token)" clove sync github egeapak/clove`.
 
