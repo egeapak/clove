@@ -154,6 +154,11 @@ empty or a real GitHub user.
       (the same-second case is covered by
       `sync::tests::local_edit_in_the_same_second_as_the_last_pull_is_pushed`; by hand,
       run the close immediately after the sync in one command line).
+- [ ] Wrong repository: `.clove/sync-github.json` names `egeapak/clove` after the
+      first sync. `clove sync github egeapak/<another repo> --dry-run` is refused
+      with a message that names `egeapak/clove` and `--adopt-links`; nothing changes.
+- [ ] Delete the throwaway item's file locally and sync: the run notes that the
+      local item was deleted and does not create it again; the issue stays open.
 - [ ] Sync again and `--dry-run`: `0 new / 0 updated`, everything in sync, no
       duplicated comments on the issue.
 - [ ] A transient "local item links gh-N but the GitHub issue was not found" right

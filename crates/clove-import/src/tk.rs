@@ -16,21 +16,30 @@
 //! | `type` (`task` → `chore`) | `type` (via [`crate::map::tk_type`]) |
 //! | `priority` | `priority` (via [`crate::map::coerce_priority`]) |
 //! | `assignee` | `assignee` |
-//! | `parent` | `parent` |
-//! | `deps` | `deps` |
+//! | `parent` | `parent` (tk id → clove id, see below) |
+//! | `deps` | `deps` (tk id → clove id) |
 //! | `tags` | `labels` (normalized via [`crate::map::map_labels`]) |
-//! | `links` | `relates` |
+//! | `links` | `relates` (tk id → clove id) |
 //! | `external-ref` | folded into `external_ref` as `"tk:<id> upstream:<value>"` |
 //! | — | `source_system = "tk"` |
 //!
+//! ## References between tickets
+//!
+//! `parent`, `deps` and `links` hold **tk ids** (`nw-5c46`), and every imported
+//! ticket gets a fresh clove id, so each reference is translated
+//! ([`crate::map::RefResolver`]): to the clove id minted for a ticket of this
+//! import, else to the item an earlier import made from that tk id, else it is
+//! kept when it already is a clove id. A reference that is none of these is
+//! dropped with a warning; it never fails the import.
+//!
 //! ## external_ref rule
 //!
-//! The clove `external_ref` is always namespaced as `"tk:<tk-id>"`, which is the
-//! idempotency key (DESIGN §11.3: skip incoming items whose `external_ref`
-//! matches an existing item). Namespacing keeps tk ids collision-free against
+//! The clove `external_ref` is always namespaced as `"tk:<tk-id>"`. The tk id in
+//! it is the idempotency key (DESIGN §11.3: skip incoming items that an earlier
+//! import already created). Namespacing keeps tk ids collision-free against
 //! other importers. If a tk ticket *also* carries its own upstream `external-ref`
-//! field, it is preserved by appending `" upstream:<value>"` — re-importing the
-//! same ticket reproduces the identical value, so idempotency is unaffected.
+//! field, it is preserved by appending `" upstream:<value>"`; that suffix is not
+//! part of the key, so a ticket whose upstream ref changed is still skipped.
 //!
 //! ## plan / apply split
 //!
@@ -46,7 +55,7 @@
 //! the JSON envelope's `_meta.warnings`.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use camino::Utf8Path;
 use chrono::{DateTime, Utc};
@@ -57,8 +66,8 @@ use serde::Deserialize;
 
 use crate::error::ImportError;
 use crate::map::{
-    cap_dep_array, coerce_priority, coerce_status, dangling_targets, map_labels, tk_type,
-    MAX_IMPORT_UNIT_BYTES,
+    cap_dep_array, coerce_priority, coerce_status, map_labels, mint_ids, push_dangling_warning,
+    tk_type, RefResolver, RefTarget, MAX_IMPORT_UNIT_BYTES,
 };
 use crate::plan::{ImportPlan, ImportReport, PlanItem, SkipItem};
 use crate::store::Store;
@@ -105,14 +114,17 @@ struct StagedTicket {
     /// The idempotency key / clove `external_ref` (`"tk:<id>"`, possibly with an
     /// appended `" upstream:<value>"`).
     external_ref: String,
+    /// The tk id, which the other tickets' references use.
+    source_id: String,
     title: String,
     status: ItemStatus,
     item_type: ItemType,
     priority: Priority,
     assignee: Option<String>,
-    parent: Option<CloveId>,
-    deps: Vec<CloveId>,
-    relates: Vec<CloveId>,
+    /// At most one target.
+    parent: Vec<RefTarget>,
+    deps: Vec<RefTarget>,
+    relates: Vec<RefTarget>,
     labels: Vec<String>,
     body: String,
 }
@@ -161,6 +173,8 @@ impl Importer for TkImporter {
         // (C1): the first occurrence is staged; later ones are skipped, never
         // silently overwriting the first staged record's data.
         let mut seen_ids: HashSet<String> = HashSet::new();
+        // tk id → the item an earlier import created from it.
+        let imported = ctx.imported_from("tk:");
 
         for path in paths {
             // M5: cap the per-file byte size before reading/parsing so a
@@ -241,19 +255,20 @@ impl Importer for TkImporter {
                 .unwrap_or_default();
             let priority =
                 coerce_priority(ticket.priority.unwrap_or(i64::from(Priority::DEFAULT.0)));
-            let parent = parse_ids(&path, ticket.parent.as_deref())?
+            let parent: Vec<RefTarget> = RefTarget::raw_list(ticket.parent.as_deref())
                 .into_iter()
-                .next();
+                .take(1)
+                .collect();
             // M4: enforce the per-array dep cap (truncate + warn) so the written
             // file can never violate the store's own validation limit.
             let deps = cap_dep_array(
-                parse_ids(&path, ticket.deps.iter().map(String::as_str))?,
+                RefTarget::raw_list(ticket.deps.iter().map(String::as_str)),
                 "deps",
                 &tk_id,
                 &mut self.warnings.borrow_mut(),
             );
             let relates = cap_dep_array(
-                parse_ids(&path, ticket.links.iter().map(String::as_str))?,
+                RefTarget::raw_list(ticket.links.iter().map(String::as_str)),
                 "relates",
                 &tk_id,
                 &mut self.warnings.borrow_mut(),
@@ -262,25 +277,9 @@ impl Importer for TkImporter {
             labels.sort();
             labels.dedup();
 
-            // M4: flag dangling dependency targets (ids absent from the store).
-            // Report-only: the write still proceeds.
-            let dangling = dangling_targets(
-                &ctx.store_ids,
-                parent.iter().chain(deps.iter()).chain(relates.iter()),
-            );
-            if !dangling.is_empty() {
-                let list = dangling
-                    .iter()
-                    .map(CloveId::as_str)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                self.warnings.borrow_mut().push(format!(
-                    "item `{tk_id}`: dangling dependency target(s) not present in the store: {list}"
-                ));
-            }
-
             let staged_ticket = StagedTicket {
-                external_ref: external_ref.clone(),
+                external_ref,
+                source_id: tk_id.clone(),
                 title: title.clone(),
                 status,
                 item_type,
@@ -293,10 +292,10 @@ impl Importer for TkImporter {
                 body,
             };
 
-            if ctx.is_imported(&external_ref) {
+            if let Some(existing) = imported.get(&tk_id) {
                 // M3: report field-level divergences against the existing item
                 // (status, priority, title); the write is still skipped.
-                let conflicts = ctx.conflicts_for(&external_ref, &tk_id, status, priority, &title);
+                let conflicts = existing.conflicts_with(&tk_id, status, priority, &title);
                 plan.conflicts.extend(conflicts);
                 plan.would_skip.push(SkipItem {
                     id: tk_id,
@@ -306,6 +305,40 @@ impl Importer for TkImporter {
                 plan.would_create.push(PlanItem { id: tk_id, title });
                 staged.push(staged_ticket);
             }
+        }
+
+        // The references are tk ids; turn them into clove ids now that the
+        // whole batch is known.
+        let batch: HashSet<String> = staged.iter().map(|t| t.source_id.clone()).collect();
+        let imported: HashMap<String, CloveId> = imported
+            .into_iter()
+            .map(|(source_id, existing)| (source_id, existing.id.clone()))
+            .collect();
+        let resolver = RefResolver {
+            batch: &batch,
+            imported: &imported,
+            store_ids: &ctx.store_ids,
+        };
+        let mut warnings = self.warnings.borrow_mut();
+        for ticket in staged.iter_mut() {
+            let own = ticket.source_id.clone();
+            // M4: flag dangling dependency targets (ids absent from the store).
+            // Report-only: the write still proceeds.
+            let mut dangling = Vec::new();
+            for (field, targets) in [
+                ("parent", &mut ticket.parent),
+                ("deps", &mut ticket.deps),
+                ("relates", &mut ticket.relates),
+            ] {
+                *targets = resolver.resolve(
+                    &own,
+                    field,
+                    std::mem::take(targets),
+                    &mut dangling,
+                    &mut warnings,
+                );
+            }
+            push_dangling_warning(&own, dangling, &mut warnings);
         }
 
         Ok(plan)
@@ -320,8 +353,9 @@ impl Importer for TkImporter {
         // lock-step during `plan`, so each staged record is written exactly once
         // with its own data — a shared source id can no longer collapse two
         // records onto the first one.
+        let minted = mint_ids(store, staged.iter().map(|t| t.source_id.as_str()))?;
         for ticket in staged.iter() {
-            let id = store.new_id()?;
+            let id = minted[&ticket.source_id].clone();
             let closed = if ticket.status == ItemStatus::Closed {
                 Some(self.now)
             } else {
@@ -338,10 +372,12 @@ impl Importer for TkImporter {
                 updated: self.now,
                 closed,
                 assignee: ticket.assignee.clone(),
-                parent: ticket.parent.clone(),
+                parent: RefTarget::clove_ids(&ticket.parent, &minted)
+                    .into_iter()
+                    .next(),
                 labels: ticket.labels.clone(),
-                deps: ticket.deps.clone(),
-                relates: ticket.relates.clone(),
+                deps: RefTarget::clove_ids(&ticket.deps, &minted),
+                relates: RefTarget::clove_ids(&ticket.relates, &minted),
                 duplicates: Vec::new(),
                 supersedes: Vec::new(),
                 source_system: Some("tk".to_owned()),
@@ -410,21 +446,6 @@ fn ticket_paths(src: &Utf8Path) -> Result<Vec<camino::Utf8PathBuf>, ImportError>
         paths.push(path);
     }
     Ok(paths)
-}
-
-/// Parse each raw id string into a [`CloveId`], surfacing a [`ImportError::Record`]
-/// on a malformed reference.
-fn parse_ids<'a, I>(path: &Utf8Path, raw: I) -> Result<Vec<CloveId>, ImportError>
-where
-    I: IntoIterator<Item = &'a str>,
-{
-    raw.into_iter()
-        .map(|r| {
-            CloveId::new(r.trim()).map_err(|err| ImportError::Record {
-                message: format!("{path}: invalid id reference `{r}`: {err}"),
-            })
-        })
-        .collect()
 }
 
 /// Split a file into (frontmatter text, body text). Tolerant of a missing

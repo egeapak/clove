@@ -2033,9 +2033,12 @@ driver, so they are deliberately excluded from it.
 **`clove merge-driver <ancestor> <ours> <theirs> <marker-size>` algorithm:**
 1. Parse all three files' frontmatter.
 2. For each scalar field: same-value conflict → accept; standard 3-way otherwise.
-3. For each list field: compute `union(ours, theirs) \ (ancestor \ ours \ theirs)` (standard
-   three-way set merge), then sort. Dep removal conflict (A removes X, B adds X) → flag
-   conflict.
+3. For each list field: compute `union(ours, theirs) \ (ancestor \ ours \ theirs)`, then
+   sort. An element is dropped only when both sides removed it. Removal conflict: an
+   element of the ancestor that exactly one side removed (A removes X, B still has X) →
+   flag a conflict on that field, also when B did not change the field. The driver
+   does not drop X silently, because a set cannot tell "B kept X on purpose" from "B
+   did not look at X".
 4. For the body: delegate to `git merge-file`.
 
 **Union-merge semantics for `deps`:** if branch A adds `proj-3k2` and branch B adds
@@ -2197,6 +2200,36 @@ and id mentions that name it stay valid; otherwise clove mints a fresh
 **Link write-back:** a *created* issue's number is written back onto the local
 item (`external_ref = "gh-<number>"`), so the next sync UPDATES it rather than
 creating a duplicate.
+
+**One repository per store.** A `gh-<number>` link does not name its repository.
+A sync against repository B of a store whose links point at repository A would
+pair each item with B's unrelated issue of the same number. The sync refuses
+(nothing is changed). The first sync records its repository in
+`.clove/sync-github.json` (`{"repo": "owner/repo"}`), a tracked file, so every
+clone knows it; a sync against another repository of a store that has `gh-`
+links is refused. A store from before that file has no record: there the sync
+refuses when this repository's sync state records none of the local links and
+either another repository's sync state records them, or the linked issues carry
+`clove-meta` ids and none is the id of the item linked to it. `--adopt-links`
+overrides the refusal and records the new repository.
+
+**`clove-meta` is trusted.** The `id`, `type`, `priority` and `deps` in an issue
+body are applied to the item that mirrors that issue, whoever wrote them: the
+people who can edit an issue body (its author and the repository's triagers)
+can already change that item's title and body. The effect stays on that one
+item: deps go through the checked dep op (no dangling edge, no cycle), an `id`
+is kept only when no local item has it, and an unlinked local item is paired
+with an issue that names its id only when their content is equal.
+
+**Lost link, deleted item.** An unlinked local item whose content equals an
+issue that names its id in `clove-meta` (a create whose response was lost) is
+linked to that issue instead of pushed a second time. An issue that was synced
+before, is unchanged since, and has no local item any more is reported under
+`local_missing` and not pulled again; an edit of the issue pulls it again.
+
+**Pulled deps.** The `clove-meta` deps of a pulled issue are added through the
+existence- and cycle-checked dep op. A dep that cannot be added is left out,
+reported as a warning, and tried again by the next sync.
 
 **Two-way reconcile:** one pass that pulls remote changes *and* pushes local
 changes, plus bidirectional issue-comment sync. A per-repo last-sync fingerprint

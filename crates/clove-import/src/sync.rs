@@ -179,6 +179,12 @@ pub struct SyncEntry {
     /// falls back to clock-only detection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gh_content_hash: Option<u64>,
+    /// The remote issue's assignee logins at the last sync, sorted. The content
+    /// fingerprint leaves the assignee out, so this is what shows that only the
+    /// assignee changed on GitHub. `None` (state files written before it was
+    /// tracked) never counts as a change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gh_assignees: Option<Vec<String>>,
 }
 
 impl SyncEntry {
@@ -195,6 +201,7 @@ impl SyncEntry {
             comment_links: Vec::new(),
             synced_assignee: None,
             gh_content_hash: None,
+            gh_assignees: None,
         }
     }
 
@@ -355,6 +362,36 @@ impl SyncState {
         }
     }
 
+    /// The sync states of the *other* repositories this store has been synced
+    /// with: every readable `*.json` next to `path`, except `path` itself. Each
+    /// carries its `repo` (the file stem when an old file recorded none).
+    pub fn load_siblings(path: &Utf8Path) -> Vec<Self> {
+        let Some(dir) = path.parent() else {
+            return Vec::new();
+        };
+        if clove_core::fs_safe::check_dirs(store_root(path), dir).is_err() {
+            return Vec::new();
+        }
+        let Ok(read) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let mut siblings: Vec<Self> = read
+            .filter_map(Result::ok)
+            .filter_map(|entry| Utf8PathBuf::from_path_buf(entry.path()).ok())
+            .filter(|other| other.extension() == Some("json") && other != path)
+            .filter_map(|other| {
+                let text = std::fs::read_to_string(&other).ok()?;
+                let mut state: Self = serde_json::from_str(&text).ok()?;
+                if state.repo.trim().is_empty() {
+                    state.repo = other.file_stem().unwrap_or_default().to_owned();
+                }
+                Some(state)
+            })
+            .collect();
+        siblings.sort_by(|a, b| a.repo.cmp(&b.repo));
+        siblings
+    }
+
     /// Persist the state to `path` (creating parent directories), pretty-printed
     /// and atomically (temp file + rename) so a crash never leaves a half-written
     /// state. `.clove/sync/` arrives with the repository, so nothing planted
@@ -403,6 +440,16 @@ impl SyncState {
             entry.gh_content_hash = Some(hash);
         }
     }
+
+    /// Record the remote issue's assignee logins for `external_ref` (see
+    /// [`SyncEntry::gh_assignees`]). Pair with [`SyncState::record`].
+    pub fn record_assignees(&mut self, external_ref: &str, mut logins: Vec<String>) {
+        if let Some(entry) = self.entries.get_mut(external_ref) {
+            logins.sort();
+            logins.dedup();
+            entry.gh_assignees = Some(logins);
+        }
+    }
 }
 
 /// The store's `.clove/` for a sync-state (or lock) path from
@@ -412,6 +459,51 @@ pub fn store_root(state_path: &Utf8Path) -> &Utf8Path {
         .ancestors()
         .nth(3)
         .unwrap_or_else(|| state_path.parent().unwrap_or(state_path))
+}
+
+/// The tracked record of the repository a store is synced with:
+/// `.clove/sync-github.json`, `{"repo": "owner/repo"}`.
+///
+/// A `gh-<number>` link does not name its repository, and the sync state under
+/// `.clove/sync/` is git-ignored, so a fresh clone has nothing that says which
+/// repository its links belong to. This file is outside `sync/`, so it is
+/// committed with the items and travels with every clone.
+pub fn repo_marker_path(repo_root: &Utf8Path) -> Utf8PathBuf {
+    repo_root.join(".clove").join("sync-github.json")
+}
+
+/// The repository recorded at `path` ([`repo_marker_path`]); `None` when the
+/// file is missing, unreadable, or records none.
+pub fn load_repo_marker(path: &Utf8Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    let repo = value.get("repo")?.as_str()?.trim();
+    (!repo.is_empty()).then(|| repo.to_owned())
+}
+
+/// Record `repo` at `path` ([`repo_marker_path`]), atomically.
+pub fn save_repo_marker(path: &Utf8Path, repo: &str) -> Result<(), ImportError> {
+    let root = path.parent().unwrap_or(path);
+    let mut json = serde_json::to_string_pretty(&serde_json::json!({ "repo": repo.trim() }))
+        .map_err(|err| ImportError::Record {
+            message: format!("failed to serialize the synced repository: {err}"),
+        })?;
+    json.push('\n');
+    clove_core::fs_safe::write_atomic(root, path, json.as_bytes()).map_err(|source| {
+        ImportError::Source {
+            path: path.to_owned(),
+            message: format!("failed to record the synced repository: {source}"),
+        }
+    })
+}
+
+/// Whether any local item object is linked to a GitHub issue (`gh-<number>`).
+pub fn has_github_links(local: &[Map<String, Value>]) -> bool {
+    local.iter().any(|obj| {
+        obj.get("external_ref")
+            .and_then(Value::as_str)
+            .is_some_and(|ext| parse_gh_number(ext).is_some())
+    })
 }
 
 /// A remote issue to be created as a brand-new local item (pull).
@@ -472,6 +564,20 @@ pub struct InSyncEntry {
     pub local_updated: DateTime<Utc>,
     /// The remote content fingerprint to record ([`staged_fingerprint`]).
     pub gh_content_hash: u64,
+    /// The remote assignee logins to record ([`SyncEntry::gh_assignees`]).
+    pub gh_assignees: Vec<String>,
+}
+
+/// An unlinked local item and the issue a push of it already created: the
+/// issue's `clove-meta` names the item and the two have the same content. The
+/// apply writes the missing `external_ref` instead of creating a second issue
+/// and a second item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkLocal {
+    /// The local item.
+    pub clove_id: String,
+    /// The issue's `external_ref` (`"gh-<number>"`).
+    pub external_ref: String,
 }
 
 /// A reported both-sides conflict and how it was (or was not) resolved.
@@ -508,6 +614,14 @@ pub struct SyncPlan {
     pub conflicts: Vec<SyncConflict>,
     /// Issues found already in sync (no action; fingerprint re-recorded).
     pub in_sync: Vec<InSyncEntry>,
+    /// Unlinked local items to link to the issue they were pushed as (each
+    /// also has an `in_sync` entry).
+    pub link: Vec<LinkLocal>,
+    /// `external_ref`s of issues that were synced before, are unchanged on
+    /// GitHub since, and have no local item any more (deleted locally) —
+    /// reported, never auto-applied: the item is not created again and the
+    /// issue is not closed.
+    pub local_missing: Vec<String>,
     /// `external_ref`s present locally whose GitHub issue was not found (deleted
     /// remotely, or wrong repo) — reported, never auto-applied.
     pub remote_missing: Vec<String>,
@@ -601,6 +715,7 @@ impl SyncPlan {
             conflicts: self.conflicts.clone(),
             in_sync: self.in_sync.len(),
             remote_missing: self.remote_missing.clone(),
+            local_missing: self.local_missing.clone(),
             foreign: self.foreign.clone(),
             comments: CommentSummary::default(),
         }
@@ -626,6 +741,9 @@ pub struct SyncSummary {
     pub conflicts: Vec<SyncConflict>,
     pub in_sync: usize,
     pub remote_missing: Vec<String>,
+    /// Issues whose local item was deleted (see [`SyncPlan::local_missing`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub local_missing: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub foreign: Vec<String>,
     /// The comment threads' plan; absent when comment sync is off or nothing
@@ -967,7 +1085,8 @@ pub fn staged_fingerprint(staged: &StagedIssue) -> u64 {
     content_fingerprint(
         &staged.title,
         staged.status == ItemStatus::Closed,
-        staged.priority.get(),
+        // Hashed as the default when unknown, like `export_fingerprint`.
+        staged.priority.unwrap_or(Priority::DEFAULT).get(),
         staged.item_type.map(clove_types::ItemType::as_str),
         staged
             .deps
@@ -1180,10 +1299,13 @@ pub fn plan_comments(
     }
 
     let mut legacy = entry.comment_hash_counts();
-    let unclaimed_twin = |claimed: &HashSet<&str>, hash: u64| -> Option<&LocalComment> {
+    // Twins are compared with line endings normalized ([`link_hash`]): GitHub
+    // may hand a body back with CRLF line breaks the local file never had.
+    let unclaimed_twin = |claimed: &HashSet<&str>, body: &str| -> Option<&LocalComment> {
+        let hash = link_hash(body);
         local
             .iter()
-            .find(|c| !claimed.contains(c.key.as_str()) && body_hash(&c.body) == hash)
+            .find(|c| !claimed.contains(c.key.as_str()) && link_hash(&c.body) == hash)
     };
 
     // GitHub comments a 0.1.x state already knows: adopt the local copy.
@@ -1193,7 +1315,7 @@ pub fn plan_comments(
         }
         gh_claimed.insert(remote.id);
         let hash = body_hash(&remote.body);
-        if let Some(twin) = unclaimed_twin(&local_claimed, hash) {
+        if let Some(twin) = unclaimed_twin(&local_claimed, &remote.body) {
             local_claimed.insert(&twin.key);
             if let Some(remaining) = legacy.get_mut(&hash) {
                 *remaining = remaining.saturating_sub(1);
@@ -1228,7 +1350,7 @@ pub fn plan_comments(
         if gh_claimed.contains(&remote.id) {
             continue;
         }
-        match unclaimed_twin(&local_claimed, body_hash(&remote.body)) {
+        match unclaimed_twin(&local_claimed, &remote.body) {
             Some(twin) => {
                 local_claimed.insert(&twin.key);
                 plan.relink.push(CommentRelink {
@@ -1327,19 +1449,27 @@ fn content_equal(staged: &StagedIssue, obj: &Map<String, Value>) -> bool {
     if local_closed != remote_closed {
         return false;
     }
+    // Priority, like type/deps below, is only comparable when the remote body
+    // carried it in clove-meta (`None` = unknown, never a difference).
     let local_priority = obj
         .get("priority")
         .and_then(Value::as_u64)
         .map(|p| p as u8)
         .unwrap_or(Priority::DEFAULT.get());
-    if staged.priority.get() != local_priority {
+    if staged.priority.is_some_and(|p| p.get() != local_priority) {
         return false;
     }
     let local_assignee = obj
         .get("assignee")
         .and_then(Value::as_str)
         .filter(|s| !s.trim().is_empty());
-    if staged.assignee.as_deref() != local_assignee {
+    // The local assignee is one of the issue's assignees (GitHub does not fix
+    // their order), or both sides have none.
+    let same_assignee = match local_assignee {
+        Some(local) => staged.assignees.iter().any(|login| login == local),
+        None => staged.assignees.is_empty(),
+    };
+    if !same_assignee {
         return false;
     }
     let mut local_labels: Vec<&str> = obj
@@ -1376,6 +1506,91 @@ fn content_equal(staged: &StagedIssue, obj: &Map<String, Value>) -> bool {
     staged.body.trim() == local_body
 }
 
+/// Why the local `gh-<number>` links look like links to a *different*
+/// repository than the one being synced, or `None` when nothing says so.
+///
+/// A `gh-<number>` link does not name its repository. Syncing a store against
+/// a second repository would pair each linked item with that repository's
+/// unrelated issue of the same number, and the conflict policy would then
+/// overwrite one with the other. Two things give a wrong repository away, both
+/// only consulted when `state` (this repository's) records none of the links:
+///
+/// - the state of another repository (`other_states`) records them;
+/// - the linked issues carry `clove-meta` ids, and none of them is the id of
+///   the item linked to it.
+///
+/// A store with no state at all whose issues carry no `clove-meta` (a fresh
+/// clone of pull-only links) gives no evidence either way and is let through.
+pub fn foreign_links_reason(
+    remote: &[GitHubIssue],
+    local: &[Map<String, Value>],
+    state: &SyncState,
+    other_states: &[SyncState],
+) -> Option<String> {
+    let linked: Vec<(&str, &str)> = local
+        .iter()
+        .filter_map(|obj| {
+            let ext = obj.get("external_ref").and_then(Value::as_str)?;
+            parse_gh_number(ext)?;
+            Some((
+                ext,
+                obj.get("id").and_then(Value::as_str).unwrap_or_default(),
+            ))
+        })
+        .collect();
+    if linked.is_empty()
+        || linked
+            .iter()
+            .any(|(ext, _)| state.entries.contains_key(*ext))
+    {
+        return None;
+    }
+
+    for other in other_states {
+        let known = linked
+            .iter()
+            .filter(|(ext, _)| other.entries.contains_key(*ext))
+            .count();
+        if known > 0 {
+            return Some(format!(
+                "{known} of the {} local item(s) linked to a GitHub issue were last synced with `{}`",
+                linked.len(),
+                other.repo
+            ));
+        }
+    }
+
+    let remote_by_ref: HashMap<String, &GitHubIssue> = remote
+        .iter()
+        .filter(|issue| issue.pull_request.is_none())
+        .map(|issue| (external_ref_for(issue.number), issue))
+        .collect();
+    let mut same = 0usize;
+    let mut mismatch: Option<String> = None;
+    for (ext, id) in &linked {
+        let meta_id = remote_by_ref
+            .get(*ext)
+            .and_then(|issue| issue.body.as_deref())
+            .and_then(crate::github::decode_clove_meta)
+            .and_then(|meta| meta.id);
+        match meta_id {
+            Some(meta_id) if meta_id.trim() == *id => same += 1,
+            Some(meta_id) if mismatch.is_none() => {
+                mismatch = Some(format!(
+                    "issue {ext} carries the clove id `{}`, but the local item linked to it is {id}",
+                    meta_id.trim()
+                ));
+            }
+            _ => {}
+        }
+    }
+    if same == 0 {
+        mismatch
+    } else {
+        None
+    }
+}
+
 /// Reconcile fetched `remote` issues against the local item objects (the
 /// `export_object` §7.4 shape) given the prior `state` and a `policy`.
 ///
@@ -1400,6 +1615,42 @@ pub fn plan_sync(
 
     let mut matched: HashSet<String> = HashSet::new();
 
+    // An unlinked local item whose push already created an issue (the create
+    // landed but the link was never written, e.g. the response was lost): the
+    // issue's `clove-meta` carries the item's id. Pair the two only when their
+    // content is equal, because anyone who can open an issue can write a
+    // `clove-meta` id into it.
+    let local_refs: HashSet<&str> = local
+        .iter()
+        .filter_map(|obj| obj.get("external_ref").and_then(Value::as_str))
+        .collect();
+    let unlinked: HashMap<&str, &Map<String, Value>> = local
+        .iter()
+        .filter(|obj| obj.get("external_ref").and_then(Value::as_str).is_none())
+        .filter_map(|obj| Some((obj.get("id").and_then(Value::as_str)?, obj)))
+        .collect();
+    let mut pushed_as: HashMap<String, (String, StagedIssue, &GitHubIssue)> = HashMap::new();
+    if !unlinked.is_empty() {
+        let mut candidates: Vec<&GitHubIssue> = remote_by_ref.values().copied().collect();
+        candidates.sort_by_key(|issue| issue.number);
+        for issue in candidates {
+            let ext = external_ref_for(issue.number);
+            if local_refs.contains(ext.as_str()) || state.entries.contains_key(&ext) {
+                continue;
+            }
+            let staged = map_issue(issue)?;
+            let Some(meta_id) = staged.meta_id.as_ref().map(CloveId::as_str) else {
+                continue;
+            };
+            let Some(obj) = unlinked.get(meta_id) else {
+                continue;
+            };
+            if !pushed_as.contains_key(meta_id) && content_equal(&staged, obj) {
+                pushed_as.insert(meta_id.to_owned(), (ext, staged, issue));
+            }
+        }
+    }
+
     for obj in local {
         let item = build_export_item(obj);
         let clove_id = item.clove_id.clone();
@@ -1410,12 +1661,29 @@ pub fn plan_sync(
             .map(str::to_owned);
 
         match external_ref {
-            // Brand-new local item — create it on GitHub.
-            None => plan.push_create.push(PushCreate {
-                clove_id,
-                item,
-                local_updated,
-            }),
+            None => match pushed_as.remove(clove_id.as_str()) {
+                // Already on GitHub, only the link is missing.
+                Some((ext, staged, issue)) => {
+                    matched.insert(ext.clone());
+                    plan.in_sync.push(InSyncEntry {
+                        external_ref: ext.clone(),
+                        gh_updated_at: issue.updated_at,
+                        local_updated,
+                        gh_content_hash: staged_fingerprint(&staged),
+                        gh_assignees: staged.assignees,
+                    });
+                    plan.link.push(LinkLocal {
+                        clove_id,
+                        external_ref: ext,
+                    });
+                }
+                // Brand-new local item — create it on GitHub.
+                None => plan.push_create.push(PushCreate {
+                    clove_id,
+                    item,
+                    local_updated,
+                }),
+            },
             // Linked to a *different* external system (`tk:…`, `beads:…`) — not
             // a GitHub link at all, so it neither matches a remote issue nor
             // counts as "deleted remotely". Skipped, reported.
@@ -1452,6 +1720,16 @@ pub fn plan_sync(
         if matched.contains(&ext) {
             continue;
         }
+        // Synced before and unchanged on GitHub since, but no local item links
+        // it: the item was deleted locally. Creating it again on every sync
+        // would undo the deletion. An issue edited after that is pulled again,
+        // like a comment edited after its local copy was deleted.
+        if let Some(entry) = state.entries.get(&ext) {
+            if !remote_changed(issue.updated_at, entry.gh_updated_at) {
+                plan.local_missing.push(ext);
+                continue;
+            }
+        }
         let staged = map_issue(issue)?;
         plan.pull_create.push(PullCreate { staged });
     }
@@ -1482,11 +1760,21 @@ fn decide_linked(
             // `updated_at` without changing any synced field, and a phantom
             // change here (combined with a real local edit) would resolve as a
             // conflict that reverts the local edit with stale remote content.
+            // The fingerprint leaves the assignee out; the recorded logins
+            // show a change of the assignee alone.
+            let assignee_changed = entry
+                .gh_assignees
+                .as_ref()
+                .is_some_and(|prev| *prev != staged.assignees);
+            let local = local_updated > entry.local_updated;
             let remote = match entry.gh_content_hash {
-                Some(prev) => clock_newer && prev != remote_hash,
+                // A change of only the assignee is pulled when the local item
+                // did not change. When it did, the push goes ahead: it keeps
+                // the assignees a human added on GitHub.
+                Some(prev) => clock_newer && (prev != remote_hash || (assignee_changed && !local)),
                 None => clock_newer, // pre-fingerprint state file
             };
-            (remote, local_updated > entry.local_updated)
+            (remote, local)
         }
         // No prior sync for an already-linked pair: compare content so a first
         // `sync` can never silently clobber a side.
@@ -1502,6 +1790,7 @@ fn decide_linked(
             gh_updated_at: issue.updated_at,
             local_updated,
             gh_content_hash: remote_hash,
+            gh_assignees: staged.assignees,
         }),
         (true, false) => push_pull_update(plan, clove_id, staged)?,
         (false, true) => push_push_update(plan, ext, clove_id, item, local_updated, issue),
@@ -1515,6 +1804,7 @@ fn decide_linked(
             gh_updated_at: issue.updated_at,
             local_updated,
             gh_content_hash: remote_hash,
+            gh_assignees: staged.assignees,
         }),
         (true, true) => resolve_conflict(
             plan,
@@ -1687,6 +1977,91 @@ mod tests {
         assert_eq!(plan.push_create.len(), 1);
         assert_eq!(plan.push_create[0].clove_id, "proj-AAAA1111");
         assert!(plan.pull_create.is_empty());
+    }
+
+    fn with_meta_id(mut issue: GitHubIssue, id: &str) -> GitHubIssue {
+        issue.body = Some(format!(
+            "Body text.\n\n<!-- clove-meta: {{\"id\":\"{id}\"}} -->"
+        ));
+        issue
+    }
+
+    #[test]
+    fn links_another_repositorys_state_records_are_foreign() {
+        let linked = [local(
+            "proj-AAAA1111",
+            "Linked",
+            "open",
+            Some("gh-1"),
+            "2026-06-01T00:00:00Z",
+        )];
+        let remote = [issue(1, "Unrelated", "open", "2026-06-01T00:00:00Z")];
+        let mut origin = SyncState::new("owner/repo");
+        origin.record("gh-1", None, ts("2026-06-01T00:00:00Z"));
+
+        let reason = foreign_links_reason(
+            &remote,
+            &linked,
+            &SyncState::new("me/fork"),
+            &[origin.clone()],
+        )
+        .expect("the links belong to owner/repo");
+        assert!(reason.contains("owner/repo"), "{reason}");
+
+        // The repository the links were synced with is never foreign.
+        assert_eq!(foreign_links_reason(&remote, &linked, &origin, &[]), None);
+        // No state anywhere and no clove-meta: no evidence, let it through.
+        assert_eq!(
+            foreign_links_reason(&remote, &linked, &SyncState::new("me/fork"), &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn links_to_issues_carrying_other_clove_ids_are_foreign() {
+        let linked = [
+            local(
+                "proj-AAAA1111",
+                "A",
+                "open",
+                Some("gh-1"),
+                "2026-06-01T00:00:00Z",
+            ),
+            local(
+                "proj-BBBB2222",
+                "B",
+                "open",
+                Some("gh-2"),
+                "2026-06-01T00:00:00Z",
+            ),
+        ];
+        let state = SyncState::new("me/other");
+        let foreign = [
+            with_meta_id(
+                issue(1, "X", "open", "2026-06-01T00:00:00Z"),
+                "othr-CCCC3333",
+            ),
+            issue(2, "Y", "open", "2026-06-01T00:00:00Z"),
+        ];
+        let reason = foreign_links_reason(&foreign, &linked, &state, &[]).expect("foreign");
+        assert!(
+            reason.contains("othr-CCCC3333") && reason.contains("gh-1"),
+            "{reason}"
+        );
+
+        // One issue that does carry its linked item's id vouches for the repository
+        // (a pull that had to mint a fresh id leaves a lone mismatch behind).
+        let own = [
+            with_meta_id(
+                issue(1, "X", "open", "2026-06-01T00:00:00Z"),
+                "othr-CCCC3333",
+            ),
+            with_meta_id(
+                issue(2, "Y", "open", "2026-06-01T00:00:00Z"),
+                "proj-BBBB2222",
+            ),
+        ];
+        assert_eq!(foreign_links_reason(&own, &linked, &state, &[]), None);
     }
 
     #[test]
@@ -2521,6 +2896,19 @@ mod tests {
         assert_eq!(plan.relink[0].link.gh_id, 10);
         assert_eq!(plan.relink[0].link.local_key, "a.md");
         assert_eq!(plan.relink[0].legacy_hash, None);
+    }
+
+    #[test]
+    fn a_fresh_state_adopts_a_twin_that_differs_only_in_line_endings() {
+        let plan = plan(
+            &[gh_comment(1, "first line\r\nsecond line")],
+            &[local_comment("k1", "first line\nsecond line")],
+            &fresh_entry(),
+        );
+        assert!(plan.pull.is_empty(), "{plan:?}");
+        assert!(plan.push.is_empty(), "{plan:?}");
+        assert_eq!(plan.relink.len(), 1);
+        assert_eq!(plan.relink[0].link.local_key, "k1");
     }
 
     #[test]
