@@ -1417,6 +1417,52 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
+    /// A failed submit shows its error whatever the body length and wherever the
+    /// caret is. The error used to be the last scrolling row, so a body taller
+    /// than the popup pushed it off screen and Ctrl-S looked like a no-op.
+    #[test]
+    fn form_error_stays_visible_with_a_long_body() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        app.select_first();
+
+        for (w, h) in [(80, 24), (40, 48), (120, 18), (60, 12)] {
+            for focus_body in [false, true] {
+                app.start_edit();
+                app.form.body = (1..=40)
+                    .map(|n| format!("line {n}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                app.form.deps = "not an id".to_owned();
+                if focus_body {
+                    while app.form.focused() != Field::Body {
+                        app.form_next_field();
+                    }
+                }
+                app.form_submit();
+                let error = app.form.error.clone().expect("submit failed");
+
+                let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+                terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+                let buffer = terminal.backend().buffer().clone();
+                let screen: String = buffer.content().iter().map(|c| c.symbol()).collect();
+                let shown: String = error.chars().take(12).collect();
+                assert!(
+                    screen.contains(&shown),
+                    "{w}x{h} focus_body={focus_body}: {shown:?} not on screen"
+                );
+                assert!(
+                    screen.contains("line 40") == focus_body,
+                    "{w}x{h}: the caret row is what the fields scroll to"
+                );
+                app.cancel_form();
+            }
+        }
+    }
+
     /// A malformed or unknown id typed into Parent or Deps is rejected before
     /// the scalar edit is written. The title used to reach disk first.
     #[test]
