@@ -1744,3 +1744,21 @@ async fn delete_force_accepts_the_shared_boolean_spellings() {
     assert!(status.contains("200"), "force=1: {status} {body}");
     assert!(body.contains("\"deleted\":true"), "{body}");
 }
+
+/// A file under `_app/` that this build does not have is a 404. It used to be
+/// answered with the SPA entry page (the fallback for client-side routes), so
+/// a tab left open across an upgrade failed its chunk import on a MIME type.
+/// A client-side route still gets the entry page.
+#[tokio::test]
+async fn missing_app_chunk_is_404() {
+    let (_tmp, addr, _id) = spawn().await;
+
+    let (status, _body) = get(addr, "/_app/immutable/chunks/gone.abc123.js").await;
+    assert!(status.contains("404"), "missing chunk: {status}");
+    let (status, _body) = get(addr, "/_app/version.json.missing").await;
+    assert!(status.contains("404"), "missing build file: {status}");
+
+    let (status, body) = get(addr, "/items/proj-0000000A").await;
+    assert!(status.contains("200"), "a client route: {status}");
+    assert!(body.contains("<html"), "serves the entry page: {body}");
+}
