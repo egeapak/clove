@@ -18,8 +18,10 @@ on:
     tags:
       - "v*"
 
+# Only the `release` job writes (it creates the draft Release). The build jobs
+# run third-party actions and `cargo install`, so they get a read-only token.
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -57,10 +59,11 @@ jobs:
           name: web-dist-tree
           path: crates/clove-web/dist
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
       - name: Install cargo-about
         # Pinned; generates THIRD_PARTY_LICENSES.txt (about.toml / about.hbs).
@@ -161,6 +164,8 @@ jobs:
     name: publish GitHub Release
     needs: [build, web-dist]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -168,7 +173,7 @@ jobs:
           pattern: clove-*   # not web-dist-tree, the raw SPA the platform builds shared
           merge-multiple: true
       - name: Publish
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           draft: true   # review the assets, then publish from the Releases page
           generate_release_notes: true
