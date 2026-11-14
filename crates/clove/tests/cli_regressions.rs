@@ -152,3 +152,50 @@ fn human_list_reports_a_truncated_page() {
         assert!(stderr(&out).contains("showing 1 of"), "{args:?}: {out:?}");
     }
 }
+
+/// An export is a backup. An item file that does not parse used to be left
+/// out with exit 0 and no word; it must be named on stderr and, for `json`, in
+/// `_meta.warnings`.
+#[test]
+fn export_names_item_files_it_could_not_export() {
+    let repo = init_repo();
+    let good = new_item(repo.path(), "good", &[]);
+    let bad = new_item(repo.path(), "bad", &[]);
+    let bad_path = repo.path().join(format!(".clove/issues/{bad}.md"));
+    let text = std::fs::read_to_string(&bad_path).unwrap();
+    std::fs::write(&bad_path, text.replace("status: open", "status: nonsense")).unwrap();
+
+    let jsonl = clove(repo.path())
+        .args(["export", "jsonl"])
+        .output()
+        .unwrap();
+    assert!(jsonl.status.success(), "{jsonl:?}");
+    assert_eq!(stdout(&jsonl).lines().count(), 1);
+    assert!(stdout(&jsonl).contains(&good));
+    assert!(
+        stderr(&jsonl).contains("warning: skipped") && stderr(&jsonl).contains(&bad),
+        "{jsonl:?}"
+    );
+
+    let json = clove(repo.path())
+        .args(["export", "json"])
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(v["data"].as_array().unwrap().len(), 1);
+    let warnings = v["_meta"]["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1, "{v}");
+    assert!(warnings[0].as_str().unwrap().contains(&bad), "{v}");
+    assert!(stderr(&json).contains(&bad), "{json:?}");
+
+    // `--out` keeps the same contract and still writes the good item.
+    let out_path = repo.path().join("backup.jsonl");
+    let to_file = clove(repo.path())
+        .args(["export", "jsonl", "--out", "backup.jsonl"])
+        .output()
+        .unwrap();
+    assert!(to_file.status.success(), "{to_file:?}");
+    assert!(stderr(&to_file).contains("wrote 1 items"), "{to_file:?}");
+    assert!(stderr(&to_file).contains(&bad), "{to_file:?}");
+    assert_eq!(std::fs::read_to_string(out_path).unwrap().lines().count(), 1);
+}
