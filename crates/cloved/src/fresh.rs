@@ -205,7 +205,12 @@ impl Freshness {
             return Sync::Lost;
         };
         let taken = std::mem::take(&mut *lock(&self.pending));
-        let unexplained = *lock(&self.seen_dir_mtime) != Some(dir_mtime) && !taken.activity;
+        // A directory that moved since the last sync gets the full pass, also
+        // when reports are pending: reports can arrive late and in parts (the
+        // event for a writer's temporary file before the event for its rename,
+        // most visibly on macOS), so pending reports do not show that every
+        // change behind the new mtime has been reported.
+        let unexplained = *lock(&self.seen_dir_mtime) != Some(dir_mtime);
         let full = unexplained || self.resweep.swap(false, Ordering::Relaxed);
 
         let report = if full {
@@ -465,5 +470,22 @@ mod tests {
         fx.write(1, "rewritten, not reported");
         fx.fresh.sync(&mut fx.index, None);
         assert_eq!(fx.title(1).as_deref(), Some("Item 1"));
+    }
+    #[test]
+    fn a_new_file_is_indexed_when_only_part_of_its_reports_arrived() {
+        // A writer creates a temporary file and renames it to the item file.
+        // The watch has reported the temporary file and not yet the rename.
+        let mut f = fixture(2);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        f.write(7, "New item");
+        let event = notify::Event::new(EventKind::Modify(ModifyKind::Data(DataChange::Any)))
+            .add_path(f.issues.join(".tmpAbC123").into_std_path_buf());
+        f.fresh.note_event(&event);
+
+        assert_eq!(
+            f.fresh.sync(&mut f.index, None),
+            Sync::Fresh { changed: true }
+        );
+        assert_eq!(f.title(7).as_deref(), Some("New item"));
     }
 }
