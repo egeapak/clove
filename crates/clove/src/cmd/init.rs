@@ -155,10 +155,19 @@ fn write_clove_file(root: &Utf8Path, path: &Utf8Path, contents: &str) -> Result<
     })
 }
 
+/// A file in the working tree outside `.clove/` (`.gitattributes`,
+/// `.git/config`). Replaced atomically, and never through a symlink: a clone
+/// may carry one that points outside the repository.
 fn write_file(path: &Utf8Path, contents: &str) -> Result<(), CloveError> {
-    std::fs::write(path, contents).map_err(|source| CloveError::Io {
-        path: path.to_owned(),
-        source,
+    let dir = match path.parent() {
+        Some(parent) if !parent.as_str().is_empty() => parent,
+        _ => Utf8Path::new("."),
+    };
+    clove_core::fs_safe::write_atomic(dir, path, contents.as_bytes()).map_err(|source| {
+        CloveError::Io {
+            path: path.to_owned(),
+            source,
+        }
     })
 }
 
