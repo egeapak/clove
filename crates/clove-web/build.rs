@@ -61,6 +61,12 @@ fn main() {
 
     let dist = if web.join("package.json").exists() {
         let dist = PathBuf::from("dist");
+        // `dist/` is an input too: it is what gets embedded. Without this a
+        // `npm run build` run by hand (the step the placeholder page tells the
+        // user to take) left the placeholder in the binary, because no listed
+        // source had changed. Files this script writes into `dist/` are older
+        // than its own completion stamp, so they do not retrigger it.
+        println!("cargo:rerun-if-changed=dist");
         ensure_placeholder(&dist);
         maybe_npm_build(web, &dist);
         dist
@@ -236,13 +242,24 @@ fn maybe_npm_build(web: &Path, dist: &Path) {
         }
     }
     if !web.join("node_modules").exists() && !run(web, &["install", "--no-audit", "--no-fund"]) {
-        println!("cargo:warning=clove-web: `npm install` failed; embedding the placeholder web UI");
+        warn_npm_failed("npm install", dist);
         return;
     }
     if !run(web, &["run", "build"]) {
+        warn_npm_failed("npm run build", dist);
+    }
+}
+
+/// Report a failed npm step, naming what is embedded instead: the previous
+/// real build when there is one (`ensure_placeholder` keeps it), else the
+/// placeholder.
+fn warn_npm_failed(step: &str, dist: &Path) {
+    if real_dist_mtime(dist).is_some() {
         println!(
-            "cargo:warning=clove-web: `npm run build` failed; embedding the placeholder web UI"
+            "cargo:warning=clove-web: `{step}` failed; keeping the existing (stale) web UI build"
         );
+    } else {
+        println!("cargo:warning=clove-web: `{step}` failed; embedding the placeholder web UI");
     }
 }
 
