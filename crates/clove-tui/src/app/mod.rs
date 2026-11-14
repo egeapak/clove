@@ -1,9 +1,11 @@
-//! TUI application state and the read-only data layer.
+//! TUI application state and the data layer.
 //!
 //! All data comes from the file store (the source of truth): a fresh
-//! `scan_frontmatter` + `GraphStore::build` on launch and on every manual
-//! refresh. This keeps the TUI always-correct and decoupled from the optional
-//! SQLite index and daemon — it never mutates anything.
+//! `scan_frontmatter` + `GraphStore::build` on launch and on every refresh.
+//! This keeps the TUI always-correct and decoupled from the optional SQLite
+//! index and daemon. Browsing never mutates anything; the add/edit form writes
+//! through the shared `clove_core` write path (`ops::create`, `apply_edit`,
+//! `set_parent`, `dep_add`, `dep_remove`) and re-scans.
 
 mod data;
 pub use data::Data;
@@ -55,6 +57,8 @@ pub struct App {
     pub detail: DetailPane,
     pub focus: Focus,
     pub show_help: bool,
+    /// Rows the help overlay is scrolled down (clamped to its content at render).
+    pub help_scroll: u16,
     pub status: String,
     pub should_quit: bool,
     /// Whether a background scan is in flight — drives the 10fps cadence and the
@@ -91,6 +95,7 @@ impl App {
             detail: DetailPane::default(),
             focus: Focus::List,
             show_help: false,
+            help_scroll: 0,
             status: String::new(),
             should_quit: false,
             busy: false,
@@ -315,9 +320,15 @@ impl App {
     fn rebuild_facets(&mut self) {
         use std::collections::BTreeSet;
 
+        // A value that is active in the filter stays in the menu even when no
+        // item has it any more (the last item with that label was relabelled,
+        // then a refresh): otherwise it keeps filtering the list with no row
+        // left to toggle it off, and only `x` (clear everything) removes it.
+        let filter = &self.list.filter;
+
         let mut statuses = Vec::new();
         for s in [ItemStatus::Open, ItemStatus::InProgress, ItemStatus::Closed] {
-            if self.data.all.iter().any(|fm| fm.status == s) {
+            if filter.status == Some(s) || self.data.all.iter().any(|fm| fm.status == s) {
                 statuses.push(MenuValue::Status(s));
             }
         }
@@ -329,11 +340,12 @@ impl App {
             ItemType::Docs,
             ItemType::Epic,
         ] {
-            if self.data.all.iter().any(|fm| fm.item_type == t) {
+            if filter.types.contains(&t) || self.data.all.iter().any(|fm| fm.item_type == t) {
                 types.push(MenuValue::Type(t));
             }
         }
         let mut priorities: Vec<u8> = self.data.all.iter().map(|fm| fm.priority.get()).collect();
+        priorities.extend(filter.priorities.iter().copied());
         priorities.sort_unstable();
         priorities.dedup();
         let labels: BTreeSet<String> = self
@@ -341,12 +353,14 @@ impl App {
             .all
             .iter()
             .flat_map(|fm| fm.labels.iter().cloned())
+            .chain(filter.labels.iter().cloned())
             .collect();
         let assignees: BTreeSet<String> = self
             .data
             .all
             .iter()
             .filter_map(|fm| fm.assignee.clone())
+            .chain(filter.assignee.clone())
             .collect();
 
         let mut menu = Vec::new();
@@ -717,6 +731,35 @@ impl App {
 
     pub fn form_prev_field(&mut self) {
         self.form.prev_field();
+    }
+
+    /// ↓ in the form: move the caret down a line inside a multi-line Body, and
+    /// on to the next field from its last line (or from any other field).
+    pub fn form_down(&mut self) {
+        if !self.form.move_line(1) {
+            self.form.next_field();
+        }
+    }
+
+    /// ↑ in the form: move the caret up a line inside a multi-line Body, and
+    /// back to the previous field from its first line (or from any other field).
+    pub fn form_up(&mut self) {
+        if !self.form.move_line(-1) {
+            self.form.prev_field();
+        }
+    }
+
+    // --- Help overlay -----------------------------------------------------
+
+    pub fn open_help(&mut self) {
+        self.show_help = true;
+        self.help_scroll = 0;
+    }
+
+    /// Scroll the help overlay by `delta` rows (the renderer clamps the far end).
+    pub fn scroll_help(&mut self, delta: i32) {
+        self.help_scroll =
+            (i32::from(self.help_scroll) + delta).clamp(0, i32::from(u16::MAX)) as u16;
     }
 
     /// Route a key to the focused field: cycle enum values with ←/→, otherwise
@@ -1579,6 +1622,104 @@ mod tests {
         let updated = app.data.store.get(&independent).unwrap();
         assert_eq!(updated.frontmatter.parent.as_ref(), Some(&base));
         assert_eq!(updated.frontmatter.deps, vec![base.clone()]);
+    }
+
+    /// A filter value no item has any more stays in the menu, so it can be
+    /// toggled off there. It used to vanish from the menu while still filtering
+    /// the list, leaving `x` (clear everything) as the only way out.
+    #[test]
+    fn active_filter_values_stay_in_the_menu_after_a_refresh() {
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        app.list.filter.labels = vec!["gone".to_owned()];
+        app.list.filter.assignee = Some("nobody".to_owned());
+        app.list.filter.priorities = vec![4];
+        app.list.filter.types = vec![ItemType::Epic];
+        app.list.filter.status = Some(ItemStatus::Closed);
+        app.refresh();
+        assert_eq!(app.visible_count(), 0);
+
+        for text in ["gone", "nobody", "p4", "epic", "closed"] {
+            let row = app
+                .filter_menu
+                .menu
+                .iter()
+                .position(|item| item.text == text)
+                .unwrap_or_else(|| panic!("{text} is still a menu row"));
+            app.start_filter();
+            app.filter_menu.cursor = row;
+            app.filter_toggle();
+        }
+        assert!(!app.list.filter.is_active(), "{:?}", app.list.filter);
+        assert_eq!(app.visible_count(), 3);
+    }
+
+    /// ↑/↓ walk the lines of a multi-line Body and only leave the field from
+    /// its first/last line. They used to change field from anywhere, so the
+    /// body could be navigated only with ←/→.
+    #[test]
+    fn form_up_down_move_between_body_lines() {
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        app.start_new();
+        while app.form.focused() != Field::Body {
+            app.form_next_field();
+        }
+        app.form.body = "ab\ncdef\ng".to_owned();
+        app.form.cursor = 6; // `cdef`, after the `e`
+
+        app.form_up();
+        assert_eq!((app.form.focused(), app.form.cursor), (Field::Body, 2));
+        app.form_down();
+        assert_eq!(app.form.cursor, 5, "column kept where the line allows");
+        app.form.cursor = 7;
+        app.form_down();
+        assert_eq!(app.form.cursor, 9, "clamped to the shorter last line");
+        app.form_down();
+        assert_ne!(app.form.focused(), Field::Body, "↓ on the last line leaves");
+
+        app.form_prev_field();
+        app.form.cursor = 1;
+        app.form_up();
+        assert_eq!(
+            app.form.focused(),
+            Field::Deps,
+            "↑ on the first line leaves"
+        );
+        // Outside the body ↑/↓ still change field.
+        app.form_down();
+        assert_eq!(app.form.focused(), Field::Body);
+    }
+
+    /// The help overlay scrolls on a terminal shorter than its text, and the
+    /// scroll stops at the last row.
+    #[test]
+    fn help_scrolls_on_a_short_terminal() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        let draw = |app: &mut App| -> String {
+            let mut terminal = Terminal::new(TestBackend::new(60, 10)).unwrap();
+            terminal.draw(|f| crate::ui::render(f, app)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            buffer.content().iter().map(|c| c.symbol()).collect()
+        };
+
+        app.open_help();
+        let top = draw(&mut app);
+        assert!(top.contains("move selection") && top.contains("↑↓ scroll"));
+        assert!(!top.contains("by color"), "the last row starts off screen");
+
+        app.scroll_help(1000);
+        let bottom = draw(&mut app);
+        assert!(bottom.contains("by color"), "scrolled to the last row");
+        assert!(!bottom.contains("move selection"));
+        assert!(app.help_scroll < 1000, "clamped to the content");
+
+        app.scroll_help(-1000);
+        assert!(draw(&mut app).contains("move selection"));
     }
 
     #[test]

@@ -267,6 +267,46 @@ impl FormState {
         }
     }
 
+    /// Move the caret one line up (`delta < 0`) or down in the Body, keeping its
+    /// column where the target line is long enough. Returns `false`, moving
+    /// nothing, when the Body is not focused or the caret is already on the
+    /// first/last line, so the caller can move to the neighbouring field.
+    pub fn move_line(&mut self, delta: i32) -> bool {
+        if self.focused() != Field::Body {
+            return false;
+        }
+        let chars: Vec<char> = self.body.chars().collect();
+        let cursor = self.cursor.min(chars.len());
+        let line_start = chars[..cursor]
+            .iter()
+            .rposition(|&c| c == '\n')
+            .map_or(0, |i| i + 1);
+        let column = cursor - line_start;
+        let line_len = |start: usize| {
+            chars[start..]
+                .iter()
+                .position(|&c| c == '\n')
+                .unwrap_or(chars.len() - start)
+        };
+        let target_start = if delta < 0 {
+            if line_start == 0 {
+                return false;
+            }
+            chars[..line_start - 1]
+                .iter()
+                .rposition(|&c| c == '\n')
+                .map_or(0, |i| i + 1)
+        } else {
+            let line_end = line_start + line_len(line_start);
+            if line_end == chars.len() {
+                return false;
+            }
+            line_end + 1
+        };
+        self.cursor = target_start + column.min(line_len(target_start));
+        true
+    }
+
     /// Insert a newline at the caret (Body field only).
     pub fn newline(&mut self) {
         if self.focused() == Field::Body {

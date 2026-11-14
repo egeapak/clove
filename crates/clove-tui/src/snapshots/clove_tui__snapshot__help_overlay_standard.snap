@@ -1,0 +1,28 @@
+---
+source: crates/clove-tui/src/snapshot.rs
+expression: rendered
+---
+┌ clove ───────────────────────────────────────────────────────────────────────┐
+│  All 7  │  Re┌ Help ──────────────────────────────────────────┐              │
+└──────────────│ clove tui — browser + editor                   │──────────────┘
+┌ Items (7) ───│                                                │omments ──────┐
+│▌◐ F #9QX4D1B7│ ↑/k ↓/j      move selection                    │              │
+│ ○ B #0HZ6C3PW│ g / G        jump to top / bottom              │              │
+│ ● C #7AF3K2MN│ Tab / 1 2 3  All / Ready / Blocked             │              │
+│ ○ E #3HT6WYG5│ o / t / c    overview / dep tree / comments    │s · ready     │
+│ ○ F #K2M8ZP5R│ →/l  ←/h     focus detail / list (narrow)      │              │
+│ ○ F #5RB9NC2V│ PgUp / PgDn  scroll detail                     │              │
+│ ● D #8XQ4F7DM│ s / S        cycle sort field / direction      │ckend         │
+│              │ f            filter menu (facets)              │              │
+│              │ x            clear all filters                 │              │
+│              │ /            search id, title, labels          │              │
+│              │ n / e        new / edit item                   │───────────── │
+│              │ Esc          clear search / back / close       │              │
+│              │ r            refresh from disk                 │              │
+│              │ ?            toggle this help                  │xum; see      │
+│              │ q            quit                              │              │
+│              │                                                │              │
+│              │ priority     ! ↑ • ↓  =  p0 p1 p2/p3 p4 (by    │              │
+│              │ color)                                         │              │
+└──────────────└────────────────────────────────────────────────┘──────────────┘
+7 item(s) loaded   ?: help · q: quit
