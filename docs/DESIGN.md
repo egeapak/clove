@@ -1544,7 +1544,9 @@ every project's *acceleration*, never its data.
 | `.clove/reindex.lock` | Prevents concurrent `clove reindex` | held for reindex duration |
 
 `<runtime>` is `$CLOVE_RUNTIME_DIR`; else, on Unix, `$XDG_RUNTIME_DIR/clove`, else
-`${TMPDIR:-/tmp}/clove-<uid>`; on Windows `%LOCALAPPDATA%\clove\run` (a per-user
+`${TMPDIR:-/tmp}/clove-<uid>` (or `<clove-home>/run` when that name already
+exists and is not the user's own private directory, so another local user cannot
+block the daemon by creating it first); on Windows `%LOCALAPPDATA%\clove\run` (a per-user
 profile directory), else `%USERPROFILE%\AppData\Local\clove\run` — and with
 neither set there is no per-user directory, so no hub is used or started (set
 `CLOVE_RUNTIME_DIR`). It is always made absolute. It is short on Unix because a socket path is capped at 103 bytes
