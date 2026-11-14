@@ -484,6 +484,7 @@ fn isolated_clove(tmp: &Path) -> std::path::PathBuf {
 impl Env {
     fn clove(&self) -> Command {
         let mut cmd = Command::new(&self.clove_exe);
+        cmd.envs(support::isolated_env(&self.home));
         // Generous plugin timeouts (honoured only by a `test-knobs` build): a slow
         // plugin start under load must not flip a result. The tests that target a
         // timeout set a small value of their own.

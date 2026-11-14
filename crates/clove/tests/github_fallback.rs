@@ -10,6 +10,8 @@
 //! sibling `clove-sync-github` may well be built into `target/debug` and would
 //! resolve on the plugin search path, so `github` is not a reliable miss.
 
+mod support;
+
 use std::path::Path;
 use std::process::Command;
 
@@ -19,6 +21,7 @@ use tempfile::TempDir;
 
 fn clove(dir: &Path) -> Command {
     let mut cmd = Command::cargo_bin("clove").unwrap();
+    cmd.envs(support::isolated_env(dir));
     // Generous plugin timeouts (honoured only by a `test-knobs` build): a slow
     // plugin start under load must not flip a result. The tests that target a
     // timeout set a small value of their own.

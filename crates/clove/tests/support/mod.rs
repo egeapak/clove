@@ -13,6 +13,26 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+/// The environment that keeps a spawned `clove` away from the developer's own
+/// hub and clove home: a private runtime directory (where a hub's socket, lock
+/// and pid file live) and a private clove home (token records, managed
+/// plugins), both under `dir`.
+///
+/// Without `CLOVE_RUNTIME_DIR` the client probes the user's real runtime
+/// directory, attaches to a hub found there, and may clean up after one it
+/// judges dead. Every suite passes this to its `clove` command first, then sets
+/// what it needs on top (`cmd.envs(support::isolated_env(dir))`).
+///
+/// `HOME` stays as it is: clove reads it only to find the clove home, which
+/// `CLOVE_HOME` overrides, and the `git` and `cargo` that some suites spawn
+/// need the real one.
+pub fn isolated_env(dir: &Path) -> [(&'static str, PathBuf); 2] {
+    [
+        ("CLOVE_RUNTIME_DIR", dir.join(".test-run")),
+        ("CLOVE_HOME", dir.join(".test-clove-home")),
+    ]
+}
+
 /// The `cloved` built for this test run (all features, so the `CLOVED_*` test
 /// knobs and the web server are both present).
 #[cfg(unix)]

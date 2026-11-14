@@ -3,6 +3,8 @@
 //! `tests/sync_github.rs`.) The Phase 2 `merge-driver` is wired and implemented
 //! (see `tests/merge_driver.rs` for its full coverage).
 
+mod support;
+
 use std::path::Path;
 use std::process::Command;
 
@@ -13,6 +15,7 @@ use tempfile::TempDir;
 /// A `clove` invocation rooted at `dir`, with a clean environment.
 fn clove(dir: &Path) -> Command {
     let mut cmd = Command::cargo_bin("clove").unwrap();
+    cmd.envs(support::isolated_env(dir));
     cmd.current_dir(dir);
     cmd.env_remove("CLOVE_FORMAT");
     cmd.env_remove("EDITOR");

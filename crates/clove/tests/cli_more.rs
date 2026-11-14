@@ -6,6 +6,8 @@
 //! pagination, `query` (flag + stdin), `version`, `agent-doc --format json`,
 //! the no-repo error, `--clove-dir`, `comments --limit`, and `--quiet`.
 
+mod support;
+
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -17,6 +19,7 @@ use tempfile::TempDir;
 /// A `clove` invocation rooted at `dir`, with a clean environment.
 fn clove(dir: &Path) -> Command {
     let mut c = Command::cargo_bin("clove").unwrap();
+    c.envs(support::isolated_env(dir));
     c.current_dir(dir);
     c.env_remove("CLOVE_FORMAT");
     c.env_remove("EDITOR");

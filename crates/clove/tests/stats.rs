@@ -1,5 +1,7 @@
 //! M4: `clove stats` end-to-end tests — analytics shape, schema, persistence.
 
+mod support;
+
 use std::path::Path;
 use std::process::Command;
 
@@ -10,6 +12,7 @@ use tempfile::TempDir;
 
 fn clove(dir: &Path) -> Command {
     let mut cmd = Command::cargo_bin("clove").unwrap();
+    cmd.envs(support::isolated_env(dir));
     cmd.current_dir(dir);
     cmd.env_remove("CLOVE_FORMAT");
     cmd.env_remove("EDITOR");
