@@ -249,21 +249,22 @@ pub fn dep_add(
             });
         }
         // A cycle needs a path `dep_id → … → id` over `deps`, and every item
-        // on such a path is in the forward closure of `dep_id`. Walk only that;
-        // a very large closure falls back to the whole-store graph.
-        let would_cycle = match dep_path_exists(store, dep_id, id)? {
-            Some(found) => found,
-            None => {
+        // on such a path is in the forward closure of `dep_id`. Walk only that.
+        // When the walk finds a path, or the closure is too large to walk, the
+        // whole-store graph decides and gives the chain for the error.
+        let cycle = match dep_path_exists(store, dep_id, id)? {
+            Some(false) => None,
+            Some(true) | None => {
                 let frontmatters = scan_or_fail(store)?;
                 let (graph, _dangling) = GraphStore::build(&frontmatters);
-                graph.check_would_cycle(id, dep_id)
+                graph.would_cycle_path(id, dep_id)
             }
         };
-        if would_cycle {
+        if let Some(cycle) = cycle {
             return Err(CloveError::DependencyCycle {
                 from: id.to_string(),
                 to: dep_id.to_string(),
-                cycle: vec![id.to_string(), dep_id.to_string()],
+                cycle: cycle.iter().map(CloveId::to_string).collect(),
             });
         }
         if item.frontmatter.deps.contains(dep_id) {
@@ -651,9 +652,8 @@ fn graph_terms_whole_store(
 /// computed `ready`/`blocked_by` (the same shape as `clove show --format json`).
 pub fn show(store: &ItemStore, id: &CloveId) -> Result<Value, CloveError> {
     let item = store.get(id)?;
-    let comment_count = list_comments(store.issues_dir(), id)
-        .map(|c| c.len())
-        .unwrap_or(0);
+    // A thread that cannot be read is an error, not "no comments".
+    let comment_count = list_comments(store.issues_dir(), id)?.len();
 
     let mut obj = item_object(&item);
     obj.insert("body".to_owned(), json!(item.body));
@@ -776,7 +776,18 @@ pub fn list_rows(
     filters: &crate::Filters,
     order: crate::view::Order,
 ) -> Result<Vec<ItemFrontmatter>, CloveError> {
-    list_rows_with_graph(store, filters, order).map(|(rows, _)| rows)
+    if order.needs_ranks() {
+        return list_rows_with_graph(store, filters, order).map(|(rows, _)| rows);
+    }
+    // No topological rank in the sort key and no caller for the graph: skip
+    // the whole-store graph build.
+    let (frontmatters, _errors) = store.scan_frontmatter()?;
+    let mut matched: Vec<ItemFrontmatter> = frontmatters
+        .into_iter()
+        .filter(|fm| filters.matches(fm))
+        .collect();
+    order.apply(&mut matched, &std::collections::HashMap::new());
+    Ok(matched)
 }
 
 /// [`list_rows`] plus the whole-store graph it had to build anyway.
@@ -1174,6 +1185,41 @@ mod tests {
         CloveId::new(v["id"].as_str().unwrap()).unwrap()
     }
 
+    /// `list_rows` skips the graph for a sort that reads no rank; the rows are
+    /// the ones the graph-building path returns.
+    #[test]
+    fn list_rows_without_ranks_matches_the_graph_path() {
+        let (_d, store) = store();
+        let a = new_id(&store, "a");
+        let b = new_id(&store, "b");
+        let c = new_id(&store, "c");
+        dep_add(&store, &a, &b, Utc::now()).unwrap();
+        dep_add(&store, &b, &c, Utc::now()).unwrap();
+        let filters = crate::Filters::default();
+        for field in [
+            "rank", "priority", "created", "updated", "id", "status", "type",
+        ] {
+            for dir in ["asc", "desc"] {
+                let order = crate::view::Order::parse(Some(field), Some(dir)).unwrap();
+                let plain = list_rows(&store, &filters, order).unwrap();
+                let (with_graph, _) = list_rows_with_graph(&store, &filters, order).unwrap();
+                assert_eq!(plain, with_graph, "sort {field} {dir}");
+                assert_eq!(plain.len(), 3);
+            }
+        }
+    }
+
+    #[test]
+    fn show_counts_a_thread_with_a_non_utf8_comment() {
+        let (_d, store) = store();
+        let id = new_id(&store, "commented");
+        comment(&store, &id, "a@x", "first").unwrap();
+        let second = comment(&store, &id, "a@x", "second").unwrap();
+        let path = store.repo_root().join(second["path"].as_str().unwrap());
+        std::fs::write(&path, b"caf\xff").unwrap();
+        assert_eq!(show(&store, &id).unwrap()["comment_count"], 2);
+    }
+
     #[test]
     fn create_then_show_round_trips() {
         let (_d, store) = store();
@@ -1301,11 +1347,14 @@ mod tests {
             dep_add(&store, &a, &a, Utc::now()),
             Err(CloveError::SelfDependency { .. })
         ));
-        // Negative: cycle (b → a, when a → b already).
-        assert!(matches!(
-            dep_add(&store, &b, &a, Utc::now()),
-            Err(CloveError::DependencyCycle { .. })
-        ));
+        // Negative: cycle (b → a, when a → b already). The error carries the
+        // closed path, not only the rejected edge.
+        match dep_add(&store, &b, &a, Utc::now()) {
+            Err(CloveError::DependencyCycle { cycle, .. }) => {
+                assert_eq!(cycle, vec![b.to_string(), a.to_string(), b.to_string()]);
+            }
+            other => panic!("expected DependencyCycle, got {other:?}"),
+        }
         // Negative: missing dependency target.
         let missing = CloveId::new("proj-ZZZZZZZZ").unwrap();
         assert!(matches!(

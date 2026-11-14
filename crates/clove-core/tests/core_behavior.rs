@@ -1178,3 +1178,42 @@ fn comment_order_falls_back_to_file_name_when_timestamps_and_authors_tie() {
         "a tied thread must come back in file-name order, not directory order"
     );
 }
+
+#[test]
+fn delete_refuses_a_parent_with_children_then_force_succeeds() {
+    let (_tmp, store) = repo();
+    let parent = mk(&store, "Parent");
+
+    let mut child_spec = new_item("Child");
+    child_spec.parent = Some(parent.frontmatter.id.clone());
+    let child = store
+        .create("proj", child_spec, ts("2026-06-02T10:00:01Z"))
+        .unwrap();
+
+    let err = store.delete(&parent.frontmatter.id, false).unwrap_err();
+    match err {
+        CloveError::HasDependents { dependents, .. } => {
+            assert_eq!(dependents, vec![child.frontmatter.id.to_string()]);
+        }
+        other => panic!("expected HasDependents, got {other:?}"),
+    }
+    assert!(store.exists(&parent.frontmatter.id));
+
+    store.delete(&parent.frontmatter.id, true).unwrap();
+    assert!(!store.exists(&parent.frontmatter.id));
+}
+
+#[test]
+fn delete_refuses_while_an_item_file_is_unparseable() {
+    let (_tmp, store) = repo();
+    let item = mk(&store, "Target");
+    // A dependent may be hidden in the file that does not parse.
+    std::fs::write(store.issues_dir().join("proj-BR0KEN00.md"), "not an item").unwrap();
+
+    let err = store.delete(&item.frontmatter.id, false).unwrap_err();
+    assert!(matches!(err, CloveError::ScanFailed { .. }), "got {err:?}");
+    assert!(store.exists(&item.frontmatter.id));
+
+    store.delete(&item.frontmatter.id, true).unwrap();
+    assert!(!store.exists(&item.frontmatter.id));
+}
