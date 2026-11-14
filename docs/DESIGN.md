@@ -1732,8 +1732,9 @@ bytes — so whatever it holds now is what counts, however it was rewritten.
 **It is a gate for automation, not a security boundary against the local
 user**, who can read every token they own; hub-wide calls (`ping`,
 `hub_status`, and `clove daemon stop --all`, which signals the hub's pid) need
-no token, and the web UI is not token-gated — it stays loopback-only, behind
-the `Host`/`Origin` guards (§8.10), and may list every project.
+no token. The web UI has its own access token (§8.10): a loopback TCP port is
+open to every local user, so the port alone must not give what the socket's
+peer-uid check withholds.
 
 **`CloveRpc`:** hub-level `ping` and `hub_status` (pid, uptime, web address,
 token records directory, and each project's `STATUS`); per project `attach` (is it served — loading it when
@@ -1977,7 +1978,34 @@ from the `__sveltekit_<hash> = { base: "" }` global in the fallback `index.html`
 so each project's router serves that page with `base: "/p/<slug>"` (and its
 `/_app/` asset URLs) rewritten; every `{base}` link, the API root, and the event
 socket URL derive from it. The top bar offers a project switcher when the hub
-serves more than one. The DNS-rebinding `Host` guard wraps the whole listener;
+serves more than one.
+
+**Access token.** A loopback TCP port has no owner: any local user or process
+can connect to it. So every web server has a random access token
+(`clove_web::WebAuth`, 32 random bytes, hex), made when the server starts: one
+per `clove serve`, one per hub (it covers the project list, the root page and
+every mounted project). A request without it is answered `401` with a text
+that says where the token is. The token reaches the user in the URL that the
+CLI prints: `clove serve` prints `http://127.0.0.1:<port>/?token=<hex>`, and a
+project's `web_url` in `STATUS` (which travels over the uid-checked socket) is
+`http://127.0.0.1:<port>/p/<slug>/?token=<hex>`. Three ways to present it:
+
+- `?token=` on a page load: the server sets the cookie `clove_web_<port>`
+  (`HttpOnly`, `SameSite=Strict`, `Path=/`) and answers `303` to the same URL
+  without the token, so it does not stay in the address bar, the history or
+  a `Referer`. The SPA, its API calls and its event socket then ride on the
+  cookie; the SPA has no token code.
+- `Authorization: Bearer <token>`, for scripts.
+- `?token=` on an API request, also for scripts (no redirect).
+
+The token lives as long as the server process: after a daemon restart an open
+tab gets `401` until the user opens the URL that `clove serve` prints again.
+The cookie is named for the port because cookies are shared by all ports of a
+host. A library caller that builds a router without `with_auth` gets an open
+router (the hub's per-project routers sit behind the hub's guard).
+
+The DNS-rebinding `Host` guard wraps the whole listener (it runs before the
+token check);
 the event socket additionally requires its `Origin` to be exactly this server
 (host *and* port — another local port is another origin); every HTML page
 carries a `Content-Security-Policy` — `default-src 'self'`, `connect-src 'self'

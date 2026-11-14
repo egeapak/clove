@@ -212,6 +212,12 @@ server takes a free one and `clove serve` prints where; an explicit `--port` is
 always honored. The web API mirrors the CLI under `/api/v1` with the same JSON
 envelope and exit-code semantics.
 
+The web UI needs an access token, because a local port is open to every user
+of the machine. The URL that `clove serve` prints ends in `?token=…`; open that
+URL once and the browser keeps a cookie. A request without the token gets
+`401`. A script sends `Authorization: Bearer <token>`. The token changes when
+the server (or the daemon) restarts: run `clove serve` again for the new URL.
+
 ## Interop & GitHub sync
 
 ```sh

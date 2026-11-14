@@ -175,6 +175,12 @@ empty or a real GitHub user.
 
 Drive with a real browser (Playwright MCP is fine). Check the console on every page.
 
+- [ ] **Access token** — open the URL that `clove serve` prints (it ends in
+      `?token=…`): the board loads, the address bar no longer shows the token,
+      and the live indicator is green (the event socket rides on the cookie).
+      In a private window open the same address without `?token=…`: the page
+      is a `401` text that names `clove serve`. `curl` without the token gets
+      `401`; with `-H "Authorization: Bearer <token>"` it gets the items.
 - [ ] With one project loaded `/` redirects to `/p/<slug>/board`; with two, `/` is the
       project picker (no console errors, favicon loads) and each entry opens its board.
 - [ ] **Board, List, Timeline, Detail** all render the real store; the live indicator

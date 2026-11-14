@@ -64,11 +64,38 @@ fn serves_repo(port: u16, base: &str, repo: &Path) -> bool {
     response.starts_with("HTTP/1.1 200") && response.contains(&title(repo))
 }
 
+/// The web access tokens of the URLs [`url_of`] has read, by port. A server
+/// answers 401 without its token (DESIGN §8.4), and the token is only in the
+/// URL that the CLI prints.
+fn tokens() -> &'static std::sync::Mutex<std::collections::HashMap<u16, String>> {
+    static TOKENS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<u16, String>>> =
+        std::sync::OnceLock::new();
+    TOKENS.get_or_init(Default::default)
+}
+
+/// The `Authorization` header line for the server on `port`, when a printed
+/// URL gave its token.
+fn auth_header(port: u16) -> String {
+    match tokens().lock().unwrap().get(&port) {
+        Some(token) => format!("Authorization: Bearer {token}\r\n"),
+        None => String::new(),
+    }
+}
+
+/// The token of the first `?token=<hex>` in `text`.
+fn token_in(text: &str) -> Option<String> {
+    let rest = &text[text.find("?token=")? + "?token=".len()..];
+    let token: String = rest.chars().take_while(char::is_ascii_hexdigit).collect();
+    (!token.is_empty()).then_some(token)
+}
+
 /// The raw response to `GET <base>api/v1/items` on loopback `port`.
 fn items_response(port: u16, base: &str) -> String {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    let request =
-        format!("GET {base}api/v1/items HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+    let request = format!(
+        "GET {base}api/v1/items HTTP/1.1\r\nHost: 127.0.0.1\r\n{}Connection: close\r\n\r\n",
+        auth_header(port)
+    );
     stream.write_all(request.as_bytes()).unwrap();
     let mut response = String::new();
     stream.read_to_string(&mut response).unwrap();
@@ -81,20 +108,26 @@ fn url_port(text: &str) -> Option<u16> {
 }
 
 /// The port and path (`/` when none) of the first `http://127.0.0.1:<port>`
-/// URL in `text`.
+/// URL in `text`. The URL's `?token=` is remembered for [`items_response`] and
+/// is not part of the path.
 fn url_of(text: &str) -> Option<(u16, String)> {
     let rest = &text[text.find("http://127.0.0.1:")? + "http://127.0.0.1:".len()..];
     let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-    let path: String = rest[digits.len()..]
+    let url: String = rest[digits.len()..]
         .chars()
         .take_while(|c| !c.is_whitespace())
         .collect();
+    let path = url.split('?').next().unwrap_or("");
     let path = if path.is_empty() {
         "/".to_owned()
     } else {
-        path
+        path.to_owned()
     };
-    Some((digits.parse().ok()?, path))
+    let port = digits.parse().ok()?;
+    if let Some(token) = token_in(&url) {
+        tokens().lock().unwrap().insert(port, token);
+    }
+    Some((port, path))
 }
 
 /// Spawn a standalone `clove serve` and return it with the port it announced,
@@ -289,11 +322,13 @@ fn explicit_host_skips_the_daemon_hand_off() {
                 .parse::<u16>()
                 .ok()
         });
+    let token = token_in(&text).unwrap_or_default();
     let serves = port.is_some_and(|port| {
         let mut stream = TcpStream::connect(("::1", port)).unwrap();
-        stream
-            .write_all(b"GET /api/v1/items HTTP/1.1\r\nHost: [::1]\r\nConnection: close\r\n\r\n")
-            .unwrap();
+        let request = format!(
+            "GET /api/v1/items HTTP/1.1\r\nHost: [::1]\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
+        );
+        stream.write_all(request.as_bytes()).unwrap();
         let mut response = String::new();
         stream.read_to_string(&mut response).unwrap();
         response.starts_with("HTTP/1.1 200") && response.contains(&title(repo.path()))
@@ -365,7 +400,9 @@ fn serve_keeps_serving_after_its_stderr_reader_is_gone() {
     let mut serves = false;
     while std::time::Instant::now() < deadline && child.try_wait().unwrap().is_none() {
         if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            serves = serves_repo(port, "/", repo.path());
+            // Nobody read the URL, so nobody has the token: an answering
+            // server says 401.
+            serves = items_response(port, "/").starts_with("HTTP/1.1 401");
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -377,5 +414,5 @@ fn serve_keeps_serving_after_its_stderr_reader_is_gone() {
         exited.is_none(),
         "serve died with no stderr reader: {exited:?}"
     );
-    assert!(serves, "port {port} does not serve this repo");
+    assert!(serves, "port {port} does not answer");
 }

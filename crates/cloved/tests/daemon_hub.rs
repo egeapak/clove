@@ -264,10 +264,19 @@ fn a_client_of_another_protocol_is_refused_with_proof_of_life() {
 /// Minimal HTTP GET over std TCP: `(status, location header, body)`.
 #[cfg(feature = "web")]
 fn http_get(addr: &str, path: &str) -> (u16, Option<String>, String) {
+    http_get_as(addr, path, "")
+}
+
+/// [`http_get`] presenting the hub's web access `token` (none when empty).
+fn http_get_as(addr: &str, path: &str, token: &str) -> (u16, Option<String>, String) {
     let mut stream = std::net::TcpStream::connect(addr).unwrap();
+    let auth = match token {
+        "" => String::new(),
+        token => format!("Authorization: Bearer {token}\r\n"),
+    };
     write!(
         stream,
-        "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        "GET {path} HTTP/1.1\r\nHost: localhost\r\n{auth}Connection: close\r\n\r\n"
     )
     .unwrap();
     let mut text = String::new();
@@ -305,27 +314,40 @@ fn every_project_is_reachable_on_the_one_web_port() {
         Some(addr.as_str()),
         "one port"
     );
-    let alpha_url = alpha_status.web_url.expect("alpha has a URL");
-    let beta_url = beta_status.web_url.expect("beta has a URL");
+    // Each URL carries the hub's one access token (DESIGN §8.4).
+    let split = |url: String| {
+        let (page, token) = url
+            .split_once("?token=")
+            .expect("the URL carries the token");
+        (page.to_owned(), token.to_owned())
+    };
+    let (alpha_url, token) = split(alpha_status.web_url.expect("alpha has a URL"));
+    let (beta_url, beta_token) = split(beta_status.web_url.expect("beta has a URL"));
     assert_ne!(alpha_url, beta_url);
+    assert_eq!(token, beta_token, "one hub, one token");
 
     for (url, title, other) in [
         (&alpha_url, "alpha on the web", "beta on the web"),
         (&beta_url, "beta on the web", "alpha on the web"),
     ] {
         let path = url.strip_prefix(&format!("http://{addr}")).unwrap();
-        let (status, _, body) = http_get(&addr, &format!("{path}api/v1/items"));
+        let (status, _, body) = http_get_as(&addr, &format!("{path}api/v1/items"), &token);
         assert_eq!(status, 200, "{body}");
         assert!(body.contains(title) && !body.contains(other), "{body}");
+        // Without the token the port gives nothing away.
+        let (status, _, body) = http_get(&addr, &format!("{path}api/v1/items"));
+        assert_eq!(status, 401, "{body}");
+        assert!(!body.contains(title), "{body}");
     }
 
-    let (status, _, picker) = http_get(&addr, "/");
+    let (status, _, picker) = http_get_as(&addr, "/", &token);
     assert_eq!(status, 200);
     assert!(picker.contains(&alpha_url[format!("http://{addr}").len()..]));
+    assert_eq!(http_get(&addr, "/").0, 401);
 
     // Down to one project: the root leads straight into it.
     hub.detach(&b);
-    let (status, location, _) = http_get(&addr, "/");
+    let (status, location, _) = http_get_as(&addr, "/", &token);
     assert_eq!(status, 307);
     assert_eq!(
         location.as_deref(),
