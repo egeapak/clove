@@ -1817,7 +1817,19 @@ project watches, never lost until the next change.
 
 ### 8.7 Git Auto-Sync (Disabled by Default)
 
-Enabled via `[daemon] git_sync = true` in `config.toml`.
+Enabled via `[daemon] git_sync = true` in `config.toml`, **and** allowed in the
+clone: `git config clove.automation true`.
+
+**Daemon automation needs the clone's permission.** `.clove/config.toml` arrives
+with the repository, and the daemon loads a project as soon as any command
+touches it (`clove daemon start`, or `clove mcp` from a committed `.mcp.json`).
+`git_sync` commits under the user's git identity, and periodic GitHub sync
+(`github_sync_interval_min` + `github_sync_repo`) uses the user's token. So the
+daemon acts on these keys only when git configuration sets `clove.automation`
+to true (the clone's `.git/config`, or the user's global file; a clone never
+carries either). Otherwise both stay off, the daemon log says so, and
+`clove doctor` reports `DAEMON_AUTOMATION_NOT_ALLOWED` with the command to
+run. `clove sync github <owner/repo>` typed by the user is not gated.
 
 Behavior: after successful index update for a file, check `git diff --name-only HEAD -- <path>`.
 If modified-but-uncommitted AND frontmatter parses cleanly (malformed-skip rule): run

@@ -74,6 +74,9 @@ pub fn run(
     if let Some(issue) = tracked_token_issue(daemon_dir(ctx)) {
         report.issues.push(issue);
     }
+    if let Some(issue) = automation_issue(&ctx.root, &ctx.config.daemon) {
+        report.issues.push(issue);
+    }
     if let Some(issue) = legacy_daemon_issue(daemon_dir(ctx)) {
         if args.fix && issue.fixable {
             clove_ipc::cleanup_legacy(daemon_dir(ctx));
@@ -266,6 +269,35 @@ fn tracked_token_issue(clove_dir: &camino::Utf8Path) -> Option<DoctorIssue> {
     })
 }
 
+/// `[daemon]` asks the daemon to commit or to sync with GitHub, but this clone
+/// has not allowed it (`git config clove.automation true`), so the daemon does
+/// neither. Asked of `git` itself, like the daemon's own check.
+fn automation_issue(
+    repo_root: &camino::Utf8Path,
+    daemon: &clove_core::DaemonConfig,
+) -> Option<DoctorIssue> {
+    let keys = daemon.automation_keys();
+    if keys.is_empty() {
+        return None;
+    }
+    let allowed = std::process::Command::new("git")
+        .current_dir(repo_root)
+        .args(["config", "--type=bool", "--get"])
+        .arg(clove_core::AUTOMATION_GIT_CONFIG_KEY)
+        .stderr(std::process::Stdio::null())
+        .output()
+        .is_ok_and(|out| {
+            out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "true"
+        });
+    (!allowed).then(|| DoctorIssue {
+        severity: Severity::Warning,
+        code: "DAEMON_AUTOMATION_NOT_ALLOWED",
+        item: None,
+        message: clove_core::DaemonConfig::automation_hint(&keys, repo_root),
+        fixable: false,
+    })
+}
+
 /// A clove 0.1.0 daemon's footprint in `.clove/`: a live one still serving the
 /// project (which keeps the hub from serving it), or one that cannot be
 /// verified either way, is a non-fixable `DAEMON_LEGACY`; only files proven to
@@ -354,6 +386,40 @@ fn emit_human(report: &DoctorReport, fixed: usize) {
 mod tests {
     use super::*;
     use clove_ipc::DaemonHealth;
+
+    /// A config that asks for auto-commit is reported until the clone allows
+    /// it in git configuration; the message says how.
+    #[test]
+    fn automation_without_the_clones_permission_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = camino::Utf8Path::from_path(dir.path()).unwrap();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .current_dir(root)
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        let mut daemon = clove_core::DaemonConfig::default();
+        assert!(automation_issue(root, &daemon).is_none());
+
+        daemon.git_sync = true;
+        let issue = automation_issue(root, &daemon).unwrap();
+        assert_eq!(issue.code, "DAEMON_AUTOMATION_NOT_ALLOWED");
+        assert!(issue.message.contains("git_sync"), "{}", issue.message);
+        assert!(
+            issue.message.contains("config clove.automation true"),
+            "{}",
+            issue.message
+        );
+
+        git(&["config", "clove.automation", "true"]);
+        assert!(automation_issue(root, &daemon).is_none());
+    }
 
     #[test]
     fn daemon_issue_maps_each_health_state() {

@@ -106,6 +106,42 @@ pub struct DaemonConfig {
     pub github_sync_repo: Option<String>,
 }
 
+/// The git configuration key that allows the daemon to act on the automation
+/// keys of `[daemon]` in one clone: `git config clove.automation true`. Git
+/// configuration is not part of a clone, so the repository cannot set it.
+pub const AUTOMATION_GIT_CONFIG_KEY: &str = "clove.automation";
+
+impl DaemonConfig {
+    /// The `[daemon]` keys of this configuration that make the daemon act on
+    /// its own with the user's identity: commit (`git_sync`) or talk to
+    /// GitHub (`github_sync_*`). `.clove/config.toml` arrives with the
+    /// repository, so the daemon acts on them only in a clone that allowed it
+    /// ([`AUTOMATION_GIT_CONFIG_KEY`]). Empty when none is set.
+    pub fn automation_keys(&self) -> Vec<&'static str> {
+        let mut keys = Vec::new();
+        if self.git_sync {
+            keys.push("git_sync");
+        }
+        if self.github_sync_interval_min > 0 && self.github_sync_repo.is_some() {
+            keys.push("github_sync_interval_min");
+        }
+        keys
+    }
+
+    /// What to tell a user whose clone has not allowed the automation that
+    /// `keys` ask for.
+    pub fn automation_hint(keys: &[&str], repo_root: &camino::Utf8Path) -> String {
+        format!(
+            ".clove/config.toml sets [daemon] {}, but this clone has not allowed daemon \
+             automation, so the daemon does not commit or sync here. The config file \
+             arrives with the repository; the permission does not. To allow it in this \
+             clone, run `git -C {repo_root} config {AUTOMATION_GIT_CONFIG_KEY} true`, \
+             then `clove daemon stop` (the next command starts the daemon again)",
+            keys.join(" and ")
+        )
+    }
+}
+
 impl Default for DaemonConfig {
     fn default() -> Self {
         Self {

@@ -219,6 +219,7 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
   command works identically without it; when it is serving the project, reads come\n\
   from its hot index and report `_meta.source = \"daemon\"`.\n\
 - Opt-in `[daemon] git_sync = true` auto-commits clean item edits (never pushes).\n\
+\x20 It needs `git config clove.automation true` in the clone; so does periodic GitHub sync.\n\
 - A running daemon auto-records `clove stats` history points on a timer\n\
   (`[daemon] stats_snapshot_min`, default 60; `0` disables) — replay with\n\
   `clove stats --history`.\n\

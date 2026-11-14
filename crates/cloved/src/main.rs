@@ -21,6 +21,7 @@ macro_rules! status {
 
 use clap::{Parser, Subcommand};
 
+mod automation;
 #[cfg(feature = "git-sync")]
 mod git_sync;
 mod github_remote;

@@ -97,6 +97,11 @@ TMPDIR=/tmp CLOVE_HOME=$(mktemp -d /tmp/cvd.XXXX)/h scripts/ci/daemon-smoke.sh <
 - [ ] `clove daemon start` → serving, watcher `watching`; `clove daemon status` shows
       the hub pid, project, web URL and log path.
 - [ ] `.clove/daemon.token` is `0600` and git-ignored (`git check-ignore`).
+- [ ] **Automation needs the clone's permission** — in a scratch git repo set
+      `[daemon] git_sync = true`, start the daemon and edit an item: no commit
+      appears, and `clove doctor` reports `DAEMON_AUTOMATION_NOT_ALLOWED` with
+      the command to run. Run `git config clove.automation true`, then
+      `clove daemon stop` and edit an item again: the daemon commits it.
 - [ ] After the CLI and daemon steps, `git status --porcelain --untracked-files=all .clove`
       lists only item and comment files: no `*.lock`, `index.db*`, `daemon.token` or `sync/`.
 - [ ] `clove -f json ls|ready|blocked` report `_meta.source == "daemon"`.
