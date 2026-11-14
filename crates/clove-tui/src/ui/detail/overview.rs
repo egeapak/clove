@@ -137,7 +137,7 @@ pub(super) fn overview_body(detail: &Detail, inner_w: u16) -> Vec<Line<'static>>
         if !lines.is_empty() {
             lines.push(Line::raw(""));
         }
-        lines.extend(crate::markdown::render(body, inner_w));
+        lines.extend(detail.body_lines(inner_w));
     }
     lines
 }
@@ -183,7 +183,7 @@ pub(super) fn overview_lines(app: &App, detail: &Detail, inner_w: u16) -> Vec<Li
             "─".repeat(inner_w as usize),
             Style::default().fg(DIM),
         )));
-        lines.extend(crate::markdown::render(body, inner_w));
+        lines.extend(detail.body_lines(inner_w));
     }
 
     lines

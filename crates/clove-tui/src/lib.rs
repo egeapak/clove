@@ -113,8 +113,11 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         }
         match code {
             KeyCode::Esc => app.cancel_form(),
-            KeyCode::Tab | KeyCode::Down => app.form_next_field(),
-            KeyCode::BackTab | KeyCode::Up => app.form_prev_field(),
+            KeyCode::Tab => app.form_next_field(),
+            KeyCode::BackTab => app.form_prev_field(),
+            // ↑/↓ walk the lines of a multi-line Body before leaving the field.
+            KeyCode::Down => app.form_down(),
+            KeyCode::Up => app.form_up(),
             _ => app.form_key(code),
         }
         return;
@@ -137,8 +140,14 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
 
     // Help overlay swallows everything except its dismiss keys.
     if app.show_help {
-        if matches!(code, KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q')) {
-            app.show_help = false;
+        match code {
+            KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') => app.show_help = false,
+            // The overlay can be taller than a short terminal: scroll it.
+            KeyCode::Down | KeyCode::Char('j') => app.scroll_help(1),
+            KeyCode::Up | KeyCode::Char('k') => app.scroll_help(-1),
+            KeyCode::PageDown => app.scroll_help(10),
+            KeyCode::PageUp => app.scroll_help(-10),
+            _ => {}
         }
         return;
     }
@@ -154,7 +163,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
                 app.focus_list();
             }
         }
-        KeyCode::Char('?') => app.show_help = true,
+        KeyCode::Char('?') => app.open_help(),
 
         KeyCode::Down | KeyCode::Char('j') => app.select_next(),
         KeyCode::Up | KeyCode::Char('k') => app.select_prev(),

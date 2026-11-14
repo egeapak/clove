@@ -206,8 +206,9 @@ add or update the step in the same change.
 
 `crates/clove-tui/src/snapshot.rs` renders the UI to a `ratatui` `TestBackend`
 and flattens the cell buffer to **plain text** (no colour/style) so snapshots
-stay font- and theme-independent. Every state is captured at three terminal
-shapes (portrait/landscape/square) to exercise the adaptive layout.
+stay font- and theme-independent. Every state is captured at four terminal
+shapes (portrait/landscape/square, and the default 80×24) to exercise the
+adaptive layout.
 
 - These tests **only capture glyphs, not colour** — a pure colour change won't
   alter a snapshot (you must eyeball a screenshot instead; see below).
