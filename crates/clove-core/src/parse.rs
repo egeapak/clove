@@ -228,6 +228,10 @@ fn split_frontmatter<'a>(
         path: path.to_owned(),
     };
 
+    // A UTF-8 byte-order mark before the opening fence is dropped: the same
+    // Windows editors that rewrite line endings as CRLF may add one.
+    let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
+
     // Opening fence at the very start.
     let open_len = if bytes.starts_with(b"---\n") {
         4
@@ -662,6 +666,16 @@ mod tests {
         ] {
             assert!(!contains_yaml_anchor_or_alias(fm.as_bytes()), "{fm}");
         }
+    }
+
+    #[test]
+    fn accepts_a_leading_utf8_bom() {
+        let contents = "\u{feff}---\r\nschema: 1\r\nid: proj-7AF3K2MN\r\ntitle: x\r\nstatus: open\r\ntype: bug\r\npriority: 2\r\ncreated: 2026-06-02T10:00:00Z\r\nupdated: 2026-06-02T10:00:00Z\r\n---\r\nbody\r\n";
+        let (_tmp, path) = write_temp("proj-7AF3K2MN.md", contents);
+        let item = parse_item_file(&path).unwrap();
+        assert_eq!(item.frontmatter.title, "x");
+        assert_eq!(item.body, "body\r\n");
+        assert!(parse_frontmatter_file(&path).is_ok());
     }
 
     #[test]
