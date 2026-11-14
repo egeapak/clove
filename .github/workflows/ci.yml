@@ -154,10 +154,14 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           save-if: ${{ github.ref == 'refs/heads/master' }}
-      # Enforce the DESIGN §13.1 file-scan budgets — these only assert in
-      # optimized builds (debug is several times slower).
+      # Enforce the DESIGN §13.1 file-scan budgets and the DESIGN §6 index
+      # budgets (reindex, ls, ready, search, staleness). Both files only assert
+      # in optimized builds (debug is several times slower), and the ordinary
+      # test job is a debug build, so this job is the only place they can fail.
       - name: Perf gate tests
-        run: cargo test --release -p clove-core --test perf_gates
+        run: |
+          cargo test --release -p clove-core --test perf_gates
+          cargo test --release -p clove-index --test index_perf_gates
 
   fuzz:
     name: fuzz (30s/target)

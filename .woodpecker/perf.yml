@@ -18,3 +18,4 @@ steps:
     environment: *cargo_env
     commands:
       - cargo test --release -p clove-core --test perf_gates
+      - cargo test --release -p clove-index --test index_perf_gates
