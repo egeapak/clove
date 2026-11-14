@@ -447,9 +447,16 @@ pub struct ShowArgs {
 pub struct EditArgs {
     /// The item id.
     pub id: String,
-    /// A `KEY=VALUE` field edit (repeatable). If omitted, opens `$EDITOR`.
+    /// A `KEY=VALUE` field edit (repeatable). With no `--field`, `--body` or
+    /// `--body-file`, opens `$EDITOR`.
     #[arg(long = "field", value_name = "KEY=VALUE")]
     pub fields: Vec<String>,
+    /// Replace the item body (an empty string clears it).
+    #[arg(short = 'b', long, value_name = "TEXT", conflicts_with = "body_file")]
+    pub body: Option<String>,
+    /// Replace the item body with the contents of FILE (`-` reads stdin).
+    #[arg(long, value_name = "FILE")]
+    pub body_file: Option<Utf8PathBuf>,
 }
 
 #[derive(Debug, Args)]

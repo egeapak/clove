@@ -240,3 +240,139 @@ fn import_validates_every_item_before_writing_any() {
         assert_eq!(written, 0, "{extra:?}: nothing may be written");
     }
 }
+
+/// The body is editable without an editor: `edit --body` / `--body-file`.
+#[test]
+fn edit_sets_the_body_from_a_flag_or_a_file() {
+    let repo = init_repo();
+    let id = new_item(repo.path(), "has a body", &["-b", "old"]);
+    let body_of = |dir: &Path| {
+        let mut show = clove(dir);
+        show.args(["show", id.as_str()]);
+        json_ok(&mut show)["data"]["body"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+
+    let mut edit = clove(repo.path());
+    edit.args(["edit", id.as_str(), "--body", "new text", "--field", "priority=1"]);
+    let v = json_ok(&mut edit);
+    assert_eq!(v["data"]["priority"], 1);
+    assert_eq!(body_of(repo.path()), "new text\n");
+
+    std::fs::write(repo.path().join("body.md"), "from a file\nline 2\n").unwrap();
+    clove(repo.path())
+        .args(["edit", id.as_str(), "--body-file", "body.md"])
+        .assert()
+        .success();
+    assert_eq!(body_of(repo.path()), "from a file\nline 2\n");
+
+    let mut stdin_edit = clove(repo.path());
+    stdin_edit.args(["edit", id.as_str(), "--body-file", "-"]);
+    let out = {
+        use std::io::Write;
+        let mut child = stdin_edit
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"piped").unwrap();
+        child.wait_with_output().unwrap()
+    };
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(body_of(repo.path()), "piped\n");
+
+    // `--body ""` clears the body.
+    clove(repo.path())
+        .args(["edit", id.as_str(), "--body", ""])
+        .assert()
+        .success();
+    assert_eq!(body_of(repo.path()), "");
+}
+
+/// An "editor" that rewrites the file in place (no rename), like nano or VS
+/// Code: it applies one `sed` expression to the file it is given.
+#[cfg(unix)]
+fn in_place_editor(dir: &Path, sed_expr: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let script = dir.join("editor.sh");
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\nsed '{sed_expr}' \"$1\" > \"$1.edit\" && cat \"$1.edit\" > \"$1\" && rm \"$1.edit\"\n"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    script
+}
+
+/// `clove edit` in an editor is a store write like any other: validated,
+/// `updated` stamped, the `closed` invariant kept, a JSON envelope printed, and
+/// visible to the index even when the editor wrote the file in place.
+#[cfg(unix)]
+#[test]
+fn editor_edit_is_saved_through_the_store() {
+    let repo = init_repo();
+    let id = new_item(repo.path(), "edit me", &[]);
+    clove(repo.path()).arg("reindex").assert().success();
+    let mut show = clove(repo.path());
+    show.args(["show", id.as_str()]);
+    let before = json_ok(&mut show)["data"].clone();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+
+    let editor = in_place_editor(repo.path(), "s/^status: open$/status: closed/");
+    let mut edit = clove(repo.path());
+    edit.env("CLOVE_EDITOR", &editor).args(["edit", id.as_str()]);
+    let saved = json_ok(&mut edit);
+    assert_eq!(saved["data"]["status"], "closed");
+    assert!(saved["data"]["closed"].is_string(), "{saved}");
+    assert_ne!(saved["data"]["updated"], before["updated"]);
+
+    // The index tier sees the change: no open item is left.
+    let mut ls = clove(repo.path());
+    ls.args(["ls", "--status", "open"]);
+    let listed = json_ok(&mut ls);
+    assert_eq!(listed["_meta"]["total"], 0, "{listed}");
+    assert_eq!(listed["data"].as_array().unwrap().len(), 0, "{listed}");
+
+    // An editor that changes nothing leaves the file byte-identical.
+    let path = repo.path().join(format!(".clove/issues/{id}.md"));
+    let bytes = std::fs::read(&path).unwrap();
+    let noop = in_place_editor(repo.path(), "s/^zzz$/zzz/");
+    clove(repo.path())
+        .env("CLOVE_EDITOR", &noop)
+        .args(["edit", id.as_str()])
+        .assert()
+        .success();
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+}
+
+/// An editor session that leaves an invalid item must not leave it in the
+/// store: the original file is restored and the rejected text is kept.
+#[cfg(unix)]
+#[test]
+fn editor_edit_that_does_not_validate_is_rolled_back() {
+    let repo = init_repo();
+    let id = new_item(repo.path(), "edit me", &[]);
+    let path = repo.path().join(format!(".clove/issues/{id}.md"));
+    let original = std::fs::read(&path).unwrap();
+
+    let editor = in_place_editor(repo.path(), "s/^status: open$/status: nonsense/");
+    let out = clove(repo.path())
+        .env("CLOVE_EDITOR", &editor)
+        .env("TMPDIR", repo.path())
+        .args(["edit", id.as_str()])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(4), "{out:?}");
+    assert!(stderr(&out).contains("clove-edit-"), "{out:?}");
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    let kept = std::fs::read_dir(repo.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| entry.file_name().to_string_lossy().starts_with("clove-edit-"))
+        .expect("the rejected text is kept");
+    assert!(std::fs::read_to_string(kept.path())
+        .unwrap()
+        .contains("status: nonsense"));
+}
