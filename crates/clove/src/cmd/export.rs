@@ -196,7 +196,7 @@ pub fn run(ctx: &Ctx, format: OutputFormat, args: ExportArgs) -> Result<ExitCode
                 ErrorKind::DisplayHelp
                 | ErrorKind::DisplayVersion
                 | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => ExitCode::Success,
-                _ => ExitCode::Usage,
+                _ => crate::output::emit_usage_error(format, &err.to_string()),
             });
         }
     };

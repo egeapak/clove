@@ -85,6 +85,55 @@ pub fn emit_error(format: OutputFormat, error: &CloveError, quiet: bool) -> Exit
     exit
 }
 
+/// The output format a command line asks for, read from the raw arguments.
+///
+/// Used only when clap could not parse them — so there is no parsed `--format`
+/// to consult — to decide whether the usage error also owes a JSON envelope.
+/// Recognizes `--format X`, `--format=X`, `-f X` and `-fX` up to a `--`, then
+/// falls back to `CLOVE_FORMAT` and human, like [`resolve_format`].
+pub fn requested_format(argv: &[String]) -> OutputFormat {
+    let parse = OutputFormat::parse;
+    let mut args = argv.iter().skip(1);
+    let mut found = None;
+    while let Some(arg) = args.next() {
+        if arg == "--" {
+            break;
+        }
+        let value = if arg == "--format" || arg == "-f" {
+            args.next().map(String::as_str)
+        } else if let Some(value) = arg.strip_prefix("--format=") {
+            Some(value)
+        } else if arg.starts_with("-f") && !arg.starts_with("--") {
+            Some(arg[2..].trim_start_matches('='))
+        } else {
+            None
+        };
+        if let Some(format) = value.and_then(parse) {
+            found = Some(format);
+        }
+    }
+    resolve_format(found, None)
+}
+
+/// The JSON half of a usage error clap already reported on stderr (exit 1): a
+/// client that asked for JSON reads stdout, and an empty stdout is not an
+/// envelope. Human mode prints nothing more. Returns [`ExitCode::Usage`].
+pub fn emit_usage_error(format: OutputFormat, message: &str) -> ExitCode {
+    if matches!(format, OutputFormat::Json | OutputFormat::Jsonl) {
+        let envelope = json!({
+            "v": ENVELOPE_VERSION,
+            "ok": false,
+            "error": {
+                "code": "USAGE_ERROR",
+                "message": message.trim_end(),
+                "exit": ExitCode::Usage.code(),
+            },
+        });
+        outln!("{envelope}");
+    }
+    ExitCode::Usage
+}
+
 /// Emit an "unknown subcommand" usage error (exit 1, PLUGIN_SYSTEM.md §4.1/§7):
 /// a bare `clove <x>` matched no built-in and no `clove-<x>` plugin resolved.
 ///
@@ -158,6 +207,32 @@ mod tests {
         assert_eq!(envelope["error"]["code"], "ITEM_NOT_FOUND");
         assert_eq!(envelope["error"]["exit"], 2);
         assert_eq!(envelope["v"], 1);
+    }
+
+    #[test]
+    fn requested_format_reads_every_spelling_of_the_flag() {
+        let argv = |args: &[&str]| -> Vec<String> {
+            std::iter::once("clove")
+                .chain(args.iter().copied())
+                .map(str::to_owned)
+                .collect()
+        };
+        for args in [
+            &["--format", "json", "show"][..],
+            &["show", "--format=json"],
+            &["-f", "json", "show"],
+            &["-fjson", "show"],
+        ] {
+            assert_eq!(requested_format(&argv(args)), OutputFormat::Json, "{args:?}");
+        }
+        // After `--` the tokens are positionals, not flags.
+        if std::env::var("CLOVE_FORMAT").is_err() {
+            assert_eq!(
+                requested_format(&argv(&["new", "--", "--format", "json"])),
+                OutputFormat::Human
+            );
+            assert_eq!(requested_format(&argv(&["show"])), OutputFormat::Human);
+        }
     }
 
     #[test]
