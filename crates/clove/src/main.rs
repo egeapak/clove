@@ -309,7 +309,7 @@ fn run_repo(
         Commands::Assign(a) => cmd::assign::run(ctx, f, &a.id, a.assignee, a.clear).map(|_| ok),
         Commands::Parent(a) => cmd::parent::run(ctx, f, &a.id, a.parent, a.clear).map(|_| ok),
         Commands::Priority(a) => cmd::priority::run(ctx, f, &a.id, a.priority).map(|_| ok),
-        Commands::Dep(a) => cmd::dep::run(ctx, f, a.action, no_index),
+        Commands::Dep(a) => cmd::dep::run(ctx, f, a.action, no_index, deep),
         Commands::Ready(a) => cmd::ready::run(ctx, f, a, quiet, no_index, deep).map(|_| ok),
         Commands::Blocked(a) => cmd::blocked::run(ctx, f, a, quiet, no_index, deep).map(|_| ok),
         Commands::Ls(a) => cmd::ls::run(ctx, f, a, no_index, deep).map(|_| ok),
