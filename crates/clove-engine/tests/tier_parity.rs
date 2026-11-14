@@ -340,6 +340,7 @@ fn the_index_tier_hydrates_to_exactly_the_file_answer() {
                     assert_eq!(want.source, Source::Files, "{label}");
                     assert_eq!(got.total, want.total, "{label}: total");
                     assert_eq!(rows_of(&got.rows), rows_of(&want.rows), "{label}: rows");
+                    assert_eq!(got.warnings, want.warnings, "{label}: warnings");
                 }
             }
         }
@@ -685,4 +686,60 @@ fn an_index_error_falls_back_to_the_files_with_a_warning() {
             got.warnings
         );
     }
+}
+
+/// `ready` names the items it left out because a hard dependency is missing,
+/// and names the same ones whichever tier answers.
+///
+/// Only the file tier used to build that warning, so `_meta.warnings` was empty
+/// with an index and filled with `--no-index`. The file tier also named closed
+/// items, which are never `ready` candidates, and ignored the query's filters.
+#[test]
+fn ready_warns_about_the_same_dangling_items_on_every_tier() {
+    let fx = fixture();
+    let store = ItemStore::new(fx.root.clone());
+    // A closed item with a missing dependency: not excluded from `ready` by
+    // that dependency, so it is not the warning's business.
+    let closed = fx.ids[5].clone();
+    edit(&store, &closed, |fm| {
+        fm.deps = vec![CloveId::new("proj-YYYYYYYY").unwrap()]
+    });
+    let updated = store.get(&closed).unwrap().frontmatter.updated;
+    clove_core::ops::transition(&store, &closed, ItemStatus::Closed, updated).unwrap();
+    clove_index::reindex(&fx.clove_dir.join("issues"), &fx.clove_dir.join("index.db")).unwrap();
+
+    let ready = |engine: &Engine, filters: &Filters| {
+        engine
+            .ready(
+                filters,
+                Order::default(),
+                Page::unlimited(),
+                Projection::Lean,
+            )
+            .unwrap()
+    };
+    let dangling_open = fx.ids[4].to_string(); // "epsilon widget", an epic
+
+    let all = Filters::default();
+    let got = ready(&fx.indexed(), &all);
+    let want = ready(&fx.files(), &all);
+    assert_eq!(got.source, Source::Index);
+    assert_eq!(want.source, Source::Files);
+    assert_eq!(got.warnings, want.warnings);
+    assert_eq!(
+        got.warnings,
+        vec![format!(
+            "1 item(s) excluded with dangling deps: {dangling_open}"
+        )],
+        "the open item only; the closed one was never a candidate"
+    );
+
+    // A filter that the dangling item does not match leaves nothing to warn
+    // about; one it matches (through the `q` residue too) keeps the warning.
+    let bugs = with(Filters::default(), |f| f.item_type = vec![ItemType::Bug]);
+    assert!(ready(&fx.indexed(), &bugs).warnings.is_empty());
+    assert!(ready(&fx.files(), &bugs).warnings.is_empty());
+    let q = with(Filters::default(), |f| f.q = Some("epsilon".to_owned()));
+    assert_eq!(ready(&fx.indexed(), &q).warnings, want.warnings);
+    assert_eq!(ready(&fx.files(), &q).warnings, want.warnings);
 }

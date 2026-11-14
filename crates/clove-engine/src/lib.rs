@@ -840,9 +840,21 @@ impl Engine {
         // error out where `--no-index` answers normally. The index is a cache;
         // "this query is too big for SQLite" is a reason to use the other path,
         // not to refuse.
-        match index.query_filtered(&filter, residue.as_ref(), window) {
-            Ok((rows, total)) => (
-                Some((rows.iter().map(LeanRow::from).collect(), total, Vec::new())),
+        // `ready` names the items it left out for a missing dependency. The
+        // file tier derives that from its graph; this is the same list from the
+        // index, so `_meta.warnings` does not depend on which tier answered.
+        let answer = index
+            .query_filtered(&filter, residue.as_ref(), window)
+            .and_then(|(rows, total)| {
+                let warnings = match mode {
+                    QueryMode::Ready => index.ready_warnings(&filter, residue.as_ref())?,
+                    QueryMode::List | QueryMode::Blocked => Vec::new(),
+                };
+                Ok((rows, total, warnings))
+            });
+        match answer {
+            Ok((rows, total, warnings)) => (
+                Some((rows.iter().map(LeanRow::from).collect(), total, warnings)),
                 Vec::new(),
             ),
             Err(e) if query_too_complex(&e) => (None, Vec::new()),

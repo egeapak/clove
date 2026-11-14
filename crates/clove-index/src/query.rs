@@ -432,7 +432,59 @@ pub fn query_filtered(
     }
 }
 
+/// The warnings a `ready` answer carries: the active items that match `filter`
+/// (and `post`) but are left out because a hard dependency is missing.
+///
+/// The index-path twin of the warning `clove_core::ops::ready_rows_with_graph`
+/// builds from the graph, worded by the same
+/// [`clove_core::ops::ready_dangling_warning`]. `filter.mode`, `filter.order`
+/// and `filter.limit` are ignored: the set is every match, in id order.
+pub fn ready_warnings(
+    conn: &Connection,
+    filter: &Filter,
+    post: Option<&PostFilter>,
+) -> Result<Vec<String>, IndexError> {
+    // The `List` clause with the status set narrowed to the active statuses is
+    // the `ready` candidate set before any graph term is applied.
+    let mut filter = filter.clone();
+    filter.mode = QueryMode::List;
+    let active: Vec<ItemStatus> = [ItemStatus::Open, ItemStatus::InProgress]
+        .into_iter()
+        .filter(|s| filter.status.is_empty() || filter.status.contains(s))
+        .collect();
+    filter.status = active;
+    if filter.status.is_empty() {
+        return Ok(Vec::new()); // e.g. `ready --status closed`
+    }
+    let (where_sql, params) = where_clause(&filter);
+    let sql = format!(
+        "SELECT {ITEM_COLUMNS} FROM items{where_sql} AND has_dangling_deps = TRUE ORDER BY id"
+    );
+    let param_refs: Vec<&dyn ToSql> = params.iter().map(|b| b.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(param_refs.as_slice(), ItemRow::from_row)?;
+    let mut ids = Vec::new();
+    for row in rows {
+        let row = row?;
+        if post.is_none_or(|post| post.matches_row(&row)) {
+            ids.push(row.id);
+        }
+    }
+    Ok(clove_core::ops::ready_dangling_warning(&ids)
+        .into_iter()
+        .collect())
+}
+
 impl crate::db::Index {
+    /// [`ready_warnings`] against this index.
+    pub fn ready_warnings(
+        &self,
+        filter: &Filter,
+        post: Option<&PostFilter>,
+    ) -> Result<Vec<String>, IndexError> {
+        ready_warnings(self.conn(), filter, post)
+    }
+
     /// Run a filtered query against the index (T-S07).
     pub fn query_items(&self, filter: &Filter) -> Result<Vec<ItemRow>, IndexError> {
         query_items(self.conn(), filter)

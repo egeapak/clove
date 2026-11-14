@@ -778,10 +778,12 @@ pub fn ready_rows_with_graph(
 
     // Items excluded from `ready` because they reference missing dependencies.
     // They are not lost: `blocked` lists them, with the broken ids in
-    // `blocked_by`.
-    let mut warnings = Vec::new();
-    let dangling: Vec<String> = frontmatters
+    // `blocked_by`. Only items this query could have returned are named: an
+    // active item that matches the filters. A closed item is never a `ready`
+    // candidate, so naming it would report an exclusion that did not happen.
+    let mut dangling: Vec<String> = frontmatters
         .iter()
+        .filter(|fm| fm.status != ItemStatus::Closed && filters.matches(fm))
         .filter(|fm| {
             graph
                 .meta(&fm.id)
@@ -790,14 +792,25 @@ pub fn ready_rows_with_graph(
         })
         .map(|fm| fm.id.to_string())
         .collect();
-    if !dangling.is_empty() {
-        warnings.push(format!(
-            "{} item(s) excluded with dangling deps: {}",
-            dangling.len(),
-            dangling.join(", ")
-        ));
-    }
+    dangling.sort();
+    let warnings: Vec<String> = ready_dangling_warning(&dangling).into_iter().collect();
     Ok((ordered, warnings, graph))
+}
+
+/// The `ready` warning for the items left out because a hard dependency is
+/// missing, or `None` when there are none. `ids` are in id order.
+///
+/// One definition, shared by the file tier above and the index tier
+/// (`clove_index::Index::ready_warnings`), so the two cannot word it
+/// differently.
+pub fn ready_dangling_warning(ids: &[String]) -> Option<String> {
+    (!ids.is_empty()).then(|| {
+        format!(
+            "{} item(s) excluded with dangling deps: {}",
+            ids.len(),
+            ids.join(", ")
+        )
+    })
 }
 
 /// One row of a `blocked` answer: the item and the ids holding it up (unclosed
