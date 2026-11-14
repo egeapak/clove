@@ -224,6 +224,47 @@ describe('store query loading', () => {
     expect(store.offset).toBe(100);
   });
 
+  it('ignores the failure of a superseded request', async () => {
+    store.loadError = null;
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    vi.stubGlobal('fetch', async (url: string | URL) => {
+      const u = String(url);
+      if (!u.includes('/items')) return envelope(META);
+      if (!u.includes('offset=')) {
+        // The first query fails, late.
+        await held;
+        return new Response(
+          JSON.stringify({ v: 1, ok: false, error: { code: 'IO_ERROR', message: 'boom', exit: 5 }, _meta: {} }),
+          { status: 500, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      return envelope([item({ id: 'proj-FRESH' })], { total: 101, offset: 100, limit: 1 });
+    });
+
+    store.setQuery({ limit: 1, offset: 0 });
+    store.setQuery({ limit: 1, offset: 100 });
+    await vi.waitFor(() => expect(store.all.map((i) => i.id)).toEqual(['proj-FRESH']));
+    release();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(store.loadError).toBeNull();
+    expect(store.all.map((i) => i.id)).toEqual(['proj-FRESH']);
+  });
+
+  it('still reports the failure of the current request', async () => {
+    store.loadError = null;
+    vi.stubGlobal('fetch', async (url: string | URL) => {
+      if (!String(url).includes('/items')) return envelope(META);
+      return new Response(
+        JSON.stringify({ v: 1, ok: false, error: { code: 'IO_ERROR', message: 'boom', exit: 5 }, _meta: {} }),
+        { status: 500, headers: { 'content-type': 'application/json' } }
+      );
+    });
+    store.setQuery({ limit: 1, offset: 300 });
+    await vi.waitFor(() => expect(store.loadError).not.toBeNull());
+    store.loadError = null;
+  });
+
   it('loads metadata without fetching any items before a view declares a query', async () => {
     let itemCalls = 0;
     vi.stubGlobal('fetch', async (url: string | URL) => {
