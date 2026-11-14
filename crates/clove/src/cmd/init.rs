@@ -1,6 +1,6 @@
 //! `clove init` (T-CLI02): create the `.clove/` layout. Idempotent.
 
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::Utf8Path;
 use clove_core::config::derive_prefix;
 use clove_core::{OutputFormat, GITIGNORE_ENTRIES};
 use clove_plugin::outln;
@@ -18,13 +18,7 @@ pub fn run(
     quiet: bool,
 ) -> Result<(), CloveError> {
     let (root, clove_dir) = match clove_dir_override {
-        Some(dir) => {
-            let root = dir
-                .parent()
-                .map(Utf8Path::to_owned)
-                .unwrap_or_else(|| Utf8PathBuf::from("."));
-            (root, dir.to_owned())
-        }
+        Some(dir) => crate::context::clove_dir_override_root(dir)?,
         None => {
             let cwd = current_dir()?;
             let clove_dir = cwd.join(".clove");
