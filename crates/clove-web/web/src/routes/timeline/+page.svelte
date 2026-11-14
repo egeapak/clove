@@ -9,7 +9,7 @@
   import { shortId, typeIcon, statusGlyph, statusColorVar, statusLabel } from '$lib/glyphs';
   import { dailyHistory, lastDays } from '$lib/history';
   import { tooltip } from '$lib/tooltip';
-  import { chipCenter, dateAtFraction, formatAxisDate, fractionAtX } from '$lib/timeline';
+  import { chipCenter, dateAtFraction, formatAxisDate, fractionAtX, rowWindow } from '$lib/timeline';
   import { tick } from 'svelte';
 
   let history = $state<StatsHistoryPoint[]>([]);
@@ -214,8 +214,44 @@
   const rowIndex = $derived(new Map(rows.map((r, i) => [r.id, i])));
   const ROW_H = 38;
 
+  // Only the rows near the viewport are rendered. The page scrolls the
+  // timeline (it has no vertical scroller of its own), so the window comes
+  // from where the track column sits in the viewport. Without this, every
+  // item cost two rows of DOM plus an arrow per dependency, and a store of a
+  // few thousand items made each scroll and hover slow.
+  const OVERSCAN = 8;
+  let tracksEl = $state<HTMLDivElement | undefined>();
+  let win = $state.raw({ first: 0, last: 0 });
+  $effect(() => {
+    const el = tracksEl;
+    const count = rows.length;
+    if (!el) return;
+    let frame = 0;
+    const read = () => {
+      frame = 0;
+      const top = -el.getBoundingClientRect().top;
+      const next = rowWindow(top, top + window.innerHeight, ROW_H, count, OVERSCAN);
+      if (next.first !== win.first || next.last !== win.last) win = next;
+    };
+    const schedule = () => {
+      if (!frame) frame = requestAnimationFrame(read);
+    };
+    read();
+    // Scroll events do not bubble; capture sees the scroll of any ancestor.
+    document.addEventListener('scroll', schedule, { capture: true, passive: true });
+    window.addEventListener('resize', schedule);
+    return () => {
+      if (frame) cancelAnimationFrame(frame);
+      document.removeEventListener('scroll', schedule, { capture: true });
+      window.removeEventListener('resize', schedule);
+    };
+  });
+  const visible = $derived(
+    rows.slice(win.first, win.last).map((it, k) => ({ it, ri: win.first + k }))
+  );
+
   interface Arrow { x1: number; y1: number; x2: number; y2: number; }
-  const arrows = $derived.by(() => {
+  const allArrows = $derived.by(() => {
     const out: Arrow[] = [];
     rows.forEach((it, ri) => {
       for (const dep of it.deps) {
@@ -229,6 +265,12 @@
       }
     });
     return out;
+  });
+  // An arrow is drawn when any part of it crosses the rendered rows.
+  const arrows = $derived.by(() => {
+    const top = win.first * ROW_H;
+    const bottom = win.last * ROW_H;
+    return allArrows.filter((a) => Math.max(a.y1, a.y2) >= top && Math.min(a.y1, a.y2) <= bottom);
   });
 
   const svgH = $derived(rows.length * ROW_H);
@@ -290,13 +332,14 @@
     {/if}
   </div>
 
-  <div class="tl-labels">
-    {#each rows as it (it.id)}
+  <div class="tl-labels" style="height:{svgH}px">
+    {#each visible as { it, ri } (it.id)}
       <a
         class="rowlabel"
         class:closed={it.status === 'closed'}
         class:epic={it.type === 'epic'}
         class:hl={hovered === it.id}
+        style="top:{ri * ROW_H}px"
         href="{base}/items/{it.id}"
         use:tooltip={`${it.id} · ${it.title}`}
         onmouseenter={() => (hovered = it.id)}
@@ -308,7 +351,7 @@
     {/each}
   </div>
 
-  <div class="tl-tracks" style="height:{svgH}px">
+  <div class="tl-tracks" style="height:{svgH}px" bind:this={tracksEl}>
     <!-- grid -->
     {#each ticks as t (t.left)}
       <div class="grid-line" style="left:{t.left}%"></div>
@@ -337,7 +380,7 @@
         />
       {/each}
     </svg>
-    {#each rows as it, ri (it.id)}
+    {#each visible as { it, ri } (it.id)}
       <div
         class="track"
         class:hl={hovered === it.id}
@@ -498,6 +541,10 @@
     pointer-events: none;
   }
   .rowlabel {
+    position: absolute;
+    left: 0;
+    right: 0;
+    box-sizing: border-box;
     height: 38px;
     display: flex;
     align-items: center;
