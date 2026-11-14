@@ -248,9 +248,18 @@ pub fn dep_add(
                 id: dep_id.to_string(),
             });
         }
-        let frontmatters = scan_or_fail(store)?;
-        let (graph, _dangling) = GraphStore::build(&frontmatters);
-        if graph.check_would_cycle(id, dep_id) {
+        // A cycle needs a path `dep_id → … → id` over `deps`, and every item
+        // on such a path is in the forward closure of `dep_id`. Walk only that;
+        // a very large closure falls back to the whole-store graph.
+        let would_cycle = match dep_path_exists(store, dep_id, id)? {
+            Some(found) => found,
+            None => {
+                let frontmatters = scan_or_fail(store)?;
+                let (graph, _dangling) = GraphStore::build(&frontmatters);
+                graph.check_would_cycle(id, dep_id)
+            }
+        };
+        if would_cycle {
             return Err(CloveError::DependencyCycle {
                 from: id.to_string(),
                 to: dep_id.to_string(),
@@ -324,15 +333,14 @@ pub fn set_parent(
                 // the walk so a *pre-existing* parent cycle in the store (a
                 // representable but invalid state, e.g. from a bad hand-edit or
                 // merge) can't hang us.
-                let frontmatters = scan_or_fail(store)?;
-                let parent_of: std::collections::HashMap<&CloveId, Option<&CloveId>> = frontmatters
-                    .iter()
-                    .map(|fm| (&fm.id, fm.parent.as_ref()))
-                    .collect();
+                //
+                // Only the ancestors are read, one file each. A chain longer
+                // than the budget is answered from one whole-store scan.
+                let mut scanned: Option<std::collections::HashMap<CloveId, Option<CloveId>>> = None;
                 let mut visited = std::collections::HashSet::new();
-                let mut cursor = Some(parent);
+                let mut cursor = Some(parent.clone());
                 while let Some(node) = cursor {
-                    if node == id {
+                    if &node == id {
                         return Err(CloveError::InvalidField {
                             field: "parent".to_owned(),
                             reason: format!(
@@ -340,10 +348,21 @@ pub fn set_parent(
                             ),
                         });
                     }
-                    if !visited.insert(node) {
+                    if !visited.insert(node.clone()) {
                         break; // a pre-existing cycle that doesn't involve `id`
                     }
-                    cursor = parent_of.get(node).copied().flatten();
+                    if scanned.is_none() && visited.len() > LOCAL_CLOSURE_BUDGET {
+                        scanned = Some(
+                            scan_or_fail(store)?
+                                .into_iter()
+                                .map(|fm| (fm.id, fm.parent))
+                                .collect(),
+                        );
+                    }
+                    cursor = match &scanned {
+                        Some(parent_of) => parent_of.get(&node).cloned().flatten(),
+                        None => read_for_walk(store, &node)?.and_then(|fm| fm.parent),
+                    };
                 }
                 item.frontmatter.parent = Some(parent.clone());
             }
@@ -362,6 +381,52 @@ const LOCAL_CLOSURE_BUDGET: usize = 512;
 /// The closure of `id` was too large to walk item-by-item; use the whole-store
 /// graph instead.
 struct BudgetExceeded;
+
+/// Read one item's frontmatter for a validation walk, resolving the id the way
+/// the store's scan does: a symlink or a non-regular file is not a graph node
+/// (`None`). A file that exists but does not parse is an error, for the reason
+/// [`scan_or_fail`] gives — the walk cannot see through it.
+fn read_for_walk(store: &ItemStore, id: &CloveId) -> Result<Option<ItemFrontmatter>, CloveError> {
+    let path = store.path_for(id);
+    match std::fs::symlink_metadata(&path) {
+        Ok(meta) if meta.is_file() => {}
+        _ => return Ok(None),
+    }
+    crate::parse_frontmatter_file(&path)
+        .map(Some)
+        .map_err(|e| CloveError::ScanFailed {
+            message: e.to_string(),
+            path,
+            count: 1,
+        })
+}
+
+/// Whether a path `from → … → target` exists over hard dependencies, reading
+/// only the items in the forward closure of `from`. `Ok(None)` when the closure
+/// passes [`LOCAL_CLOSURE_BUDGET`] items; the caller then builds the whole graph.
+fn dep_path_exists(
+    store: &ItemStore,
+    from: &CloveId,
+    target: &CloveId,
+) -> Result<Option<bool>, CloveError> {
+    let mut seen: std::collections::HashSet<CloveId> = std::collections::HashSet::new();
+    let mut stack = vec![from.clone()];
+    while let Some(node) = stack.pop() {
+        if &node == target {
+            return Ok(Some(true));
+        }
+        if !seen.insert(node.clone()) {
+            continue;
+        }
+        if seen.len() > LOCAL_CLOSURE_BUDGET {
+            return Ok(None);
+        }
+        if let Some(fm) = read_for_walk(store, &node)? {
+            stack.extend(fm.deps);
+        }
+    }
+    Ok(Some(false))
+}
 
 /// `ready` / `blocked_by` for **one** item, without scanning the whole store.
 ///
@@ -1330,18 +1395,26 @@ mod tests {
     }
 
     #[test]
-    fn cycle_validation_refuses_a_partially_unparseable_store() {
-        // If a file fails to parse, the graph built for the cycle/ancestry check
-        // is incomplete; validating against it could admit a real cycle. Both
-        // graph-edge ops must refuse rather than validate against a partial store.
+    fn cycle_validation_refuses_an_unparseable_file_on_the_walked_path() {
+        // The cycle and ancestry checks walk from the new target. A file on
+        // that walk that fails to parse could hide the edge that closes a
+        // cycle, so both graph-edge ops must refuse rather than guess.
         let (_d, store) = store();
         let a = new_id(&store, "a");
         let b = new_id(&store, "b");
-        std::fs::write(
-            store.issues_dir().join("proj-BROKEN01.md"),
-            "---\nnot: [valid yaml\n---\nbody",
-        )
-        .unwrap();
+        let broken = CloveId::new("proj-BR0KEN01").unwrap();
+        let break_it =
+            || std::fs::write(store.path_for(&broken), "---\nnot: [valid yaml\n---\nbody").unwrap();
+
+        // b depends on the broken file: a → b → broken → ? may lead back to a.
+        store
+            .update_with(&b, Utc::now(), |item| {
+                item.frontmatter.deps.push(broken.clone());
+                item.frontmatter.parent = Some(broken.clone());
+                Ok(())
+            })
+            .unwrap();
+        break_it();
 
         assert!(matches!(
             dep_add(&store, &a, &b, Utc::now()),
@@ -1351,6 +1424,67 @@ mod tests {
             set_parent(&store, &a, Some(&b), Utc::now()),
             Err(CloveError::ScanFailed { .. })
         ));
+    }
+
+    #[test]
+    fn edge_validation_reads_only_the_walked_items() {
+        // An unparseable file that the walk never reaches cannot be part of a
+        // cycle through the new edge. It must not block the edge, which also
+        // shows that the ops no longer parse every file in the store.
+        let (_d, store) = store();
+        let a = new_id(&store, "a");
+        let b = new_id(&store, "b");
+        let c = new_id(&store, "c");
+        std::fs::write(
+            store.issues_dir().join("proj-BR0KEN01.md"),
+            "---\nnot: [valid yaml\n---\nbody",
+        )
+        .unwrap();
+
+        dep_add(&store, &a, &b, Utc::now()).unwrap();
+        dep_add(&store, &b, &c, Utc::now()).unwrap();
+        set_parent(&store, &a, Some(&b), Utc::now()).unwrap();
+        set_parent(&store, &b, Some(&c), Utc::now()).unwrap();
+        // Cycles through two hops are still found.
+        assert!(matches!(
+            dep_add(&store, &c, &a, Utc::now()),
+            Err(CloveError::DependencyCycle { .. })
+        ));
+        assert!(matches!(
+            set_parent(&store, &c, Some(&a), Utc::now()),
+            Err(CloveError::InvalidField { .. })
+        ));
+    }
+
+    #[test]
+    fn edge_validation_past_the_walk_budget_uses_the_whole_store() {
+        // A chain longer than LOCAL_CLOSURE_BUDGET: the walk gives up and the
+        // whole-store graph answers, with the same result.
+        let (_d, store) = store();
+        let ids: Vec<CloveId> = (0..LOCAL_CLOSURE_BUDGET + 8)
+            .map(|i| new_id(&store, &format!("n{i}")))
+            .collect();
+        for pair in ids.windows(2) {
+            store
+                .update_with(&pair[0], Utc::now(), |item| {
+                    item.frontmatter.deps.push(pair[1].clone());
+                    item.frontmatter.parent = Some(pair[1].clone());
+                    Ok(())
+                })
+                .unwrap();
+        }
+        let (first, last) = (&ids[0], &ids[ids.len() - 1]);
+        assert!(matches!(
+            dep_add(&store, last, first, Utc::now()),
+            Err(CloveError::DependencyCycle { .. })
+        ));
+        assert!(matches!(
+            set_parent(&store, last, Some(first), Utc::now()),
+            Err(CloveError::InvalidField { .. })
+        ));
+        let other = new_id(&store, "other");
+        dep_add(&store, &other, first, Utc::now()).unwrap();
+        set_parent(&store, &other, Some(first), Utc::now()).unwrap();
     }
 
     #[test]
