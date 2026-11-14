@@ -12,23 +12,38 @@ use crate::cli::AgentDocArgs;
 use crate::output::print_json_success;
 
 pub fn run(format: OutputFormat, args: AgentDocArgs) -> Result<(), CloveError> {
+    let json = matches!(format, OutputFormat::Json | OutputFormat::Jsonl);
     if args.check {
-        return check(args.file.as_deref());
+        let (path, schema) = check(args.file.as_deref())?;
+        if json {
+            print_json_success(
+                json!({ "file": path.as_str(), "schema": schema }),
+                json!({ "warnings": [] }),
+            );
+        }
+        return Ok(());
     }
 
     let doc = generate();
-    match format {
-        OutputFormat::Json | OutputFormat::Jsonl => print_json_success(
-            json!({ "schema": CURRENT_SCHEMA_VERSION, "markdown": doc }),
-            json!({ "warnings": [] }),
-        ),
-        OutputFormat::Human => match &args.out {
-            Some(path) => std::fs::write(path, &doc).map_err(|source| CloveError::Io {
-                path: path.clone(),
-                source,
-            })?,
-            None => out!("{doc}"),
-        },
+    // `--out` writes the document in every format: the generated doc itself
+    // tells agents to set `CLOVE_FORMAT=json`, and under it `--out` used to
+    // write nothing and still exit 0.
+    if let Some(path) = &args.out {
+        std::fs::write(path, &doc).map_err(|source| CloveError::Io {
+            path: path.clone(),
+            source,
+        })?;
+    }
+    match (&args.out, json) {
+        (out, true) => {
+            let mut data = json!({ "schema": CURRENT_SCHEMA_VERSION, "markdown": doc });
+            if let Some(path) = out {
+                data["out"] = json!(path.as_str());
+            }
+            print_json_success(data, json!({ "warnings": [] }));
+        }
+        (None, false) => out!("{doc}"),
+        (Some(_), false) => {}
     }
     Ok(())
 }
@@ -81,7 +96,7 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
 | 3 | dependency cycle |\n\
 | 4 | validation error |\n\
 | 5 | i/o or missing `.clove/`; also `REGISTRY_ERROR` — the plugin registry, `cargo` or `git` could not be reached |\n\
-| 6 | index error |\n\
+| 6 | reserved (never returned; an index failure is exit 5) |\n\
 | 7 | daemon error |\n\
 \n\
 ## Workflow for agents\n\
@@ -154,9 +169,10 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
   two-way GitHub sync (pull + push + comments in one pass; conflict policy\n\
   `newer|local|remote|manual`). Needs the `clove-sync-github` plugin\n\
   (`clove plugin install sync-github`) + a token via `GITHUB_TOKEN` or\n\
-  `gh auth token`; without the plugin it exits 4 with an install hint. The\n\
-  single GitHub path (replaces the old\n\
-  one-way `import github` / `export github`).\n\
+  `gh auth token`; without the plugin it exits 4 with an install hint.\n\
+  `clove import github` (pull-only) and `clove export github` (push-only) are\n\
+  one-way views of the same reconcile, served by the same plugin; they do not\n\
+  sync comments.\n\
 - File imports are idempotent on `external_ref`: re-running skips already-imported\n\
   items. `--dry-run` reports `{{ would_create, would_skip, conflicts }}` and\n\
   writes nothing.\n\
@@ -279,7 +295,7 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
 }
 
 /// Verify a saved doc's embedded schema version matches this binary.
-fn check(file: Option<&camino::Utf8Path>) -> Result<(), CloveError> {
+fn check(file: Option<&camino::Utf8Path>) -> Result<(camino::Utf8PathBuf, u32), CloveError> {
     let path = file.ok_or_else(|| CloveError::InvalidField {
         field: "file".to_owned(),
         reason: "--check requires --file PATH".to_owned(),
@@ -300,7 +316,7 @@ fn check(file: Option<&camino::Utf8Path>) -> Result<(), CloveError> {
             reason: format!("stale: doc schema {found}, binary schema {CURRENT_SCHEMA_VERSION}"),
         });
     }
-    Ok(())
+    Ok((path.to_owned(), found))
 }
 
 /// Parse the `schema:N` value out of the marker line.

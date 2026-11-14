@@ -6,10 +6,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 use ratatui::Frame;
 
+use crate::app::App;
+
 use super::style::{ACCENT, LABEL};
 use super::util::{centered_fixed, wrapped_height};
 
-pub(crate) fn render_help(f: &mut Frame, area: Rect) {
+pub(crate) fn render_help(f: &mut Frame, app: &mut App, area: Rect) {
     let rows = [
         ("↑/k ↓/j", "move selection"),
         ("g / G", "jump to top / bottom"),
@@ -62,18 +64,31 @@ pub(crate) fn render_help(f: &mut Frame, area: Rect) {
     } else {
         centered_fixed(area, w, needed_h)
     };
+    // On a terminal shorter than the help text the overlay scrolls (↑/↓, PgUp/
+    // PgDn); clamp so it never scrolls past the last row. The title says so, as
+    // nothing else on screen hints at the hidden rows.
+    let text_w = popup.width.saturating_sub(4);
+    let view_h = popup.height.saturating_sub(2);
+    let max_scroll = wrapped_height(&lines, text_w).saturating_sub(view_h);
+    app.help_scroll = app.help_scroll.min(max_scroll);
+    let title = if max_scroll > 0 {
+        " Help · ↑↓ scroll "
+    } else {
+        " Help "
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(ACCENT))
         .padding(Padding::new(1, 1, 0, 0))
-        .title(" Help ")
+        .title(title)
         .style(Style::default().bg(Color::Black));
     f.render_widget(Clear, popup);
     // Wrap so descriptions never clip mid-word on a narrow full-screen help.
     f.render_widget(
         Paragraph::new(lines)
             .block(block)
-            .wrap(Wrap { trim: false }),
+            .wrap(Wrap { trim: false })
+            .scroll((app.help_scroll, 0)),
         popup,
     );
 }

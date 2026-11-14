@@ -260,10 +260,14 @@ pub fn plan_restore(
     overwrite: bool,
 ) -> Result<RestorePlan, ImportError> {
     let mut plan = RestorePlan::default();
+    // An id repeated inside the file exists by the time its second copy is
+    // applied, so the plan must count it the way the apply will.
+    let mut planned = std::collections::HashSet::new();
     for item in items {
         let id = item.frontmatter.id.to_string();
         let title = item.frontmatter.title.clone();
-        if store.exists(&item.frontmatter.id) {
+        let repeated = !planned.insert(&item.frontmatter.id);
+        if repeated || store.exists(&item.frontmatter.id) {
             if overwrite {
                 plan.would_overwrite.push(PlanItem { id, title });
             } else {
@@ -495,6 +499,29 @@ mod tests {
         assert_eq!(parsed.len(), 1, "the item still restores");
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("were not restored"), "{warnings:?}");
+    }
+
+    /// The same id twice in one file: the apply creates it once and skips (or
+    /// overwrites) the second copy, so the plan must report the same counts.
+    #[test]
+    fn plan_counts_an_id_repeated_in_the_file_like_the_apply() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = camino::Utf8Path::from_path(dir.path()).unwrap();
+        std::fs::create_dir_all(root.join(".clove/issues")).unwrap();
+        let store = ItemStore::new(root.to_owned());
+        let first = sample_items().remove(0);
+        let items = vec![first.clone(), first];
+
+        let plan = plan_restore(&items, &store, false).unwrap();
+        assert_eq!((plan.would_create.len(), plan.would_skip.len()), (1, 1));
+        let plan = plan_restore(&items, &store, true).unwrap();
+        assert_eq!(
+            (plan.would_create.len(), plan.would_overwrite.len()),
+            (1, 1)
+        );
+
+        let report = apply_restore(&items, &store, false).unwrap();
+        assert_eq!((report.created, report.skipped), (1, 1));
     }
 
     #[test]

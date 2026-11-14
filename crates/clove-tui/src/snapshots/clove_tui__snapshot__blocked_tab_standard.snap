@@ -1,0 +1,28 @@
+---
+source: crates/clove-tui/src/snapshot.rs
+expression: rendered
+---
+┌ clove ───────────────────────────────────────────────────────────────────────┐
+│  All 7  │  Ready 4  │  Blocked 1                                             │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌ Items (1) ───────────────────────────┐┌ Overview · Dep tree · Comments ──────┐
+│▌○ F #K2M8ZP5R • Write integration… ✗ ││ #K2M8ZP5R  • FEATURE                 │
+│                                      ││ Write integration tests              │
+│                                      ││                                      │
+│                                      ││ status     ○ open · blocked          │
+│                                      ││ deps       1                         │
+│                                      ││ blocked by #9QX4D1B7                 │
+│                                      ││ labels     area:qa                   │
+│                                      ││ created    Jan 1                     │
+│                                      ││ updated    Jan 12                    │
+│                                      ││                                      │
+│                                      ││ ──────────────────────────────────── │
+│                                      ││ End-to-end coverage of the public    │
+│                                      ││ API surface.                         │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+└──────────────────────────────────────┘└──────────────────────────────────────┘
+7 item(s) loaded   ?: help · q: quit

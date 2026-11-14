@@ -3,18 +3,22 @@
 //! The `json` and `jsonl` writers. The source of truth is the file store (export
 //! always reads files, never the index), loading every item with its full §7.4
 //! shape (frontmatter + body + computed `ready`/`blocked_by`), sorted by
-//! `(priority, topological_rank, id)` to match list ordering. Output goes to
-//! stdout by default, or atomically to `--out FILE`. (GitHub is no longer an
+//! `(priority, topological_rank, id)` to match list ordering. Items are read and
+//! written one at a time, so memory does not grow with the bodies. An item file
+//! that does not parse is left out and named in a warning (stderr, and
+//! `_meta.warnings` for `json`). Output goes to stdout by default, or atomically
+//! to `--out FILE`. (GitHub is no longer an
 //! export sink — `clove sync github` is the single GitHub path.)
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::io::{self, Write};
+use std::io::{self, Seek, SeekFrom, Write};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::error::ErrorKind;
 use clap::Parser;
-use clove_core::{GraphStore, OutputFormat};
-use clove_import::export::{export_json, export_jsonl};
+use clove_core::{GraphStore, OutputFormat, ScanError};
+use clove_import::export::export_json_spooled;
 use clove_types::{CloveError, CloveId};
 use serde_json::{json, Value};
 use tempfile::NamedTempFile;
@@ -46,14 +50,22 @@ struct ExportBuiltinArgs {
     out: Option<Utf8PathBuf>,
 }
 
-/// Shape every item in the store into the canonical §7.4 export object
-/// (frontmatter + body + computed `ready`/`blocked_by`), in the canonical
-/// `(priority, topological rank, id)` order.
-fn shaped_objects(ctx: &Ctx) -> Result<Vec<serde_json::Map<String, Value>>, CloveError> {
-    // Files are the source of truth: load every item with its body.
-    let (items, _errors) = ctx.store.scan()?;
+/// The export plan: every item id in the canonical `(priority, topological
+/// rank, id)` order, the graph-derived `ready`/`blocked` sets, and one warning
+/// per item file that did not parse.
+///
+/// Built from the body-free frontmatter scan, so planning holds no bodies; the
+/// bodies are read one item at a time while writing ([`write_items`]).
+struct Plan {
+    order: Vec<CloveId>,
+    ready: HashSet<CloveId>,
+    blocked: HashMap<CloveId, (Vec<CloveId>, Vec<CloveId>)>,
+    warnings: Vec<String>,
+}
 
-    let frontmatters: Vec<_> = items.iter().map(|i| i.frontmatter.clone()).collect();
+fn plan(ctx: &Ctx) -> Result<Plan, CloveError> {
+    // Files are the source of truth.
+    let (mut frontmatters, errors) = ctx.store.scan_frontmatter()?;
     let (graph, _dangling) = GraphStore::build(&frontmatters);
     let ranks = graph.topological_ranks();
 
@@ -66,16 +78,93 @@ fn shaped_objects(ctx: &Ctx) -> Result<Vec<serde_json::Map<String, Value>>, Clov
 
     // Export is not a user-facing list: its order is fixed to the canonical
     // `(priority, topo, id)` so an export → import round-trip is byte-stable.
-    let mut order = frontmatters.clone();
-    clove_core::view::Order::default().apply(&mut order, &ranks);
-    let by_id: HashMap<&CloveId, &clove_types::Item> =
-        items.iter().map(|i| (&i.frontmatter.id, i)).collect();
+    clove_core::view::Order::default().apply(&mut frontmatters, &ranks);
 
-    Ok(order
+    Ok(Plan {
+        order: frontmatters.into_iter().map(|fm| fm.id).collect(),
+        ready,
+        blocked,
+        // An export is a backup: an item file left out of it must be named,
+        // or a later restore loses the item without anyone having been told.
+        warnings: errors.iter().map(skipped_warning).collect(),
+    })
+}
+
+fn skipped_warning(error: &ScanError) -> String {
+    format!("skipped (not exported): {error}")
+}
+
+/// The planned items as export objects, each read from disk only when pulled.
+/// An item whose file stops parsing between the plan and the read (or whose
+/// body alone is invalid) becomes a warning instead of an item.
+fn objects<'a>(
+    ctx: &'a Ctx,
+    plan: &'a Plan,
+    late_warnings: &'a RefCell<Vec<String>>,
+) -> impl Iterator<Item = Value> + 'a {
+    plan.order
         .iter()
-        .filter_map(|fm| by_id.get(&fm.id).copied())
-        .map(|item| export_object(item, &ctx.issues_dir, &ready, &blocked))
-        .collect())
+        .filter_map(move |id| match ctx.store.get(id) {
+            Ok(item) => Some(Value::Object(export_object(
+                &item,
+                &ctx.issues_dir,
+                &plan.ready,
+                &plan.blocked,
+            ))),
+            Err(error) => {
+                late_warnings
+                    .borrow_mut()
+                    .push(format!("skipped (not exported): {id}: {error}"));
+                None
+            }
+        })
+}
+
+/// Write the export to `writer`, one item at a time, and return the item count
+/// and every warning.
+fn write_items<W: Write>(
+    ctx: &Ctx,
+    fmt: ExportFormat,
+    plan: &Plan,
+    writer: &mut W,
+) -> Result<(usize, Vec<String>), io::Error> {
+    let late = RefCell::new(Vec::new());
+    let all_warnings = || -> Vec<String> {
+        plan.warnings
+            .iter()
+            .cloned()
+            .chain(late.borrow().iter().cloned())
+            .collect()
+    };
+    let items = objects(ctx, plan, &late);
+    let mut count = 0usize;
+    match fmt {
+        ExportFormat::Json => {
+            // `_meta` precedes `data` in the envelope and carries the warnings
+            // found while reading the items, so the items are spooled first: in
+            // memory up to 8 MiB, then in an anonymous temp file.
+            let mut spool = tempfile::spooled_tempfile(8 * 1024 * 1024);
+            for item in items {
+                if count > 0 {
+                    spool.write_all(b",")?;
+                }
+                serde_json::to_writer(&mut spool, &item)?;
+                count += 1;
+            }
+            spool.seek(SeekFrom::Start(0))?;
+            let meta = json!({ "source": "files", "warnings": all_warnings() });
+            export_json_spooled(writer, &mut spool, meta)?;
+        }
+        ExportFormat::Jsonl => {
+            for item in items {
+                serde_json::to_writer(&mut *writer, &item)?;
+                writer.write_all(b"\n")?;
+                count += 1;
+            }
+        }
+    }
+    writer.flush()?;
+    Ok((count, all_warnings()))
 }
 
 /// Run a built-in export provider (`json`/`jsonl`). `args.provider` is guaranteed
@@ -109,75 +198,57 @@ pub fn run(ctx: &Ctx, format: OutputFormat, args: ExportArgs) -> Result<ExitCode
                 ErrorKind::DisplayHelp
                 | ErrorKind::DisplayVersion
                 | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => ExitCode::Success,
-                _ => ExitCode::Usage,
+                _ => crate::output::emit_usage_error(format, &err.to_string()),
             });
         }
     };
 
-    // Files are the source of truth: shape every item (body + computed fields) in
-    // the canonical order. Per-file parse failures are dropped (consistent with
-    // `ls`/`ready`).
-    let shaped: Vec<Value> = shaped_objects(ctx)?
-        .into_iter()
-        .map(Value::Object)
-        .collect();
+    let plan = plan(ctx)?;
 
-    // Pick the sink: a file (atomic write) when `--out` is set, else stdout.
-    match &parsed.out {
+    // Pick the sink: a file (atomic: temp file + rename) when `--out` is set,
+    // else stdout. Either way the items stream through, so memory does not grow
+    // with the total size of the bodies.
+    let (_, warnings) = match &parsed.out {
         Some(path) => {
-            let mut buf = Vec::new();
-            serialize(export_format, &shaped, &mut buf).map_err(|source| CloveError::Io {
+            let parent = match path.parent() {
+                Some(parent) if !parent.as_str().is_empty() => parent,
+                _ => Utf8Path::new("."),
+            };
+            let io_err = |source| CloveError::Io {
                 path: path.clone(),
                 source,
-            })?;
-            atomic_write(path, &buf)?;
+            };
+            let temp = NamedTempFile::new_in(parent.as_std_path()).map_err(io_err)?;
+            let mut writer = io::BufWriter::new(temp);
+            let written = write_items(ctx, export_format, &plan, &mut writer).map_err(io_err)?;
+            let temp = writer.into_inner().map_err(|e| io_err(e.into_error()))?;
+            temp.persist(path.as_std_path())
+                .map_err(|e| io_err(e.error))?;
             // Under non-JSON, a short confirmation goes to *stderr* only; stdout
             // stays empty so a redirect of the file path is uncluttered.
             if matches!(format, OutputFormat::Human) {
-                eprintln!("wrote {} items to {path}", shaped.len());
+                eprintln!("wrote {} items to {path}", written.0);
             }
+            written
         }
         None => {
             let stdout = io::stdout();
-            let mut handle = stdout.lock();
-            serialize(export_format, &shaped, &mut handle).map_err(|source| {
+            let mut writer = io::BufWriter::new(stdout.lock());
+            write_items(ctx, export_format, &plan, &mut writer).map_err(|source| {
                 clove_plugin::stdout::exit_if_broken_pipe(&source);
                 CloveError::Io {
                     path: Utf8Path::new("<stdout>").to_owned(),
                     source,
                 }
-            })?;
+            })?
         }
+    };
+
+    // On stderr in every format: `jsonl` has no envelope to carry warnings, and
+    // a `json` export redirected to a file would otherwise hide them.
+    for warning in &warnings {
+        eprintln!("warning: {warning}");
     }
 
     Ok(ExitCode::Success)
-}
-
-/// Serialize `items` to `writer` in the chosen format. JSON wraps them in the
-/// standard envelope; JSONL emits one bare item object per line.
-fn serialize<W: Write>(
-    fmt: ExportFormat,
-    items: &[Value],
-    writer: &mut W,
-) -> Result<(), io::Error> {
-    match fmt {
-        ExportFormat::Json => export_json(writer, items, json!({ "source": "files" })),
-        ExportFormat::Jsonl => export_jsonl(writer, items),
-    }
-}
-
-/// Atomically write `bytes` to `path`: a tempfile in the same directory followed
-/// by a rename, so a reader never sees a partial export.
-fn atomic_write(path: &Utf8Path, bytes: &[u8]) -> Result<(), CloveError> {
-    let parent = path.parent().unwrap_or_else(|| Utf8Path::new("."));
-    let io_err = |source| CloveError::Io {
-        path: path.to_owned(),
-        source,
-    };
-    let mut temp = NamedTempFile::new_in(parent.as_std_path()).map_err(io_err)?;
-    temp.write_all(bytes).map_err(io_err)?;
-    temp.flush().map_err(io_err)?;
-    temp.persist(path.as_std_path())
-        .map_err(|e| io_err(e.error))?;
-    Ok(())
 }

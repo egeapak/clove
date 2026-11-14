@@ -46,6 +46,14 @@ class Store {
   offset = $state(0);
   limit = $state(0);
 
+  /**
+   * The request string of the query that produced the current window, or `null`
+   * before any response. `total`/`offset` describe *that* query; a view whose
+   * URL has already moved on must not judge its own page number against them
+   * (see {@link Store.answers}).
+   */
+  private answered = $state<string | null>(null);
+
   /** ids of the current window, in the order the server returned them. */
   private order = $state<string[]>([]);
   /** The query in force. `null` until a view declares one — startup loads
@@ -151,6 +159,7 @@ class Store {
     this.items = new Map();
     this.order = [];
     this.query = null;
+    this.answered = null;
     this.pending.clear();
     this.total = 0;
     this.offset = 0;
@@ -185,9 +194,14 @@ class Store {
    * HTTP responses can arrive out of order, and dropping "the oldest" patch on
    * settle while rolling back by token corrupted the ledger — a patch could
    * leak into `pending` forever and silently overwrite later server values).
+   *
+   * `base` is the caller's copy of the item, used when the cache has none: the
+   * window holds one page, and a live refetch drops whatever is outside it, so
+   * the detail route's item is often not here. Without it the edit was a silent
+   * no-op — nothing shown, the server's answer discarded, no rollback.
    */
-  optimistic(id: string, patch: Partial<Item>): OptimisticEdit {
-    const before = this.items.get(id);
+  optimistic(id: string, patch: Partial<Item>, base?: Item): OptimisticEdit {
+    const before = this.items.get(id) ?? base;
     if (!before) return { rollback: () => {}, settle: () => {} };
     let entry = this.pending.get(id);
     if (!entry) {
@@ -235,6 +249,11 @@ class Store {
     }
     if (server) entry.base = server;
     this.recompute(id);
+  }
+
+  /** Whether the current window is the server's answer to exactly `query`. */
+  answers(query: ListQuery): boolean {
+    return this.answered !== null && this.answered === queryString(query);
   }
 
   /**
@@ -286,13 +305,22 @@ class Store {
       if (isMockMode()) this.conn = 'mock';
       return;
     }
-    const [page, meta]: [ItemPage, Meta] = await Promise.all([
-      api.items(this.query),
-      api.meta()
-    ]);
+    const asked = this.query;
+    let page: ItemPage;
+    let meta: Meta;
+    try {
+      [page, meta] = await Promise.all([api.items(asked), api.meta()]);
+    } catch (e) {
+      // Nor may its *failure*: every caller records a rejection as `loadError`,
+      // and a late error from an abandoned request replaced the newer query's
+      // table with the error panel.
+      if (token !== this.loadToken) return;
+      throw e;
+    }
     // A response for a superseded query must not overwrite a newer one.
     if (token !== this.loadToken) return;
     this.replaceAll(page.items, page);
+    this.answered = queryString(asked);
     this.meta = meta;
     this.loadError = null;
     if (isMockMode()) this.conn = 'mock';

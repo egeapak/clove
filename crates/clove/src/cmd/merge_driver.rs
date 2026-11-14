@@ -242,9 +242,7 @@ fn merge_body(
             source,
         })?;
 
-    // `git merge-file` exit code: 0 = clean, N>0 = N conflicts, <0 = error.
-    let status = output.status.code().unwrap_or(-1);
-    if status < 0 {
+    let Some(conflicted) = merge_file_conflicted(output.status.code()) else {
         return Err(CloveError::Io {
             path: Utf8PathBuf::from("git merge-file"),
             source: std::io::Error::other(format!(
@@ -252,12 +250,23 @@ fn merge_body(
                 String::from_utf8_lossy(&output.stderr)
             )),
         });
-    }
+    };
     let text = String::from_utf8_lossy(&output.stdout).into_owned();
-    Ok(BodyMerge {
-        text,
-        conflicted: status > 0,
-    })
+    Ok(BodyMerge { text, conflicted })
+}
+
+/// Read a `git merge-file` exit code: `Some(false)` = clean, `Some(true)` =
+/// conflicts, `None` = the merge itself failed.
+///
+/// git exits with the conflict count, capped at 127. An error exits 255 (a
+/// negative return truncated to a byte), and a signal leaves no code. Neither
+/// has a merged body on stdout, so neither may be read as "conflicted".
+fn merge_file_conflicted(code: Option<i32>) -> Option<bool> {
+    match code {
+        Some(0) => Some(false),
+        Some(1..=127) => Some(true),
+        _ => None,
+    }
 }
 
 /// Append a human-resolvable conflict block describing every conflicting
@@ -300,5 +309,21 @@ fn read_opt(path: &Utf8Path) -> Result<Option<Vec<u8>>, CloveError> {
             path: path.to_owned(),
             source,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_file_conflicted;
+
+    #[test]
+    fn merge_file_error_exit_is_not_a_conflict() {
+        assert_eq!(merge_file_conflicted(Some(0)), Some(false));
+        assert_eq!(merge_file_conflicted(Some(3)), Some(true));
+        assert_eq!(merge_file_conflicted(Some(127)), Some(true));
+        // `git merge-file` exits 255 on an error, for example an unreadable file.
+        assert_eq!(merge_file_conflicted(Some(255)), None);
+        assert_eq!(merge_file_conflicted(Some(128)), None);
+        assert_eq!(merge_file_conflicted(None), None);
     }
 }

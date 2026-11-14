@@ -343,6 +343,66 @@ pub fn check_staleness_fast(
     check_staleness(conn, issues_dir)
 }
 
+/// Compare only the named items with the index: the targeted counterpart of
+/// [`check_staleness`] for a caller that already knows which files changed (a
+/// file watcher's batch, or the id it has just written).
+///
+/// Each id costs one `stat` and one indexed row lookup, so the work is
+/// O(changed) and not O(store). A named file is hashed when its mtime or size
+/// moved or it was touched within the recent window, exactly as in the full
+/// pass, so an in-place rewrite of a named file is detected. The report has no
+/// `observed` directory snapshot: applying it leaves the `meta` oracle alone,
+/// because a targeted pass says nothing about the files it was not told about.
+pub fn check_staleness_of(
+    conn: &Connection,
+    issues_dir: &Utf8Path,
+    ids: &[CloveId],
+) -> Result<StalenessReport, IndexError> {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let mut report = StalenessReport::default();
+    let mut stmt =
+        conn.prepare_cached("SELECT file_mtime, file_size, content_hash FROM items WHERE id = ?1")?;
+    for id in ids {
+        let path = issues_dir.join(format!("{id}.md"));
+        let stored: Option<(i64, i64, Vec<u8>)> = stmt
+            .query_row([id.as_str()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .optional()?;
+        // Symlinks and directories are not item files (the scan's rule).
+        let on_disk = std::fs::symlink_metadata(&path)
+            .ok()
+            .filter(std::fs::Metadata::is_file);
+        match (on_disk, stored) {
+            (None, None) => {}
+            (None, Some(_)) => report.deleted_ids.push(id.clone()),
+            (Some(_), None) => report.new_ids.push(id.clone()),
+            (Some(meta), Some((stored_mtime, stored_size, stored_hash))) => {
+                let mtime_ms = mtime_to_ms(&meta);
+                let size = meta.len() as i64;
+                let recent = now_ms - mtime_ms < RECENT_WINDOW_MS;
+                let moved = mtime_ms != stored_mtime || size != stored_size;
+                if !(moved || recent) {
+                    continue;
+                }
+                let Ok(bytes) = std::fs::read(&path) else {
+                    // Vanished since the stat: the next pass sees it gone.
+                    continue;
+                };
+                if content_hash8(&bytes).as_slice() != stored_hash.as_slice() {
+                    report.stale_ids.push(id.clone());
+                } else if moved {
+                    report.touched.push(TouchedFile {
+                        id: id.clone(),
+                        mtime_ms,
+                        mtime_ns: mtime_to_ns(&meta),
+                        size,
+                    });
+                }
+            }
+        }
+    }
+    Ok(report)
+}
+
 /// Apply a [`StalenessReport`]: re-parse and upsert new/changed items, delete
 /// removed ones, then recompute the derived graph columns — all in one
 /// transaction (T-S03; M4 P1 made the derived columns exact).
@@ -612,6 +672,16 @@ impl Index {
         issues_dir: &Utf8Path,
     ) -> Result<StalenessReport, IndexError> {
         check_staleness_fast(self.conn(), issues_dir)
+    }
+
+    /// Targeted staleness check of the named items only. See
+    /// [`check_staleness_of`].
+    pub fn check_staleness_of(
+        &self,
+        issues_dir: &Utf8Path,
+        ids: &[CloveId],
+    ) -> Result<StalenessReport, IndexError> {
+        check_staleness_of(self.conn(), issues_dir, ids)
     }
 
     /// Apply a staleness report, resyncing the index in one transaction (T-S03).
@@ -1206,5 +1276,58 @@ mod tests {
         let recomputed = apply_staleness_tracked(index.conn_mut(), &report, &fx.issues).unwrap();
         assert!(recomputed, "adding an item must trigger the recompute");
         assert_eq!(derived(&index), gold(&fx.issues));
+    }
+
+    /// The targeted check sees an in-place rewrite of a named file that the
+    /// directory-level fast path cannot see, and classifies new and deleted
+    /// files, while leaving every unnamed file alone.
+    #[test]
+    fn targeted_check_classifies_only_the_named_items() {
+        let fx = fixture(4);
+        reindex(&fx.issues, &fx.db).unwrap();
+        backdate(&fx.issues);
+        let mut index = Index::open(&fx.db).unwrap();
+        let settle = index.check_staleness(&fx.issues).unwrap();
+        index.apply_staleness(&settle, &fx.issues).unwrap();
+
+        let (changed, removed, untouched) = (id_for(0), id_for(1), id_for(2));
+        let added = id_for(9);
+        // In place: same directory mtime, same file count.
+        std::fs::write(
+            fx.issues.join(format!("{changed}.md")),
+            item_md(&changed, "Renamed in place", "body number 0"),
+        )
+        .unwrap();
+        // A second in-place rewrite that the caller does not name.
+        std::fs::write(
+            fx.issues.join(format!("{untouched}.md")),
+            item_md(&untouched, "Not named", "body number 2"),
+        )
+        .unwrap();
+        std::fs::remove_file(fx.issues.join(format!("{removed}.md"))).unwrap();
+        std::fs::write(
+            fx.issues.join(format!("{added}.md")),
+            item_md(&added, "Added", "new"),
+        )
+        .unwrap();
+
+        let ids: Vec<CloveId> = [&changed, &removed, &added, &id_for(30)]
+            .iter()
+            .map(|id| CloveId::new(id).unwrap())
+            .collect();
+        let report = index.check_staleness_of(&fx.issues, &ids).unwrap();
+        assert_eq!(report.stale_ids, vec![CloveId::new(&changed).unwrap()]);
+        assert_eq!(report.deleted_ids, vec![CloveId::new(&removed).unwrap()]);
+        assert_eq!(report.new_ids, vec![CloveId::new(&added).unwrap()]);
+        assert_eq!(report.observed, None, "a targeted pass must not move meta");
+
+        index.apply_staleness(&report, &fx.issues).unwrap();
+        let after = index.check_staleness(&fx.issues).unwrap();
+        assert_eq!(
+            after.stale_ids,
+            vec![CloveId::new(&untouched).unwrap()],
+            "only the unnamed rewrite is left for the full pass"
+        );
+        assert!(after.new_ids.is_empty() && after.deleted_ids.is_empty());
     }
 }

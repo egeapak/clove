@@ -19,8 +19,9 @@ use camino::{Utf8Path, Utf8PathBuf};
 use clove_index::Index;
 use notify::{recommended_watcher, Event, RecommendedWatcher, RecursiveMode, Watcher};
 
+use crate::fresh::{Freshness, Sync};
 use crate::graph_cache::GraphCache;
-use crate::reindexer::sync_once;
+use crate::reindexer::{startup_sweep, sync_batch};
 use crate::state::{DaemonState, WatcherState};
 
 /// Per-batch options that depend on repo config (the git-sync opt-in).
@@ -40,9 +41,19 @@ fn is_item_file(path: &std::path::Path) -> bool {
     path.extension().and_then(|e| e.to_str()) == Some("md")
 }
 
+/// The longest a burst may keep collecting, however busy the directory is.
+///
+/// The quiet window alone has no upper bound: a writer that touches `issues/`
+/// more often than the window (a shell loop of `clove new`) would restart it
+/// forever and the batch would never be applied.
+fn max_burst(debounce: Duration) -> Duration {
+    debounce.saturating_mul(10).max(Duration::from_secs(1))
+}
+
 /// Collect one debounced burst: take `first`, then keep draining `rx` until it
-/// has stayed quiet for `debounce`. Returns the coalesced (deduplicated) path
-/// set that becomes exactly one applied batch.
+/// has stayed quiet for `debounce`, or until `max_wait` has passed since
+/// `first`. Returns the coalesced (deduplicated) path set that becomes exactly
+/// one applied batch.
 ///
 /// Split out of [`watch`] so the coalescing rule can be tested against a
 /// **virtual** clock. The end-to-end watcher test can only observe batches by
@@ -55,11 +66,17 @@ async fn collect_burst(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<PathBuf>,
     first: PathBuf,
     debounce: Duration,
+    max_wait: Duration,
 ) -> HashSet<PathBuf> {
     let mut pending: HashSet<PathBuf> = HashSet::new();
     pending.insert(first);
+    let deadline = tokio::time::Instant::now() + max_wait;
     loop {
-        match tokio::time::timeout(debounce, rx.recv()).await {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            break; // a busy directory must not starve the batch
+        }
+        match tokio::time::timeout(debounce.min(left), rx.recv()).await {
             Ok(Some(path)) => {
                 pending.insert(path);
             }
@@ -79,18 +96,25 @@ struct Armed {
 
 /// Put the OS watch on `issues_dir`. Blocking, and on macOS at the mercy of
 /// `fseventsd`: FSEvents setup can take seconds when it is busy.
-fn arm(issues_dir: &Utf8Path) -> Result<Armed, String> {
+///
+/// Every report goes to `fresh` first (what changed, and whether the watch
+/// still covers the directory); item-file paths are also queued in `events`,
+/// which paces the batches.
+fn arm(issues_dir: &Utf8Path, fresh: Arc<Freshness>) -> Result<Armed, String> {
     let (tx, events) = tokio::sync::mpsc::unbounded_channel::<PathBuf>();
+    let noted = fresh.clone();
     // The notify handler runs on notify's own thread; forward only item-file
     // paths into the channel (non-blocking send, no runtime needed here).
-    let mut watcher = recommended_watcher(move |res: notify::Result<Event>| {
-        if let Ok(event) = res {
+    let mut watcher = recommended_watcher(move |res: notify::Result<Event>| match res {
+        Ok(event) => {
+            noted.note_event(&event);
             for path in event.paths {
                 if is_item_file(&path) {
                     let _ = tx.send(path);
                 }
             }
         }
+        Err(_) => noted.note_error(),
     })
     .map_err(|e| format!("watcher init failed: {e}"))?;
     // Test knobs: a slow arm, as on a loaded machine — for a fixed time, or
@@ -106,6 +130,7 @@ fn arm(issues_dir: &Utf8Path) -> Result<Armed, String> {
     watcher
         .watch(issues_dir.as_std_path(), RecursiveMode::Recursive)
         .map_err(|e| format!("watch({issues_dir}) failed: {e}"))?;
+    fresh.armed();
     Ok(Armed {
         events,
         _watcher: DropOffThread(Some(watcher)),
@@ -113,8 +138,9 @@ fn arm(issues_dir: &Utf8Path) -> Result<Armed, String> {
 }
 
 /// A loaded project's watcher task: arm the watch, catch up, then keep the
-/// index fresh until the task is dropped (on teardown). Returns early only if
-/// the watch cannot be put in place, which unloads the project.
+/// index fresh until the task is dropped (on teardown). Returns early if the
+/// watch cannot be put in place, or once it no longer covers `issues/`; either
+/// unloads the project, and the next call loads it again with a new watch.
 ///
 /// The load has already swept `issues/` once, without waiting for this: the
 /// project is served from the moment it is loaded. Until the watch is armed,
@@ -123,6 +149,7 @@ fn arm(issues_dir: &Utf8Path) -> Result<Armed, String> {
 /// whatever changed between the first and the arming — anything later is
 /// queued by the watch — and only then is the state `Watching`.
 pub async fn run(
+    fresh: Arc<Freshness>,
     issues_dir: Utf8PathBuf,
     index: Arc<Mutex<Index>>,
     state: Arc<Mutex<DaemonState>>,
@@ -131,7 +158,7 @@ pub async fn run(
     graph: Arc<GraphCache>,
 ) {
     let arming = std::time::Instant::now();
-    let armed = match arm_on_own_thread(issues_dir.clone()).await {
+    let armed = match arm_on_own_thread(issues_dir.clone(), fresh.clone()).await {
         Ok(armed) => armed,
         Err(why) => {
             status!("cloved: {issues_dir}: {why}");
@@ -142,14 +169,10 @@ pub async fn run(
     if took > Duration::from_secs(1) {
         status!("cloved: {issues_dir}: the file watch took {took:.1?} to set up");
     }
-    let (dir, index_c, state_c, graph_c) = (
-        issues_dir.clone(),
-        index.clone(),
-        state.clone(),
-        graph.clone(),
-    );
+    let (fresh_c, index_c, state_c, graph_c) =
+        (fresh.clone(), index.clone(), state.clone(), graph.clone());
     let caught_up = tokio::task::spawn_blocking(move || {
-        if sync_once(&dir, &index_c, &state_c) {
+        if startup_sweep(&fresh_c, &index_c, &state_c) {
             graph_c.mark_dirty();
         }
     })
@@ -158,29 +181,47 @@ pub async fn run(
         status!("cloved: {issues_dir}: the sweep after arming the watcher panicked");
         return;
     }
-    watch(armed, issues_dir, index, state, debounce, options, graph).await;
+    watch(
+        armed, fresh, issues_dir, index, state, debounce, options, graph,
+    )
+    .await;
 }
 
 /// [`arm`] on a thread of its own rather than the blocking pool: an arm stuck
 /// behind `fseventsd` must neither hold a pool thread nor keep the runtime
 /// from shutting down, and one that outlives its project (torn down while it
 /// armed) just drops what it made.
-async fn arm_on_own_thread(issues_dir: Utf8PathBuf) -> Result<Armed, String> {
+async fn arm_on_own_thread(
+    issues_dir: Utf8PathBuf,
+    fresh: Arc<Freshness>,
+) -> Result<Armed, String> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     std::thread::Builder::new()
         .name("cloved-arm".to_owned())
         .spawn(move || {
-            let _ = tx.send(arm(&issues_dir));
+            let _ = tx.send(arm(&issues_dir, fresh));
         })
         .map_err(|e| format!("arming the watcher: {e}"))?;
     rx.await
         .map_err(|_| "arming the watcher: its thread died".to_owned())?
 }
 
+/// How often the watcher task checks that `issues/` is still the directory it
+/// armed the watch on (one `stat`), for a loss the watch itself did not report.
+const ROOT_CHECK: Duration = Duration::from_secs(1);
+
+/// How long after a failed sync the watcher task tries again, and how many
+/// failures in a row end the task (which reloads the project).
+const RETRY_AFTER: Duration = Duration::from_secs(1);
+const MAX_FAILURES: u32 = 5;
+
 /// Keep the index fresh from `armed`'s changes until the task is dropped (on
-/// shutdown). `debounce` is the per-burst quiet window (DESIGN §8.5).
+/// shutdown) or the watch is lost. `debounce` is the per-burst quiet window
+/// (DESIGN §8.5).
+#[allow(clippy::too_many_arguments)]
 async fn watch(
     armed: Armed,
+    fresh: Arc<Freshness>,
     issues_dir: Utf8PathBuf,
     index: Arc<Mutex<Index>>,
     state: Arc<Mutex<DaemonState>>,
@@ -195,29 +236,50 @@ async fn watch(
     if let Ok(mut st) = state.lock() {
         st.set_watcher_state(WatcherState::Watching);
     }
+    let mut root_check = tokio::time::interval(ROOT_CHECK);
+    root_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut failures = 0u32;
+    let mut retry: Option<tokio::time::Instant> = None;
 
     // Debounce loop: collect a burst, then apply exactly one batch.
-    while let Some(first) = rx.recv().await {
-        let batch: Vec<Utf8PathBuf> = collect_burst(&mut rx, first, debounce)
-            .await
-            .into_iter()
-            .filter_map(|p| Utf8PathBuf::from_path_buf(p).ok())
-            .collect();
+    loop {
+        let batch: Vec<Utf8PathBuf> = tokio::select! {
+            first = rx.recv() => {
+                let Some(first) = first else { return };
+                collect_burst(&mut rx, first, debounce, max_burst(debounce))
+                    .await
+                    .into_iter()
+                    .filter_map(|p| Utf8PathBuf::from_path_buf(p).ok())
+                    .collect()
+            }
+            // A sync is owed that no item-file event announces: reports were
+            // dropped, or a request handler left a large catch-up to this task.
+            _ = fresh.woken() => Vec::new(),
+            _ = root_check.tick() => {
+                if fresh.root_intact() {
+                    continue;
+                }
+                Vec::new()
+            }
+            _ = async { tokio::time::sleep_until(retry.unwrap_or_else(tokio::time::Instant::now)).await },
+                if retry.is_some() => Vec::new(),
+        };
+        retry = None;
 
         // Apply one index batch (one transaction) and record it — on the
-        // blocking pool, like the IPC handlers: `sync_once` (SQLite work while
+        // blocking pool, like the IPC handlers: the sync (SQLite work while
         // holding the index mutex) and the git sync (libgit2 I/O, one commit
         // per file) can take seconds on a big batch (e.g. after a `git pull`),
         // and running them inline would park one of the daemon's two runtime
         // workers, starving concurrent `ping`s past the client's 50ms budget
         // exactly when the daemon is most needed.
-        let issues_dir_b = issues_dir.clone();
+        let fresh_b = fresh.clone();
         let index_b = index.clone();
         let state_b = state.clone();
         let graph_b = graph.clone();
         let options_b = options.clone();
         let done = tokio::task::spawn_blocking(move || {
-            sync_once(&issues_dir_b, &index_b, &state_b);
+            let outcome = sync_batch(&fresh_b, &index_b, &state_b);
             // The files changed → the cached dependency graph is now stale.
             graph_b.mark_dirty();
             if let Ok(mut st) = state_b.lock() {
@@ -227,10 +289,28 @@ async fn watch(
 
             // Opt-in git auto-sync of the changed files (T-D06).
             maybe_git_sync(&options_b, batch, &index_b);
+            outcome
         })
         .await;
-        if done.is_err() {
-            status!("cloved: watcher batch task panicked");
+        match done {
+            Ok(Sync::Fresh { .. }) => failures = 0,
+            Ok(Sync::Lost) => {
+                status!(
+                    "cloved: {issues_dir}: the file watch no longer covers this directory \
+                     (it was removed or replaced)"
+                );
+                return;
+            }
+            // `Behind` cannot happen without a limit; treat it like a failure.
+            Ok(Sync::Failed | Sync::Behind) => {
+                failures += 1;
+                if failures >= MAX_FAILURES {
+                    status!("cloved: {issues_dir}: the index could not be brought up to date");
+                    return;
+                }
+                retry = Some(tokio::time::Instant::now() + RETRY_AFTER);
+            }
+            Err(_) => status!("cloved: watcher batch task panicked"),
         }
     }
 }
@@ -264,6 +344,8 @@ mod tests {
     use super::*;
 
     const DEBOUNCE: Duration = Duration::from_millis(200);
+    /// A burst cap far beyond any test's virtual time: the quiet window decides.
+    const NO_CAP: Duration = Duration::from_secs(365 * 24 * 3600);
 
     fn path(name: &str) -> PathBuf {
         PathBuf::from(format!("/issues/{name}.md"))
@@ -284,7 +366,7 @@ mod tests {
         // Keep the sender alive so the burst ends on the quiet window, not on a
         // closed channel — that is the path the debounce rule is about.
         let first = rx.recv().await.expect("at least one event");
-        let out = collect_burst(&mut rx, first, debounce).await;
+        let out = collect_burst(&mut rx, first, debounce, NO_CAP).await;
         drop(tx);
         out
     }
@@ -299,7 +381,8 @@ mod tests {
         let clove_dir = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
         let issues = clove_dir.join("issues");
         std::fs::create_dir_all(&issues).unwrap();
-        let mut armed = arm(&issues).expect("arm the watch");
+        let fresh = Arc::new(Freshness::new(issues.clone()));
+        let mut armed = arm(&issues, fresh).expect("arm the watch");
 
         for name in ["index.db", "index.db-wal", "index.db-shm"] {
             std::fs::write(clove_dir.join(name), name).unwrap();
@@ -343,12 +426,12 @@ mod tests {
 
         tx.send(path("first")).unwrap();
         let first = rx.recv().await.unwrap();
-        let one = collect_burst(&mut rx, first, DEBOUNCE).await;
+        let one = collect_burst(&mut rx, first, DEBOUNCE, NO_CAP).await;
         assert_eq!(one, HashSet::from([path("first")]));
 
         tx.send(path("second")).unwrap();
         let next = rx.recv().await.unwrap();
-        let two = collect_burst(&mut rx, next, DEBOUNCE).await;
+        let two = collect_burst(&mut rx, next, DEBOUNCE, NO_CAP).await;
         assert_eq!(
             two,
             HashSet::from([path("second")]),
@@ -366,7 +449,7 @@ mod tests {
         let first = rx.recv().await.unwrap();
         drop(tx);
 
-        let burst = collect_burst(&mut rx, first, DEBOUNCE).await;
+        let burst = collect_burst(&mut rx, first, DEBOUNCE, NO_CAP).await;
         assert_eq!(burst, HashSet::from([path("a"), path("b")]));
     }
 
@@ -383,5 +466,38 @@ mod tests {
             let burst = burst_of(&["x", "y", "z"], debounce).await;
             assert_eq!(burst.len(), 3, "debounce={debounce:?}");
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_directory_that_never_goes_quiet_still_flushes() {
+        // A writer faster than the quiet window restarts it on every event.
+        // Without a cap the burst never ends and the index is never updated.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<PathBuf>();
+        let writer = tokio::spawn(async move {
+            let mut n = 0u64;
+            loop {
+                if tx.send(path(&format!("item{n}"))).is_err() {
+                    return;
+                }
+                n += 1;
+                tokio::time::sleep(DEBOUNCE / 2).await;
+            }
+        });
+        let first = rx.recv().await.unwrap();
+        let cap = max_burst(DEBOUNCE);
+        let started = tokio::time::Instant::now();
+        let burst = tokio::time::timeout(cap * 3, collect_burst(&mut rx, first, DEBOUNCE, cap))
+            .await
+            .expect("the burst must end at the cap");
+        assert!(
+            started.elapsed() <= cap + DEBOUNCE,
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(
+            burst.len() > 1,
+            "the burst carries what arrived before the cap"
+        );
+        writer.abort();
     }
 }
