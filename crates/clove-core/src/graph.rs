@@ -13,7 +13,7 @@
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
-use petgraph::algo::{has_path_connecting, kosaraju_scc};
+use petgraph::algo::{astar, has_path_connecting, kosaraju_scc};
 use petgraph::stable_graph::{NodeIndex, StableDiGraph};
 use petgraph::visit::{EdgeFiltered, EdgeRef, IntoEdgeReferences};
 use smol_str::SmolStr;
@@ -432,6 +432,18 @@ impl GraphStore {
         };
         let hard = EdgeFiltered::from_fn(&self.graph, |e| is_hard_dep(*e.weight()));
         has_path_connecting(&hard, to_node, from_node, None)
+    }
+
+    /// The cycle that the hard edge `from → to` would close, as the closed path
+    /// `[from, to, …, from]` along a shortest existing `to ⇝ from` chain, or
+    /// `None` when the edge would not create a cycle.
+    pub fn would_cycle_path(&self, from: &CloveId, to: &CloveId) -> Option<Vec<CloveId>> {
+        let (&from_node, &to_node) = (self.id_to_node.get(from)?, self.id_to_node.get(to)?);
+        let hard = EdgeFiltered::from_fn(&self.graph, |e| is_hard_dep(*e.weight()));
+        let (_, chain) = astar(&hard, to_node, |n| n == from_node, |_| 1usize, |_| 0)?;
+        let mut cycle = vec![from.clone()];
+        cycle.extend(chain.into_iter().map(|n| self.graph[n].id.clone()));
+        Some(cycle)
     }
 
     /// All hard-dependency cycles, each as the list of member ids. Includes
@@ -1108,6 +1120,30 @@ mod tests {
         assert!(graph.check_would_cycle(&id("proj-CCCCCCCC"), &id("proj-AAAAAAAA")));
         // Adding A→C would NOT cycle (A already reaches C).
         assert!(!graph.check_would_cycle(&id("proj-AAAAAAAA"), &id("proj-CCCCCCCC")));
+    }
+
+    #[test]
+    fn would_cycle_path_is_the_closed_chain() {
+        // A→B→C; adding C→A closes C→A→B→C.
+        let items = [
+            fm("proj-AAAAAAAA", ItemStatus::Open, &["proj-BBBBBBBB"]),
+            fm("proj-BBBBBBBB", ItemStatus::Open, &["proj-CCCCCCCC"]),
+            fm("proj-CCCCCCCC", ItemStatus::Open, &[]),
+        ];
+        let (graph, _) = GraphStore::build(&items);
+        assert_eq!(
+            graph.would_cycle_path(&id("proj-CCCCCCCC"), &id("proj-AAAAAAAA")),
+            Some(vec![
+                id("proj-CCCCCCCC"),
+                id("proj-AAAAAAAA"),
+                id("proj-BBBBBBBB"),
+                id("proj-CCCCCCCC"),
+            ])
+        );
+        assert_eq!(
+            graph.would_cycle_path(&id("proj-AAAAAAAA"), &id("proj-CCCCCCCC")),
+            None
+        );
     }
 
     #[test]

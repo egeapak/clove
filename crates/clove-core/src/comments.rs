@@ -45,6 +45,7 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 
 use crate::error::CloveError;
 use crate::id::CloveId;
+use crate::limits::MAX_BODY_BYTES;
 
 /// Fixed-length basic-ISO UTC timestamp format used in comment file names.
 /// Always 26 characters: `YYYYMMDDTHHMMSS.fffffffffZ`.
@@ -86,6 +87,13 @@ pub fn add_comment_at(
     timestamp: DateTime<Utc>,
 ) -> Result<Utf8PathBuf, CloveError> {
     let dir = comments_dir(issues_dir, id);
+    // The same budget as an item body: the read path refuses a larger file.
+    if body.len() > MAX_BODY_BYTES {
+        return Err(CloveError::BodyTooLarge {
+            path: dir,
+            limit: MAX_BODY_BYTES,
+        });
+    }
     let root = issues_dir.parent().unwrap_or(issues_dir);
     crate::fs_safe::create_dirs(root, &dir).map_err(|source| CloveError::Io {
         path: dir.clone(),
@@ -196,6 +204,38 @@ fn git_config(dir: &Utf8Path, key: &str) -> Option<String> {
     }
 }
 
+/// Read one comment file. A body over [`MAX_BODY_BYTES`] is refused from the
+/// open file's size, before anything is allocated for it. Bytes that are not
+/// valid UTF-8 are replaced rather than failing: one bad file must not hide
+/// the rest of the thread.
+fn read_comment_body(path: &Utf8Path) -> Result<String, CloveError> {
+    use std::io::Read as _;
+    let io_err = |source| CloveError::Io {
+        path: path.to_owned(),
+        source,
+    };
+    let too_large = || CloveError::BodyTooLarge {
+        path: path.to_owned(),
+        limit: MAX_BODY_BYTES,
+    };
+    let file = std::fs::File::open(path).map_err(io_err)?;
+    let len = file.metadata().map_err(io_err)?.len();
+    if len > MAX_BODY_BYTES as u64 {
+        return Err(too_large());
+    }
+    let mut bytes = Vec::with_capacity(len as usize + 1);
+    file.take(MAX_BODY_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(io_err)?;
+    if bytes.len() > MAX_BODY_BYTES {
+        return Err(too_large());
+    }
+    Ok(match String::from_utf8(bytes) {
+        Ok(body) => body,
+        Err(err) => String::from_utf8_lossy(err.as_bytes()).into_owned(),
+    })
+}
+
 /// List all comments for item `id`, sorted chronologically. Returns an empty
 /// list when the item has no comments. Files whose names don't parse are
 /// skipped (defensively), never fatal.
@@ -246,10 +286,7 @@ pub fn list_comments(issues_dir: &Utf8Path, id: &CloveId) -> Result<Vec<Comment>
         let Some((timestamp, author)) = parse_comment_name(stem) else {
             continue; // not a recognizable comment file name
         };
-        let body = std::fs::read_to_string(&path).map_err(|source| CloveError::Io {
-            path: path.clone(),
-            source,
-        })?;
+        let body = read_comment_body(&path)?;
         let modified = entry
             .metadata()
             .and_then(|meta| meta.modified())
@@ -415,6 +452,40 @@ mod tests {
 
     fn ts(s: &str) -> DateTime<Utc> {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn a_non_utf8_comment_does_not_hide_the_thread() {
+        let (_tmp, issues, id) = temp();
+        add_comment_at(&issues, &id, "a@x", "good", ts("2026-06-02T10:00:00Z")).unwrap();
+        let bad = add_comment_at(&issues, &id, "b@x", "x", ts("2026-06-02T11:00:00Z")).unwrap();
+        std::fs::write(&bad, b"caf\xff latte").unwrap();
+
+        let comments = list_comments(&issues, &id).unwrap();
+        assert_eq!(comments.len(), 2);
+        assert_eq!(comments[0].body, "good");
+        assert_eq!(comments[1].body, "caf\u{fffd} latte");
+    }
+
+    #[test]
+    fn an_oversized_comment_is_refused_on_write_and_on_read() {
+        let (_tmp, issues, id) = temp();
+        let huge = "x".repeat(MAX_BODY_BYTES + 1);
+        let err = add_comment_at(&issues, &id, "a@x", &huge, ts("2026-06-02T10:00:00Z"));
+        assert!(
+            matches!(err, Err(CloveError::BodyTooLarge { .. })),
+            "{err:?}"
+        );
+        assert!(list_comments(&issues, &id).unwrap().is_empty());
+
+        // One planted by hand is rejected from its size, not read into memory.
+        let path = add_comment_at(&issues, &id, "a@x", "x", ts("2026-06-02T10:00:00Z")).unwrap();
+        std::fs::write(&path, &huge).unwrap();
+        let err = list_comments(&issues, &id);
+        assert!(
+            matches!(err, Err(CloveError::BodyTooLarge { .. })),
+            "{err:?}"
+        );
     }
 
     #[test]
