@@ -517,3 +517,63 @@ fn synced_and_parent_select_the_intended_items() {
     );
     assert!(ids(with(Filters::default(), |f| f.parent = Some(fx.ids[5].clone()))).is_empty());
 }
+
+/// A tiered answer is hydrated file by file, which only pays while the page is
+/// a small share of the store. A page that is most of the store (`--limit 0`,
+/// the web board) must come from the file tier instead: `blocked --limit 0` on
+/// the index tier took twice as long as `--no-index` at 80k items.
+///
+/// The floor is lowered so six items exercise the rule; the default floor keeps
+/// every other test in this file on the index.
+#[test]
+fn a_page_that_is_most_of_the_store_is_answered_from_the_files() {
+    let fx = fixture();
+    let indexed = fx.indexed().with_hydrate_floor(0);
+    let files = fx.files();
+    let all = Filters::default();
+    let order = Order::default();
+
+    // Unlimited `list`: six rows of a six-item store.
+    let got = indexed
+        .list(&all, order, Page::unlimited(), Projection::Full)
+        .unwrap();
+    let want = files
+        .list(&all, order, Page::unlimited(), Projection::Full)
+        .unwrap();
+    assert_eq!(got.source, Source::Files, "a whole-store page is a scan");
+    assert_eq!(rows_of(&got.rows), rows_of(&want.rows));
+    assert_eq!(got.total, want.total);
+    assert!(got.graph.is_some(), "the file tier hands back its graph");
+
+    // One row of six is still worth a tier.
+    let got = indexed
+        .list(&all, order, Page::new(0, Some(1), 0), Projection::Full)
+        .unwrap();
+    assert_eq!(got.source, Source::Index, "a small page stays on the index");
+    assert_eq!(got.total, 6);
+
+    // A lean page reads no files, so its size never matters.
+    let got = indexed
+        .list(&all, order, Page::unlimited(), Projection::Lean)
+        .unwrap();
+    assert_eq!(got.source, Source::Index);
+
+    // `blocked` rows cost more (each reads its dependencies again), so two
+    // blocked rows of six are already past its share.
+    let got = indexed
+        .blocked(&all, order, Page::unlimited(), Projection::Full)
+        .unwrap();
+    let want = files
+        .blocked(&all, order, Page::unlimited(), Projection::Full)
+        .unwrap();
+    assert_eq!(got.source, Source::Files);
+    assert_eq!(rows_of(&got.rows), rows_of(&want.rows));
+
+    // With the default floor the same reads stay on the index: a store this
+    // small is cheap either way, and the probe is not worth a `readdir`.
+    let got = fx
+        .indexed()
+        .list(&all, order, Page::unlimited(), Projection::Full)
+        .unwrap();
+    assert_eq!(got.source, Source::Index);
+}

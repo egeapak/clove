@@ -56,6 +56,22 @@ pub const STALE_REFRESH_LIMIT: usize = 20;
 /// scanned store parse the same way.
 const PARALLEL_HYDRATE_THRESHOLD: usize = 500;
 
+/// Below this many rows a tiered page is always hydrated: the per-file reads are
+/// too few to matter, and the store-size probe below is not worth making.
+const HYDRATE_PAGE_FLOOR: usize = 1000;
+
+/// A tiered `list`/`ready` page is hydrated only while it holds fewer than one
+/// in this many of the store's items. Reading a page file by file costs about
+/// 2.5 times as much per file as the whole-store scan does (measured: 545 ms
+/// against 220 ms for all of a 20k store), so past roughly a third of the store
+/// the file tier answers sooner.
+const HYDRATE_STORE_SHARE: usize = 3;
+
+/// The same share for `blocked`, whose rows cost more: each one also reads its
+/// dependencies' files again for `blocked_by` (measured: 1884 ms against 937 ms
+/// at 80k with about a fifth of the store blocked).
+const HYDRATE_STORE_SHARE_BLOCKED: usize = 10;
+
 /// The keys a lean row carries — the columns `clove ls` renders, and the only
 /// fields the index and daemon tiers can answer from without reading files.
 pub const LEAN_FIELDS: &[&str] = &["id", "status", "type", "priority", "title"];
@@ -323,6 +339,9 @@ pub struct Engine {
     /// client is kept and only its (cheap, on the open connection) `ping` is
     /// repeated; a dead or restarted daemon drops the cache and re-probes.
     daemon: Arc<Mutex<Option<DaemonClient>>>,
+    /// [`HYDRATE_PAGE_FLOOR`], as a field so a test can lower it instead of
+    /// building a store of thousands of items.
+    hydrate_floor: usize,
 }
 
 impl Engine {
@@ -337,7 +356,17 @@ impl Engine {
             db_path,
             tiers,
             daemon: Arc::new(Mutex::new(None)),
+            hydrate_floor: HYDRATE_PAGE_FLOOR,
         }
+    }
+
+    /// Lower the page size above which a tiered page is weighed against the
+    /// store size (see `cheaper_from_files`). For tests only: the default is
+    /// what production reads use.
+    #[doc(hidden)]
+    pub fn with_hydrate_floor(mut self, floor: usize) -> Engine {
+        self.hydrate_floor = floor;
+        self
     }
 
     /// The file store this engine reads (surfaces still need it for writes and
@@ -445,14 +474,18 @@ impl Engine {
             };
             if let Some((source, (rows, total, warnings))) = tiered {
                 let (page, _) = window.apply(rows);
-                let hydrated = self.hydrate(page.iter().map(|row| row.id.as_str()));
-                return Ok(ListAnswer {
-                    source,
-                    rows: Rows::Full(self.with_blocked_by(hydrated)?),
-                    total,
-                    warnings,
-                    graph: None,
-                });
+                // A page that is a large share of the store is cheaper from the
+                // file tier below, which builds the graph once for every row.
+                if !self.cheaper_from_files(page.len(), HYDRATE_STORE_SHARE_BLOCKED) {
+                    let hydrated = self.hydrate(page.iter().map(|row| row.id.as_str()));
+                    return Ok(ListAnswer {
+                        source,
+                        rows: Rows::Full(self.with_blocked_by(hydrated)?),
+                        total,
+                        warnings,
+                        graph: None,
+                    });
+                }
             }
         }
 
@@ -610,15 +643,18 @@ impl Engine {
         file_rows: impl FnOnce() -> Result<(Vec<FullRow>, Vec<String>, GraphStore), CloveError>,
     ) -> Result<ListAnswer, CloveError> {
         if projection.allows_tiers() {
-            if let Some((rows, total, warnings)) =
-                self.lean_via_daemon(kind, filters, order, window)
-            {
-                return self.finish_lean(Source::Daemon, rows, total, warnings, window, projection);
-            }
-            if let Some((rows, total, warnings)) =
-                self.lean_via_index(mode, filters, order, window)?
-            {
-                return self.finish_lean(Source::Index, rows, total, warnings, window, projection);
+            let tiered = match self.lean_via_daemon(kind, filters, order, window) {
+                Some(answer) => Some((Source::Daemon, answer)),
+                None => self
+                    .lean_via_index(mode, filters, order, window)?
+                    .map(|answer| (Source::Index, answer)),
+            };
+            if let Some((source, (rows, total, warnings))) = tiered {
+                if let Some(answer) =
+                    self.finish_lean(source, rows, total, warnings, window, projection)
+                {
+                    return Ok(answer);
+                }
             }
         }
         let (rows, warnings, graph) = file_rows()?;
@@ -639,6 +675,9 @@ impl Engine {
     /// Hydration happens **after** the window, which is the whole reason a
     /// full-object surface can afford a tier at all: the filtering, ordering,
     /// and counting stay in SQL and only the page touches the disk.
+    ///
+    /// `None` means the page is too large a share of the store to hydrate (see
+    /// [`Self::cheaper_from_files`]), so the caller answers from the file tier.
     fn finish_lean(
         &self,
         source: Source,
@@ -647,7 +686,7 @@ impl Engine {
         warnings: Vec<String>,
         window: Page,
         projection: Projection,
-    ) -> Result<ListAnswer, CloveError> {
+    ) -> Option<ListAnswer> {
         // The tier returns the `offset + limit` prefix (or, when a residue
         // forced an unlimited fetch, everything), so the offset is applied here.
         let (page, _) = window.apply(rows);
@@ -655,20 +694,51 @@ impl Engine {
             Projection::Lean => Rows::Lean(page),
             // `Files` never reaches here (`allows_tiers` is false), but treating
             // it as `Full` keeps this total rather than a panic.
-            Projection::Full | Projection::Files => Rows::Full(
-                self.hydrate(page.iter().map(|row| row.id.as_str()))
-                    .into_iter()
-                    .map(FullRow::bare)
-                    .collect(),
-            ),
+            Projection::Full | Projection::Files => {
+                if self.cheaper_from_files(page.len(), HYDRATE_STORE_SHARE) {
+                    return None;
+                }
+                Rows::Full(
+                    self.hydrate(page.iter().map(|row| row.id.as_str()))
+                        .into_iter()
+                        .map(FullRow::bare)
+                        .collect(),
+                )
+            }
         };
-        Ok(ListAnswer {
+        Some(ListAnswer {
             source,
             rows,
             total,
             warnings,
             graph: None,
         })
+    }
+
+    /// Whether reading `page_len` item files one by one costs more than the
+    /// whole-store scan of the file tier.
+    ///
+    /// A tier is worth its hydration only while the page is a small part of the
+    /// store. An unlimited window (`--limit 0`, the web board) or a very large
+    /// one turns "read the page back" into "read most of the store back", file
+    /// by file, which is slower than the scan it was meant to avoid. `share` is
+    /// the break-even: the page must hold fewer than one in `share` of the
+    /// store's items.
+    ///
+    /// The store size is one `readdir`, and only for a page above
+    /// [`HYDRATE_PAGE_FLOOR`], so an ordinary page never pays for the probe.
+    fn cheaper_from_files(&self, page_len: usize, share: usize) -> bool {
+        if page_len <= self.hydrate_floor {
+            return false;
+        }
+        let Ok(entries) = std::fs::read_dir(&self.issues_dir) else {
+            return false;
+        };
+        let store_len = entries
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".md"))
+            .count();
+        page_len.saturating_mul(share) > store_len
     }
 
     /// May a read that the daemon answers from its index or hot graph go to
