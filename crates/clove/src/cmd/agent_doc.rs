@@ -96,7 +96,7 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
 | 3 | dependency cycle |\n\
 | 4 | validation error |\n\
 | 5 | i/o or missing `.clove/`; also `REGISTRY_ERROR` — the plugin registry, `cargo` or `git` could not be reached |\n\
-| 6 | index error |\n\
+| 6 | reserved (never returned; an index failure is exit 5) |\n\
 | 7 | daemon error |\n\
 \n\
 ## Workflow for agents\n\
@@ -169,9 +169,10 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
   two-way GitHub sync (pull + push + comments in one pass; conflict policy\n\
   `newer|local|remote|manual`). Needs the `clove-sync-github` plugin\n\
   (`clove plugin install sync-github`) + a token via `GITHUB_TOKEN` or\n\
-  `gh auth token`; without the plugin it exits 4 with an install hint. The\n\
-  single GitHub path (replaces the old\n\
-  one-way `import github` / `export github`).\n\
+  `gh auth token`; without the plugin it exits 4 with an install hint.\n\
+  `clove import github` (pull-only) and `clove export github` (push-only) are\n\
+  one-way views of the same reconcile, served by the same plugin; they do not\n\
+  sync comments.\n\
 - File imports are idempotent on `external_ref`: re-running skips already-imported\n\
   items. `--dry-run` reports `{{ would_create, would_skip, conflicts }}` and\n\
   writes nothing.\n\

@@ -221,10 +221,7 @@ fn dispatch_multiplexer(
             // instruction the product gave, and it lands the binary in
             // `~/.cargo/bin` — outside the clove-managed root, which is exactly
             // the state `uninstall` then declines to manage.
-            reason: format!(
-                "unknown {multiplexer} provider `{provider}`; install it with \
-                 `clove plugin install {multiplexer}-{provider}`"
-            ),
+            reason: plugin::missing_provider_hint(multiplexer, provider),
         }),
     }
 }

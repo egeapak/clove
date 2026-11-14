@@ -376,3 +376,159 @@ fn editor_edit_that_does_not_validate_is_rolled_back() {
         .unwrap()
         .contains("status: nonsense"));
 }
+
+/// Inputs that used to be accepted and silently ignored are refused.
+#[test]
+fn conflicting_or_empty_arguments_are_refused() {
+    let repo = init_repo();
+    let id = new_item(repo.path(), "target", &[]);
+
+    // `--since` that is not a timestamp returned the whole history.
+    let out = clove(repo.path())
+        .args(["stats", "--history", "--since", "yesterday"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(4), "{out:?}");
+    assert!(stderr(&out).contains("--since"), "{out:?}");
+    clove(repo.path())
+        .args(["stats", "--history", "--since", "2026-01-01T00:00:00Z"])
+        .assert()
+        .success();
+
+    // A name next to `--clear`, and live-report flags next to `--history`.
+    for args in [
+        vec!["assign", id.as_str(), "bob", "--clear"],
+        vec!["stats", "--history", "--snapshot"],
+        vec!["stats", "--history", "--top", "3"],
+        vec!["stats", "--history", "--no-epics"],
+        vec!["agent-doc", "--file", "AGENTS.md"],
+    ] {
+        let out = clove(repo.path()).args(&args).output().unwrap();
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {out:?}");
+    }
+
+    // An empty comment.
+    for message in ["", "  \n"] {
+        let out = clove(repo.path())
+            .args(["comment", id.as_str(), message])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(4), "{message:?}: {out:?}");
+    }
+    let mut comments = clove(repo.path());
+    comments.args(["comments", id.as_str()]);
+    assert_eq!(json_ok(&mut comments)["data"].as_array().unwrap().len(), 0);
+}
+
+/// `clove init` is re-runnable: it must keep lines a user added to
+/// `.clove/.gitignore` and still restore a clove entry that went missing.
+#[test]
+fn init_rerun_keeps_user_gitignore_lines() {
+    let repo = init_repo();
+    let path = repo.path().join(".clove/.gitignore");
+    let original = std::fs::read_to_string(&path).unwrap();
+    let without_first: String = original.lines().skip(1).map(|l| format!("{l}\n")).collect();
+    std::fs::write(&path, format!("{without_first}my-notes/\n")).unwrap();
+
+    clove(repo.path()).arg("init").assert().success();
+    let merged = std::fs::read_to_string(&path).unwrap();
+    assert!(merged.lines().any(|l| l == "my-notes/"), "{merged}");
+    for entry in original.lines() {
+        assert!(merged.lines().any(|l| l == entry), "missing {entry}: {merged}");
+    }
+
+    // A second run changes nothing.
+    clove(repo.path()).arg("init").assert().success();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), merged);
+}
+
+/// `agent-doc --out` writes the file in every format, and `--check` answers
+/// with an envelope under JSON.
+#[test]
+fn agent_doc_out_and_check_work_in_json_format() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = clove(dir.path())
+        .env("CLOVE_FORMAT", "json")
+        .args(["agent-doc", "--out", "AGENTS.md"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["data"]["out"], "AGENTS.md");
+    let written = std::fs::read_to_string(dir.path().join("AGENTS.md")).unwrap();
+    assert_eq!(v["data"]["markdown"], written);
+
+    let check = clove(dir.path())
+        .args(["--format", "json", "agent-doc", "--check", "--file", "AGENTS.md"])
+        .output()
+        .unwrap();
+    assert!(check.status.success(), "{check:?}");
+    let v: Value = serde_json::from_slice(&check.stdout).unwrap();
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["data"]["file"], "AGENTS.md");
+}
+
+/// A usage error under `--format json` still owes stdout an envelope.
+#[test]
+fn usage_errors_carry_a_json_envelope() {
+    let repo = init_repo();
+    for args in [
+        vec!["--format", "json", "show"],
+        vec!["show", "-fjson", "--no-such-flag"],
+        vec!["--format", "json", "export", "jsonl", "--bogus"],
+        vec!["--format", "json", "import", "jsonl"],
+    ] {
+        let out = clove(repo.path()).args(&args).output().unwrap();
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {out:?}");
+        let v: Value = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|e| panic!("{args:?}: stdout is not JSON ({e}): {out:?}"));
+        assert_eq!(v["ok"], false, "{args:?}");
+        assert_eq!(v["error"]["code"], "USAGE_ERROR", "{args:?}");
+        assert_eq!(v["error"]["exit"], 1, "{args:?}");
+        assert!(!stderr(&out).is_empty(), "{args:?}: clap's message stays on stderr");
+    }
+
+    // Human mode is unchanged: nothing on stdout. `--help` is not an error.
+    let out = clove(repo.path()).arg("show").output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty(), "{out:?}");
+    let help = clove(repo.path())
+        .args(["--format", "json", "show", "--help"])
+        .output()
+        .unwrap();
+    assert!(help.status.success() && !stdout(&help).starts_with('{'), "{help:?}");
+}
+
+/// An argument that is not UTF-8 is a usage error, not a panic.
+#[cfg(unix)]
+#[test]
+fn non_utf8_argument_is_a_usage_error_not_a_panic() {
+    use std::os::unix::ffi::OsStrExt;
+    let repo = init_repo();
+    let out = clove(repo.path())
+        .arg("show")
+        .arg(std::ffi::OsStr::from_bytes(b"\xff\xfe"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(!stderr(&out).contains("panicked"), "{out:?}");
+}
+
+/// `clove import github` without a plugin: the hint must name the sync plugin,
+/// because no `import-github` crate exists.
+#[test]
+fn missing_import_provider_hint_names_the_sync_plugin() {
+    let repo = init_repo();
+    let empty = tempfile::tempdir().unwrap();
+    let out = clove(repo.path())
+        .env("CLOVE_PLUGIN_PATH", empty.path())
+        .env("PATH", empty.path())
+        .args(["import", "nosuchprovider", "o/r"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(4), "{out:?}");
+    assert!(
+        stderr(&out).contains("clove plugin install sync-nosuchprovider"),
+        "{out:?}"
+    );
+}

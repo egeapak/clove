@@ -110,9 +110,12 @@ filters, sorts, and windows, with `Source` assertions that stop it going vacuous
 
 ## GitHub sync (`clove-import`)
 
-`clove sync github <owner/repo>` is the **single GitHub path** (two-way; the old
-one-way `import github` / `export github` were removed). `import`/`export` remain
-for the file formats only (tk/beads, json/jsonl). The crate splits — like the
+`clove sync github <owner/repo>` is the **single GitHub reconcile** (two-way).
+`clove import github` / `clove export github` are its pull-only / push-only
+views, served by the same `clove-sync-github` plugin through the umbrella
+fallback (`PLUGIN_SYSTEM.md` §4.2); there is no separate one-way GitHub code
+path. The built-in `import`/`export` providers are the file formats only
+(json/jsonl; tk/beads are plugins). The crate splits — like the
 rest — into **pure, always-compiled** logic vs. the **`github`-feature** network
 layer:
 
