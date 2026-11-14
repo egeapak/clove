@@ -27,6 +27,31 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # A tag can point at any commit. Build nothing unless the CI workflow has
+  # finished with success on exactly this commit (CI runs on every push to
+  # master, so tag a commit that is on master and wait for its run). If this job
+  # fails because CI is still running, wait for CI and re-run the failed job.
+  ci-green:
+    name: CI passed on the tagged commit
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: The CI run of this commit succeeded
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          conclusions=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml \
+            --commit "$GITHUB_SHA" --event push --json status,conclusion \
+            --jq '.[] | "\(.status)/\(.conclusion)"')
+          echo "CI runs for $GITHUB_SHA: ${conclusions:-none}"
+          if ! printf '%s\n' "$conclusions" | grep -qx 'completed/success'; then
+            echo "CI has not passed on $GITHUB_SHA (${GITHUB_REF_NAME}); not building a release from it" >&2
+            exit 1
+          fi
+
   build:
     name: build (${{ matrix.suffix }})
     needs: web-dist
@@ -121,6 +146,7 @@ jobs:
 
   web-dist:
     name: pack web UI for crates.io builds
+    needs: ci-green
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

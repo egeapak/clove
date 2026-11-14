@@ -109,9 +109,13 @@ jobs:
         # plugins that the clove-cli suites spawn once per run, before any test,
         # so every test runs the same binaries. --all-features exercises
         # clove-import's github mapping/network tests. The second arm is the lean
-        # default build of the CLI and the daemon; the sync_github mock suite runs
-        # on both arms (proving clove sync github dispatches to the plugin end to
-        # end). nextest does not run doctests, so `cargo test --doc` runs them.
+        # default build of the CLI and of cloved's own tests. The daemon that the
+        # clove-cli suites spawn is the all-features `cloved` from the setup
+        # script on both arms (those suites need its test knobs), so a default
+        # `cloved` is covered by its own tests only. The sync_github mock suite
+        # runs on both arms (proving clove sync github dispatches to the plugin
+        # end to end). nextest does not run doctests, so `cargo test --doc` runs
+        # them.
         run: |
           cargo nextest run --workspace --all-features --no-fail-fast
           cargo test --workspace --all-features --doc
