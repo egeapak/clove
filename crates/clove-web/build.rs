@@ -14,10 +14,12 @@
 //!   minimal placeholder `index.html` is used so a Node-free `cargo build` still
 //!   compiles. `CLOVE_SKIP_WEB_BUILD=1` skips the npm build.
 //! * **In a published package** (no `web/`): the built SPA is downloaded from
-//!   this version's GitHub Release (`clove-web-dist-v<version>.tar.gz` plus its
-//!   `.sha256`), verified, and extracted — no Node on the user's machine. A
-//!   failed download or a checksum mismatch fails the build; it never falls back
-//!   to the placeholder. Two escapes: `CLOVE_WEB_DIST_DIR` points at an already
+//!   this version's GitHub Release (`clove-web-dist-v<version>.tar.gz`),
+//!   verified against the SHA-256 pinned in the package itself
+//!   (`build/web-dist.sha256`, written by `scripts/release/publish.sh`), and
+//!   extracted — no Node on the user's machine. A failed download, a missing
+//!   pin, or a digest mismatch fails the build; it never falls back to the
+//!   placeholder. Two escapes: `CLOVE_WEB_DIST_DIR` points at an already
 //!   built `dist/` (offline and packager builds), and `DOCS_RS` embeds the
 //!   placeholder because docs.rs builds without network access.
 //!   `CLOVE_WEB_DIST_BASE_URL` serves the assets from a mirror instead.
@@ -40,6 +42,7 @@ fn main() {
     for p in [
         "build.rs",
         "build/fetch.rs",
+        "build/web-dist.sha256",
         "web/src",
         "web/static",
         "web/package.json",
@@ -61,6 +64,12 @@ fn main() {
 
     let dist = if web.join("package.json").exists() {
         let dist = PathBuf::from("dist");
+        // `dist/` is an input too: it is what gets embedded. Without this a
+        // `npm run build` run by hand (the step the placeholder page tells the
+        // user to take) left the placeholder in the binary, because no listed
+        // source had changed. Files this script writes into `dist/` are older
+        // than its own completion stamp, so they do not retrigger it.
+        println!("cargo:rerun-if-changed=dist");
         ensure_placeholder(&dist);
         maybe_npm_build(web, &dist);
         dist
@@ -133,10 +142,9 @@ fn acquire_packaged(dist: &Path) {
         &version,
         std::env::var("CLOVE_WEB_DIST_BASE_URL").ok().as_deref(),
     );
-    let (tarball_name, checksum_name) = fetch::asset_names(&version);
+    let (tarball_name, _) = fetch::asset_names(&version);
     let result = (|| -> Result<usize, String> {
-        let checksum = download(&format!("{base}/{checksum_name}"), 4096)?;
-        let expected = fetch::parse_sha256(&String::from_utf8_lossy(&checksum))?;
+        let expected = fetch::expected_digest(include_str!("build/web-dist.sha256"))?;
         let tarball = download(&format!("{base}/{tarball_name}"), fetch::MAX_DOWNLOAD)?;
         fetch::verify(&tarball, &expected)?;
         std::fs::create_dir_all(dist).map_err(|e| e.to_string())?;
@@ -236,13 +244,24 @@ fn maybe_npm_build(web: &Path, dist: &Path) {
         }
     }
     if !web.join("node_modules").exists() && !run(web, &["install", "--no-audit", "--no-fund"]) {
-        println!("cargo:warning=clove-web: `npm install` failed; embedding the placeholder web UI");
+        warn_npm_failed("npm install", dist);
         return;
     }
     if !run(web, &["run", "build"]) {
+        warn_npm_failed("npm run build", dist);
+    }
+}
+
+/// Report a failed npm step, naming what is embedded instead: the previous
+/// real build when there is one (`ensure_placeholder` keeps it), else the
+/// placeholder.
+fn warn_npm_failed(step: &str, dist: &Path) {
+    if real_dist_mtime(dist).is_some() {
         println!(
-            "cargo:warning=clove-web: `npm run build` failed; embedding the placeholder web UI"
+            "cargo:warning=clove-web: `{step}` failed; keeping the existing (stale) web UI build"
         );
+    } else {
+        println!("cargo:warning=clove-web: `{step}` failed; embedding the placeholder web UI");
     }
 }
 

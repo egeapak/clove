@@ -11,7 +11,9 @@ keywords.workspace = true
 categories.workspace = true
 # The built SPA is not packaged: a published `clove-web` downloads it from this
 # version's GitHub Release at build time (see `build.rs`), so nothing generated
-# has to ride in the .crate and `cargo publish` needs no `--allow-dirty`. Listing
+# has to ride in the .crate. The one release-time file is `build/web-dist.sha256`:
+# `scripts/release/publish.sh` writes the archive's digest into it, so that one
+# crate is published with `--allow-dirty`. Listing
 # `include` also drops `web/` (the SvelteKit sources) and `tests/`. `build/` holds
 # modules `build.rs` pulls in, so it must ship. The license paths are anchored
 # with `/`: a bare `LICENSE` matches at any depth, which pulls in every
@@ -42,6 +44,7 @@ flate2.workspace = true
 futures-util.workspace = true
 sha2.workspace = true
 base64.workspace = true
+getrandom.workspace = true     # the web access token
 
 [build-dependencies]
 flate2.workspace = true

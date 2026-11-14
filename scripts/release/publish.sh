@@ -16,6 +16,12 @@
 #     checksum matches, and the archive holds index.html and _app/. clove-web
 #     downloads them at build time, so a bad or missing asset breaks the
 #     published crate for everyone, permanently.
+#
+# clove-web is published with the archive's SHA-256 written into
+# crates/clove-web/build/web-dist.sha256 (and so with --allow-dirty, for that
+# one file). The published crate verifies its download against that pin, not
+# against the .sha256 beside the archive, so a later change to the Release
+# cannot change what a build embeds. The file is restored afterwards.
 set -euo pipefail
 
 dry_run=0
@@ -95,6 +101,17 @@ echo "$listing" | grep -Eq '^(\./)?index\.html$' || fail "the web UI asset has n
 echo "$listing" | grep -Eq '^(\./)?_app/' || fail "the web UI asset has no _app/ (it is the placeholder, not the built SPA)"
 echo "web UI assets for $tag download, match their checksum, and hold the built SPA"
 
+pin=crates/clove-web/build/web-dist.sha256
+publish_clove_web() {
+	# The tracked tree is clean (checked above), so the pin is the only change
+	# that --allow-dirty lets into the package.
+	printf '%s  %s\n' "$actual" "$asset" >> "$pin"
+	local status=0
+	cargo publish -p clove-web --allow-dirty || status=$?
+	git checkout -- "$pin"
+	return "$status"
+}
+
 started=0
 [ -z "$from" ] && started=1
 for crate in "${crates[@]}"; do
@@ -105,6 +122,10 @@ for crate in "${crates[@]}"; do
 		started=1
 	fi
 	echo "== cargo publish -p $crate ($version)"
-	cargo publish -p "$crate"
+	if [ "$crate" = clove-web ]; then
+		publish_clove_web
+	else
+		cargo publish -p "$crate"
+	fi
 done
 echo "done: $version"

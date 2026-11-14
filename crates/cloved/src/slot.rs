@@ -135,7 +135,7 @@ pub fn open(clove_dir: &Utf8Path, cancel: CancellationToken) -> Result<Slot, Loa
 
     let repo_root = clove_dir.parent().unwrap_or(clove_dir).to_owned();
     let config = clove_core::load_config(&repo_root).ok();
-    let settings = settings(config.as_ref());
+    let settings = settings(config.as_ref(), &repo_root);
 
     let db_path = clove_dir.join("index.db");
     // A rebuild that cannot run right now — most often because another process
@@ -193,10 +193,20 @@ pub fn open(clove_dir: &Utf8Path, cancel: CancellationToken) -> Result<Slot, Loa
     })
 }
 
-fn settings(config: Option<&clove_core::CloveConfig>) -> Settings {
+fn settings(config: Option<&clove_core::CloveConfig>, repo_root: &Utf8Path) -> Settings {
     let defaults = clove_core::CloveConfig::default();
     let daemon = config.map_or(&defaults.daemon, |c| &c.daemon);
-    let git_sync = daemon.git_sync;
+    // The config arrives with the repository; committing and syncing as the
+    // user needs this clone's own permission (see `automation`).
+    let asked = daemon.automation_keys();
+    let automation = asked.is_empty() || crate::automation::allowed(repo_root);
+    if !automation {
+        status!(
+            "cloved: {repo_root}: {}",
+            clove_core::DaemonConfig::automation_hint(&asked, repo_root)
+        );
+    }
+    let git_sync = daemon.git_sync && automation;
     if git_sync && !cfg!(feature = "git-sync") {
         status!(
             "cloved: [daemon] git_sync = true but this binary was built without \
@@ -219,10 +229,14 @@ fn settings(config: Option<&clove_core::CloveConfig>) -> Settings {
         web_port: config.map_or(defaults.web.port, |c| c.web.port),
         id_prefix: config.map_or_else(|| defaults.id_prefix.clone(), |c| c.id_prefix.clone()),
         default_type: config.map_or(defaults.default_type, |c| c.default_type),
-        github_sync: (
-            daemon.github_sync_repo.clone(),
-            daemon.github_sync_interval_min,
-        ),
+        github_sync: if automation {
+            (
+                daemon.github_sync_repo.clone(),
+                daemon.github_sync_interval_min,
+            )
+        } else {
+            (None, 0)
+        },
     }
 }
 
@@ -339,5 +353,52 @@ async fn idle_watchdog(
         if idle_for >= idle {
             return;
         }
+    }
+}
+
+#[cfg(all(test, feature = "git-sync"))]
+mod tests {
+    use super::*;
+
+    fn config_asking_for_automation() -> clove_core::CloveConfig {
+        let mut config = clove_core::CloveConfig::default();
+        config.daemon.git_sync = true;
+        config.daemon.github_sync_interval_min = 30;
+        config.daemon.github_sync_repo = Some("me/project".to_owned());
+        config
+    }
+
+    /// `.clove/config.toml` arrives with the repository. Until the clone allows
+    /// it in git configuration, the daemon neither commits nor syncs.
+    #[test]
+    fn a_committed_config_cannot_turn_automation_on_by_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(dir.path()).unwrap();
+        let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
+        let config = config_asking_for_automation();
+
+        let refused = settings(Some(&config), &root);
+        assert!(!refused.git_sync);
+        assert_eq!(refused.github_sync, (None, 0));
+
+        repo.config()
+            .unwrap()
+            .open_level(git2::ConfigLevel::Local)
+            .unwrap()
+            .set_bool(clove_core::AUTOMATION_GIT_CONFIG_KEY, true)
+            .unwrap();
+        let allowed = settings(Some(&config), &root);
+        assert!(allowed.git_sync);
+        assert_eq!(allowed.github_sync, (Some("me/project".to_owned()), 30));
+    }
+
+    /// A config that asks for no automation needs no permission.
+    #[test]
+    fn the_default_config_is_unaffected() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
+        let settings = settings(Some(&clove_core::CloveConfig::default()), &root);
+        assert!(!settings.git_sync);
+        assert_eq!(settings.github_sync, (None, 0));
     }
 }

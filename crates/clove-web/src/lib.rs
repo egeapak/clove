@@ -8,6 +8,7 @@
 //! are concurrency-safe with the CLI and re-enter the same watcher → push loop.
 
 mod assets;
+mod auth;
 mod dto;
 mod error;
 mod events;
@@ -32,6 +33,7 @@ use clove_types::ItemType;
 use tokio::sync::broadcast;
 use tower_http::compression::{CompressionLayer, CompressionLevel};
 
+pub use auth::WebAuth;
 pub use error::ApiError;
 pub use events::Event;
 pub use hub::{HubWeb, ProjectEntry};
@@ -77,6 +79,9 @@ pub struct AppState {
     /// sockets close rather than keep a tab listening to a project nobody
     /// serves any more.
     closing: Arc<tokio::sync::watch::Sender<bool>>,
+    /// The access token every request must present ([`AppState::with_auth`]);
+    /// `None` leaves the router open (a hub guards its own outer router).
+    auth: Option<WebAuth>,
 }
 
 impl AppState {
@@ -132,7 +137,16 @@ impl AppState {
             heartbeat: None,
             index_page: None,
             closing: Arc::new(tokio::sync::watch::channel(false).0),
+            auth: None,
         }
+    }
+
+    /// Require `auth`'s token on every request to this state's router
+    /// (DESIGN §8.4). `clove serve` sets it; a project mounted on the daemon
+    /// hub does not, because the hub's router is guarded as a whole.
+    pub fn with_auth(mut self, auth: WebAuth) -> Self {
+        self.auth = Some(auth);
+        self
     }
 
     /// Override the read tiers — `clove serve --no-index` / `--deep`.
@@ -280,7 +294,8 @@ async fn heartbeat_layer(
 pub fn build_router(state: AppState) -> Router {
     // Decompress the embedded gzip assets into memory once, up front.
     assets::warm();
-    Router::new()
+    let auth = state.auth.clone();
+    let router = Router::new()
         .route(
             "/api/v1/items",
             get(read::list_items).post(write::create_item),
@@ -310,7 +325,14 @@ pub fn build_router(state: AppState) -> Router {
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             heartbeat_layer,
-        ))
+        ));
+    // The token check sits inside the Host guard (a rebound name is refused
+    // before anything else) and outside the handlers and the heartbeat.
+    let router = match auth {
+        Some(auth) => auth.protect(router),
+        None => router,
+    };
+    router
         // DNS-rebinding guard: reject any request (API + WS + assets) whose Host
         // header isn't loopback. Outermost so it runs before everything else.
         .layer(axum::middleware::from_fn(host_guard))

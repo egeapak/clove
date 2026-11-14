@@ -52,6 +52,8 @@ const REPLY_MARGIN: Duration = Duration::from_millis(250);
 struct WebSite {
     web: clove_web::HubWeb,
     addr: SocketAddr,
+    /// The hub's web access token: every project URL the hub reports carries it.
+    auth: clove_web::WebAuth,
 }
 
 /// A cheap handle to the hub; clones share it.
@@ -397,7 +399,7 @@ impl Hub {
             if let Ok(mut s) = slot.dispatcher.state.lock() {
                 s.set_web(
                     Some(site.addr.to_string()),
-                    Some(format!("http://{}/p/{slug}/", site.addr)),
+                    Some(site.auth.url(&format!("http://{}/p/{slug}/", site.addr))),
                 );
             }
             *slot.web_slug.lock().unwrap_or_else(|e| e.into_inner()) = Some(slug);
@@ -432,14 +434,24 @@ impl Hub {
                 if port != 0 && addr.port() != port {
                     status!("cloved: web UI port {wanted} in use; serving on {addr}");
                 }
-                let web = clove_web::HubWeb::new();
+                // The port is open to every local user; the token is what
+                // limits the web UI to this one (clients get it in `web_url`,
+                // over the uid-checked socket).
+                let auth = match clove_web::WebAuth::generate() {
+                    Ok(auth) => auth,
+                    Err(e) => {
+                        status!("cloved: web server not started (no access token): {e}");
+                        return None;
+                    }
+                };
+                let web = clove_web::HubWeb::new().with_auth(auth.clone());
                 let server = web.clone();
                 tokio::spawn(async move {
                     if let Err(e) = server.serve(listener).await {
                         status!("cloved: web server error ({addr}): {e}");
                     }
                 });
-                Some(WebSite { web, addr })
+                Some(WebSite { web, addr, auth })
             })
             .await
             .as_ref()
