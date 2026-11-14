@@ -2,10 +2,9 @@
 //!
 //! Pipeline for each file:
 //! 1. Size guard from the opened file's metadata (reject absurdly large files
-//!    before read). In [`parse_item_file`] this is one `open` + `fstat` with no
-//!    second lookup by path; [`parse_frontmatter_file`] still does the older
-//!    `metadata(path)` + `read(path)` pair (two path resolutions) — see the
-//!    roadmap's follow-up list.
+//!    before read): one `open` (refusing symlinks and non-regular files) and
+//!    one `fstat`, with no second lookup by path. [`parse_frontmatter_file`]
+//!    then reads only as far as a frontmatter block can reach, not the body.
 //! 2. Locate the `---` … `---` frontmatter fences (`memchr`, zero-copy slice).
 //! 3. Enforce the frontmatter byte budget and reject YAML anchors/aliases (bomb
 //!    guard) before handing bytes to the YAML parser.
@@ -21,6 +20,35 @@ use crate::limits::{MAX_BODY_BYTES, MAX_FRONTMATTER_BYTES};
 use crate::model::{Item, ItemFrontmatter};
 use crate::validate::validate_item;
 
+/// Open an item file for reading and return it with its size. A symlink is
+/// refused, not followed, and so is anything that is not a regular file: the
+/// store's scan skips both (DESIGN §12.3), so a read by path must not resolve
+/// one either (a link to a device or a FIFO would block or never end).
+fn open_item_file(path: &Utf8Path) -> Result<(std::fs::File, u64), CloveError> {
+    let io_err = |source| CloveError::Io {
+        path: path.to_owned(),
+        source,
+    };
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    crate::fs_safe::no_follow(&mut options, path).map_err(io_err)?;
+    // Never wait on a FIFO: the regular-file check below then rejects it.
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(
+        &mut options,
+        libc::O_NOFOLLOW | libc::O_NONBLOCK,
+    );
+    let file = options.open(path).map_err(io_err)?;
+    let metadata = file.metadata().map_err(io_err)?;
+    if !metadata.is_file() {
+        return Err(io_err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "not a regular file",
+        )));
+    }
+    Ok((file, metadata.len()))
+}
+
 /// Parse the item file at `path`, validating that its `id` matches the file
 /// name stem.
 pub fn parse_item_file(path: &Utf8Path) -> Result<Item, CloveError> {
@@ -35,17 +63,7 @@ pub fn parse_item_file(path: &Utf8Path) -> Result<Item, CloveError> {
     //
     // The guard is unchanged — the size is still checked before anything is
     // allocated for the body.
-    let file = std::fs::File::open(path).map_err(|source| CloveError::Io {
-        path: path.to_owned(),
-        source,
-    })?;
-    let len = file
-        .metadata()
-        .map_err(|source| CloveError::Io {
-            path: path.to_owned(),
-            source,
-        })?
-        .len();
+    let (file, len) = open_item_file(path)?;
 
     // Cheap early rejection of pathologically large files before we allocate.
     let ceiling = (MAX_FRONTMATTER_BYTES + MAX_BODY_BYTES).saturating_add(4096);
@@ -122,27 +140,70 @@ pub fn parse_item_lenient(bytes: &[u8], path: &Utf8Path) -> Result<Item, CloveEr
 /// body — the `scan_lazy` fast path for `ls`/`ready`/`blocked` (DESIGN §13.3).
 /// Still validates the `id` matches the file name stem.
 pub fn parse_frontmatter_file(path: &Utf8Path) -> Result<ItemFrontmatter, CloveError> {
-    let metadata = std::fs::metadata(path).map_err(|source| CloveError::Io {
+    use std::io::Read as _;
+    let io_err = |source| CloveError::Io {
         path: path.to_owned(),
         source,
-    })?;
+    };
+    let (file, len) = open_item_file(path)?;
     // Same cheap early rejection as `parse_item_file`: this is the hot scan
     // path (`ls`/`ready`/every mutation's `scan_or_fail`), so a multi-GB file
     // dropped into the issues dir must be rejected from metadata, not read
     // fully into memory on every scan just to fail the budget check after.
     let ceiling = (MAX_FRONTMATTER_BYTES + MAX_BODY_BYTES).saturating_add(4096);
-    if metadata.len() as usize > ceiling {
+    if len as usize > ceiling {
         return Err(CloveError::BodyTooLarge {
             path: path.to_owned(),
             limit: MAX_BODY_BYTES,
         });
     }
 
-    let bytes = std::fs::read(path).map_err(|source| CloveError::Io {
-        path: path.to_owned(),
-        source,
-    })?;
-    let (frontmatter, _body) = parse_frontmatter_parts(&bytes, path)?;
+    // Read only as far as a frontmatter within budget can reach (plus the BOM
+    // and both fences), not the body. The body's size still counts: it is the
+    // file size minus where the body starts.
+    let head_cap = MAX_FRONTMATTER_BYTES + FENCE_OVERHEAD_BYTES;
+    let mut bytes = Vec::with_capacity((len as usize).min(head_cap));
+    (&file)
+        .take(head_cap as u64)
+        .read_to_end(&mut bytes)
+        .map_err(io_err)?;
+    let truncated = (len as usize) > bytes.len();
+
+    let head = if truncated {
+        match split_frontmatter(&bytes, path) {
+            // The closing fence must be followed by more of the head: one that
+            // ends exactly at the cut might continue (`----`) in the file.
+            Ok((frontmatter, body)) if !body.is_empty() => {
+                Some((frontmatter, len as usize - (bytes.len() - body.len())))
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let frontmatter = match head {
+        Some((frontmatter_bytes, body_len)) => {
+            parse_frontmatter_checked(frontmatter_bytes, body_len, path)?
+        }
+        None => {
+            // The whole file fits in the head, or no closing fence is within
+            // reach: read the rest so the verdict is the full parse's.
+            if truncated {
+                (&file)
+                    .take(ceiling as u64 + 1)
+                    .read_to_end(&mut bytes)
+                    .map_err(io_err)?;
+                if bytes.len() > ceiling {
+                    return Err(CloveError::BodyTooLarge {
+                        path: path.to_owned(),
+                        limit: MAX_BODY_BYTES,
+                    });
+                }
+            }
+            parse_frontmatter_parts(&bytes, path)?.0
+        }
+    };
+
     let stem = path.file_stem().unwrap_or_default();
     if frontmatter.id.as_str() != stem {
         return Err(CloveError::IdMismatch {
@@ -153,6 +214,11 @@ pub fn parse_frontmatter_file(path: &Utf8Path) -> Result<ItemFrontmatter, CloveE
     }
     Ok(frontmatter)
 }
+
+/// Bytes a file may spend around a frontmatter block: a UTF-8 BOM, the opening
+/// fence, and the closing fence with its line terminators, plus one byte of
+/// body so the closing fence is seen whole.
+const FENCE_OVERHEAD_BYTES: usize = 3 + 5 + 6 + 1;
 
 /// The structural parse: fences, budgets, alias guard, deserialize, validate.
 /// Does not check the id against any external reference.
@@ -173,14 +239,24 @@ fn parse_frontmatter_parts<'a>(
     path: &Utf8Path,
 ) -> Result<(ItemFrontmatter, &'a [u8]), CloveError> {
     let (frontmatter_bytes, body_bytes) = split_frontmatter(bytes, path)?;
+    let frontmatter = parse_frontmatter_checked(frontmatter_bytes, body_bytes.len(), path)?;
+    Ok((frontmatter, body_bytes))
+}
 
+/// Budgets, alias guard, deserialize and validate for a frontmatter block
+/// already split from a body of `body_len` bytes.
+fn parse_frontmatter_checked(
+    frontmatter_bytes: &[u8],
+    body_len: usize,
+    path: &Utf8Path,
+) -> Result<ItemFrontmatter, CloveError> {
     if frontmatter_bytes.len() > MAX_FRONTMATTER_BYTES {
         return Err(CloveError::FrontmatterTooLarge {
             path: path.to_owned(),
             limit: MAX_FRONTMATTER_BYTES,
         });
     }
-    if body_bytes.len() > MAX_BODY_BYTES {
+    if body_len > MAX_BODY_BYTES {
         return Err(CloveError::BodyTooLarge {
             path: path.to_owned(),
             limit: MAX_BODY_BYTES,
@@ -211,7 +287,7 @@ fn parse_frontmatter_parts<'a>(
         });
     }
 
-    Ok((frontmatter, body_bytes))
+    Ok(frontmatter)
 }
 
 /// Split a file into (frontmatter bytes, body bytes) by locating the opening and
@@ -676,6 +752,91 @@ mod tests {
         assert_eq!(item.frontmatter.title, "x");
         assert_eq!(item.body, "body\r\n");
         assert!(parse_frontmatter_file(&path).is_ok());
+    }
+
+    const HEAD: &str = "---\nschema: 1\nid: proj-7AF3K2MN\ntitle: x\nstatus: open\ntype: bug\npriority: 2\ncreated: 2026-06-02T10:00:00Z\nupdated: 2026-06-02T10:00:00Z\n";
+
+    /// The frontmatter-only parse stops reading after the frontmatter, and its
+    /// verdict on every file is the full parse's.
+    #[test]
+    fn frontmatter_parse_agrees_with_the_full_parse_on_large_files() {
+        let verdict = |contents: &str| {
+            let (_tmp, path) = write_temp("proj-7AF3K2MN.md", contents);
+            let full = parse_item_file(&path).map(|item| item.frontmatter);
+            let lazy = parse_frontmatter_file(&path);
+            match (&full, &lazy) {
+                (Ok(a), Ok(b)) => assert_eq!(a, b),
+                (Err(a), Err(b)) => assert_eq!(
+                    std::mem::discriminant(a),
+                    std::mem::discriminant(b),
+                    "full: {a:?}, lazy: {b:?}"
+                ),
+                other => panic!("verdicts differ: {other:?}"),
+            }
+            lazy
+        };
+        let filler = |n: usize| "b".repeat(n);
+
+        // A body far larger than the head that is read.
+        assert!(verdict(&format!("{HEAD}---\n{}", filler(MAX_FRONTMATTER_BYTES * 4))).is_ok());
+        // Body at and over its budget.
+        assert!(verdict(&format!("{HEAD}---\n{}", filler(MAX_BODY_BYTES))).is_ok());
+        assert!(matches!(
+            verdict(&format!("{HEAD}---\n{}", filler(MAX_BODY_BYTES + 1))),
+            Err(CloveError::BodyTooLarge { .. })
+        ));
+        // Frontmatter over its budget: the fence is beyond the head.
+        assert!(matches!(
+            verdict(&format!(
+                "{HEAD}assignee: {}\n---\n{}",
+                filler(MAX_FRONTMATTER_BYTES),
+                filler(100)
+            )),
+            Err(CloveError::FrontmatterTooLarge { .. })
+        ));
+        // No closing fence anywhere.
+        assert!(matches!(
+            verdict(&format!("{HEAD}{}", filler(MAX_FRONTMATTER_BYTES * 2))),
+            Err(CloveError::UnterminatedFrontmatter { .. })
+        ));
+        // A `---` that ends exactly where the head is cut, for each way the
+        // file may go on: a real fence, and `----`, which is not one.
+        let pad =
+            MAX_FRONTMATTER_BYTES + FENCE_OVERHEAD_BYTES - HEAD.len() - "assignee: \n---".len();
+        for rest in [
+            "\nbody\n",
+            "-\nstill frontmatter: no\n---\nbody\n",
+            "\r\nbody",
+        ] {
+            let contents = format!("{HEAD}assignee: {}\n---{rest}", filler(pad));
+            assert_eq!(
+                contents.find(rest).unwrap(),
+                MAX_FRONTMATTER_BYTES + FENCE_OVERHEAD_BYTES
+            );
+            let _ = verdict(&contents);
+        }
+    }
+
+    /// A symlinked or non-regular item file is refused, not followed: the scan
+    /// skips such files, and a read by path must agree.
+    #[cfg(unix)]
+    #[test]
+    fn refuses_a_symlinked_item_file() {
+        let (_tmp, target) = write_temp("proj-7AF3K2MN.md", &format!("{HEAD}---\n"));
+        let link = target.with_file_name("proj-AAAAAAAA.md");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(parse_item_file(&target).is_ok());
+        assert!(matches!(parse_item_file(&link), Err(CloveError::Io { .. })));
+        assert!(matches!(
+            parse_frontmatter_file(&link),
+            Err(CloveError::Io { .. })
+        ));
+
+        // A FIFO must be rejected without blocking on the open.
+        let fifo = target.with_file_name("proj-BBBBBBBB.md");
+        let c_path = std::ffi::CString::new(fifo.as_str()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) }, 0);
+        assert!(matches!(parse_item_file(&fifo), Err(CloveError::Io { .. })));
     }
 
     #[test]
