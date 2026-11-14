@@ -94,3 +94,27 @@ fn clove_dir_sibling_of_a_real_store_is_refused() {
         .count();
     assert_eq!(issues, 0, "nothing may be written to the real store");
 }
+
+/// Item text is untrusted (item files, synced trackers). Human output must not
+/// pass terminal control sequences through; JSON keeps the stored value.
+#[test]
+fn human_output_strips_terminal_control_sequences() {
+    let repo = init_repo();
+    let title = "safe\u{1b}[2K\rforged";
+    let id = new_item(repo.path(), title, &["-b", "body\u{1b}]52;c;QUJD\u{7}end"]);
+
+    for args in [vec!["ls"], vec!["show", id.as_str()], vec!["search", "safe"]] {
+        let out = clove(repo.path()).args(&args).output().unwrap();
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        let text = stdout(&out);
+        assert!(text.contains("safe[2Kforged"), "{args:?}: {text:?}");
+        assert!(
+            !text.contains('\u{1b}') && !text.contains('\r') && !text.contains('\u{7}'),
+            "{args:?} leaked a control character: {text:?}"
+        );
+    }
+
+    let mut show = clove(repo.path());
+    show.args(["show", id.as_str()]);
+    assert_eq!(json_ok(&mut show)["data"]["title"], title);
+}

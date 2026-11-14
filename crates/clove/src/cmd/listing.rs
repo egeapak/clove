@@ -186,7 +186,7 @@ pub fn emit(format: OutputFormat, objects: Vec<ListObject>, opts: ListOpts<'_>) 
                     s("status"),
                     priority,
                     s("type"),
-                    s("title")
+                    crate::util::term_line(s("title"))
                 );
             }
         }

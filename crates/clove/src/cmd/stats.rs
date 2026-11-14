@@ -254,7 +254,7 @@ fn render_human(report: &StatsReport, daemon: &Value, index: &Value, snapshotted
         let mut parts: Vec<String> = report
             .by_assignee
             .iter()
-            .map(|kc| format!("{} {}", kc.key, kc.count))
+            .map(|kc| format!("{} {}", crate::util::term_line(&kc.key), kc.count))
             .collect();
         parts.push(format!("unassigned {}", report.unassigned));
         outln!("Assignees  {}", parts.join("  "));
@@ -263,7 +263,7 @@ fn render_human(report: &StatsReport, daemon: &Value, index: &Value, snapshotted
         let parts: Vec<String> = report
             .by_label
             .iter()
-            .map(|kc| format!("{} {}", kc.key, kc.count))
+            .map(|kc| format!("{} {}", crate::util::term_line(&kc.key), kc.count))
             .collect();
         outln!("Labels     {}", parts.join("  "));
     }
@@ -286,7 +286,7 @@ fn render_human(report: &StatsReport, daemon: &Value, index: &Value, snapshotted
             outln!(
                 "  {:14} {:<24} {}/{}  {}%{}",
                 e.id,
-                e.title,
+                crate::util::term_line(&e.title),
                 e.closed,
                 e.total,
                 e.pct,
