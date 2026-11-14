@@ -96,4 +96,32 @@ describe('cloveId micromark extension', () => {
   it('does NOT link when followed immediately by more id chars (9 chars)', () => {
     expect(render('#7AF3Q2K9X')).not.toContain('<a href="/items/');
   });
+
+  it('does NOT nest a link inside the label of a markdown link', () => {
+    const out = render('[fix for #proj-AS5Y8MM7](https://example.com) and #proj-AS5Y8MM7');
+    expect(out).toContain('<a href="https://example.com">fix for #proj-AS5Y8MM7</a>');
+    // The same id outside the link is still linked.
+    expect(out).toContain('and <a href="/items/proj-AS5Y8MM7">#proj-AS5Y8MM7</a>');
+    expect(out.match(/<a /g)).toHaveLength(2);
+  });
+
+  it('does NOT nest a link inside a reference-style link label', () => {
+    const out = render('[see #7AF3Q2K9][ref]\n\n[ref]: https://example.com');
+    expect(out).toContain('<a href="https://example.com">see #7AF3Q2K9</a>');
+    expect(out).not.toContain('/items/');
+  });
+
+  it('still links inside brackets that are not a link', () => {
+    expect(render('[see #7AF3Q2K9] for details')).toContain(
+      '[see <a href="/items/proj-7AF3Q2K9">#7AF3Q2K9</a>] for details'
+    );
+  });
+
+  it('still links inside emphasis', () => {
+    expect(render('**#7AF3Q2K9**')).toContain('<strong><a href="/items/proj-7AF3Q2K9">#7AF3Q2K9</a></strong>');
+  });
+
+  it('does NOT link the fragment of a URL that is not autolinked', () => {
+    expect(render('see example.com/#7AF3Q2K9 now')).not.toContain('/items/');
+  });
 });

@@ -17,8 +17,11 @@
 //
 // Because it is registered as a `text` construct it only runs where inline
 // text is being tokenized — micromark's construct model means it never fires
-// inside code spans, fenced/indented code blocks, or the target/label of an
-// existing link or autolink. (Covered by tests.)
+// inside code spans, fenced/indented code blocks, or the *destination* of a
+// link or autolink. A link's *label* is inline text, so the construct does
+// match there; `resolveAll` turns such a match back into plain text, because
+// an `<a>` inside an `<a>` is invalid and the browser splits the outer link.
+// (Covered by tests.)
 
 import { codes } from 'micromark-util-symbol';
 import { asciiAlpha, asciiDigit } from 'micromark-util-character';
@@ -103,8 +106,9 @@ const cloveIdTokenize: Tokenizer = function (effects, ok, nok) {
     if (code !== codes.numberSign) return nok(code);
 
     const previous = self.previous;
-    // Disallow if the preceding char was alphanumeric (would be mid-word).
-    if (previous !== null && (asciiAlpha(previous) || asciiDigit(previous))) {
+    // Disallow if the preceding char was alphanumeric (would be mid-word), or a
+    // slash: `example.com/#7AF3Q2K9` is the fragment of a URL, not a reference.
+    if (previous !== null && (asciiAlpha(previous) || asciiDigit(previous) || previous === codes.slash)) {
       return nok(code);
     }
 
@@ -197,7 +201,18 @@ const cloveIdConstruct: Construct = {
   // the preceding character is NOT alphanumeric, so `abc#deadbeef` won't fire
   // mid-word. Classification is by code point (no regex).
   previous(code: Code) {
-    return code === null || !(asciiAlpha(code) || asciiDigit(code));
+    return code === null || !(asciiAlpha(code) || asciiDigit(code) || code === codes.slash);
+  },
+  // Runs once the inline content is tokenized, when every `[label](dest)` has
+  // been resolved into a `link` token group. An id matched inside one becomes
+  // plain `data`: the surrounding link already has a target.
+  resolveAll(events) {
+    let linkDepth = 0;
+    for (const [kind, token] of events) {
+      if (token.type === 'link') linkDepth += kind === 'enter' ? 1 : -1;
+      else if (linkDepth > 0 && token.type === 'cloveId') token.type = 'data';
+    }
+    return events;
   }
 };
 
