@@ -169,8 +169,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_write_connection_follows_a_replaced_database() {
-        // What a `clove reindex` outside the daemon does: a new file under
-        // the same name.
+        // Another process puts a new file under the same name.
         let (_tmp, path) = db();
         let readers = Readers::new(path.clone());
         let mut index = Index::open(&path).unwrap();
@@ -183,7 +182,11 @@ mod tests {
              priority: 2\ncreated: 2026-06-02T10:00:00Z\nupdated: 2026-06-02T10:00:00Z\n---\nbody\n",
         )
         .unwrap();
-        clove_index::reindex(&issues, &path).unwrap();
+        // Build the new index beside the old one and rename it over the name,
+        // so the test does not depend on how `reindex` writes its target.
+        let fresh = path.with_file_name("index.db.new");
+        clove_index::reindex(&issues, &fresh).unwrap();
+        std::fs::rename(&fresh, &path).unwrap();
         assert_eq!(index.item_count().unwrap(), 0, "still on the old file");
 
         assert!(readers.follow(&mut index));
