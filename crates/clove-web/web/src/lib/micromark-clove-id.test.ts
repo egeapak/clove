@@ -124,4 +124,21 @@ describe('cloveId micromark extension', () => {
   it('does NOT link the fragment of a URL that is not autolinked', () => {
     expect(render('see example.com/#7AF3Q2K9 now')).not.toContain('/items/');
   });
+
+  it('does NOT link a lowercase bare word such as #feedback', () => {
+    for (const word of ['#feedback', '#database', '#7af3q2k9', '#7AF3q2K9', '#aBCDEFGH']) {
+      const out = render(`tagged ${word} here`);
+      expect(out, word).not.toContain('/items/');
+      expect(out, word).toContain(word);
+    }
+  });
+
+  it('still links an all-digit or uppercase bare id', () => {
+    expect(render('#12345678')).toContain('<a href="/items/proj-12345678">#12345678</a>');
+    expect(render('#ZZZZ0000')).toContain('<a href="/items/proj-ZZZZ0000">#ZZZZ0000</a>');
+  });
+
+  it('still links a prefixed id written in upper or mixed case body', () => {
+    expect(render('#proj-7AF3q2k9')).toContain('<a href="/items/proj-7AF3Q2K9">#proj-7AF3q2k9</a>');
+  });
 });

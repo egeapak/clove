@@ -2,11 +2,12 @@
 schema: 1
 id: clov-1KVXZYQ2
 title: Bare-form id autolink matches ordinary words and numbers
-status: open
+status: closed
 type: bug
 priority: 2
 created: 2026-11-14T19:14:40.375Z
-updated: 2026-11-14T19:14:40.375Z
+updated: 2026-11-14T19:21:54.094Z
+closed: 2026-11-14T19:21:54.094Z
 labels: []
 deps: []
 relates: []

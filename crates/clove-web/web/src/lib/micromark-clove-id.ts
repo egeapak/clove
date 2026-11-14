@@ -7,7 +7,12 @@
 //
 // The 8-char id body is Crockford base32, which EXCLUDES the letters
 // I, L, O, U (to avoid look-alikes). So the accepted body alphabet is
-//   0-9 A-H J K M N P-T V-Z   (and their lowercase equivalents).
+//   0-9 A-H J K M N P-T V-Z
+// The prefixed form also accepts the lowercase equivalents: the prefix makes
+// it unambiguous. The bare form must be written the way the UI prints it,
+// digits and UPPERCASE letters only. A lowercase bare form would turn every
+// 8-letter hashtag without i/l/o/u (`#feedback`, `#database`) into a link to
+// an item that does not exist.
 //
 // This is a real micromark *syntax* extension (a `text` construct hooked on
 // the `#` character code) plus a matching *HTML compiler* extension. It does
@@ -74,6 +79,11 @@ function isCrockfordBase32(code: Code): boolean {
   return true;
 }
 
+// The bare form's stricter body alphabet: no lowercase letters.
+function isBareBodyChar(code: Code): boolean {
+  return isCrockfordBase32(code) && !(code !== null && code >= codes.lowercaseA && code <= codes.lowercaseZ);
+}
+
 // Prefix characters: lowercase ASCII letters and digits (the first must be a
 // letter, enforced separately). Classify by code point.
 function isLowerAlnum(code: Code): boolean {
@@ -117,70 +127,39 @@ const cloveIdTokenize: Tokenizer = function (effects, ok, nok) {
     return afterHash;
   }
 
-  // After '#': either a prefix letter (prefixed form) or directly a base32
-  // body char (bare form). We do not know yet which form it is; we try to
-  // read an optional `prefix-` then a mandatory 8-char body.
+  // After '#': a lowercase letter opens a prefix (prefixed form); a digit or
+  // an uppercase base32 letter opens the bare 8-char body.
   function afterHash(code: Code): State | undefined {
-    // Bare form starts immediately with a base32 char; prefixed form starts
-    // with a lowercase letter that is part of the prefix. A lowercase letter
-    // is valid in BOTH, so we tentatively read prefix chars and decide at the
-    // '-' whether it was a prefix. To keep the construct deterministic we read
-    // the first segment of [a-z0-9]* characters; if it is followed by '-' it
-    // was a prefix, otherwise it must have been the start of the 8-char body.
     if (code !== null && code >= codes.lowercaseA && code <= codes.lowercaseZ) {
-      // A lowercase letter must open the prefix (prefixes start with a letter).
-      return prefixOrBody(code, 0, 0);
+      return prefix(code);
     }
-    if (isCrockfordBase32(code)) {
-      // Cannot be a prefix (prefix must start with a letter) -> bare body.
-      return body(code, 0);
+    if (isBareBodyChar(code)) {
+      return body(code, 0, isBareBodyChar);
     }
     return nok(code);
   }
 
-  // Read a run that is simultaneously a candidate prefix and a candidate body.
-  // `letters` counts chars consumed in this run; `bodyMatched` tracks whether
-  // every char so far is also a valid base32 body char (so we can fall back to
-  // the bare form if no '-' appears).
-  //
-  // We do not actually need to count base32 validity for the prefix path; we
-  // re-decide at the boundary:
-  //   - if we hit '-', the run was a prefix -> read the 8-char body next.
-  //   - if we hit a non-prefix char (or boundary), the run must itself be the
-  //     8-char body -> validate length and that all chars were base32.
-  function prefixOrBody(code: Code, runLen: number, badForBody: number): State | undefined {
+  // Read the `[a-z][a-z0-9]*` prefix up to its `-`. Without the `-` the run
+  // is an ordinary lowercase word, not an id.
+  function prefix(code: Code): State | undefined {
     if (isLowerAlnum(code)) {
-      // Track whether this char would be invalid as a base32 body char (e.g.
-      // lowercase i/l/o/u, which are excluded from Crockford).
-      const bad = isCrockfordBase32(code) ? 0 : 1;
       effects.consume(code);
-      return (next: Code) => prefixOrBody(next, runLen + 1, badForBody + bad);
+      return prefix;
     }
-
     if (code === codes.dash) {
-      // The run was a prefix (it started with a letter, enforced in afterHash).
-      // A prefix must be non-empty.
-      if (runLen < 1) return nok(code);
       effects.consume(code); // consume '-'
-      return (next: Code) => body(next, 0);
-    }
-
-    // No '-': the run itself must be the bare 8-char base32 body.
-    if (runLen === ID_BODY_LENGTH && badForBody === 0) {
-      // Right boundary: the next char must not continue the id.
-      if (isIdContinuation(code)) return nok(code);
-      return done(code);
+      return (next: Code) => body(next, 0, isCrockfordBase32);
     }
     return nok(code);
   }
 
-  // Read exactly ID_BODY_LENGTH base32 chars as the id body (prefixed form, or
-  // the bare form reached directly).
-  function body(code: Code, count: number): State | undefined {
+  // Read exactly ID_BODY_LENGTH body chars; `accepts` is the alphabet of the
+  // form being read (either case after a prefix, uppercase for the bare form).
+  function body(code: Code, count: number, accepts: (code: Code) => boolean): State | undefined {
     if (count < ID_BODY_LENGTH) {
-      if (!isCrockfordBase32(code)) return nok(code);
+      if (!accepts(code)) return nok(code);
       effects.consume(code);
-      return (next: Code) => body(next, count + 1);
+      return (next: Code) => body(next, count + 1, accepts);
     }
     // count === ID_BODY_LENGTH: enforce right boundary.
     if (isIdContinuation(code)) return nok(code);
@@ -244,8 +223,8 @@ export interface CloveIdHtmlOptions {
  * micromark HTML compiler extension: renders a `cloveId` token as
  * `<a href="<base>/items/<canonical-id>">#<matched></a>`.
  *
- * The tokenizer matches ids case-insensitively and with or without a prefix,
- * but the API's id grammar is strict (`^[a-z][a-z0-9]{0,7}-[0-9A-Z]{8}$`), so
+ * The tokenizer matches a prefixed id in either case and a bare id in upper
+ * case, but the API's id grammar is strict (`^[a-z][a-z0-9]{0,7}-[0-9A-Z]{8}$`), so
  * the href canonicalizes what was matched: the suffix is upper-cased and a
  * bare suffix gets `idPrefix` prepended. The visible text stays as written.
  * Both the href and the visible text are escaped with micromark's `encode`
