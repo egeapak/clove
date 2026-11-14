@@ -46,6 +46,14 @@ class Store {
   offset = $state(0);
   limit = $state(0);
 
+  /**
+   * The request string of the query that produced the current window, or `null`
+   * before any response. `total`/`offset` describe *that* query; a view whose
+   * URL has already moved on must not judge its own page number against them
+   * (see {@link Store.answers}).
+   */
+  private answered = $state<string | null>(null);
+
   /** ids of the current window, in the order the server returned them. */
   private order = $state<string[]>([]);
   /** The query in force. `null` until a view declares one — startup loads
@@ -151,6 +159,7 @@ class Store {
     this.items = new Map();
     this.order = [];
     this.query = null;
+    this.answered = null;
     this.pending.clear();
     this.total = 0;
     this.offset = 0;
@@ -237,6 +246,11 @@ class Store {
     this.recompute(id);
   }
 
+  /** Whether the current window is the server's answer to exactly `query`. */
+  answers(query: ListQuery): boolean {
+    return this.answered !== null && this.answered === queryString(query);
+  }
+
   /**
    * Declare the query this view needs and load it.
    *
@@ -286,13 +300,15 @@ class Store {
       if (isMockMode()) this.conn = 'mock';
       return;
     }
+    const asked = this.query;
     const [page, meta]: [ItemPage, Meta] = await Promise.all([
-      api.items(this.query),
+      api.items(asked),
       api.meta()
     ]);
     // A response for a superseded query must not overwrite a newer one.
     if (token !== this.loadToken) return;
     this.replaceAll(page.items, page);
+    this.answered = queryString(asked);
     this.meta = meta;
     this.loadError = null;
     if (isMockMode()) this.conn = 'mock';

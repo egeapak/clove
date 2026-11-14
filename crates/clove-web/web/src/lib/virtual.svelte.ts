@@ -27,6 +27,8 @@ type Opts<S extends Element, I extends Element> = Pick<
   | 'paddingStart'
   | 'paddingEnd'
   | 'gap'
+  | 'scrollPaddingStart'
+  | 'scrollPaddingEnd'
 >;
 
 export class Virtual<S extends Element = HTMLElement, I extends Element = HTMLElement> {
@@ -63,6 +65,12 @@ export class Virtual<S extends Element = HTMLElement, I extends Element = HTMLEl
     this.items = this.#virtualizer.getVirtualItems();
     this.total = this.#virtualizer.getTotalSize();
     return cleanup;
+  }
+
+  // Bring row `index` into view (no-op when it already is). Used by keyboard
+  // cursors, whose target row may not be rendered at all.
+  scrollToIndex(index: number) {
+    this.#virtualizer.scrollToIndex(index, { align: 'auto' });
   }
 
   // For dynamic (measured) heights: pass each row element to the observer.
