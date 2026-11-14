@@ -1690,10 +1690,12 @@ fn read_tools_use_the_index_tier_and_report_it() {
         );
         // A full row, hydrated per page — the lean projection carries none of
         // these, so this is what proves the tier did not change the shape.
-        if let Some(row) = page["items"].get(0) {
-            assert!(row.get("created").is_some(), "{tool} row: {row}");
-            assert_eq!(row["schema"], 1, "{tool} row: {row}");
-        }
+        // Indexed unconditionally: an `if let Some(row)` here let an empty page
+        // (or a renamed `items` key) skip the shape check altogether.
+        let row = &page["items"][0];
+        assert!(row.is_object(), "{tool} returned no row to check: {page}");
+        assert!(row.get("created").is_some(), "{tool} row: {row}");
+        assert_eq!(row["schema"], 1, "{tool} row: {row}");
     }
 
     // `clove_blocked` still carries `blocked_by` on the tiered path.
