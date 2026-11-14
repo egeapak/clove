@@ -624,7 +624,7 @@ fn an_index_far_behind_is_refreshed_by_the_next_read() {
             .item_count()
             .unwrap()
     };
-    assert!(25 > clove_engine::STALE_REFRESH_LIMIT);
+    const { assert!(25 > clove_engine::STALE_REFRESH_LIMIT) };
 
     // 25 new items behind a 6-item index: most of the store, so a rebuild.
     add_items(&fx, 25, "pulled");
