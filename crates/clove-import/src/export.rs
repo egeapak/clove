@@ -37,6 +37,28 @@ pub fn export_json<W: Write>(writer: &mut W, items: &[Value], meta: Value) -> io
     writer.write_all(b"\n")
 }
 
+/// [`export_json`] for a store too large to hold as one `Vec<Value>`: write
+/// the envelope around already-serialized items.
+///
+/// `items_json` yields the item objects as JSON text joined by `,` (no
+/// brackets) — the caller serializes one item at a time into a spool and hands
+/// the spool over, so memory stays bounded by a single item. The envelope puts
+/// `_meta` before `data` (serde_json's sorted keys), which is why the items
+/// cannot simply be streamed first: `meta` carries the warnings found while
+/// producing them. The bytes are the same as [`export_json`] writes for the
+/// same items and meta.
+pub fn export_json_spooled<W: Write, R: io::Read>(
+    writer: &mut W,
+    items_json: &mut R,
+    meta: Value,
+) -> io::Result<()> {
+    writer.write_all(b"{\"_meta\":")?;
+    serde_json::to_writer(&mut *writer, &with_export_provenance(meta))?;
+    writer.write_all(b",\"data\":[")?;
+    io::copy(items_json, writer)?;
+    writeln!(writer, "],\"ok\":true,\"v\":{ENVELOPE_VERSION}}}")
+}
+
 /// Stamp export provenance into the caller-supplied `_meta` object so a later
 /// `import json` can version-check the container (see [`crate::restore`]):
 /// `_meta.clove_export = { "format": EXPORT_FORMAT_VERSION, "item_schema":
@@ -115,6 +137,29 @@ mod tests {
         // Caller-supplied keys survive the merge.
         assert_eq!(v["_meta"]["source"], "file");
         assert_eq!(v["_meta"]["warnings"], json!([]));
+    }
+
+    /// The spooled writer must produce exactly the bytes of the in-memory
+    /// one — an export's layout does not depend on which path wrote it.
+    #[test]
+    fn spooled_json_is_byte_identical_to_the_in_memory_writer() {
+        for set in [items(), Vec::new()] {
+            let meta = || json!({ "source": "files", "warnings": ["w"] });
+            let mut whole = Vec::new();
+            export_json(&mut whole, &set, meta()).unwrap();
+
+            let joined = set
+                .iter()
+                .map(|item| serde_json::to_string(item).unwrap())
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut spooled = Vec::new();
+            export_json_spooled(&mut spooled, &mut joined.as_bytes(), meta()).unwrap();
+            assert_eq!(
+                String::from_utf8(spooled).unwrap(),
+                String::from_utf8(whole).unwrap()
+            );
+        }
     }
 
     #[test]

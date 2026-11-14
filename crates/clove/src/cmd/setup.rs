@@ -199,9 +199,13 @@ pub fn run(
             .map_or_else(|| project_dir.clone(), Utf8Path::to_owned);
         write_mcp_json(&project_root, dry_run, &mut actions)?
     };
+    // A project's files come with the clone, so a symlink there may point
+    // anywhere: setup refuses to write through one. The user's own `~/.claude`
+    // may hold symlinks into a dotfiles checkout, so `--global` follows them.
+    let links = if global { Links::Follow } else { Links::Refuse };
     let settings_changed = write_settings(&claude_dir, !global, dry_run, &mut actions)?;
-    let clove_md_changed = write_clove_md(&claude_dir, dry_run, &mut actions)?;
-    let claude_md_changed = update_claude_md(&claude_dir, dry_run, &mut actions)?;
+    let clove_md_changed = write_clove_md(&claude_dir, links, dry_run, &mut actions)?;
+    let claude_md_changed = update_claude_md(&claude_dir, links, dry_run, &mut actions)?;
     let changed = mcp_json_changed || settings_changed || clove_md_changed || claude_md_changed;
 
     match format {
@@ -271,7 +275,7 @@ fn write_mcp_json(
         return Ok(true);
     }
     create_dir_all(project_root)?;
-    write_json(&path, &config)?;
+    write_json(&path, &config, Links::Refuse)?;
     actions.push("Registered the clove MCP server in .mcp.json.".into());
     Ok(true)
 }
@@ -355,20 +359,25 @@ fn write_settings(
     }
 
     create_dir_all(claude_dir)?;
-    write_json(&settings_path, &settings)?;
+    let links = if enable_project_server {
+        Links::Refuse
+    } else {
+        Links::Follow
+    };
+    write_json(&settings_path, &settings, links)?;
     actions.push("Enabled the clove MCP tools in settings.json.".into());
     Ok(true)
 }
 
 /// Pretty-print `value` and atomically write it to `path`.
-fn write_json(path: &Utf8Path, value: &Value) -> Result<(), CloveError> {
+fn write_json(path: &Utf8Path, value: &Value, links: Links) -> Result<(), CloveError> {
     let mut formatted =
         serde_json::to_string_pretty(value).map_err(|e| CloveError::InvalidField {
             field: file_label(path),
             reason: format!("could not serialize {path}: {e}"),
         })?;
     formatted.push('\n');
-    write_atomic(path, &formatted)
+    write_atomic(path, &formatted, links)
 }
 
 /// The file name used in an error's `field` (`settings.json`, `.mcp.json`).
@@ -379,6 +388,7 @@ fn file_label(path: &Utf8Path) -> String {
 /// Write `CLOVE.md` (create or refresh stale content). Returns whether it changed.
 fn write_clove_md(
     claude_dir: &Utf8Path,
+    links: Links,
     dry_run: bool,
     actions: &mut Vec<String>,
 ) -> Result<bool, CloveError> {
@@ -397,7 +407,7 @@ fn write_clove_md(
         return Ok(true);
     }
     create_dir_all(claude_dir)?;
-    write_file(&path, CLOVE_MD_CONTENT)?;
+    write_atomic(&path, CLOVE_MD_CONTENT, links)?;
     actions.push(if exists {
         "Updated CLOVE.md.".into()
     } else {
@@ -410,6 +420,7 @@ fn write_clove_md(
 /// whether it changed.
 fn update_claude_md(
     claude_dir: &Utf8Path,
+    links: Links,
     dry_run: bool,
     actions: &mut Vec<String>,
 ) -> Result<bool, CloveError> {
@@ -440,7 +451,7 @@ fn update_claude_md(
         };
         format!("{existing}{separator}{CLOVE_MD_REF}\n")
     };
-    write_file(&path, &new_content)?;
+    write_atomic(&path, &new_content, links)?;
     actions.push(if existing.is_empty() {
         "Created CLAUDE.md importing @CLOVE.md.".into()
     } else {
@@ -558,24 +569,50 @@ fn ensure_array_entry<'a>(
     }
 }
 
-/// Atomically replace `path`: write a sibling temp file, then rename over the
-/// target, so a crash mid-write can never leave a truncated `settings.json`.
-fn write_atomic(path: &Utf8Path, contents: &str) -> Result<(), CloveError> {
-    let dir = match path.parent() {
+/// What a write does when the file it replaces is a symlink.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Links {
+    /// Fail: the link may point outside the project.
+    Refuse,
+    /// Replace the file the link points to, and keep the link.
+    Follow,
+}
+
+/// Atomically replace `path`: a fresh sibling temp file with a random name,
+/// then a rename over the target. A crash mid-write cannot leave a truncated
+/// file, and nothing planted under a guessable temp name is written through.
+fn write_atomic(path: &Utf8Path, contents: &str, links: Links) -> Result<(), CloveError> {
+    let io = |source| CloveError::Io {
+        path: path.to_owned(),
+        source,
+    };
+    let is_link = std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
+    let target = match (is_link, links) {
+        (false, _) => path.to_owned(),
+        (true, Links::Refuse) => {
+            return Err(io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "refusing to write through the symlink {path}                      (replace the link with a regular file, then run the command again)"
+                ),
+            )))
+        }
+        (true, Links::Follow) => {
+            let resolved = std::fs::canonicalize(path).map_err(io)?;
+            Utf8PathBuf::from_path_buf(resolved).map_err(|p| {
+                io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("{} is not UTF-8", p.display()),
+                ))
+            })?
+        }
+    };
+    let dir = match target.parent() {
         Some(parent) if !parent.as_str().is_empty() => parent.to_owned(),
         _ => Utf8PathBuf::from("."),
     };
-    let file_name = path.file_name().unwrap_or("settings.json");
-    let tmp_path = dir.join(format!(".{file_name}.{}.tmp", std::process::id()));
-    let result =
-        std::fs::write(&tmp_path, contents).and_then(|()| std::fs::rename(&tmp_path, path));
-    result.map_err(|source| {
-        let _ = std::fs::remove_file(&tmp_path);
-        CloveError::Io {
-            path: path.to_owned(),
-            source,
-        }
-    })
+    let target = dir.join(target.file_name().unwrap_or("settings.json"));
+    clove_core::fs_safe::write_atomic(&dir, &target, contents.as_bytes()).map_err(io)
 }
 
 // --- small filesystem helpers (CloveError-mapped) ---
@@ -587,6 +624,7 @@ fn create_dir_all(path: &Utf8Path) -> Result<(), CloveError> {
     })
 }
 
+#[cfg(test)]
 fn write_file(path: &Utf8Path, contents: &str) -> Result<(), CloveError> {
     std::fs::write(path, contents).map_err(|source| CloveError::Io {
         path: path.to_owned(),
@@ -633,7 +671,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let d = dir(&tmp);
         let mut a = Vec::new();
-        assert!(write_clove_md(&d, false, &mut a).unwrap());
+        assert!(write_clove_md(&d, Links::Refuse, false, &mut a).unwrap());
         assert_eq!(
             read_to_string(&d.join("CLOVE.md")).unwrap(),
             CLOVE_MD_CONTENT
@@ -645,8 +683,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let d = dir(&tmp);
         let mut a = Vec::new();
-        write_clove_md(&d, false, &mut a).unwrap();
-        assert!(!write_clove_md(&d, false, &mut a).unwrap());
+        write_clove_md(&d, Links::Refuse, false, &mut a).unwrap();
+        assert!(!write_clove_md(&d, Links::Refuse, false, &mut a).unwrap());
     }
 
     #[test]
@@ -655,7 +693,7 @@ mod tests {
         let d = dir(&tmp);
         write_file(&d.join("CLOVE.md"), "old content").unwrap();
         let mut a = Vec::new();
-        assert!(write_clove_md(&d, false, &mut a).unwrap());
+        assert!(write_clove_md(&d, Links::Refuse, false, &mut a).unwrap());
         assert_eq!(
             read_to_string(&d.join("CLOVE.md")).unwrap(),
             CLOVE_MD_CONTENT
@@ -667,7 +705,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let d = dir(&tmp);
         let mut a = Vec::new();
-        assert!(write_clove_md(&d, true, &mut a).unwrap());
+        assert!(write_clove_md(&d, Links::Refuse, true, &mut a).unwrap());
         assert!(!d.join("CLOVE.md").exists());
     }
 
@@ -678,7 +716,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let d = dir(&tmp);
         let mut a = Vec::new();
-        assert!(update_claude_md(&d, false, &mut a).unwrap());
+        assert!(update_claude_md(&d, Links::Refuse, false, &mut a).unwrap());
         assert_eq!(read_to_string(&d.join("CLAUDE.md")).unwrap(), "@CLOVE.md\n");
     }
 
@@ -688,7 +726,7 @@ mod tests {
         let d = dir(&tmp);
         write_file(&d.join("CLAUDE.md"), "# existing").unwrap();
         let mut a = Vec::new();
-        assert!(update_claude_md(&d, false, &mut a).unwrap());
+        assert!(update_claude_md(&d, Links::Refuse, false, &mut a).unwrap());
         let content = read_to_string(&d.join("CLAUDE.md")).unwrap();
         assert!(content.starts_with("# existing"));
         assert!(content.contains("\n\n@CLOVE.md\n"));
@@ -699,8 +737,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let d = dir(&tmp);
         let mut a = Vec::new();
-        update_claude_md(&d, false, &mut a).unwrap();
-        assert!(!update_claude_md(&d, false, &mut a).unwrap());
+        update_claude_md(&d, Links::Refuse, false, &mut a).unwrap();
+        assert!(!update_claude_md(&d, Links::Refuse, false, &mut a).unwrap());
     }
 
     #[test]
@@ -708,7 +746,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let d = dir(&tmp);
         let mut a = Vec::new();
-        assert!(update_claude_md(&d, true, &mut a).unwrap());
+        assert!(update_claude_md(&d, Links::Refuse, true, &mut a).unwrap());
         assert!(!d.join("CLAUDE.md").exists());
     }
 
@@ -1135,5 +1173,31 @@ mod tests {
             ours, server,
             "MCP_TOOL_NAMES drifted from the clove-mcp tool router; update the list"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_setup_refuses_a_symlinked_file_and_global_follows_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let outside = d.join("outside.md");
+        write_file(&outside, "keep me").unwrap();
+        let claude = d.join(".claude");
+        create_dir_all(&claude).unwrap();
+        for name in ["CLOVE.md", "CLAUDE.md", "settings.json"] {
+            std::os::unix::fs::symlink(&outside, claude.join(name)).unwrap();
+        }
+
+        let mut a = Vec::new();
+        assert!(write_clove_md(&claude, Links::Refuse, false, &mut a).is_err());
+        assert!(update_claude_md(&claude, Links::Refuse, false, &mut a).is_err());
+        assert!(write_atomic(&claude.join("settings.json"), "{}", Links::Refuse).is_err());
+        assert_eq!(read_to_string(&outside).unwrap(), "keep me");
+
+        // `--global`: the target is replaced and the link stays a link.
+        assert!(write_clove_md(&claude, Links::Follow, false, &mut a).unwrap());
+        assert_eq!(read_to_string(&outside).unwrap(), CLOVE_MD_CONTENT);
+        let meta = std::fs::symlink_metadata(claude.join("CLOVE.md")).unwrap();
+        assert!(meta.file_type().is_symlink());
     }
 }

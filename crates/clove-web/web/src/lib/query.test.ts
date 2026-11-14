@@ -66,3 +66,36 @@ describe('the page number the list route derives its window from', () => {
     expect(pageOf('2.7')).toBe(2);
   });
 });
+
+describe('values the server would reject are dropped from a browser URL', () => {
+  const parse = (qs: string) => parseQuery(new URLSearchParams(qs));
+
+  it('drops an unknown sort, dir, status, type and priority', () => {
+    const q = parse('sort=bogus&dir=sideways&status=done&type=story&priority=abc');
+    expect(q.sort).toBeUndefined();
+    expect(q.dir).toBeUndefined();
+    expect(q.status).toBeUndefined();
+    expect(q.type).toEqual([]);
+    expect(q.priority).toEqual([]);
+    // Nothing invalid reaches the wire.
+    expect(queryString(q)).toBe('');
+  });
+
+  it('keeps the valid parts of a mixed value', () => {
+    const q = parse('status=open,done&type=bug,story&priority=1,9,x,3&sort=Updated&dir=DESC');
+    expect(q.status).toBe('open');
+    expect(q.type).toEqual(['bug']);
+    expect(q.priority).toEqual([1, 3]);
+    expect(q.sort).toBe('updated');
+    expect(q.dir).toBe('desc');
+  });
+
+  it('keeps every valid value unchanged', () => {
+    const q = parse('status=open,closed&type=bug,epic&priority=0,4&sort=status&dir=asc');
+    expect(q.status).toBe('open,closed');
+    expect(q.type).toEqual(['bug', 'epic']);
+    expect(q.priority).toEqual([0, 4]);
+    expect(q.sort).toBe('status');
+    expect(q.dir).toBe('asc');
+  });
+});

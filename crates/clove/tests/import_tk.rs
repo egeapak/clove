@@ -470,3 +470,107 @@ fn re_import_is_idempotent() {
     assert_eq!(v["data"]["skipped"], 5);
     assert_eq!(item_file_count(dir.path()), 5, "no new files on re-import");
 }
+
+/// tk writes `parent`, `deps` and `links` as tk ids. The import translates them
+/// to the clove ids of the imported tickets; an id it cannot place is dropped
+/// with a warning instead of failing the whole import.
+#[test]
+fn references_in_tk_ids_become_edges_between_the_imported_items() {
+    let src = write_tickets(&[
+        ("nw-1a2b.md", "---\nid: nw-1a2b\n---\n# Epic\n"),
+        (
+            "nw-5c46.md",
+            "---\nid: nw-5c46\nparent: nw-1a2b\ndeps: [nw-9f00, nw-gone]\nlinks: [nw-1a2b]\n---\n# Child\n",
+        ),
+        ("nw-9f00.md", "---\nid: nw-9f00\n---\n# Blocker\n"),
+    ]);
+    let tickets = src.path().join(".tickets");
+    let repo = init_repo();
+
+    let out = clove(repo.path())
+        .args([
+            "import",
+            "--format",
+            "json",
+            "tk",
+            tickets.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "import failed: {out:?}");
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["data"]["created"], 3);
+    let warnings = v["_meta"]["warnings"].to_string();
+    assert!(warnings.contains("nw-gone"), "warnings: {warnings}");
+
+    let items = list_items(repo.path());
+    let id_of = |tk_id: &str| {
+        find_by_tk_id(&items, tk_id)["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let child = show(repo.path(), &id_of("nw-5c46"));
+    assert_eq!(child["parent"], id_of("nw-1a2b").as_str());
+    assert_eq!(child["deps"], serde_json::json!([id_of("nw-9f00")]));
+    assert_eq!(child["relates"], serde_json::json!([id_of("nw-1a2b")]));
+
+    // A later import of a new ticket finds the earlier items by their tk id.
+    std::fs::write(
+        tickets.join("nw-7777.md"),
+        "---\nid: nw-7777\ndeps: [nw-9f00]\n---\n# Later\n",
+    )
+    .unwrap();
+    let out = clove(repo.path())
+        .args([
+            "import",
+            "--format",
+            "json",
+            "tk",
+            tickets.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "second import failed: {out:?}");
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["data"]["created"], 1);
+    assert_eq!(v["data"]["skipped"], 3);
+    let items = list_items(repo.path());
+    let later = show(
+        repo.path(),
+        find_by_tk_id(&items, "nw-7777")["id"].as_str().unwrap(),
+    );
+    assert_eq!(later["deps"], serde_json::json!([id_of("nw-9f00")]));
+}
+
+/// The tk id is the idempotency key. A ticket whose upstream `external-ref`
+/// changed since the first import is skipped, not imported a second time.
+#[test]
+fn re_import_after_the_upstream_ref_changed_creates_nothing() {
+    let src = write_tickets(&[("a.md", "---\nid: tk-up\nexternal-ref: JIRA-1\n---\n# Up\n")]);
+    let tickets = src.path().join(".tickets");
+    let repo = init_repo();
+    clove(repo.path())
+        .args(["import", "tk", tickets.to_str().unwrap()])
+        .assert()
+        .success();
+    std::fs::write(
+        tickets.join("a.md"),
+        "---\nid: tk-up\nexternal-ref: JIRA-2\n---\n# Up\n",
+    )
+    .unwrap();
+    let out = clove(repo.path())
+        .args([
+            "import",
+            "--format",
+            "json",
+            "tk",
+            tickets.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "re-import failed: {out:?}");
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["data"]["created"], 0);
+    assert_eq!(item_file_count(repo.path()), 1);
+}

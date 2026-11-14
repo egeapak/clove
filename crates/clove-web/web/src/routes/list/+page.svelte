@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { ItemType, ListQuery } from '$lib/types';
   import { store, retryLoad } from '$lib/store.svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import { base } from '$app/paths';
@@ -16,7 +17,7 @@
   import { relativeTime, priorityLabel } from '$lib/glyphs';
   import { parseQuery, parsePage } from '$lib/query';
   import { defaultDir } from '$lib/filter';
-  import { Virtual } from '$lib/virtual.svelte';
+  import { Virtual, visibleRows } from '$lib/virtual.svelte';
   import { tooltip } from '$lib/tooltip';
 
   // Fallbacks when /meta isn't available yet.
@@ -43,8 +44,14 @@
   const dir = $derived(query.dir || defaultDir(sort));
 
   let searchInput = $state('');
+  // Follow the URL (back/forward, a shared link, the top-bar search), but leave
+  // the box alone while it already says the same thing. The URL holds the
+  // *trimmed* text, so copying it back unconditionally deleted a trailing space
+  // 220 ms after it was typed and glued the next word on: "Item 2 " + "alpha"
+  // became "Item 2alpha".
   $effect(() => {
-    searchInput = q;
+    const next = q;
+    if (untrack(() => searchInput).trim() !== next) searchInput = next;
   });
 
   // 1-based page number, in the URL so the back button and a shared link land
@@ -94,6 +101,9 @@
     if (immediate) run();
     else searchTimer = setTimeout(run, 220);
   }
+  // A pending write must not outlive the page: it would rewrite the query
+  // string of whichever route the user has moved to.
+  onDestroy(() => clearTimeout(searchTimer));
   function cycleSort(col: string) {
     setParams((p) => {
       if ((p.get('sort') || 'rank') === col) {
@@ -114,8 +124,9 @@
   // by the browser — and the two disagreed about the same URL more than once.
   // Under paging a client-side filter is not merely duplicated, it is wrong: it
   // can only see the rows already fetched.
+  const wanted = $derived<ListQuery>({ ...query, sort, dir, limit: PAGE_SIZE, offset });
   $effect(() => {
-    store.setQuery({ ...query, sort, dir, limit: PAGE_SIZE, offset });
+    store.setQuery(wanted);
   });
 
   const rows = $derived(store.all);
@@ -141,8 +152,13 @@
   // the server answers honestly with zero rows, so step back to the last page
   // that has any. Guarded on `total > 0` so an empty result stays on page 1
   // rather than oscillating.
+  //
+  // Only against the answer to *this* query. `total` belongs to whatever query
+  // the store last loaded; on Back to `?page=5` it is still the previous
+  // search's (smaller) count until the new response lands, and clamping against
+  // that rewrote the URL to a page the user never asked for.
   $effect(() => {
-    if (store.loaded && total > 0 && offset >= total) gotoPage(pageCount);
+    if (store.loaded && store.answers(wanted) && total > 0 && offset >= total) gotoPage(pageCount);
   });
 
   const meta = $derived(store.meta);
@@ -173,13 +189,23 @@
     if (e.key === 'j') {
       e.preventDefault();
       cursor = Math.min(cursor + 1, rows.length - 1);
+      // The cursor row may be outside the rendered window: follow it, or Enter
+      // opens an item the user cannot see.
+      virtual.scrollToIndex(cursor);
     } else if (e.key === 'k') {
       e.preventDefault();
       cursor = Math.max(cursor - 1, 0);
+      virtual.scrollToIndex(cursor);
     } else if (e.key === 'Enter') {
       const it = rows[cursor];
       if (it) goto(`${base}/items/${it.id}`);
     }
+  }
+
+  /** A click anywhere on a row opens it; a click on its link is the link's own. */
+  function openRow(e: MouseEvent, id: string) {
+    if (e.target instanceof Element && e.target.closest('a')) return;
+    goto(`${base}/items/${id}`);
   }
 
   function sortArrow(col: string): string {
@@ -213,7 +239,9 @@
     getScrollElement: () => scrollEl ?? null,
     estimateSize: () => ROW_H,
     overscan: 12,
-    getItemKey: itemKey
+    getItemKey: itemKey,
+    // Keep a row scrolled to by the keyboard clear of the sticky header.
+    scrollPaddingStart: ROW_H
   });
 
   // Mount once the scroll container exists; teardown on unmount.
@@ -226,6 +254,8 @@
   });
 
   const vItems = $derived(virtual.items);
+  // Never index `rows` from the template: see `visibleRows`.
+  const vRows = $derived(visibleRows(vItems, rows));
   const padTop = $derived(vItems.length ? vItems[0].start : 0);
   const padBottom = $derived(vItems.length ? virtual.total - vItems[vItems.length - 1].end : 0);
 </script>
@@ -369,12 +399,11 @@
       </thead>
       <tbody>
         {#if padTop > 0}<tr class="spacer" style="height:{padTop}px" aria-hidden="true"><td colspan={colCount}></td></tr>{/if}
-        {#each vItems as row (row.key)}
+        {#each vRows as { v: row, item } (row.key)}
           {@const i = row.index}
-          {@const item = rows[i]}
           <tr
             class:cursor={i === cursor}
-            onclick={() => goto(`${base}/items/${item.id}`)}
+            onclick={(e) => openRow(e, item.id)}
             onmouseenter={() => (cursor = i)}
           >
             <td><StatusGlyph status={item.status} /></td>
@@ -383,7 +412,9 @@
             <td><PriorityGlyph priority={item.priority} /></td>
             <td class="title">
               <div class="title-in">
-                <span class="title-text" use:tooltip={{ content: item.title, whenTruncated: true }}>{item.title}</span>
+                <!-- A real link: the row's only focusable element, so Tab, a
+                     screen reader, and Ctrl/middle-click can all open the item. -->
+                <a class="title-text" href="{base}/items/{item.id}" use:tooltip={{ content: item.title, whenTruncated: true }}>{item.title}</a>
                 {#if item.blocked_by.length}<BlockedBadge blockedBy={item.blocked_by} />{/if}
               </div>
             </td>
@@ -659,6 +690,13 @@
     overflow: hidden;
     text-overflow: ellipsis;
     min-width: 0;
+    color: inherit;
+    text-decoration: none;
+  }
+  .title-text:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+    border-radius: 3px;
   }
   .title-in :global(.blocked) {
     flex: none;

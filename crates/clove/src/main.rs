@@ -47,7 +47,13 @@ fn main() -> std::process::ExitCode {
     // (PLUGIN_REGISTRY.md §6): its help trailer lists the installed provider
     // plugins, which clap's compile-time `after_help` cannot. Every other argv is
     // untouched and falls through to the normal parser below.
-    let argv: Vec<String> = std::env::args().collect();
+    // `args_os`, not `args`: the latter panics on an argument that is not
+    // valid UTF-8 (a path on Unix can be any bytes). The lossy copy is only
+    // used for this pre-scan; clap parses the real arguments itself and
+    // reports a non-UTF-8 value as a usage error.
+    let argv: Vec<String> = std::env::args_os()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
     if let Some(mux) = mux_help::detect(&argv) {
         mux_help::render(mux);
         return std::process::ExitCode::SUCCESS;
@@ -63,7 +69,8 @@ fn main() -> std::process::ExitCode {
                 | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => {
                     std::process::ExitCode::SUCCESS
                 }
-                _ => ExitCode::Usage.process(),
+                _ => output::emit_usage_error(output::requested_format(&argv), &err.to_string())
+                    .process(),
             };
         }
     };
@@ -214,10 +221,7 @@ fn dispatch_multiplexer(
             // instruction the product gave, and it lands the binary in
             // `~/.cargo/bin` — outside the clove-managed root, which is exactly
             // the state `uninstall` then declines to manage.
-            reason: format!(
-                "unknown {multiplexer} provider `{provider}`; install it with \
-                 `clove plugin install {multiplexer}-{provider}`"
-            ),
+            reason: plugin::missing_provider_hint(multiplexer, provider),
         }),
     }
 }
@@ -305,7 +309,7 @@ fn run_repo(
         Commands::Assign(a) => cmd::assign::run(ctx, f, &a.id, a.assignee, a.clear).map(|_| ok),
         Commands::Parent(a) => cmd::parent::run(ctx, f, &a.id, a.parent, a.clear).map(|_| ok),
         Commands::Priority(a) => cmd::priority::run(ctx, f, &a.id, a.priority).map(|_| ok),
-        Commands::Dep(a) => cmd::dep::run(ctx, f, a.action, no_index),
+        Commands::Dep(a) => cmd::dep::run(ctx, f, a.action, no_index, deep),
         Commands::Ready(a) => cmd::ready::run(ctx, f, a, quiet, no_index, deep).map(|_| ok),
         Commands::Blocked(a) => cmd::blocked::run(ctx, f, a, quiet, no_index, deep).map(|_| ok),
         Commands::Ls(a) => cmd::ls::run(ctx, f, a, no_index, deep).map(|_| ok),

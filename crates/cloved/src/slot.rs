@@ -160,7 +160,8 @@ pub fn open(clove_dir: &Utf8Path, cancel: CancellationToken) -> Result<Slot, Loa
     if let Ok(mut st) = state.lock() {
         st.set_watcher_state(WatcherState::Sweeping);
     }
-    crate::reindexer::sync_once(&issues_dir, &index, &state);
+    let fresh = Arc::new(crate::fresh::Freshness::new(issues_dir.clone()));
+    crate::reindexer::startup_sweep(&fresh, &index, &state);
     if let Ok(mut st) = state.lock() {
         st.set_watcher_state(WatcherState::Arming);
     }
@@ -170,7 +171,9 @@ pub fn open(clove_dir: &Utf8Path, cancel: CancellationToken) -> Result<Slot, Loa
         state,
         repo_root: repo_root.clone(),
         issues_dir,
+        readers: Arc::new(crate::readers::Readers::new(db_path.clone())),
         db_path,
+        fresh,
         auto_refresh: config.as_ref().is_none_or(|c| c.index.auto_refresh),
         graph,
         id_prefix: settings.id_prefix.clone(),
@@ -240,6 +243,7 @@ impl Slot {
         let d = &self.dispatcher;
         let mut tasks = JoinSet::new();
         let watch = crate::watcher::run(
+            d.fresh.clone(),
             d.issues_dir.clone(),
             d.index.clone(),
             d.state.clone(),
@@ -257,6 +261,7 @@ impl Slot {
         let snapshots = crate::snapshot::snapshot_loop(
             self.repo_root.clone(),
             d.index.clone(),
+            d.readers.clone(),
             self.settings.snapshot_interval,
         );
         tasks.spawn(async move {

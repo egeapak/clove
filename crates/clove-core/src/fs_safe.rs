@@ -163,13 +163,13 @@ pub fn write_atomic(root: &Utf8Path, path: &Utf8Path, bytes: &[u8]) -> io::Resul
 
 /// What an ordinary new file gets (`tempfile` makes its own `0600`).
 #[cfg(unix)]
-fn new_file_permissions() -> Option<std::fs::Permissions> {
+pub(crate) fn new_file_permissions() -> Option<std::fs::Permissions> {
     use std::os::unix::fs::PermissionsExt;
     Some(std::fs::Permissions::from_mode(0o644))
 }
 
 #[cfg(not(unix))]
-fn new_file_permissions() -> Option<std::fs::Permissions> {
+pub(crate) fn new_file_permissions() -> Option<std::fs::Permissions> {
     None
 }
 
