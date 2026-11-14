@@ -10,8 +10,9 @@
 // Each test binary uses a subset of these helpers.
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 /// The environment that keeps a spawned `clove` away from the developer's own
 /// hub and clove home: a private runtime directory (where a hub's socket, lock
@@ -46,19 +47,48 @@ pub fn cloved() -> &'static Path {
 /// It must live there: the host searches the running `clove`'s own directory
 /// before `CLOVE_PLUGIN_PATH`, so a plugin resolved by name runs whatever sits
 /// beside `cargo_bin("clove")`. The setup script puts this run's build there;
-/// this checks that the file there is that build and not one left over.
+/// this checks that the file there is that build and not one left over. The
+/// check runs once per plugin in a test process.
 pub fn plugin(bin: &str) -> &'static Path {
+    static CHECKED: OnceLock<Mutex<HashMap<String, &'static Path>>> = OnceLock::new();
+    let mut checked = CHECKED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(path) = checked.get(bin) {
+        return path;
+    }
     let beside_clove = existing(clove_bin_dir().join(exe(bin)));
     let built = existing(bin_dir().join(exe(bin)));
-    let len = |path: &Path| std::fs::metadata(path).map(|meta| meta.len()).ok();
-    assert_eq!(
-        len(&beside_clove),
-        len(&built),
+    assert!(
+        same_content(&beside_clove, &built),
         "{} is not the {} that this run built; run the tests with `cargo nextest run`",
         beside_clove.display(),
         built.display(),
     );
-    Box::leak(beside_clove.into_boxed_path())
+    let path: &'static Path = Box::leak(beside_clove.into_boxed_path());
+    checked.insert(bin.to_owned(), path);
+    path
+}
+
+/// Whether two files hold the same bytes. The setup script hard-links the
+/// plugin beside `clove`, so on Unix the usual answer is "same inode" with
+/// nothing read. Equal length alone is not proof: a stale build of the same
+/// size would pass.
+fn same_content(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(a), Ok(b)) = (std::fs::metadata(a), std::fs::metadata(b)) {
+            if (a.dev(), a.ino()) == (b.dev(), b.ino()) {
+                return true;
+            }
+        }
+    }
+    match (std::fs::read(a), std::fs::read(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
 }
 
 /// The directory the setup script built the binaries into.
