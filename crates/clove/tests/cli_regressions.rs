@@ -199,3 +199,44 @@ fn export_names_item_files_it_could_not_export() {
     assert!(stderr(&to_file).contains(&bad), "{to_file:?}");
     assert_eq!(std::fs::read_to_string(out_path).unwrap().lines().count(), 1);
 }
+
+/// `import --dry-run` and the real import must agree. An invalid item used to
+/// pass the dry run ("would create 3") and then stop the real run half-way,
+/// with the items before it already written.
+#[test]
+fn import_validates_every_item_before_writing_any() {
+    let source = init_repo();
+    for title in ["first", "second", "third"] {
+        new_item(source.path(), title, &[]);
+    }
+    let export = clove(source.path())
+        .args(["export", "jsonl"])
+        .output()
+        .unwrap();
+    let mut lines: Vec<Value> = stdout(&export)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 3);
+    let bad_id = lines[1]["id"].as_str().unwrap().to_owned();
+    lines[1]["title"] = Value::String(String::new());
+    let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
+
+    let target = init_repo();
+    let file = target.path().join("in.jsonl");
+    std::fs::write(&file, text).unwrap();
+
+    for extra in [&["--dry-run"][..], &[][..]] {
+        let out = clove(target.path())
+            .args(["import", "jsonl", "in.jsonl"])
+            .args(extra)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(4), "{extra:?}: {out:?}");
+        assert!(stderr(&out).contains(&bad_id), "{extra:?}: {out:?}");
+        let written = std::fs::read_dir(target.path().join(".clove/issues"))
+            .unwrap()
+            .count();
+        assert_eq!(written, 0, "{extra:?}: nothing may be written");
+    }
+}
