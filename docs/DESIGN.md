@@ -2018,9 +2018,12 @@ driver, so they are deliberately excluded from it.
 **`clove merge-driver <ancestor> <ours> <theirs> <marker-size>` algorithm:**
 1. Parse all three files' frontmatter.
 2. For each scalar field: same-value conflict → accept; standard 3-way otherwise.
-3. For each list field: compute `union(ours, theirs) \ (ancestor \ ours \ theirs)` (standard
-   three-way set merge), then sort. Dep removal conflict (A removes X, B adds X) → flag
-   conflict.
+3. For each list field: compute `union(ours, theirs) \ (ancestor \ ours \ theirs)`, then
+   sort. An element is dropped only when both sides removed it. Removal conflict: an
+   element of the ancestor that exactly one side removed (A removes X, B still has X) →
+   flag a conflict on that field, also when B did not change the field. The driver
+   does not drop X silently, because a set cannot tell "B kept X on purpose" from "B
+   did not look at X".
 4. For the body: delegate to `git merge-file`.
 
 **Union-merge semantics for `deps`:** if branch A adds `proj-3k2` and branch B adds
