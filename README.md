@@ -61,7 +61,9 @@ single, dependency-light, cross-platform binary.
 
 **Prebuilt binaries** (with the web UI) are attached to each
 [GitHub Release](https://github.com/egeapak/clove/releases) for Linux, macOS
-(arm64 + x86_64) and Windows: `clove`, `cloved` and the integration plugins.
+(arm64 + x86_64) and Windows: `clove`, `cloved` and the integration plugins. The
+Linux binaries need glibc 2.35 or newer (Ubuntu 22.04, Debian 12, RHEL 10); on
+an older distribution, build from source.
 
 **Homebrew** (macOS, Linux x86_64) installs those same binaries, with the plugins
 as separate formulae:

@@ -264,9 +264,106 @@ fn tls_verdict(ring_tree: &str, aws_status: Option<i32>, aws_tree: &str) -> anyh
     Ok(())
 }
 
+/// `guard-glibc <floor> <binary>...`: every glibc symbol version that a Linux
+/// binary requires is at most `<floor>` (for example `2.35`). The release
+/// workflow runs it on the packaged binaries, so a build on a newer image
+/// fails there and not on a user's machine.
+pub fn glibc(args: Vec<String>) -> anyhow::Result<()> {
+    let mut args = args.into_iter();
+    let floor_text = args
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("usage: cargo xtask guard-glibc <floor> <binary>..."))?;
+    let floor = glibc_version(&floor_text)
+        .ok_or_else(|| anyhow::anyhow!("`{floor_text}` is not a glibc version such as 2.35"))?;
+    let binaries: Vec<String> = args.collect();
+    anyhow::ensure!(
+        !binaries.is_empty(),
+        "usage: cargo xtask guard-glibc <floor> <binary>..."
+    );
+    let mut failed = false;
+    for binary in &binaries {
+        let output = Command::new("objdump").args(["-T", binary]).output()?;
+        anyhow::ensure!(
+            output.status.success(),
+            "objdump -T {binary} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        let highest = highest_glibc(&String::from_utf8_lossy(&output.stdout))?;
+        if highest > floor {
+            failed = true;
+            eprintln!(
+                "FAIL: {binary} requires glibc {}.{}, above the floor {floor_text}",
+                highest.0, highest.1
+            );
+        } else {
+            println!("ok: {binary} requires glibc {}.{}", highest.0, highest.1);
+        }
+    }
+    anyhow::ensure!(!failed, "a binary requires a newer glibc than {floor_text}");
+    Ok(())
+}
+
+/// `2.35` or `2.2.5` as (major, minor). The third part does not matter for a
+/// floor check.
+fn glibc_version(text: &str) -> Option<(u32, u32)> {
+    let mut parts = text.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    parts
+        .all(|part| part.parse::<u32>().is_ok())
+        .then_some((major, minor))
+}
+
+/// The highest `GLIBC_x.y` version in `objdump -T` output. No such version is
+/// an error: the binary is static or not a glibc binary, so the guard would
+/// pass without checking anything.
+fn highest_glibc(objdump: &str) -> anyhow::Result<(u32, u32)> {
+    let mut highest = None;
+    for token in objdump.split(|c: char| c.is_whitespace() || c == '(' || c == ')') {
+        let Some(version) = token.strip_prefix("GLIBC_") else {
+            continue;
+        };
+        // `GLIBC_PRIVATE` and `GLIBC_ABI_DT_RELR` carry no version number.
+        let Some(version) = glibc_version(version) else {
+            continue;
+        };
+        highest = highest.max(Some(version));
+    }
+    highest.ok_or_else(|| anyhow::anyhow!("the binary names no GLIBC_x.y symbol version"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn highest_glibc_reads_the_newest_required_version() {
+        let objdump = "\
+0000000000000000      DF *UND*  0000000000000000 (GLIBC_2.2.5) write
+0000000000000000      DF *UND*  0000000000000000 (GLIBC_2.34) pthread_create
+0000000000000000      DF *UND*  0000000000000000 (GLIBC_2.9)  pipe2
+0000000000000000      DO *UND*  0000000000000000 (GLIBC_ABI_DT_RELR) x
+0000000000000000  w   DF *UND*  0000000000000000 (GLIBC_2.39) pidfd_spawnp
+";
+        // 2.39 > 2.9: the comparison is numeric, not textual.
+        assert_eq!(highest_glibc(objdump).unwrap(), (2, 39));
+        assert!(highest_glibc(objdump).unwrap() > glibc_version("2.35").unwrap());
+        assert!(highest_glibc(objdump).unwrap() <= glibc_version("2.39").unwrap());
+    }
+
+    #[test]
+    fn a_binary_without_glibc_versions_is_an_error() {
+        assert!(highest_glibc("no dynamic symbols").is_err());
+        assert!(highest_glibc("(GLIBC_PRIVATE) __libc_x").is_err());
+    }
+
+    #[test]
+    fn glibc_version_rejects_text_that_is_not_a_version() {
+        assert_eq!(glibc_version("2.35"), Some((2, 35)));
+        assert_eq!(glibc_version("2.2.5"), Some((2, 2)));
+        assert_eq!(glibc_version("2"), None);
+        assert_eq!(glibc_version("latest"), None);
+    }
 
     const CONTROL: &str = "clove-types v0.3.0 (/w/crates/clove-types) ||| MIT OR Apache-2.0\n";
 

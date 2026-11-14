@@ -62,9 +62,12 @@ TMPDIR=/tmp scripts/ci/daemon-smoke.sh <extracted-dir>     # hub flow (sets its 
 - [ ] **macOS x86_64** — the binary is x86_64-only, so it runs under Rosetta by
       itself. Do *not* use `arch -x86_64 bash` (Homebrew's bash is arm64-only).
 - [ ] **Linux x86_64** — `docker run --rm --platform linux/amd64 -v <scratch>:/s:ro
-      -v $PWD/scripts:/scripts:ro debian:stable-slim bash -c 'apt-get update -qq &&
+      -v $PWD/scripts:/scripts:ro ubuntu:22.04 bash -c 'apt-get update -qq &&
       apt-get install -y -qq --no-install-recommends git jq curl ca-certificates procps
       >/dev/null && bash /scripts/release/release-smoke.sh … && bash /scripts/ci/daemon-smoke.sh …'`.
+      `ubuntu:22.04` has glibc 2.35, the oldest glibc that the Linux binary
+      supports (`release.yml`, "Check the glibc floor"), so this run also shows
+      that the binary starts at the floor.
 - [ ] **Windows x86_64** — the full `daemon-smoke.sh` runs in CI (`daemon (windows)`
       job) on every PR; confirm it was green for the tagged commit. Locally, Wine in
       an amd64 Debian container runs the release `.exe`s well enough for targeted

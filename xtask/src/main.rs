@@ -15,6 +15,8 @@
 //!   reads it).
 //! - `guard-sdk-licenses`, `guard-no-web` and `guard-tls` are the dependency
 //!   tree guards that CI runs (see `guards.rs`).
+//! - `guard-glibc <floor> <binary>...` fails when a Linux binary requires a
+//!   newer glibc than `<floor>`. The release workflow runs it.
 
 mod guards;
 mod publish;
@@ -32,6 +34,7 @@ fn main() -> anyhow::Result<()> {
         Some("guard-sdk-licenses") => guards::sdk_licenses(),
         Some("guard-no-web") => guards::no_web(),
         Some("guard-tls") => guards::tls(),
+        Some("guard-glibc") => guards::glibc(args.collect()),
         Some(other) => {
             eprintln!("xtask: unknown command `{other}`");
             std::process::exit(1);
@@ -39,7 +42,7 @@ fn main() -> anyhow::Result<()> {
         None => {
             eprintln!(
                 "usage: cargo xtask <bench-fixtures|test-all|test-bins|publish-order|\
-                 guard-sdk-licenses|guard-no-web|guard-tls>"
+                 guard-sdk-licenses|guard-no-web|guard-tls|guard-glibc>"
             );
             std::process::exit(1);
         }
