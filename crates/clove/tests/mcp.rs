@@ -929,6 +929,92 @@ fn tool_error_is_reported_as_is_error() {
     s.shutdown();
 }
 
+/// An argument a tool does not define is a tool error that lists the valid
+/// names. The argument structs use `#[serde(flatten)]`, which serde cannot
+/// combine with `deny_unknown_fields`, so these calls used to succeed with the
+/// stray key dropped: a misspelled filter returned the whole store, and
+/// `offset` on the comment window (its key is `skip_newest`) returned the
+/// newest page again.
+#[test]
+fn unknown_tool_arguments_are_refused() {
+    let dir = init_repo();
+    let out = clove(dir.path())
+        .args(["new", "Labelled", "--label", "area:ios", "--format", "json"])
+        .output()
+        .unwrap();
+    let id = new_id(&out.stdout);
+    clove(dir.path()).args(["new", "Plain"]).assert().success();
+    for body in ["one", "two"] {
+        clove(dir.path())
+            .args(["comment", &id, body])
+            .assert()
+            .success();
+    }
+
+    let mut s = Session::start(dir.path());
+    let text = |result: &Value| result["content"][0]["text"].as_str().unwrap().to_owned();
+
+    // The real key filters; the misspelled one is refused, not ignored.
+    let ok = s.call(2, "clove_list", json!({ "label": ["area:ios"] }));
+    assert_eq!(ok["structuredContent"]["total"], 1, "{ok}");
+    let bad = s.call(3, "clove_list", json!({ "labels": ["area:ios"] }));
+    assert_eq!(bad["isError"], true, "{bad}");
+    assert!(text(&bad).contains("unknown argument `labels`"), "{bad}");
+    assert!(
+        text(&bad).contains("label,"),
+        "lists the valid names: {bad}"
+    );
+    assert!(text(&bad).starts_with("VALIDATION_ERROR: "), "{bad}");
+
+    // `offset` is not the comment window's key.
+    let bad = s.call(
+        4,
+        "clove_comments",
+        json!({ "id": id, "limit": 1, "offset": 1 }),
+    );
+    assert_eq!(bad["isError"], true, "{bad}");
+    assert!(text(&bad).contains("skip_newest"), "{bad}");
+    let older = s.call(
+        5,
+        "clove_comments",
+        json!({ "id": id, "limit": 1, "skip_newest": 1 }),
+    );
+    assert_eq!(older["structuredContent"]["items"][0]["body"], "one");
+
+    // `clove_search` takes no field filters; `clove_edit` has no `labels`.
+    let bad = s.call(
+        6,
+        "clove_search",
+        json!({ "text": "x", "status": "closed" }),
+    );
+    assert_eq!(bad["isError"], true, "{bad}");
+    let bad = s.call(
+        7,
+        "clove_edit",
+        json!({ "id": id, "title": "Renamed", "labels": ["x"] }),
+    );
+    assert_eq!(bad["isError"], true, "{bad}");
+    assert!(text(&bad).contains("add_labels"), "{bad}");
+    // ...and the refused edit wrote nothing.
+    let shown = s.call(8, "clove_show", json!({ "id": id }));
+    assert_eq!(shown["structuredContent"]["title"], "Labelled", "{shown}");
+
+    // The tools that do not shape their result say so instead of ignoring it.
+    let bad = s.call(9, "clove_stats", json!({ "fields": ["total"] }));
+    assert_eq!(bad["isError"], true, "{bad}");
+
+    // The published schema states the rule.
+    let resp = s.request(json!({ "jsonrpc": "2.0", "id": 10, "method": "tools/list" }));
+    for tool in resp["result"]["tools"].as_array().unwrap() {
+        assert_eq!(
+            tool["inputSchema"]["additionalProperties"], false,
+            "{} must publish a closed inputSchema",
+            tool["name"]
+        );
+    }
+    s.shutdown();
+}
+
 /// `clove mcp` auto-starts the daemon (topology B) and the heartbeat keeps it
 /// alive + accrues ping stats. Unix-only (kills the spawned daemon at the end).
 #[cfg(unix)]
@@ -1880,7 +1966,7 @@ fn published_output_schemas_validate_the_tool_results() {
         &mut s,
         12,
         "clove_comments",
-        json!({ "id": main, "limit": 1, "offset": 1 }),
+        json!({ "id": main, "limit": 1, "skip_newest": 1 }),
     );
 
     s.shutdown();

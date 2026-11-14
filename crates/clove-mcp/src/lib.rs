@@ -9,6 +9,7 @@
 
 mod schema;
 mod server;
+mod strict;
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};

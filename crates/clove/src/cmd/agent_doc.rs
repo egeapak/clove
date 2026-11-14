@@ -246,9 +246,13 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
   rather than discovered. `structuredContent` validates against it; the identical\n\
   JSON is also in `content[0].text` for clients that do not read structured\n\
   results, so parse whichever you prefer, not both.\n\
-- `fields` and `compact` are accepted by every read tool, and by `clove ls`,\n\
-  `ready`, `blocked`, `query`, `search`, and `show` as `--fields`/`--compact`.\n\
+- `fields` and `compact` are accepted by `clove_ready`, `clove_blocked`,\n\
+  `clove_list`, `clove_search`, and `clove_show`, and by `clove ls`, `ready`,\n\
+  `blocked`, `query`, `search`, and `show` as `--fields`/`--compact`.\n\
   Use them: a two-field projection cuts a list result by roughly 80%.\n\
+- An argument a tool does not define is an error that lists the valid names,\n\
+  never a silently ignored key: the filter is `label` (not `labels`), and the\n\
+  comment window pages with `skip_newest` (not `offset`).\n\
 - `sort` and `desc` are accepted by `clove_ready`, `clove_blocked`, `clove_list`,\n\
   and `clove_search`, with the same vocabulary and defaults as the CLI's\n\
   `--sort`/`--desc`. `{{\"sort\": \"updated\", \"desc\": true, \"limit\": 10}}` answers\n\

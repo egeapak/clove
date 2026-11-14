@@ -43,6 +43,7 @@ expression: tools
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "description": "Shared filter fields for `clove_ready` / `clove_list` / `clove_blocked`.",
       "properties": {
         "assignee": {
@@ -321,6 +322,7 @@ expression: tools
     "description": "Append a comment to an item. Returns the item id, the comment path, and the item title.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "properties": {
         "id": {
           "description": "The item id.",
@@ -341,9 +343,10 @@ expression: tools
     "name": "clove_comment"
   },
   {
-    "description": "Read an item's comment thread, oldest first. The read counterpart to clove_comment — clove_show reports only a `comment_count`. `limit` keeps the most recent comments; `offset` pages back through older ones.",
+    "description": "Read an item's comment thread, oldest first. The read counterpart to clove_comment — clove_show reports only a `comment_count`. `limit` keeps the most recent comments; `skip_newest` pages back through older ones.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "properties": {
         "id": {
           "description": "The item id (e.g. `proj-7af3q2k9`).",
@@ -441,6 +444,7 @@ expression: tools
     "description": "Add a hard dependency: `id` depends on `dep_id`. Rejects self-loops and dependencies that would create a cycle.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "properties": {
         "dep_id": {
           "description": "The dependency target id.",
@@ -464,6 +468,7 @@ expression: tools
     "description": "Remove a hard dependency: `id` no longer depends on `dep_id`. Errors if no such dependency exists.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "properties": {
         "dep_id": {
           "description": "The dependency target id.",
@@ -487,6 +492,7 @@ expression: tools
     "description": "Render the dependency tree rooted at an item, with per-node status, `ready`, `cycle_ref`, and `repeat_ref` markers. `repeat_ref` marks a subtree that is already expanded elsewhere in the tree; it has no children here.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "properties": {
         "depth": {
           "description": "Maximum depth (0 = no limit; default 5).",
@@ -514,6 +520,7 @@ expression: tools
     "description": "Edit an item's fields in one atomic write: status, priority, type, title, assignee, Markdown body, and label add/remove.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "properties": {
         "add_labels": {
           "description": "Labels to add.",
@@ -633,6 +640,7 @@ expression: tools
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "description": "Shared filter fields for `clove_ready` / `clove_list` / `clove_blocked`.",
       "properties": {
         "assignee": {
@@ -911,6 +919,7 @@ expression: tools
     "description": "Create a new work item: one item per separate task, bug, or fix (the steps of one task are comments, not items). Give a `body` that stands on its own without this conversation: what is wrong or missing, where, and how to verify it is done. Returns its generated id, path, and title.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "properties": {
         "assignee": {
           "description": "Assignee.",
@@ -1023,6 +1032,7 @@ expression: tools
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "description": "Shared filter fields for `clove_ready` / `clove_list` / `clove_blocked`.",
       "properties": {
         "assignee": {
@@ -1301,6 +1311,7 @@ expression: tools
     "description": "Search item titles, labels, and bodies for a case-insensitive SUBSTRING (not whole words: `core` matches `corepart`). Title matches rank first, then labels, then bodies.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "description": "Result-shaping options shared by the read tools.",
       "properties": {
         "compact": {
@@ -1514,6 +1525,7 @@ expression: tools
     "description": "Set or clear an item's parent (epic membership). Omit `parent` to clear it. Rejects self-parenting and parent cycles.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "properties": {
         "id": {
           "description": "The item whose parent to set.",
@@ -1539,6 +1551,7 @@ expression: tools
     "description": "Show one work item: its fields, the Markdown body, comment count, and computed `ready`/`blocked_by`.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "description": "Result-shaping options shared by the read tools.",
       "properties": {
         "compact": {
@@ -1575,6 +1588,7 @@ expression: tools
     "description": "Repository analytics: counts by status/type/priority/assignee/label, ready/blocked/excluded/dangling totals, cycle count, per-epic rollups, and throughput.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "properties": {
         "no_epics": {
           "description": "Skip the per-epic completion rollup.",
@@ -1602,6 +1616,7 @@ expression: tools
     "description": "Change an item's status (open | in_progress | closed). Closing sets the closed timestamp; reopening clears it.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "properties": {
         "id": {
           "description": "The item id.",
