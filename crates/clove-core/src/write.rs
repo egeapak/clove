@@ -244,6 +244,22 @@ fn atomic_write(path: &Utf8Path, bytes: &[u8]) -> Result<(), CloveError> {
             path: parent.to_owned(),
             source,
         })?;
+    // `tempfile` creates the file `0600`. An item file is an ordinary tracked
+    // file: keep the mode of the one being replaced, and give a new one `0644`
+    // (as `fs_safe::write_atomic` does), so another uid or a group that could
+    // read the store can still read it after a write.
+    let permissions = match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() => Some(meta.permissions()),
+        _ => crate::fs_safe::new_file_permissions(),
+    };
+    if let Some(permissions) = permissions {
+        temp.as_file()
+            .set_permissions(permissions)
+            .map_err(|source| CloveError::Io {
+                path: path.to_owned(),
+                source,
+            })?;
+    }
     temp.write_all(bytes).map_err(|source| CloveError::Io {
         path: path.to_owned(),
         source,
@@ -527,5 +543,22 @@ mod tests {
             let parsed = crate::parse::parse_item_file(&path).unwrap();
             assert_eq!(parsed.frontmatter.labels, vec![label.to_owned()]);
         }
+    }
+
+    /// A new item file is `0644`, and rewriting one keeps its mode.
+    #[cfg(unix)]
+    #[test]
+    fn item_files_keep_an_ordinary_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |path: &Utf8Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+
+        let item = full_item();
+        let (_tmp, path) = temp_item_path(&item);
+        write_item_file(&item, &path).unwrap();
+        assert_eq!(mode(&path), 0o644);
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o664)).unwrap();
+        write_item_file(&item, &path).unwrap();
+        assert_eq!(mode(&path), 0o664);
     }
 }
