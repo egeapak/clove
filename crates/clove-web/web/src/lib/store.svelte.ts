@@ -306,10 +306,17 @@ class Store {
       return;
     }
     const asked = this.query;
-    const [page, meta]: [ItemPage, Meta] = await Promise.all([
-      api.items(asked),
-      api.meta()
-    ]);
+    let page: ItemPage;
+    let meta: Meta;
+    try {
+      [page, meta] = await Promise.all([api.items(asked), api.meta()]);
+    } catch (e) {
+      // Nor may its *failure*: every caller records a rejection as `loadError`,
+      // and a late error from an abandoned request replaced the newer query's
+      // table with the error panel.
+      if (token !== this.loadToken) return;
+      throw e;
+    }
     // A response for a superseded query must not overwrite a newer one.
     if (token !== this.loadToken) return;
     this.replaceAll(page.items, page);

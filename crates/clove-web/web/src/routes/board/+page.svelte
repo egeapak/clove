@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import { cmp } from '$lib/filter';
   import type { Item, Status } from '$lib/types';
   import { store, retryLoad } from '$lib/store.svelte';
@@ -140,9 +141,33 @@
     return ['Move to ', { text: statusGlyph(target.key), color }, ' ', { text: target.label, color, bold: true }];
   }
 
+  /** The move button of card `id` for direction `dir`, if the card is rendered. */
+  function moveButton(id: string, dir: 1 | -1): HTMLElement | null {
+    for (const el of document.querySelectorAll<HTMLElement>('.kbd-move button[data-move-dir]')) {
+      if (el.dataset.moveId === id && el.dataset.moveDir === String(dir)) return el;
+    }
+    return null;
+  }
+
   async function move(item: Item, dir: 1 | -1) {
     const next = moveTarget(item, dir).key;
+    // The card is destroyed in its old column and created in the new one, which
+    // takes the focused button with it. Follow the card, so a keyboard user can
+    // keep moving it instead of starting again from the top of the page.
+    const hadFocus = document.activeElement === moveButton(item.id, dir);
     const edit = store.optimistic(item.id, { status: next });
+    if (hadFocus) {
+      // The new column's virtual window is re-synced in an effect, so the card
+      // can take more than one flush to appear.
+      for (let i = 0; i < 4; i++) {
+        await tick();
+        const again = moveButton(item.id, dir);
+        if (again) {
+          again.focus();
+          break;
+        }
+      }
+    }
     try {
       edit.settle(await api.patch(item.id, { status: next }));
     } catch {
@@ -207,6 +232,8 @@
                     {@const target = moveTarget(item, dir)}
                     <button
                       class="btn sm"
+                      data-move-id={item.id}
+                      data-move-dir={dir}
                       aria-label="Move {shortId(item.id)} to {target.label}"
                       use:tooltip={moveTip(target)}
                       onclick={() => move(item, dir)}>{dir < 0 ? '‹' : '›'}</button
