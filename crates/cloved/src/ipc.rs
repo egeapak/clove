@@ -21,12 +21,15 @@ use clove_types::tool::ItemPayload;
 use clove_types::{CloveError, CloveId, Item, ItemType, NewSpec};
 use serde_json::Value;
 
+use crate::fresh::{Freshness, Sync};
 use crate::graph_cache::GraphCache;
+use crate::readers::Readers;
 use crate::state::DaemonState;
 
-/// Above this many out-of-date items, the QUERY-time refresh is skipped (the
-/// rows may then be slightly behind until the watcher catches up); mirrors the
-/// CLI's `STALE_REFRESH_LIMIT` (DESIGN §6.4).
+/// Above this many out-of-date items, a read does not bring the index up to
+/// date itself: it is refused (the client reads the next tier) and the watcher
+/// task applies the catch-up. Mirrors the CLI's `STALE_REFRESH_LIMIT`
+/// (DESIGN §6.4).
 const STALE_REFRESH_LIMIT: usize = 20;
 
 /// Shared context every connection handler needs. Cloned per request by tarpc,
@@ -38,9 +41,15 @@ pub struct Dispatcher {
     pub repo_root: Utf8PathBuf,
     pub issues_dir: Utf8PathBuf,
     pub db_path: Utf8PathBuf,
+    /// What the file watch has reported and the index has not applied yet.
+    pub fresh: Arc<Freshness>,
+    /// Read connections for list queries.
+    pub readers: Arc<Readers>,
     pub auto_refresh: bool,
     pub graph: Arc<GraphCache>,
-    /// Id prefix + default type for daemon-side `create` (from `.clove/config`).
+    /// Id prefix + default type for daemon-side `create`, as `.clove/config`
+    /// had them when the project was loaded: the fallback when the file cannot
+    /// be read at the time of a create.
     pub id_prefix: String,
     pub default_type: ItemType,
 }
@@ -94,15 +103,10 @@ impl Dispatcher {
     pub async fn create(self, spec: NewSpec) -> Result<Value, RpcError> {
         self.touch();
         self.blocking(move |this| {
-            let out = clove_core::ops::create(
-                &this.store(),
-                &this.id_prefix,
-                this.default_type,
-                spec,
-                now(),
-            )
-            .map_err(rpc_err);
-            this.after_write(&out);
+            let (id_prefix, default_type) = this.create_defaults();
+            let out = clove_core::ops::create(&this.store(), &id_prefix, default_type, spec, now())
+                .map_err(rpc_err);
+            this.after_write(&out, None);
             out
         })
         .await
@@ -118,7 +122,7 @@ impl Dispatcher {
         self.blocking(move |this| {
             let out =
                 clove_core::ops::transition(&this.store(), &cid, status, now()).map_err(rpc_err);
-            this.after_write(&out);
+            this.after_write(&out, Some(&cid));
             out
         })
         .await
@@ -130,7 +134,7 @@ impl Dispatcher {
         self.blocking(move |this| {
             let out =
                 clove_core::ops::edit(&this.store(), &cid, &assignments, now()).map_err(rpc_err);
-            this.after_write(&out);
+            this.after_write(&out, Some(&cid));
             out
         })
         .await
@@ -145,7 +149,7 @@ impl Dispatcher {
         let cid = CloveId::new(&id).map_err(rpc_err)?;
         self.blocking(move |this| {
             let out = clove_core::apply_edit(&this.store(), &cid, &req, now()).map_err(rpc_err);
-            this.after_write(&out);
+            this.after_write(&out, Some(&cid));
             out
         })
         .await
@@ -162,7 +166,7 @@ impl Dispatcher {
         self.blocking(move |this| {
             let out =
                 clove_core::ops::comment(&this.store(), &cid, &author, &body).map_err(rpc_err);
-            this.after_write(&out);
+            this.after_write(&out, Some(&cid));
             out
         })
         .await
@@ -173,7 +177,7 @@ impl Dispatcher {
         let item = Item::from(item);
         self.blocking(move |this| {
             let out = clove_core::ops::create_item(&this.store(), &item).map_err(rpc_err);
-            this.after_write(&out);
+            this.after_write(&out, Some(&item.frontmatter.id));
             out
         })
         .await
@@ -196,7 +200,7 @@ impl Dispatcher {
                 now(),
             )
             .map_err(rpc_err);
-            this.after_write(&out);
+            this.after_write(&out, Some(&cid));
             out
         })
         .await
@@ -214,7 +218,7 @@ impl Dispatcher {
         self.blocking(move |this| {
             let out = clove_core::ops::comment_at(&this.store(), &cid, &author, &body, timestamp)
                 .map_err(rpc_err);
-            this.after_write(&out);
+            this.after_write(&out, Some(&cid));
             out
         })
         .await
@@ -226,7 +230,7 @@ impl Dispatcher {
         let dep = CloveId::new(&dep_id).map_err(rpc_err)?;
         self.blocking(move |this| {
             let out = clove_core::ops::dep_add(&this.store(), &cid, &dep, now()).map_err(rpc_err);
-            this.after_write(&out);
+            this.after_write(&out, Some(&cid));
             out
         })
         .await
@@ -239,7 +243,7 @@ impl Dispatcher {
         self.blocking(move |this| {
             let out =
                 clove_core::ops::dep_remove(&this.store(), &cid, &dep, now()).map_err(rpc_err);
-            this.after_write(&out);
+            this.after_write(&out, Some(&cid));
             out
         })
         .await
@@ -255,7 +259,7 @@ impl Dispatcher {
         self.blocking(move |this| {
             let out = clove_core::ops::set_parent(&this.store(), &cid, parent.as_ref(), now())
                 .map_err(rpc_err);
-            this.after_write(&out);
+            this.after_write(&out, Some(&cid));
             out
         })
         .await
@@ -328,22 +332,48 @@ impl Dispatcher {
         ItemStore::new(self.repo_root.clone())
     }
 
-    /// After a successful daemon-side write, freshen the index from the
-    /// just-changed files and rebuild the hot graph so the daemon's lean
-    /// query/graph reads stay coherent (file-based `show`/`stats`/`list` ops are
-    /// already correct). A no-op on a failed write.
-    fn after_write(&self, result: &Result<Value, RpcError>) {
-        if result.is_err() {
-            return;
+    /// The id prefix and default type for a create, read from the project's
+    /// config now: an edit of `.clove/config.toml` applies to the next create
+    /// without a reload of the project.
+    fn create_defaults(&self) -> (String, ItemType) {
+        match clove_core::load_config(&self.repo_root) {
+            Ok(config) => (config.id_prefix, config.default_type),
+            Err(_) => (self.id_prefix.clone(), self.default_type),
         }
+    }
+
+    /// After a successful daemon-side write, index the file it wrote and
+    /// rebuild the hot graph so the daemon's lean query/graph reads stay
+    /// coherent (file-based `show`/`stats`/`list` ops are already correct). A
+    /// no-op on a failed write.
+    ///
+    /// `id` is the item whose file the write changed; `None` reads it from the
+    /// result (`create` mints the id). Only that file is checked: the cost of a
+    /// write does not grow with the store.
+    fn after_write(&self, result: &Result<Value, RpcError>, id: Option<&CloveId>) {
+        let Ok(value) = result else {
+            return;
+        };
         if let Ok(mut state) = self.state.lock() {
             state.inc_writes();
         }
+        let minted = || CloveId::new(value.get("id")?.as_str()?).ok();
+        let id = id.cloned().or_else(minted);
         if let Ok(mut index) = self.index.lock() {
-            if let Ok(report) = index.check_staleness_fast(&self.issues_dir) {
-                if report.needs_apply() {
-                    let _ = index.apply_staleness(&report, &self.issues_dir);
+            self.readers.follow(&mut index);
+            match &id {
+                Some(id) => self.fresh.wrote(&mut index, id),
+                // No id to go by: the full pass.
+                None => {
+                    if let Ok(report) = index.check_staleness(&self.issues_dir) {
+                        let _ = index.apply_staleness(&report, &self.issues_dir);
+                    }
                 }
+            }
+            let count = index.item_count().unwrap_or(0) as u64;
+            drop(index);
+            if let Ok(mut state) = self.state.lock() {
+                state.set_items_indexed(count);
             }
         }
         self.graph.mark_dirty();
@@ -365,7 +395,7 @@ impl Dispatcher {
                 .index
                 .lock()
                 .map_err(|_| RpcError::new("internal", "index lock poisoned"))?;
-            self.refresh(&mut index);
+            self.refresh(&mut index)?;
         }
         let unreadable = || RpcError::new("graph_failed", "could not read index");
         match req {
@@ -399,14 +429,24 @@ impl Dispatcher {
         }
     }
 
-    /// Serve a lean list query, freshening the index inline first (the daemon owns
-    /// freshness; the watcher in P3 makes this a no-op in the steady state).
+    /// Serve a lean list query, freshening the index inline first (the daemon
+    /// owns freshness; in the steady state the refresh is one `stat`).
+    ///
+    /// The index mutex is held for the refresh only. The query itself runs on
+    /// a pooled read connection, so concurrent queries do not wait for each
+    /// other.
     fn handle_query(&self, q: QueryRequest) -> Result<QueryListResponse, RpcError> {
-        let mut index = self
-            .index
-            .lock()
-            .map_err(|_| RpcError::new("internal", "index lock poisoned"))?;
-        self.refresh(&mut index);
+        let _gate = self.readers.gate.read().unwrap_or_else(|e| e.into_inner());
+        let reader = {
+            let mut index = self
+                .index
+                .lock()
+                .map_err(|_| RpcError::new("internal", "index lock poisoned"))?;
+            self.refresh(&mut index)?;
+            self.readers
+                .take()
+                .map_err(|e| RpcError::new("query_failed", e.to_string()))?
+        };
 
         let (filter, residue) = build_filter(&q);
         // The wire values go through the shared `Page` so a client that is not
@@ -415,9 +455,11 @@ impl Dispatcher {
         // everywhere else, not "zero rows". `query_filtered` owns the rest of
         // the limit/count decision, which a residue changes.
         let window = clove_core::view::Page::new(q.offset, q.limit, 0);
-        let (mut rows, total) = index
+        let (mut rows, total) = reader
+            .index
             .query_filtered(&filter, residue.as_ref(), window)
             .map_err(|e| RpcError::new("query_failed", e.to_string()))?;
+        self.readers.give(reader);
         let total = total as u64;
         // Send only what the window can reach.
         //
@@ -434,10 +476,6 @@ impl Dispatcher {
             rows.truncate(keep);
         }
 
-        if let Ok(mut state) = self.state.lock() {
-            state.set_items_indexed(index.item_count().unwrap_or(0) as u64);
-        }
-
         Ok(QueryListResponse {
             rows: rows.iter().map(to_lean).collect(),
             total,
@@ -445,21 +483,44 @@ impl Dispatcher {
         })
     }
 
-    /// Freshen the hot index from disk if it is lightly stale (shared by the
-    /// query and search paths). A heavier drift is left to the watcher.
-    fn refresh(&self, index: &mut Index) {
+    /// Bring the hot index up to date with the files before a read (shared by
+    /// the query and graph paths), or refuse the read.
+    ///
+    /// The watch names the files that changed, so this checks only those; with
+    /// nothing reported it is one `stat` of the directory. A read is refused,
+    /// so that the client answers it from the next tier, when the index cannot
+    /// be trusted right now: the watch no longer covers `issues/`, the check
+    /// failed, or more items changed than a read should apply inline (the
+    /// watcher task applies those).
+    fn refresh(&self, index: &mut Index) -> Result<(), RpcError> {
         if !self.auto_refresh {
-            return;
+            return Ok(());
         }
-        if let Ok(report) = index.check_staleness_fast(&self.issues_dir) {
-            if report.needs_apply() && report.change_count() <= STALE_REFRESH_LIMIT {
-                let _ = index.apply_staleness(&report, &self.issues_dir);
-                // The rows advanced; the hot graph (sourced from them) must
-                // rebuild. A bookkeeping-only apply changes no row it reads.
-                if !report.is_clean() {
+        if self.readers.follow(index) {
+            self.graph.mark_dirty();
+        }
+        let behind = |why: &str| {
+            Err(RpcError::new(
+                clove_ipc::hub::codes::INDEX_BEHIND,
+                format!("{why}; read the index or the files meanwhile"),
+            ))
+        };
+        match self.fresh.sync(index, Some(STALE_REFRESH_LIMIT)) {
+            Sync::Fresh { changed } => {
+                if changed {
+                    // The rows advanced; the hot graph (sourced from them)
+                    // must rebuild, and the status count moved.
                     self.graph.mark_dirty();
+                    let count = index.item_count().unwrap_or(0) as u64;
+                    if let Ok(mut state) = self.state.lock() {
+                        state.set_items_indexed(count);
+                    }
                 }
+                Ok(())
             }
+            Sync::Behind => behind("the daemon's index is catching up with a large change"),
+            Sync::Lost => behind("the daemon's file watch no longer covers this project"),
+            Sync::Failed => behind("the daemon could not bring its index up to date"),
         }
     }
 
@@ -474,23 +535,43 @@ impl Dispatcher {
     /// queries behind it is an acceptable trade for not dropping snapshots.
     fn handle_reindex(&self) -> Result<ReindexDone, RpcError> {
         let start = Instant::now();
+        // No query holds a read connection across the replacement, and none
+        // opens one while the file is missing.
+        let _gate = self.readers.gate.write().unwrap_or_else(|e| e.into_inner());
         let mut index = self
             .index
             .lock()
             .map_err(|_| RpcError::new("internal", "index lock poisoned"))?;
-        let report = clove_index::reindex(&self.issues_dir, &self.db_path)
-            .map_err(|e| RpcError::new("reindex_failed", e.to_string()))?;
+        // Close the daemon's own connections before the rebuild replaces the
+        // file: on Windows an open handle makes the replacement fail with a
+        // sharing violation. The write connection is parked on an in-memory
+        // database for the duration.
+        self.readers.reset();
+        if let Ok(parked) = Index::open(camino::Utf8Path::new(":memory:")) {
+            *index = parked;
+        }
+        let rebuilt = clove_index::reindex(&self.issues_dir, &self.db_path);
         // A failed reopen must surface: silently keeping the old handle would
         // leave the daemon serving the *replaced* (unlinked) inode — diverging
         // from the on-disk index.db every other process sees — while telling
-        // the client the reindex succeeded.
-        let fresh = Index::open_or_create(&self.db_path).map_err(|e| {
+        // the client the reindex succeeded. After a failed rebuild this
+        // reopens the database that is still there.
+        let reopened = Index::open_or_create(&self.db_path);
+        self.readers.reset();
+        let report = rebuilt.map_err(|e| RpcError::new("reindex_failed", e.to_string()));
+        *index = reopened.map_err(|e| {
             RpcError::new(
                 "reindex_reopen_failed",
-                format!("index rebuilt but the daemon could not reopen it: {e}"),
+                match &report {
+                    Ok(_) => format!("index rebuilt but the daemon could not reopen it: {e}"),
+                    Err(failed) => format!(
+                        "{}; and the daemon could not reopen the index: {e}",
+                        failed.message
+                    ),
+                },
             )
         })?;
-        *index = fresh;
+        let report = report?;
         if let Ok(mut state) = self.state.lock() {
             state.set_items_indexed(index.item_count().unwrap_or(0) as u64);
         }

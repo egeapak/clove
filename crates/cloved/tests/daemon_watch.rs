@@ -348,3 +348,159 @@ fn rapid_edits_debounce_into_fewer_batches_than_edits() {
 
     drop(hub);
 }
+
+fn titles_via_daemon(hub: &TestHub, clove_dir: &Utf8Path) -> Vec<String> {
+    let mut client: DaemonClient = hub.client(clove_dir);
+    let mut titles: Vec<String> = client
+        .query_list(list_all())
+        .unwrap()
+        .rows
+        .into_iter()
+        .map(|row| row.title)
+        .collect();
+    titles.sort();
+    titles
+}
+
+/// An editor that saves in place (VS Code, nano, `>>`) changes neither the
+/// directory mtime nor the file count. The watch reports the file, and the
+/// daemon must read that file, not trust the directory.
+#[test]
+fn an_in_place_save_reaches_the_daemon() {
+    let repo = init_repo();
+    let id = repo.add_item("before the save");
+    repo.add_item("another");
+    repo.reindex();
+    // The directory-level check is only trusted once the directory has been
+    // quiet for 2 s; wait it out so the save below is the only thing to see.
+    std::thread::sleep(Duration::from_millis(2_200));
+    let hub = TestHub::spawn(Some(&repo.clove_dir));
+    assert_eq!(
+        titles_via_daemon(&hub, &repo.clove_dir),
+        ["another", "before the save"]
+    );
+
+    let path = repo.clove_dir.join("issues").join(format!("{id}.md"));
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("before the save"), "{text}");
+    // Truncate-and-rewrite: no rename, so `issues/` itself does not change.
+    std::fs::write(&path, text.replace("before the save", "after the save")).unwrap();
+
+    let seen = wait_until(HANG_GUARD, || {
+        titles_via_daemon(&hub, &repo.clove_dir) == ["after the save", "another"]
+    });
+    assert!(
+        seen,
+        "the daemon still answers {:?}",
+        titles_via_daemon(&hub, &repo.clove_dir)
+    );
+}
+
+/// `git checkout` across a commit without the store, or `git stash -u`:
+/// `issues/` is removed and created again. The OS watch was on the old
+/// directory, so the daemon must not keep answering from what it indexed there.
+#[test]
+fn a_recreated_issues_directory_is_not_answered_from_the_old_one() {
+    let repo = init_repo();
+    for i in 0..3 {
+        repo.add_item(&format!("old {i}"));
+    }
+    repo.reindex();
+    let hub = TestHub::spawn(Some(&repo.clove_dir));
+    assert_eq!(count_via_daemon(&hub, &repo.clove_dir), 3);
+
+    let issues = repo.clove_dir.join("issues");
+    let aside = repo.clove_dir.join("issues.aside");
+    std::fs::rename(&issues, &aside).unwrap();
+    std::fs::create_dir(&issues).unwrap();
+    for i in 0..33 {
+        repo.add_item(&format!("new {i}"));
+    }
+
+    // The project is unloaded and loaded again with a watch on the new
+    // directory; until then an index read is refused, never answered stale.
+    let answer = || {
+        let mut client = DaemonClient::attach(&hub.paths, &repo.clove_dir, true).ok()?;
+        client
+            .query_list(list_all())
+            .ok()
+            .map(|page| page.rows.len())
+    };
+    let mut stale = Vec::new();
+    let caught_up = wait_until(HANG_GUARD, || match answer() {
+        Some(33) => true,
+        Some(other) => {
+            stale.push(other);
+            false
+        }
+        None => false,
+    });
+    assert!(caught_up, "the daemon never served the new directory");
+    assert!(
+        stale.is_empty(),
+        "the daemon answered from the old directory: {stale:?}"
+    );
+    // And the new watch works: a later write is seen.
+    repo.add_item("after the reload");
+    assert!(wait_until(HANG_GUARD, || answer() == Some(34)));
+}
+
+/// A `clove reindex` that did not go through the daemon replaces `index.db`.
+/// The daemon must move to the new file: what it applies afterwards has to
+/// land in the database every other process opens.
+#[test]
+fn the_daemon_follows_an_index_replaced_under_it() {
+    let repo = init_repo();
+    repo.add_item("first");
+    repo.reindex();
+    let hub = TestHub::spawn(Some(&repo.clove_dir));
+    assert_eq!(count_via_daemon(&hub, &repo.clove_dir), 1);
+
+    repo.reindex(); // a new file under the same name
+    repo.add_item("written after the rebuild");
+    assert!(wait_until(HANG_GUARD, || {
+        count_via_daemon(&hub, &repo.clove_dir) == 2
+    }));
+
+    // The daemon applied that item; it must be in the file on disk.
+    let on_disk = || {
+        clove_index::Index::open(&repo.clove_dir.join("index.db"))
+            .unwrap()
+            .item_count()
+            .unwrap()
+    };
+    assert!(
+        wait_until(HANG_GUARD, || on_disk() == 2),
+        "index.db on disk has {} item(s): the daemon wrote to the replaced file",
+        on_disk()
+    );
+}
+
+/// The id prefix and default type of a daemon-side create come from the
+/// config as it is now, not as it was when the project was loaded.
+#[test]
+fn a_create_uses_the_config_as_it_is_now() {
+    let repo = init_repo();
+    let hub = TestHub::spawn(Some(&repo.clove_dir));
+    let mut client = hub.client(&repo.clove_dir);
+    let spec = || clove_types::NewSpec {
+        title: "made by the daemon".to_owned(),
+        ..Default::default()
+    };
+    let before = client.create(spec()).unwrap();
+    assert!(
+        before["id"].as_str().unwrap().starts_with("proj-"),
+        "{before}"
+    );
+
+    std::fs::write(
+        repo.clove_dir.join("config.toml"),
+        "id_prefix = \"other\"\ndefault_type = \"bug\"\n",
+    )
+    .unwrap();
+    let after = client.create(spec()).unwrap();
+    let id = after["id"].as_str().unwrap().to_owned();
+    assert!(id.starts_with("other-"), "{after}");
+    let shown = client.show(id).unwrap();
+    assert_eq!(shown["type"], "bug", "{shown}");
+}

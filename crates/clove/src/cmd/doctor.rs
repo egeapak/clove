@@ -29,8 +29,9 @@ pub fn run(
     if !no_index && ctx.db_path.exists() {
         let issues = index_checks(ctx)?;
         if args.fix && !issues.is_empty() {
-            clove_index::reindex(&ctx.issues_dir, &ctx.db_path)
-                .map_err(|e| index_error(e, &ctx.db_path))?;
+            // Daemon first, like `clove reindex`: a rebuild here would leave a
+            // running daemon on the replaced index file.
+            crate::cmd::reindex::rebuild(ctx, true)?;
             fixed += issues.len();
             // Re-check; surface anything the rebuild did not resolve.
             report.issues.extend(index_checks(ctx)?);

@@ -5,6 +5,21 @@
 import type { ListQuery, Status, ItemType } from './types';
 
 const MODE_VALUES = new Set(['ready', 'blocked']);
+// The values `clove_core::view` accepts. The server answers anything else with
+// a validation error, which the list shows as a failed load with the table —
+// and its sort headers — hidden, so a hand-edited or stale link had no way back
+// short of editing the URL again. An unknown value is therefore dropped here.
+const STATUS_VALUES = new Set(['open', 'in_progress', 'closed']);
+const TYPE_VALUES = new Set(['bug', 'feature', 'chore', 'docs', 'epic']);
+const SORT_VALUES = new Set(['rank', 'priority', 'created', 'updated', 'id', 'status', 'type']);
+const DIR_VALUES = new Set(['asc', 'desc']);
+const PRIORITY_VALUES = new Set(['0', '1', '2', '3', '4']);
+
+/** `raw` lower-cased when the server would accept it, else `undefined`. */
+function known(raw: string | null, allowed: Set<string>): string | undefined {
+  const v = raw?.trim().toLowerCase();
+  return v && allowed.has(v) ? v : undefined;
+}
 
 /**
  * Read a multi-select param as CSV — the server's contract (read.rs csv():
@@ -34,13 +49,16 @@ export function parseQuery(p: URLSearchParams): ListQuery {
   const mode = MODE_VALUES.has(rawMode) ? (rawMode as 'ready' | 'blocked') : 'list';
   const q: ListQuery = {
     mode,
-    status: (p.get('status') as Status) || undefined,
+    // `status` may be a comma list (`open,closed`); keep the parts that parse.
+    status: (csv(p, 'status').filter((v) => STATUS_VALUES.has(v)).join(',') as Status) || undefined,
     assignee: p.get('assignee') || undefined,
     q: p.get('q') || undefined,
-    sort: p.get('sort') || undefined,
-    dir: (p.get('dir') as 'asc' | 'desc') || undefined,
-    type: csv(p, 'type') as ItemType[],
-    priority: csv(p, 'priority').map(Number),
+    sort: known(p.get('sort'), SORT_VALUES),
+    dir: known(p.get('dir'), DIR_VALUES) as 'asc' | 'desc' | undefined,
+    type: csv(p, 'type').filter((v) => TYPE_VALUES.has(v)) as ItemType[],
+    priority: csv(p, 'priority')
+      .filter((v) => PRIORITY_VALUES.has(v))
+      .map(Number),
     label: csv(p, 'label'),
     synced: p.get('synced') === 'true' ? true : p.get('synced') === 'false' ? false : undefined
   };

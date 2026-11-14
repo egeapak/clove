@@ -74,7 +74,10 @@
   const statusOptions = $derived(store.meta?.statuses?.length ? store.meta.statuses : ['open', 'in_progress', 'closed']);
   const prioOptions = $derived(store.meta?.priorities?.length ? store.meta.priorities : [0, 1, 2, 3, 4]);
 
-  let comments = $state<Comment[]>([]);
+  // Raw, not deep, state: the list is only ever replaced, and a deep proxy
+  // would make `c !== optimistic` true for every element, so a failed comment
+  // could never be taken back out (see `addComment`).
+  let comments = $state.raw<Comment[]>([]);
   let deptree = $state<DepTreeNode | null>(null);
   let newComment = $state('');
   let newDep = $state('');
@@ -91,6 +94,10 @@
   // Each load is numbered so an older response landing late cannot overwrite a
   // newer one (live refetches can overlap).
   let itemLoad = 0;
+  // Why there is no item to show, for the id it was recorded against. `gone`:
+  // the server says it does not exist (a stale link, a mistyped id, or deleted
+  // elsewhere while open). `error`: the load failed for another reason.
+  let failure = $state<{ id: string; kind: 'gone' | 'error' } | null>(null);
   let deptreeLoad = 0;
   let commentsLoad = 0;
   let childrenLoad = 0;
@@ -106,11 +113,24 @@
         // answer would bring back stale graph terms.
         if (token !== itemLoad) return;
         store.upsert(it);
-        if (curId === id) full = it;
+        if (curId === id) {
+          full = it;
+          failure = null;
+        }
       })
       .catch((e) => {
         console.warn('[clove] failed to load item', curId, e);
-        if (!live) toasts.error('Failed to load item');
+        if (token !== itemLoad || curId !== id) return;
+        if (e instanceof ApiError && e.status === 404) {
+          // Gone, whether this is the first load or a live reload of an item
+          // deleted elsewhere: drop every copy so it cannot be edited.
+          failure = { id: curId, kind: 'gone' };
+          full = null;
+          store.remove(curId);
+        } else if (!live) {
+          failure = { id: curId, kind: 'error' };
+          toasts.error('Failed to load item');
+        }
       });
   }
 
@@ -161,8 +181,19 @@
   $effect(() => {
     const curId = id;
     full = null;
+    failure = null;
     children = [];
     showAllChildren = false;
+    // The component is reused from one item to the next (a relationship link),
+    // so everything that belongs to the previous item goes: an armed delete
+    // confirmation, drafts, and its comments and dep tree.
+    confirmingDelete = false;
+    newComment = '';
+    newDep = '';
+    addingLabel = '';
+    comments = [];
+    deptree = null;
+    commentsFor = '';
     loadItem(curId, false);
     loadDeptree(curId);
     loadChildren(curId);
@@ -197,7 +228,10 @@
   // ---- inline edits (optimistic) ----
   async function patch(fields: Partial<Pick<Item, 'status' | 'priority' | 'assignee' | 'type'>>) {
     if (!item) return;
-    const edit = store.optimistic(id, fields);
+    // `item` as the base: the store's window may not hold this item (a live
+    // refetch drops what is outside it), and the edit must still show at once
+    // and roll back on failure.
+    const edit = store.optimistic(id, fields, item);
     try {
       edit.settle(await api.patch(id, fields));
     } catch (e) {
@@ -260,7 +294,7 @@
 
   async function removeLabel(l: string) {
     if (!item) return;
-    const edit = store.optimistic(id, { labels: item.labels.filter((x) => x !== l) });
+    const edit = store.optimistic(id, { labels: item.labels.filter((x) => x !== l) }, item);
     try {
       edit.settle(await api.setLabels(id, [], [l]));
     } catch {
@@ -274,7 +308,7 @@
     const l = addingLabel.trim();
     if (!l || !item) return;
     addingLabel = '';
-    const edit = store.optimistic(id, { labels: [...new Set([...item.labels, l])] });
+    const edit = store.optimistic(id, { labels: [...new Set([...item.labels, l])] }, item);
     try {
       edit.settle(await api.setLabels(id, [l], []));
     } catch {
@@ -314,7 +348,19 @@
   }
 </script>
 
-{#if !item}
+{#if failure?.id === id && (failure.kind === 'gone' || !item)}
+  <div class="panel loadfail" role="alert">
+    {#if failure.kind === 'gone'}
+      <div class="loadfail-title">Item {shortId(id)} not found</div>
+      <p class="dim">It does not exist in this project. It may have been deleted.</p>
+    {:else}
+      <div class="loadfail-title">Couldn’t load {shortId(id)}</div>
+      <p class="dim">The backend did not answer.</p>
+      <button class="btn primary" onclick={() => loadItem(id, false)}>Retry</button>
+    {/if}
+    <a class="btn" href="{base}/list">Back to the list</a>
+  </div>
+{:else if !item}
   <div class="loading dim">Loading {shortId(id)}…</div>
 {:else}
   <div class="screen panel detail">
@@ -347,7 +393,7 @@
           <p class="dim">No dependency tree.</p>
         {/if}
         <div class="dep-add">
-          <input bind:value={newDep} placeholder="add dep #id…" onkeydown={(e) => e.key === 'Enter' && addDep()} />
+          <input bind:value={newDep} aria-label="Dependency id to add" placeholder="add dep #id…" onkeydown={(e) => e.key === 'Enter' && addDep()} />
           <button class="btn sm" onclick={addDep}>Add dep</button>
         </div>
         {#if item.deps.length}
@@ -372,7 +418,7 @@
           <div class="addbox">
             <Avatar name={null} />
             <div class="field">
-              <textarea bind:value={newComment} placeholder="Add a comment…" rows="2" onkeydown={onCommentKey}></textarea>
+              <textarea bind:value={newComment} aria-label="New comment" placeholder="Add a comment…" rows="2" onkeydown={onCommentKey}></textarea>
               <div class="addfoot">
                 <span class="kbd">⌘↵ to send</span>
                 <button class="btn primary sm" onclick={addComment} disabled={!newComment.trim()}>Comment</button>
@@ -387,13 +433,13 @@
     <aside class="detail-side">
       <div class="side-block">
         <div class="side-label">Status</div>
-        <select value={item.status} onchange={(e) => patch({ status: e.currentTarget.value as Status })}>
+        <select aria-label="Status" value={item.status} onchange={(e) => patch({ status: e.currentTarget.value as Status })}>
           {#each statusOptions as s (s)}<option value={s}>{statusLabel(s as Status)}</option>{/each}
         </select>
       </div>
       <div class="side-block">
         <div class="side-label">Priority</div>
-        <select value={item.priority} onchange={(e) => patch({ priority: Number(e.currentTarget.value) })}>
+        <select aria-label="Priority" value={item.priority} onchange={(e) => patch({ priority: Number(e.currentTarget.value) })}>
           {#each prioOptions as p (p)}<option value={p}>{priorityLabel(p)}</option>{/each}
         </select>
       </div>
@@ -403,6 +449,7 @@
           <Avatar name={item.assignee} />
           <input
             class="inline-in"
+            aria-label="Assignee"
             value={item.assignee ?? ''}
             placeholder="Unassigned"
             onchange={(e) => patch({ assignee: e.currentTarget.value.trim() || null })}
@@ -414,7 +461,7 @@
         <div class="side-row labels">
           {#each item.labels as l (l)}<LabelChip label={l} removable onremove={() => removeLabel(l)} />{/each}
         </div>
-        <input class="inline-in" bind:value={addingLabel} placeholder="add label…" onkeydown={(e) => e.key === 'Enter' && addLabel()} />
+        <input class="inline-in" bind:value={addingLabel} aria-label="Label to add" placeholder="add label…" onkeydown={(e) => e.key === 'Enter' && addLabel()} />
       </div>
       <div class="side-block">
         <div class="side-label">Relationships</div>
@@ -464,6 +511,22 @@
   .loading {
     padding: 40px;
     text-align: center;
+  }
+  .loadfail {
+    text-align: center;
+    padding: 40px 24px;
+  }
+  .loadfail-title {
+    font-size: 15px;
+    font-weight: 600;
+    margin-bottom: 6px;
+    color: var(--text);
+  }
+  .loadfail p {
+    margin: 0 0 14px;
+  }
+  .loadfail .btn {
+    margin: 0 4px;
   }
   .screen {
     overflow: hidden;

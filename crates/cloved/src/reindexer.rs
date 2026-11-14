@@ -1,41 +1,51 @@
-//! Shared incremental-apply helper used by the startup sweep and the watcher
-//! (T-D04). Both reduce to: run the fast staleness check, and if anything
-//! changed, apply it in one transaction (the encapsulated `clove_index`
-//! write path), then refresh the daemon's item count.
+//! The index sync shared by a project's load and its watcher (T-D04): bring
+//! the index up to date with the files in one transaction, then refresh the
+//! daemon's item count.
 
 use std::sync::{Arc, Mutex};
 
-use camino::Utf8Path;
 use clove_index::Index;
 
+use crate::fresh::{Freshness, Sync};
 use crate::state::DaemonState;
 
-/// Re-sync the index with the files under `issues_dir` in a single pass.
-/// Returns `true` if any change was applied. Used for both the startup mtime
-/// sweep (DESIGN §8.6) and each debounced watcher batch (DESIGN §8.5).
-pub fn sync_once(
-    issues_dir: &Utf8Path,
+/// The sweep of a project's load (DESIGN §8.6), run once before the watch is
+/// armed and once after: the directory-level check, and the per-file pass
+/// only if the directory moved. Returns `true` if any change was applied.
+pub fn startup_sweep(
+    fresh: &Freshness,
     index: &Arc<Mutex<Index>>,
     state: &Arc<Mutex<DaemonState>>,
 ) -> bool {
-    let mut applied = false;
-    let count = {
-        let mut idx = match index.lock() {
-            Ok(g) => g,
-            Err(_) => return false,
-        };
-        if let Ok(report) = idx.check_staleness_fast(issues_dir) {
-            if report.needs_apply() {
-                let _ = idx.apply_staleness(&report, issues_dir);
-                // Only a content change counts as applied; touched files and
-                // the `meta` row are bookkeeping.
-                applied = !report.is_clean();
-            }
-        }
-        idx.item_count().unwrap_or(0) as u64
+    let Ok(mut idx) = index.lock() else {
+        return false;
     };
+    let applied = fresh.startup_sweep(&mut idx);
+    let count = idx.item_count().unwrap_or(0) as u64;
+    drop(idx);
     if let Ok(mut st) = state.lock() {
         st.set_items_indexed(count);
     }
     applied
+}
+
+/// One watcher batch (DESIGN §8.5): apply everything the watch has reported,
+/// with no limit on the number of changed items.
+pub fn sync_batch(
+    fresh: &Freshness,
+    index: &Arc<Mutex<Index>>,
+    state: &Arc<Mutex<DaemonState>>,
+) -> Sync {
+    let Ok(mut idx) = index.lock() else {
+        return Sync::Failed;
+    };
+    let outcome = fresh.sync(&mut idx, None);
+    if let Sync::Fresh { changed: true } = outcome {
+        let count = idx.item_count().unwrap_or(0) as u64;
+        drop(idx);
+        if let Ok(mut st) = state.lock() {
+            st.set_items_indexed(count);
+        }
+    }
+    outcome
 }

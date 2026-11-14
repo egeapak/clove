@@ -570,7 +570,7 @@ fn doctor_strict_exits_4_on_errors() {
 }
 
 #[test]
-fn ls_index_serves_lean_rows_in_same_order_as_files() {
+fn ls_index_serves_the_same_rows_in_same_order_as_files() {
     let dir = init_repo();
     let dep = new_item(dir.path(), "Dep", &[]);
     new_item(dir.path(), "Other", &["--dep", &dep, "--type", "bug"]);
@@ -589,19 +589,27 @@ fn ls_index_serves_lean_rows_in_same_order_as_files() {
 
     clove(dir.path()).arg("reindex").assert().success();
 
-    // After indexing, ls uses the index and serves the lean projection
-    // (id/status/type/priority/title) in the SAME id order.
+    // After indexing, ls uses the index, in the SAME id order and with the same
+    // keys per row: the JSON shape does not depend on the tier.
     let indexed = json_ok(clove(dir.path()).arg("ls"));
     assert_eq!(indexed["_meta"]["source"], "index");
-    let index_ids: Vec<&str> = indexed["data"]
+    assert_eq!(
+        indexed["data"], files["data"],
+        "index and file ls must agree"
+    );
+
+    // The lean projection (no file reads) is what `--fields` inside the lean
+    // columns selects.
+    let lean = json_ok(clove(dir.path()).args(["ls", "--fields", "id,status,type,priority,title"]));
+    assert_eq!(lean["_meta"]["source"], "index");
+    let index_ids: Vec<&str> = lean["data"]
         .as_array()
         .unwrap()
         .iter()
         .map(|i| i["id"].as_str().unwrap())
         .collect();
     assert_eq!(index_ids, file_ids, "index and file ls must agree on order");
-
-    let mut keys: Vec<&str> = indexed["data"][0]
+    let mut keys: Vec<&str> = lean["data"][0]
         .as_object()
         .unwrap()
         .keys()

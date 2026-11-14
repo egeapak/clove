@@ -182,3 +182,45 @@ fn a_start_waits_for_a_hub_that_has_bound_but_does_not_serve_yet() {
     support::send_signal(child.id(), support::SIGTERM);
     let _ = child.wait();
 }
+
+/// A hub that died without cleaning up leaves its `hub.pid` behind. The pid in
+/// it may belong to another process by now. The next hub removes the file as
+/// soon as it holds the lock, so no one reads the dead hub's pid while the new
+/// hub is still starting.
+#[test]
+#[cfg_attr(not(feature = "test-knobs"), ignore = "needs a `test-knobs` cloved")]
+fn a_starting_hub_discards_the_previous_hubs_pid_file() {
+    let (_run, hub) = runtime_dir();
+    let _kill = KillHub(hub.clone());
+    const SERVE_HOLD: &str = "serve-hold";
+    const DEAD_HUB: u32 = 999_999;
+    std::fs::write(hub.dir().join(SERVE_HOLD), "").unwrap();
+    std::fs::write(hub.pid(), format!("{DEAD_HUB}\n")).unwrap();
+    let mut child = support::command(
+        &hub,
+        &[
+            ("CLOVED_DISABLE_WEB", "1"),
+            ("CLOVED_SERVE_HOLD_FILE", SERVE_HOLD),
+        ],
+    )
+    .spawn()
+    .expect("spawn cloved");
+    assert!(
+        support::eventually(support::HANG_GUARD, || hub.sock().exists()),
+        "the hub never bound its socket"
+    );
+    assert_eq!(
+        hub.read_pid(),
+        None,
+        "a hub that is not ready yet still shows the dead hub's pid"
+    );
+
+    std::fs::remove_file(hub.dir().join(SERVE_HOLD)).unwrap();
+    assert!(
+        support::eventually(support::HANG_GUARD, || hub.read_pid() == Some(child.id())),
+        "the hub never wrote its own pid: {:?}",
+        hub.read_pid()
+    );
+    support::send_signal(child.id(), support::SIGTERM);
+    let _ = child.wait();
+}

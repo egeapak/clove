@@ -3,7 +3,7 @@
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -87,44 +87,16 @@ pub(crate) fn truncate(s: &str, max: usize) -> String {
 }
 
 /// Count the display rows `lines` occupy when word-wrapped to `width` columns
-/// (approximating ratatui's `Wrap { trim: false }`), using display widths so a
-/// wrapped legend / long body is measured correctly for sizing and scroll
-/// clamping. Never returns 0.
+/// with `Wrap { trim: false }`, for sizing and scroll clamping. This asks
+/// ratatui's own `Paragraph` for the count, so it is the height that is drawn:
+/// a hand-rolled estimate used to ignore leading spaces, counted indented code
+/// lines too short, and left the end of such a body out of scroll range. Never
+/// returns 0; saturates at `u16::MAX`.
 pub(crate) fn wrapped_height(lines: &[Line], width: u16) -> u16 {
-    let width = (width as usize).max(1);
-    lines
-        .iter()
-        .map(|line| {
-            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-            wrap_rows(&text, width)
-        })
-        .sum::<u16>()
-        .max(1)
-}
-
-/// The number of rows a single logical line of `text` wraps to at `width`
-/// display columns (greedy word wrap; a word wider than `width` is broken).
-fn wrap_rows(text: &str, width: usize) -> u16 {
-    let mut rows = 1u16;
-    let mut col = 0usize;
-    for (i, word) in text.split(' ').enumerate() {
-        let ww = word.width();
-        let sep = usize::from(i != 0);
-        if col == 0 {
-            col = ww;
-        } else if col + sep + ww <= width {
-            col += sep + ww;
-        } else {
-            rows = rows.saturating_add(1);
-            col = ww;
-        }
-        // A single word longer than the width is broken across rows.
-        while col > width {
-            rows = rows.saturating_add(1);
-            col -= width;
-        }
-    }
-    rows
+    let rows = Paragraph::new(lines.to_vec())
+        .wrap(Wrap { trim: false })
+        .line_count(width.max(1));
+    u16::try_from(rows).unwrap_or(u16::MAX).max(1)
 }
 
 /// A `w`×`h` rectangle centered in `area`.

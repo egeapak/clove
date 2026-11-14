@@ -78,7 +78,7 @@ pub fn run(ctx: &Ctx, format: OutputFormat, args: ImportArgs) -> Result<ExitCode
                 ErrorKind::DisplayHelp
                 | ErrorKind::DisplayVersion
                 | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => ExitCode::Success,
-                _ => ExitCode::Usage,
+                _ => crate::output::emit_usage_error(format, &err.to_string()),
             });
         }
     };
@@ -106,6 +106,11 @@ pub fn run(ctx: &Ctx, format: OutputFormat, args: ImportArgs) -> Result<ExitCode
     }
     let meta = json!({ "warnings": warnings });
 
+    // Validate every item that would be written *before* anything is: the
+    // dry run and the real run then agree, and a bad item cannot stop a real
+    // run half-way with the earlier items already on disk.
+    validate_writable(&items, ctx, parsed.overwrite)?;
+
     if parsed.dry_run {
         let plan = plan_restore(&items, &ctx.store, parsed.overwrite)
             .map_err(|err| import_err(err, &parsed.src))?;
@@ -117,6 +122,51 @@ pub fn run(ctx: &Ctx, format: OutputFormat, args: ImportArgs) -> Result<ExitCode
     }
 
     Ok(ExitCode::Success)
+}
+
+/// Check every item the restore would write against the same rules
+/// `ItemStore::restore_item` applies (title, assignee, frontmatter validation).
+/// Items that would be skipped (existing id, no `--overwrite`) are not checked,
+/// as the apply never validates them either. Every failure is reported at once,
+/// named by item id.
+fn validate_writable(
+    items: &[clove_types::Item],
+    ctx: &Ctx,
+    overwrite: bool,
+) -> Result<(), CloveError> {
+    let mut problems = Vec::new();
+    for item in items {
+        let fm = &item.frontmatter;
+        if !overwrite && ctx.store.exists(&fm.id) {
+            continue;
+        }
+        let mut reasons: Vec<String> = Vec::new();
+        if let Err(error) = clove_types::fields::parse_title(&fm.title) {
+            reasons.push(error.to_string());
+        }
+        if let Err(error) = clove_types::fields::parse_assignee(fm.assignee.clone()) {
+            reasons.push(error.to_string());
+        }
+        reasons.extend(
+            clove_types::validate_item(fm)
+                .iter()
+                .map(ToString::to_string),
+        );
+        if !reasons.is_empty() {
+            problems.push(format!("{}: {}", fm.id, reasons.join(", ")));
+        }
+    }
+    if problems.is_empty() {
+        return Ok(());
+    }
+    Err(CloveError::InvalidField {
+        field: "import".to_owned(),
+        reason: format!(
+            "{} item(s) are invalid, nothing was imported: {}",
+            problems.len(),
+            problems.join("; ")
+        ),
+    })
 }
 
 /// Emit a `--dry-run` [`RestorePlan`]: the `{would_create, would_skip,

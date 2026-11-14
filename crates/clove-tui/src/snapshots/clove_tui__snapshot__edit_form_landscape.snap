@@ -17,6 +17,6 @@ expression: rendered
 │                           │                                                              │                           │
 │                           │   Build a **REST API** with `axum`; see `docs/api.md`.       │                           │
 │                           │                                                              │───────────────────────────│
-│                           │   - CRUD endpoints                                           │ted Jan 1 · updated Jan 20 │
+│                           │ Ctrl-S save · Esc cancel · Tab/↑↓ field · ←→ move/change     │ted Jan 1 · updated Jan 20 │
 └───────────────────────────└──────────────────────────────────────────────────────────────┘───────────────────────────┘
 edit item  Ctrl-S save · Esc cancel

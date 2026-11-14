@@ -30,22 +30,69 @@ pub fn apply_assignments_to(
 
 pub fn run(ctx: &Ctx, format: OutputFormat, args: EditArgs) -> Result<(), CloveError> {
     let id = parse_id(&args.id)?;
+    let body = body_argument(args.body.as_deref(), args.body_file.as_deref())?;
 
-    if args.fields.is_empty() {
-        return open_in_editor(ctx, &id);
+    if args.fields.is_empty() && body.is_none() {
+        let saved = open_in_editor(ctx, &id)?;
+        print_item(format, &saved, Map::new());
+        return Ok(());
     }
 
-    let saved = apply_assignments_to(&ctx.store, &id, &args.fields)?;
-    print_item(format, &saved, Map::new());
+    // One `EditRequest` through `apply_edit`, the write path every surface
+    // shares: the field tokens and the body land in a single locked write.
+    let mut request = clove_types::EditRequest::from_tokens(&args.fields)?;
+    request.body = body;
+    clove_core::apply_edit(&ctx.store, &id, &request, now_millis())?;
+    print_item(format, &ctx.store.get(&id)?, Map::new());
     Ok(())
 }
 
-/// Open the item file in `$EDITOR`/`$VISUAL`, then re-parse to validate it.
-fn open_in_editor(ctx: &Ctx, id: &clove_types::CloveId) -> Result<(), CloveError> {
+/// The replacement body from `--body` or `--body-file` (`-` is stdin), if any.
+pub(crate) fn body_argument(
+    body: Option<&str>,
+    body_file: Option<&camino::Utf8Path>,
+) -> Result<Option<String>, CloveError> {
+    let Some(path) = body_file else {
+        return Ok(body.map(str::to_owned));
+    };
+    let read = if path.as_str() == "-" {
+        std::io::read_to_string(std::io::stdin())
+    } else {
+        std::fs::read_to_string(path)
+    };
+    read.map(Some).map_err(|source| CloveError::Io {
+        path: path.to_owned(),
+        source,
+    })
+}
+
+/// Open the item file in `$EDITOR`/`$VISUAL`, then save the result through the
+/// store and return the saved item.
+///
+/// The editor works on the item file itself, with no lock held (an editor
+/// session has no bound). What it leaves behind is then treated as a requested
+/// edit, not as a finished write:
+///
+/// - Unchanged bytes: nothing is written.
+/// - A file that no longer parses, or fails validation: the original bytes are
+///   put back and the edited text is kept beside the store's temp files, so an
+///   invalid item never stays in the store (where it would vanish from lists
+///   and exports).
+/// - Otherwise the item is rewritten by [`ItemStore::update_with`]: validated,
+///   `updated` stamped, the `closed` timestamp kept in step with a changed
+///   status, and renamed into place — the rename is what the index's staleness
+///   check sees, which an editor that writes in place does not trigger.
+fn open_in_editor(ctx: &Ctx, id: &clove_types::CloveId) -> Result<clove_types::Item, CloveError> {
     let path = ctx.store.path_for(id);
     if !path.exists() {
         return Err(CloveError::NotFound { id: id.to_string() });
     }
+    let io_err = |source| CloveError::Io {
+        path: path.clone(),
+        source,
+    };
+    let original = std::fs::read(&path).map_err(io_err)?;
+
     let editor = std::env::var("CLOVE_EDITOR")
         .or_else(|_| std::env::var("VISUAL"))
         .or_else(|_| std::env::var("EDITOR"))
@@ -67,9 +114,95 @@ fn open_in_editor(ctx: &Ctx, id: &clove_types::CloveId) -> Result<(), CloveError
         });
     }
 
-    // Validate that the result still parses (surfaces a corrupt hand-edit).
-    parse_item_file(&path)?;
-    Ok(())
+    let edited = std::fs::read(&path).map_err(io_err)?;
+    if edited == original {
+        return parse_item_file(&path);
+    }
+
+    let now = now_millis();
+    // A status typed into the file carries no `closed` timestamp (or a stale
+    // one), and such a file does not even parse. Bring the `closed` line in
+    // step first, the way every other status change does.
+    if let Some(fixed) = std::str::from_utf8(&edited)
+        .ok()
+        .and_then(|text| sync_closed_line(text, now))
+    {
+        std::fs::write(&path, fixed).map_err(io_err)?;
+    }
+    let saved = ctx.store.update_with(id, now, |_| Ok(()));
+    saved.map_err(|error| reject_edit(&path, &original, &edited, error))
+}
+
+/// Keep the frontmatter's `closed:` line in step with its `status:` line, as
+/// `set_status` does for a structured edit: a closed item gets `closed: <now>`
+/// when it has none, and an open or in-progress item loses a leftover
+/// `closed:` value. Returns the corrected text, or `None` when nothing needs to
+/// change (including any text whose frontmatter this cannot read — the store's
+/// own parser then reports the problem).
+fn sync_closed_line(text: &str, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
+    let mut lines: Vec<&str> = text.split_inclusive('\n').collect();
+    if lines.first()?.trim_end() != "---" {
+        return None;
+    }
+    let end = 1 + lines[1..].iter().position(|l| l.trim_end() == "---")?;
+    let value_of = |key: &str| {
+        lines[1..end].iter().enumerate().find_map(|(i, line)| {
+            let value = line.strip_prefix(key)?.strip_prefix(':')?;
+            Some((i + 1, value.trim().trim_matches(['\'', '"']).to_owned()))
+        })
+    };
+    let (status_at, status) = value_of("status")?;
+    let closed = value_of("closed");
+    let has_closed = closed
+        .as_ref()
+        .is_some_and(|(_, v)| !matches!(v.as_str(), "" | "null" | "~"));
+
+    let stamp;
+    match (status.as_str(), has_closed) {
+        ("closed", false) => {
+            stamp = format!("closed: {}\n", clove_types::canonical_rfc3339(now));
+            match closed {
+                Some((at, _)) => lines[at] = &stamp,
+                None => lines.insert(status_at + 1, &stamp),
+            }
+        }
+        ("open" | "in_progress", true) => {
+            lines.remove(closed?.0);
+        }
+        _ => return None,
+    }
+    Some(lines.concat())
+}
+
+/// Undo an editor session whose result the store refused: restore the original
+/// item file and keep the rejected text in a temp file named in the error.
+fn reject_edit(
+    path: &camino::Utf8Path,
+    original: &[u8],
+    edited: &[u8],
+    error: CloveError,
+) -> CloveError {
+    let kept = tempfile::Builder::new()
+        .prefix("clove-edit-")
+        .suffix(".md")
+        .tempfile()
+        .and_then(|mut file| {
+            std::io::Write::write_all(&mut file, edited)?;
+            file.keep().map_err(|e| e.error)
+        })
+        .map(|(_, kept)| kept.display().to_string());
+    // Only restore once the rejected text is safe somewhere: losing the user's
+    // edit would be worse than leaving the invalid file for them to fix.
+    let Ok(kept) = kept else {
+        return error;
+    };
+    if std::fs::write(path, original).is_err() {
+        return error;
+    }
+    CloveError::InvalidField {
+        field: "edit".to_owned(),
+        reason: format!("{error}; the item was left unchanged and your text is in {kept}"),
+    }
 }
 
 /// Build the command that opens `file` in `editor`. Like git, the editor value
@@ -130,7 +263,38 @@ fn split_editor_words(editor: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::split_editor_words;
+    use super::{split_editor_words, sync_closed_line};
+
+    #[test]
+    fn sync_closed_line_follows_the_status_line() {
+        let now = "2026-03-04T05:06:07.008Z".parse().unwrap();
+        // Closed with no timestamp: one is added after the status line.
+        let fixed = sync_closed_line("---\nid: a\nstatus: closed\ntype: bug\n---\nbody\n", now);
+        assert_eq!(
+            fixed.as_deref(),
+            Some("---\nid: a\nstatus: closed\nclosed: 2026-03-04T05:06:07.008Z\ntype: bug\n---\nbody\n")
+        );
+        // Reopened with a leftover timestamp: the line goes.
+        let fixed = sync_closed_line(
+            "---\nstatus: open\nclosed: 2026-01-01T00:00:00.000Z\n---\n",
+            now,
+        );
+        assert_eq!(fixed.as_deref(), Some("---\nstatus: open\n---\n"));
+        // Already consistent, or not a frontmatter document: untouched.
+        for text in [
+            "---\nstatus: open\n---\n",
+            "---\nstatus: closed\nclosed: 2026-01-01T00:00:00.000Z\n---\n",
+            "no frontmatter\nstatus: closed\n",
+            "---\nstatus: closed\n",
+        ] {
+            assert_eq!(sync_closed_line(text, now), None, "{text:?}");
+        }
+        // A `status:` line in the body is not frontmatter.
+        assert_eq!(
+            sync_closed_line("---\nstatus: open\n---\nstatus: closed\n", now),
+            None
+        );
+    }
 
     #[test]
     fn split_editor_words_handles_arguments_and_quoted_paths() {

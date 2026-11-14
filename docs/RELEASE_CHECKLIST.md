@@ -166,6 +166,11 @@ empty or a real GitHub user.
       (the same-second case is covered by
       `sync::tests::local_edit_in_the_same_second_as_the_last_pull_is_pushed`; by hand,
       run the close immediately after the sync in one command line).
+- [ ] Wrong repository: `.clove/sync-github.json` names `egeapak/clove` after the
+      first sync. `clove sync github egeapak/<another repo> --dry-run` is refused
+      with a message that names `egeapak/clove` and `--adopt-links`; nothing changes.
+- [ ] Delete the throwaway item's file locally and sync: the run notes that the
+      local item was deleted and does not create it again; the issue stays open.
 - [ ] Sync again and `--dry-run`: `0 new / 0 updated`, everything in sync, no
       duplicated comments on the issue.
 - [ ] A transient "local item links gh-N but the GitHub issue was not found" right
@@ -216,6 +221,20 @@ read with `tmux capture-pane -p`.
 - [ ] Help (`?`), filter menu (`f`), search (`/`).
 - [ ] Edit form (`e`): change a field on the throwaway item, `Ctrl-S` → it lands in
       the file; `q` exits cleanly. `clove tui </dev/null` errors without panicking.
+- [ ] Edit form does not revert outside changes: open `e` on the throwaway
+      item, and in another shell run `clove close <id>`. Change only the title,
+      `Ctrl-S` → `clove show <id>` has the new title and is still `closed`.
+      Open `e` again and `Ctrl-S` with no change → the status line says
+      `no changes to <id>` and `updated` in the file is the same.
+- [ ] Form error stays visible: at 80x24 (`tmux resize-window -t t -x 80 -y 24`),
+      open `e` on an item whose body is longer than 15 lines, type `nope` in
+      Deps, `Ctrl-S` → the red error is on screen above the key hint, and the
+      file is unchanged. In Body, `↑`/`↓` move between its lines.
+- [ ] Detail body: an item with a nested list, a table, a link, and a long
+      indented code block renders one line per nested item and per table row,
+      shows the link URL, and `PgDn` reaches the last body line.
+- [ ] Help on a short terminal (`-y 12`): the title reads `Help · ↑↓ scroll`
+      and `↓` reaches the `priority` row.
 - [ ] Form horizontal scroll: press `n` and type a title of about 100 characters.
       In `capture-pane -p`, the title scrolls behind a leading `…` and every
       field label stays in its column. `tmux display -p -t t '#{cursor_x}'`
