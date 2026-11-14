@@ -4,11 +4,20 @@
 //!   item files (DESIGN §13.4 profile) via the shared `clove_core::fixtures`
 //!   generator — the same one the criterion benches and perf-gate tests use.
 //! - `test-all` runs the workspace test suite with cargo-nextest, then the
-//!   doctests (nextest does not run them). The suite includes the fuzz seed
-//!   corpus replay in `clove-core`.
+//!   doctests (nextest does not run them). The suite replays the committed
+//!   fuzz seed corpora of all five fuzz targets (`tests/fuzz_corpus.rs` in
+//!   `clove-core` and in `clove-import`).
 //! - `test-bins` builds the `cloved` and plugin binaries that the daemon and
 //!   plugin suites of `clove-cli` spawn. It is the nextest setup script in
 //!   `.config/nextest.toml`, so it runs once per test run, before any test.
+//! - `publish-order` prints the crates.io publish order, one crate per line,
+//!   derived from the workspace dependency graph (`scripts/release/publish.sh`
+//!   reads it).
+//! - `guard-sdk-licenses`, `guard-no-web` and `guard-tls` are the dependency
+//!   tree guards that CI runs (see `guards.rs`).
+
+mod guards;
+mod publish;
 
 use camino::Utf8PathBuf;
 use clove_core::fixtures::write_fixtures;
@@ -19,12 +28,19 @@ fn main() -> anyhow::Result<()> {
         Some("bench-fixtures") => bench_fixtures(args.collect()),
         Some("test-all") => test_all(),
         Some("test-bins") => test_bins(),
+        Some("publish-order") => publish::print_order(),
+        Some("guard-sdk-licenses") => guards::sdk_licenses(),
+        Some("guard-no-web") => guards::no_web(),
+        Some("guard-tls") => guards::tls(),
         Some(other) => {
             eprintln!("xtask: unknown command `{other}`");
             std::process::exit(1);
         }
         None => {
-            eprintln!("usage: cargo xtask <bench-fixtures|test-all|test-bins>");
+            eprintln!(
+                "usage: cargo xtask <bench-fixtures|test-all|test-bins|publish-order|\
+                 guard-sdk-licenses|guard-no-web|guard-tls>"
+            );
             std::process::exit(1);
         }
     }

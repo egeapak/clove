@@ -244,12 +244,7 @@ jobs:
       # not link the HTTP server or the embedded SPA, and the opt-in build must
       # still compile. The first step asserts the default tree has no clove-web.
       - name: default builds carry no web server
-        run: |
-          tree=$(cargo tree -p clove-cli -p cloved -e normal) || exit 1
-          if printf '%s\n' "$tree" | grep -q 'clove-web'; then
-            echo "clove-web is in the default dependency tree of clove-cli/cloved" >&2
-            exit 1
-          fi
+        run: cargo xtask guard-no-web
       - name: clove and cloved with the web feature
         run: cargo check -p clove-cli -p cloved --features clove-cli/web,cloved/web
       # The plugin SDK (clove-types, clove-plugin, clove-plugin-echo) is MIT OR
@@ -265,21 +260,7 @@ jobs:
           cargo clippy -p clove-types -p clove-plugin -p clove-plugin-echo --all-targets -- -D warnings
           cargo test -p clove-types -p clove-plugin
       - name: SDK license guard (no copyleft dependency)
-        run: |
-          set -uo pipefail
-          for p in clove-types clove-plugin clove-plugin-echo; do
-            for f in "" --all-features; do
-              out=$(cargo tree -p "$p" $f -e normal,build --target all --prefix none --format '{p} {l}') || exit 1
-              if ! printf '%s\n' "$out" | grep -q '^clove-types v.* MIT OR Apache-2.0$'; then
-                echo "guard broken: clove-types row missing for $p $f" >&2
-                exit 1
-              fi
-              if printf '%s\n' "$out" | grep -i 'GPL'; then
-                echo "$p ($f) depends on a copyleft-licensed crate" >&2
-                exit 1
-              fi
-            done
-          done
+        run: cargo xtask guard-sdk-licenses
       # The registry client (ureq -> rustls) must stay on `ring`. A rustls with
       # default features unifies the tree onto aws-lc-sys and triples the binary,
       # so the workspace pins `ring` explicitly (root Cargo.toml).
@@ -293,41 +274,7 @@ jobs:
       # `jsonschema` dev-dependency, and it stays in Cargo.lock through
       # clove-sync-github's octocrab either way.
       - name: registry TLS stays on ring (no aws-lc-sys via normal edges)
-        run: |
-          set -uo pipefail
-          # Guard against a silently broken invocation. `cargo tree` happily
-          # ignores a typo'd package and prints an unrelated tree; `cargo pkgid`
-          # fails loudly (exit 101), so it is what actually catches a check that
-          # has stopped checking.
-          if ! cargo pkgid -p clove-cli >/dev/null 2>&1; then
-            echo "guard failed: 'clove-cli' is not a package in this workspace."
-            echo "This check has stopped checking what it claims to - fix the check, not the code."
-            exit 1
-          fi
-          # Positive control: the registry client must be present at all, or an
-          # "aws-lc-sys is absent" result would be vacuously true.
-          if ! cargo tree -e normal -i ring 2>/dev/null | grep -q '^ring'; then
-            echo "positive control failed: ring is absent from the normal tree."
-            echo "Either the registry client was removed, or this check is broken."
-            exit 1
-          fi
-          # `cargo tree -i` exits 0 with "nothing to print" on stderr when the
-          # package is in the lockfile but filtered out of this tree, and 101 when
-          # it is absent from the lockfile entirely. Both mean "not reachable";
-          # anything else means the check did not run.
-          found=$(cargo tree -e normal -i aws-lc-sys 2>/dev/null)
-          status=$?
-          if [ "$status" -ne 0 ] && [ "$status" -ne 101 ]; then
-            echo "cargo tree failed unexpectedly (exit $status) - result not conclusive."
-            exit 1
-          fi
-          if [ -n "$found" ]; then
-            echo "aws-lc-sys is reachable through normal edges:"
-            echo "$found"
-            echo "The rustls 'ring' pin in the root Cargo.toml has been defeated by feature unification."
-            exit 1
-          fi
-          echo "ok: ring present, aws-lc-sys absent from all normal dependency edges"
+        run: cargo xtask guard-tls
       # Informational: track the shipped binary size. The release profile is fat
       # LTO + codegen-units=1 + panic=abort + strip (see root Cargo.toml). cargo
       # forces the test/bench harness back to unwind, so `cargo test --release`

@@ -29,20 +29,21 @@ while [ $# -gt 0 ]; do
 	shift
 done
 
-# The order of docs/RELEASE.md §3. clove-cli goes last, after the plugin crates
-# that `clove plugin install` resolves by name.
-crates=(
-	clove-types clove-core clove-plugin clove-index clove-import clove-ipc clove-tui
-	clove-engine clove-service clove-mcp clove-web cloved
-	clove-sync-github clove-import-tk clove-import-beads
-	clove-cli
-)
-
 fail() { echo "error: $*" >&2; exit 1; }
 
 [ "$dry_run" = 1 ] && [ -n "$from" ] && fail "--from does not apply to --dry-run"
 
 cd "$(git rev-parse --show-toplevel)"
+
+# The publish order comes from the workspace dependency graph (docs/RELEASE.md
+# §3, xtask/src/publish.rs), never from a list kept here: every crate after the
+# crates it depends on, and clove-cli last, after the plugin crates that
+# `clove plugin install` resolves by name.
+order=$(cargo xtask publish-order) || fail "cargo xtask publish-order failed"
+# shellcheck disable=SC2206  # one crate name per line, no spaces or globs
+crates=($order)
+[ "${#crates[@]}" -gt 0 ] || fail "cargo xtask publish-order printed no crates"
+[ "${crates[${#crates[@]}-1]}" = clove-cli ] || fail "clove-cli must be the last crate to publish, got: ${crates[*]}"
 version=$(sed -n '/^\[workspace.package\]/,/^\[/{s/^version = "\(.*\)"/\1/p;}' Cargo.toml | head -1)
 [ -n "$version" ] || fail "cannot read the workspace version"
 tag="v$version"

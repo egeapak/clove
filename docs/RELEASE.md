@@ -87,9 +87,7 @@ Names can be claimed by anyone at any time. Right before publishing:
 # for *every* crate, so without `-A` this loop reports TAKEN for all sixteen —
 # including the ones that are genuinely free.
 UA="clove-release-check (+https://github.com/egeapak/clove)"
-for c in clove-types clove-core clove-plugin clove-index clove-import clove-ipc \
-         clove-tui clove-engine clove-service clove-mcp clove-web cloved clove-cli \
-         clove-sync-github clove-import-tk clove-import-beads; do
+for c in $(cargo xtask publish-order); do    # every publishable crate, from the workspace
   code=$(curl -s -A "$UA" -o /dev/null -w '%{http_code}' "https://crates.io/api/v1/crates/$c")
   case "$code" in
     404) verdict=FREE ;;
@@ -150,59 +148,29 @@ release that first documents the `clove plugin install` shorthand for it.
 
 Each crate must be on crates.io **before** anything that depends on it, because
 `cargo publish` rewrites path deps to registry version deps and verifies the
-build against the registry. The workspace's internal edges are:
+build against the registry.
 
-```
-clove-types        → (none)
-clove-core         → clove-types
-clove-plugin       → clove-types
-clove-index        → clove-types, clove-core
-clove-import       → clove-types, clove-core, clove-plugin
-clove-ipc          → clove-types, clove-core
-clove-tui          → clove-types, clove-core
-clove-engine       → clove-types, clove-core, clove-index, clove-ipc
-clove-service      → clove-types, clove-core, clove-ipc, clove-engine
-clove-mcp          → clove-types, clove-core, clove-ipc, clove-engine, clove-service
-clove-web          → clove-types, clove-core, clove-index, clove-engine
-cloved             → clove-types, clove-core, clove-index, clove-ipc, clove-web
-clove-cli          → clove-types, clove-core, clove-plugin, clove-index, clove-import, clove-ipc, clove-engine, clove-service, clove-mcp, clove-tui, clove-web
-clove-sync-github  → clove-types, clove-plugin, clove-import (github)
-clove-import-tk    → clove-types, clove-plugin, clove-import
-clove-import-beads → clove-types, clove-plugin, clove-import
+The order is not written down anywhere: it is computed from the workspace.
+
+```sh
+cargo xtask publish-order    # one crate per line, in publish order
 ```
 
-> Regenerate this table from the source of truth rather than editing it by hand
-> — it went stale once already when `clove-engine` was added: the table and the
-> publish order below both still omitted it, which would have failed the release
-> at `cargo publish -p clove-mcp`, seven crates in and unrepeatable:
->
-> ```sh
-> cargo metadata --no-deps --format-version 1 \
->   | jq -r '.packages[] | select(.publish != []) | "\(.name) → \([.dependencies[] | select(.kind == null) | .name] | map(select(startswith("clove"))) | unique | join(", "))"'
-> ```
->
-> `select(.kind == null)` keeps normal dependencies only — a dev-dependency does
-> not constrain publish order, and several crates dev-depend on siblings they do
-> not otherwise use.
+`publish-order` (`xtask/src/publish.rs`) reads `cargo metadata`, takes every
+crate that is not `publish = false`, and sorts them so that each crate comes
+after the workspace crates it depends on. `clove-cli` always comes last (§2a).
+A new crate is in the order as soon as it is in the workspace, and the xtask
+test `the_workspace_order_is_complete_and_valid` fails if the order ever misses
+a crate or puts one before a dependency. A hand-kept list here went stale twice
+(it lost `clove-engine`, then `clove-service`), and a wrong order fails the
+release several irreversible publishes in.
 
-A valid topological publish order:
+To see the internal edges:
 
-1. `clove-types`
-2. `clove-core`
-3. `clove-plugin`
-4. `clove-index`
-5. `clove-import`
-6. `clove-ipc`
-7. `clove-tui`
-8. `clove-engine`         ← must precede `clove-service`, `clove-mcp`, `clove-web`, and `clove-cli`
-9. `clove-service`        ← must precede `clove-mcp` and `clove-cli`
-10. `clove-mcp`
-11. `clove-web`
-12. `cloved`
-13. `clove-sync-github`   ← name-reservation gate (§2a)
-14. `clove-import-tk`     ← name-reservation gate (§2a)
-15. `clove-import-beads`  ← name-reservation gate (§2a)
-16. `clove-cli`
+```sh
+cargo metadata --no-deps --format-version 1 \
+  | jq -r '.packages[] | select(.publish != []) | "\(.name) → \([.dependencies[] | select(.kind == null) | .name] | map(select(startswith("clove"))) | unique | join(", "))"'
+```
 
 > `xtask` (`publish = false`), the `clove-plugin-echo` test fixture
 > (`publish = false`), and the `fuzz/` crate (a separate excluded workspace) are
@@ -210,14 +178,14 @@ A valid topological publish order:
 >
 > The three `clove-{sync-github,import-tk,import-beads}` plugins carry
 > `publish = true`. They are graph leaves — they depend only on `clove-types`,
-> `clove-core`, `clove-plugin`, and `clove-import` (all live by step 5), and
-> nothing in the workspace depends on them — so they may be published at any
-> point after `clove-import`. They are placed **immediately before `clove-cli`**
-> deliberately, per §2a: `clove-cli` is what teaches users
+> `clove-core`, `clove-plugin`, and `clove-import`, and nothing in the workspace
+> depends on them — so the dependency graph alone would let them go after
+> `clove-cli`. `publish-order` holds `clove-cli` back until every other crate is
+> out, per §2a: `clove-cli` is what teaches users
 > `clove plugin install sync-github`, and that shorthand must not be live before
 > the name it resolves to is ours.
 
-Internal deps already declare both `path` **and** `version = "0.3.0"` (see
+Internal deps already declare both `path` **and** the workspace `version` (see
 `[workspace.dependencies]` in the root `Cargo.toml`), which is exactly what
 crates.io requires — no Cargo.toml surgery is needed before publishing.
 
@@ -240,9 +208,10 @@ crates.io requires — no Cargo.toml surgery is needed before publishing.
 > binaries are built with `clove-cli/full,cloved/full`, which include it.
 > `crates/clove-web/tests/packaging.rs` guards the packaging invariants.
 
-`scripts/release/publish.sh` runs the whole sequence below: it refuses unless
-`HEAD` is the tagged commit with a clean tracked tree and the web UI assets are
-downloadable, publishes in this order, and stops at the first failure
+`scripts/release/publish.sh` runs the whole sequence: it refuses unless `HEAD`
+is the tagged commit with a clean tracked tree and the web UI assets are
+downloadable, publishes one crate at a time in the order that
+`cargo xtask publish-order` prints (§3), and stops at the first failure
 (`--from <crate>` resumes). Start with its dry run, which verifies every crate
 against the others (dependents cannot be dry-run one by one before their
 dependencies are live):
@@ -251,29 +220,17 @@ dependencies are live):
 scripts/release/publish.sh --dry-run
 ```
 
-The real publish, in order — what `publish.sh` runs. Modern cargo **waits** for
-each crate to become available on the index before returning, so the next publish
-resolves cleanly:
+Then the real publish. Modern cargo **waits** for each crate to become available
+on the index before returning, so the next publish resolves cleanly:
 
 ```sh
-cargo publish -p clove-types
-cargo publish -p clove-core
-cargo publish -p clove-plugin  # after clove-core; needed by clove-cli + the plugins
-cargo publish -p clove-index
-cargo publish -p clove-import
-cargo publish -p clove-ipc
-cargo publish -p clove-tui
-cargo publish -p clove-engine  # the read tier; clove-mcp/clove-web/clove-cli all need it
-cargo publish -p clove-mcp
-cargo publish -p clove-web     # needs the GitHub Release's web UI assets (see above)
-cargo publish -p cloved
-# --- name-reservation gate (§2a): these three go BEFORE clove-cli ---
-cargo publish -p clove-sync-github
-cargo publish -p clove-import-tk
-cargo publish -p clove-import-beads
-# --- only now is `clove plugin install <name>` safe to ship ---
-cargo publish -p clove-cli
+scripts/release/publish.sh
 ```
+
+Do not publish by hand from a list. To publish one crate yourself, take its
+place from `cargo xtask publish-order`; the three plugin crates
+(`clove-sync-github`, `clove-import-tk`, `clove-import-beads`) go **before**
+`clove-cli` (§2a).
 
 If a publish fails midway, fix the cause and **resume from the failed crate** —
 the already-published crates are permanent and must not (and cannot) be
@@ -294,16 +251,16 @@ clove version
 ## 4a. Post-publish verification
 
 Publishing is irreversible, so verify what actually landed rather than assuming
-the uploads matched the plan. Run this from a scratch directory, **not** the
-repo — the point is to exercise the registry, not the local workspace.
+the uploads matched the plan. Take the crate list in the repo, then run the rest
+from a scratch directory, **not** the repo — the point is to exercise the
+registry, not the local workspace.
 
 ```sh
+CRATES=$(cargo xtask publish-order | tr '\n' ' ')   # in the repo; then cd to a scratch dir
 UA="clove-release-check (+https://github.com/egeapak/clove)"
 
 # 1. Every crate is live at the released version.
-for c in clove-types clove-core clove-plugin clove-index clove-import clove-ipc \
-         clove-tui clove-engine clove-service clove-mcp clove-web cloved clove-cli \
-         clove-sync-github clove-import-tk clove-import-beads; do
+for c in $CRATES; do
   v=$(curl -s -A "$UA" "https://crates.io/api/v1/crates/$c" \
       | grep -o '"max_version":"[^"]*"' | head -1)
   echo "$c -> ${v:-MISSING}"
