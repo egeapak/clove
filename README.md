@@ -93,8 +93,8 @@ never needed to *run* clove. Building with `web`:
 
 - **from crates.io** (`cargo install clove-cli --features web`) downloads the
   built web UI for that exact version from its GitHub Release at build time and
-  checks it against the checksum published beside it (integrity, not
-  authenticity: both come from the release) — it needs network access, not Node. Offline or packager
+  checks it against the SHA-256 that the crate itself pins (so a changed
+  release asset fails the build) — it needs network access, not Node. Offline or packager
   builds can point `CLOVE_WEB_DIST_DIR` at a built `dist/` directory instead;
 - **from git** builds the SPA from source and so needs `npm` on your machine;
   without it the binary falls back to a placeholder page while the JSON API stays

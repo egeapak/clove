@@ -38,6 +38,13 @@ caught, add the step in the same change (see `CLAUDE.md`).
       the checksum, then `tar -tzf` it: `index.html`, `_app/` and
       `THIRD_PARTY_LICENSES.txt` (the bundled npm packages' notices) at the root,
       no `._*` files, and more than a handful of files.
+- [ ] **Web UI pin (after the crates are published)** — the published
+      `clove-web` carries the archive's digest. Run
+      `cargo download clove-web==X.Y.Z -x` (or unpack the `.crate` from
+      crates.io) and check that the last line of `build/web-dist.sha256` equals
+      the digest in the Release's `clove-web-dist-vX.Y.Z.tar.gz.sha256`. In the
+      checkout, `git status` must show `crates/clove-web/build/web-dist.sha256`
+      unchanged after `publish.sh`.
 - [ ] **Source offer (AGPL-3.0 §13)** — `clove version` prints
       `license: AGPL-3.0-only; source: https://github.com/egeapak/clove/tree/vX.Y.Z`,
       that URL opens, and the web UI's top bar shows the source link (`</>`)

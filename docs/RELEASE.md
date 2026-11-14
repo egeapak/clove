@@ -226,13 +226,26 @@ crates.io requires — no Cargo.toml surgery is needed before publishing.
 ## 4. Publish, one crate at a time
 
 > **`clove-web` downloads its web UI.** The crate does not carry the built SPA:
-> `build.rs` fetches `clove-web-dist-v<version>.tar.gz` and its `.sha256` from the
-> `v<version>` GitHub Release, verifies the checksum, and embeds the result. So
-> `cargo publish -p clove-web` — which builds the crate from its package to verify
-> it — **fails until the GitHub Release is published** with those two assets
-> (`publish.sh` checks this first). Nothing generated rides in the `.crate`, so
-> no `--allow-dirty` is needed. Offline or packager builds point
-> `CLOVE_WEB_DIST_DIR` at a built `dist/`; docs.rs builds the placeholder.
+> `build.rs` fetches `clove-web-dist-v<version>.tar.gz` from the `v<version>`
+> GitHub Release, verifies it against the SHA-256 **pinned inside the crate**
+> (`build/web-dist.sha256`), and embeds the result. The build does not download
+> the `.sha256` asset: a checksum served beside the archive proves nothing
+> against whoever can replace the archive. So `cargo publish -p clove-web` —
+> which builds the crate from its package to verify it — **fails until the
+> GitHub Release is published** with the archive (`publish.sh` checks this
+> first). Offline or packager builds point `CLOVE_WEB_DIST_DIR` at a built
+> `dist/`; docs.rs builds the placeholder.
+>
+> **The pin is written at publish time.** The archive is built from the tag, so
+> its digest cannot be in the tagged commit. In the repository
+> `build/web-dist.sha256` holds only comments. `publish.sh` checks the release
+> archive against its `.sha256`, appends that digest to the file, runs
+> `cargo publish -p clove-web --allow-dirty` (the tracked tree is clean before,
+> so the pin is the only difference from the tag), and restores the file. Do
+> not publish `clove-web` by hand: a package without the pin fails its own
+> verify build with "pins no digest". If you must, append
+> `<digest>  clove-web-dist-v<version>.tar.gz` to the file yourself, publish
+> with `--allow-dirty`, and run `git checkout -- crates/clove-web/build/web-dist.sha256`.
 >
 > The web server is the `web` feature of `clove-cli` and `cloved`, **off by
 > default**: `cargo install clove-cli` has no `clove serve` UI, and
@@ -458,7 +471,8 @@ clove version`. A new platform archive in `release.yml` needs a matching
 - **Never delete or edit the GitHub Release or its `clove-web-dist-*` assets once
   `clove-web` is on crates.io.** That version's `--features web` build downloads
   them, so removing them breaks it permanently (yanking does not help existing
-  users); the checksum is the only guard, so a replaced asset fails the build.
+  users). The crate pins the archive's digest, so a replaced asset fails the
+  build; it cannot change what a build embeds.
 - **Wrong tag?** Before any crate is published, delete and re-push, or cut a new tag:
   `git tag -d v0.3.0 && git push origin :refs/tags/v0.3.0`.
 

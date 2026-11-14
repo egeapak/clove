@@ -175,6 +175,36 @@ fn verify_accepts_the_right_digest_and_names_a_mismatch() {
     assert!(err.contains(GOOD_DIGEST), "{err}");
 }
 
+/// The expected digest comes from the package, so a replaced release asset
+/// (with a matching replaced `.sha256` beside it) cannot pass.
+#[test]
+fn the_expected_digest_comes_from_the_crate_pin() {
+    let pinned = format!("# a comment\n\n{GOOD_DIGEST}  clove-web-dist-v1.tar.gz\n");
+    assert_eq!(fetch::expected_digest(&pinned).unwrap(), GOOD_DIGEST);
+    assert_eq!(fetch::pinned_sha256("# only a comment\n").unwrap(), None);
+    let err = fetch::expected_digest("# only a comment\n").unwrap_err();
+    assert!(err.contains("pins no digest"), "{err}");
+    assert!(fetch::pinned_sha256("not-a-digest\n").is_err());
+
+    let build_rs = std::fs::read_to_string(crate_dir().join("build.rs")).unwrap();
+    assert!(
+        build_rs.contains(r#"fetch::expected_digest(include_str!("build/web-dist.sha256"))"#),
+        "build.rs must verify the download against the digest pinned in the package"
+    );
+    assert!(
+        !build_rs.contains("parse_sha256") && !build_rs.contains("checksum_name"),
+        "build.rs must not take the expected digest from a downloaded file"
+    );
+}
+
+/// The repository copy pins nothing: a digest belongs to one release's
+/// archive, and `publish.sh` writes it only into the package it uploads.
+#[test]
+fn the_repository_pin_file_holds_no_digest() {
+    let pin = std::fs::read_to_string(crate_dir().join("build/web-dist.sha256")).unwrap();
+    assert_eq!(fetch::pinned_sha256(&pin).unwrap(), None);
+}
+
 /// A gzipped tar of `(path, bytes)` files, built by hand so a test can include
 /// entries a well-behaved packer never would.
 fn tar_gz(entries: &[(&str, &[u8])]) -> Vec<u8> {
