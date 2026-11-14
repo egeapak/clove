@@ -334,11 +334,11 @@ git push origin v0.3.0
 
 ## 6. GitHub Release binaries (CI-driven)
 
-Both CI systems trigger on a `v*` tag and build the native binaries — `clove` and
+The release workflow triggers on a `v*` tag and builds the native binaries — `clove` and
 `cloved` plus the three plugin binaries (`clove-sync-github`, `clove-import-tk`,
 `clove-import-beads`) — **carrying the real embedded SPA** and are built
-`--features clove-cli/full,cloved/full`, so they include the `web` feature. In
-GitHub Actions a `web-dist` job runs `npm run build` **once** into
+`--features clove-cli/full,cloved/full`, so they include the `web` feature. A
+`web-dist` job runs `npm run build` **once** into
 `crates/clove-web/dist`; the platform jobs download that tree and compile with
 `CLOVE_SKIP_WEB_BUILD=1`. The same job packs it into
 `clove-web-dist-v<version>.tar.gz` (+ `.sha256`, via
@@ -347,13 +347,10 @@ binaries and the SPA a published `clove-web` downloads are byte-identical. Shipp
 lets a binary-install user run `clove sync github` / `clove import beads` without
 a separate `cargo install`:
 
-- **`.github/workflows/release.yml`** (GitHub Actions, canonical) — builds Linux,
+- **`.github/workflows/release.yml`** (GitHub Actions) — builds Linux,
   macOS arm64 + x86_64, and Windows; uploads tarballs/zips **plus SHA256
   checksums** to the GitHub Release for the tag. `permissions: contents: write`
   is already set.
-- **`.woodpecker/release.yml`** (`when: event: tag`) — cross-builds the macOS
-  `universal2` + Windows-gnu artifacts; its publish step is commented out
-  pending a forge token secret.
 
 After the tag push:
 
