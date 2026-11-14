@@ -2,11 +2,12 @@
 schema: 1
 id: clov-NEV2CAY8
 title: clove --clove-dir with a path not named .clove splits the store
-status: in_progress
+status: closed
 type: bug
 priority: 2
 created: 2026-11-14T19:03:23.180Z
-updated: 2026-11-14T19:03:34.006Z
+updated: 2026-11-14T19:44:49.774Z
+closed: 2026-11-14T19:44:49.774Z
 labels: []
 deps: []
 relates: []

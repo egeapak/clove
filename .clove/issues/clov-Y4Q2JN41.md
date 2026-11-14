@@ -2,11 +2,12 @@
 schema: 1
 id: clov-Y4Q2JN41
 title: DESIGN.md, CLAUDE.md and agent-doc describe commands, flags and envelope keys that do not exist
-status: in_progress
+status: closed
 type: docs
 priority: 2
 created: 2026-11-14T19:25:57.690Z
-updated: 2026-11-14T19:25:57.702Z
+updated: 2026-11-14T19:44:50.246Z
+closed: 2026-11-14T19:44:50.246Z
 labels: []
 deps: []
 relates: []

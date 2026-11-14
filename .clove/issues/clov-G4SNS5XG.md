@@ -2,11 +2,12 @@
 schema: 1
 id: clov-G4SNS5XG
 title: Human CLI output prints terminal control sequences from item text
-status: in_progress
+status: closed
 type: bug
 priority: 2
 created: 2026-11-14T19:04:50.851Z
-updated: 2026-11-14T19:04:50.906Z
+updated: 2026-11-14T19:44:49.810Z
+closed: 2026-11-14T19:44:49.810Z
 labels: []
 deps: []
 relates: []

@@ -2,11 +2,12 @@
 schema: 1
 id: clov-3JP6104B
 title: CLI accepts conflicting or empty arguments and ignores them
-status: in_progress
+status: closed
 type: bug
 priority: 2
 created: 2026-11-14T19:25:57.420Z
-updated: 2026-11-14T19:25:57.470Z
+updated: 2026-11-14T19:44:50.090Z
+closed: 2026-11-14T19:44:50.090Z
 labels: []
 deps: []
 relates: []

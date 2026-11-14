@@ -2,11 +2,12 @@
 schema: 1
 id: clov-J7YEP42H
 title: Human-format list commands truncate at the window with no notice
-status: in_progress
+status: closed
 type: bug
 priority: 2
 created: 2026-11-14T19:05:05.018Z
-updated: 2026-11-14T19:05:05.150Z
+updated: 2026-11-14T19:44:49.866Z
+closed: 2026-11-14T19:44:49.866Z
 labels: []
 deps: []
 relates: []

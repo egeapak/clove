@@ -2,11 +2,12 @@
 schema: 1
 id: clov-C6QG1B36
 title: 'clove edit in an editor bypasses the store: stale index, no envelope, invalid file left in place'
-status: in_progress
+status: closed
 type: bug
 priority: 2
 created: 2026-11-14T19:17:54.474Z
-updated: 2026-11-14T19:17:54.562Z
+updated: 2026-11-14T19:44:50.026Z
+closed: 2026-11-14T19:44:50.026Z
 labels: []
 deps: []
 relates: []

@@ -2,11 +2,12 @@
 schema: 1
 id: clov-ER8EXPSR
 title: clove import --dry-run accepts a file that the real import rejects half-way
-status: in_progress
+status: closed
 type: bug
 priority: 2
 created: 2026-11-14T19:07:30.582Z
-updated: 2026-11-14T19:07:30.646Z
+updated: 2026-11-14T19:44:49.966Z
+closed: 2026-11-14T19:44:49.966Z
 labels: []
 deps: []
 relates: []

@@ -2,11 +2,12 @@
 schema: 1
 id: clov-X18KXN6W
 title: clove export leaves out unparseable item files without a warning
-status: in_progress
+status: closed
 type: bug
 priority: 2
 created: 2026-11-14T19:06:37.406Z
-updated: 2026-11-14T19:06:37.482Z
+updated: 2026-11-14T19:44:49.898Z
+closed: 2026-11-14T19:44:49.898Z
 labels: []
 deps: []
 relates: []

@@ -2,11 +2,12 @@
 schema: 1
 id: clov-J3GQVWZQ
 title: clove edit --body and --body-file set the body without an editor
-status: in_progress
+status: closed
 type: feature
 priority: 2
 created: 2026-11-14T19:17:43.240Z
-updated: 2026-11-14T19:17:43.366Z
+updated: 2026-11-14T19:44:49.994Z
+closed: 2026-11-14T19:44:49.994Z
 labels: []
 deps: []
 relates: []

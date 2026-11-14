@@ -599,3 +599,64 @@ fn json_list_rows_have_the_same_keys_on_every_tier() {
     let row = lean["data"][0].as_object().unwrap();
     assert_eq!(row.len(), 2, "{lean}");
 }
+
+/// Where the arguments forwarded to an `import`/`export`/`sync` provider start:
+/// at the first token after the provider that is not a clove global flag.
+#[test]
+fn provider_arguments_start_at_the_first_non_global_token() {
+    let dir = init_repo();
+    new_item(dir.path(), "one", &[]);
+
+    // Directly after the provider, the host still reads a global flag.
+    clove(dir.path())
+        .args(["export", "jsonl", "--no-index", "--out", "a.jsonl"])
+        .assert()
+        .success();
+    assert!(dir.path().join("a.jsonl").exists());
+
+    // After the first provider argument, a global flag is the provider's.
+    let out = clove(dir.path())
+        .args(["export", "jsonl", "--out", "b.jsonl", "--no-index"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(stderr(&out).contains("before the provider"), "{out:?}");
+    assert!(!dir.path().join("b.jsonl").exists());
+}
+
+/// `init` does not write through a symlinked `.gitattributes`.
+#[cfg(unix)]
+#[test]
+fn init_refuses_a_symlinked_gitattributes() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = dir.path().join("outside.txt");
+    std::fs::write(&outside, "keep me\n").unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    std::os::unix::fs::symlink(&outside, repo.join(".gitattributes")).unwrap();
+
+    let out = clove(&repo)
+        .args(["init", "--prefix", "proj", "--merge-driver"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(5), "{out:?}");
+    assert!(stderr(&out).contains("symlink"), "{out:?}");
+    assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep me\n");
+}
+
+/// `new --body-file` reads the body from a file.
+#[test]
+fn new_reads_the_body_from_a_file() {
+    let dir = init_repo();
+    std::fs::write(dir.path().join("body.md"), "from a file\n").unwrap();
+    let id = new_item(dir.path(), "with body", &["--body-file", "body.md"]);
+    let shown = json_ok(clove(dir.path()).args(["show", &id]));
+    assert_eq!(
+        shown["data"]["body"].as_str().unwrap().trim(),
+        "from a file"
+    );
+    clove(dir.path())
+        .args(["new", "both", "-b", "x", "--body-file", "body.md"])
+        .assert()
+        .code(1);
+}

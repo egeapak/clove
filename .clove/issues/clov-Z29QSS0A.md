@@ -2,11 +2,12 @@
 schema: 1
 id: clov-Z29QSS0A
 title: clove agent-doc --out writes no file when the format is JSON
-status: in_progress
+status: closed
 type: bug
 priority: 2
 created: 2026-11-14T19:25:57.500Z
-updated: 2026-11-14T19:25:57.546Z
+updated: 2026-11-14T19:44:50.142Z
+closed: 2026-11-14T19:44:50.142Z
 labels: []
 deps: []
 relates: []

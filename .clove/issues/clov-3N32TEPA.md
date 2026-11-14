@@ -2,11 +2,12 @@
 schema: 1
 id: clov-3N32TEPA
 title: clove export holds every item body in memory
-status: in_progress
+status: closed
 type: chore
 priority: 2
 created: 2026-11-14T19:06:37.505Z
-updated: 2026-11-14T19:06:37.586Z
+updated: 2026-11-14T19:44:49.934Z
+closed: 2026-11-14T19:44:49.934Z
 labels: []
 deps: []
 relates: []

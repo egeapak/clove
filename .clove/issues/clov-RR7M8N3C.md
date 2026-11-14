@@ -2,11 +2,12 @@
 schema: 1
 id: clov-RR7M8N3C
 title: Usage errors print no JSON envelope, and a non-UTF-8 argument panics
-status: in_progress
+status: closed
 type: bug
 priority: 2
 created: 2026-11-14T19:25:57.574Z
-updated: 2026-11-14T19:25:57.634Z
+updated: 2026-11-14T19:44:50.178Z
+closed: 2026-11-14T19:44:50.178Z
 labels: []
 deps: []
 relates: []

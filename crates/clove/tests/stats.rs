@@ -350,11 +350,19 @@ fn the_history_window_flags_require_history() {
             stderr.contains("--history"),
             "{args:?}: the error must name the flag that is missing: {stderr}"
         );
-        // The report must not be printed alongside the error.
-        assert!(
-            String::from_utf8_lossy(&out.stdout).trim().is_empty(),
-            "{args:?}: printed a report anyway"
-        );
+        // The report must not be printed alongside the error. Under
+        // `--format json`, stdout carries the error envelope and nothing else.
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        if args.contains(&"json") {
+            let v: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+            assert_eq!(v["ok"], false, "{args:?}: {stdout}");
+            assert_eq!(v["error"]["code"], "USAGE_ERROR", "{args:?}: {stdout}");
+        } else {
+            assert!(
+                stdout.trim().is_empty(),
+                "{args:?}: printed a report anyway"
+            );
+        }
     }
 
     // With `--history` they are accepted, and a live report still needs none of
