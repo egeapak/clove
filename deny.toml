@@ -82,6 +82,13 @@ ignore = [
     # alternatives (`fontdue`, `cosmic-text`) still pull `ttf-parser` themselves,
     # so no swap actually clears this. Revisit if screenshotting moves to skrifa.
     "RUSTSEC-2026-0192",
+    # rmcp < 3.9: the built-in Streamable HTTP *clients* buffer response bodies
+    # with no size limit. clove builds rmcp with `default-features = false` and
+    # only `server`, `macros`, `transport-io`, `schemars` (root Cargo.toml): the
+    # stdio MCP server. Neither HTTP client feature is compiled, so the affected
+    # code is not in any clove binary. Remove this entry when rmcp moves to 3.9+
+    # (a major-version API change).
+    "RUSTSEC-2026-0462",
 ]
 
 [sources]
