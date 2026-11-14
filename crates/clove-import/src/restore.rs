@@ -515,7 +515,10 @@ mod tests {
         let plan = plan_restore(&items, &store, false).unwrap();
         assert_eq!((plan.would_create.len(), plan.would_skip.len()), (1, 1));
         let plan = plan_restore(&items, &store, true).unwrap();
-        assert_eq!((plan.would_create.len(), plan.would_overwrite.len()), (1, 1));
+        assert_eq!(
+            (plan.would_create.len(), plan.would_overwrite.len()),
+            (1, 1)
+        );
 
         let report = apply_restore(&items, &store, false).unwrap();
         assert_eq!((report.created, report.skipped), (1, 1));

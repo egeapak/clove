@@ -818,11 +818,20 @@ mod tests {
     #[test]
     fn missing_provider_hint_names_every_plugin_that_can_serve_it() {
         let hint = missing_provider_hint("import", "github");
-        assert!(hint.contains("`clove plugin install import-github`"), "{hint}");
-        assert!(hint.contains("`clove plugin install sync-github`"), "{hint}");
+        assert!(
+            hint.contains("`clove plugin install import-github`"),
+            "{hint}"
+        );
+        assert!(
+            hint.contains("`clove plugin install sync-github`"),
+            "{hint}"
+        );
         // `sync` has no fallback, so its hint names one crate only.
         let hint = missing_provider_hint("sync", "github");
-        assert!(hint.ends_with("`clove plugin install sync-github`"), "{hint}");
+        assert!(
+            hint.ends_with("`clove plugin install sync-github`"),
+            "{hint}"
+        );
     }
 
     #[test]

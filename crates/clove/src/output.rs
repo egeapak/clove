@@ -223,7 +223,11 @@ mod tests {
             &["-f", "json", "show"],
             &["-fjson", "show"],
         ] {
-            assert_eq!(requested_format(&argv(args)), OutputFormat::Json, "{args:?}");
+            assert_eq!(
+                requested_format(&argv(args)),
+                OutputFormat::Json,
+                "{args:?}"
+            );
         }
         // After `--` the tokens are positionals, not flags.
         if std::env::var("CLOVE_FORMAT").is_err() {
