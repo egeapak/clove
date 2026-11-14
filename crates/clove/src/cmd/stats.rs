@@ -77,6 +77,18 @@ pub fn run(
 
 /// Print the persisted snapshot series (`--history`).
 fn show_history(ctx: &Ctx, format: OutputFormat, args: &StatsArgs) -> Result<(), CloveError> {
+    // The history query drops a `since` it cannot parse and returns the whole
+    // series, so a mistyped bound must be refused here rather than ignored.
+    if let Some(since) = &args.since {
+        if clove_types::parse_rfc3339(since).is_none() {
+            return Err(CloveError::InvalidField {
+                field: "--since".to_owned(),
+                reason: format!(
+                    "`{since}` is not an RFC 3339 timestamp (for example 2026-01-31T00:00:00Z)"
+                ),
+            });
+        }
+    }
     if !ctx.db_path.exists() {
         // No index yet → no history. Empty series rather than an error.
         match format {

@@ -12,23 +12,38 @@ use crate::cli::AgentDocArgs;
 use crate::output::print_json_success;
 
 pub fn run(format: OutputFormat, args: AgentDocArgs) -> Result<(), CloveError> {
+    let json = matches!(format, OutputFormat::Json | OutputFormat::Jsonl);
     if args.check {
-        return check(args.file.as_deref());
+        let (path, schema) = check(args.file.as_deref())?;
+        if json {
+            print_json_success(
+                json!({ "file": path.as_str(), "schema": schema }),
+                json!({ "warnings": [] }),
+            );
+        }
+        return Ok(());
     }
 
     let doc = generate();
-    match format {
-        OutputFormat::Json | OutputFormat::Jsonl => print_json_success(
-            json!({ "schema": CURRENT_SCHEMA_VERSION, "markdown": doc }),
-            json!({ "warnings": [] }),
-        ),
-        OutputFormat::Human => match &args.out {
-            Some(path) => std::fs::write(path, &doc).map_err(|source| CloveError::Io {
-                path: path.clone(),
-                source,
-            })?,
-            None => out!("{doc}"),
-        },
+    // `--out` writes the document in every format: the generated doc itself
+    // tells agents to set `CLOVE_FORMAT=json`, and under it `--out` used to
+    // write nothing and still exit 0.
+    if let Some(path) = &args.out {
+        std::fs::write(path, &doc).map_err(|source| CloveError::Io {
+            path: path.clone(),
+            source,
+        })?;
+    }
+    match (&args.out, json) {
+        (out, true) => {
+            let mut data = json!({ "schema": CURRENT_SCHEMA_VERSION, "markdown": doc });
+            if let Some(path) = out {
+                data["out"] = json!(path.as_str());
+            }
+            print_json_success(data, json!({ "warnings": [] }));
+        }
+        (None, false) => out!("{doc}"),
+        (Some(_), false) => {}
     }
     Ok(())
 }
@@ -279,7 +294,7 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
 }
 
 /// Verify a saved doc's embedded schema version matches this binary.
-fn check(file: Option<&camino::Utf8Path>) -> Result<(), CloveError> {
+fn check(file: Option<&camino::Utf8Path>) -> Result<(camino::Utf8PathBuf, u32), CloveError> {
     let path = file.ok_or_else(|| CloveError::InvalidField {
         field: "file".to_owned(),
         reason: "--check requires --file PATH".to_owned(),
@@ -300,7 +315,7 @@ fn check(file: Option<&camino::Utf8Path>) -> Result<(), CloveError> {
             reason: format!("stale: doc schema {found}, binary schema {CURRENT_SCHEMA_VERSION}"),
         });
     }
-    Ok(())
+    Ok((path.to_owned(), found))
 }
 
 /// Parse the `schema:N` value out of the marker line.

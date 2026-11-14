@@ -37,13 +37,15 @@ pub fn run(
         write_clove_file(&clove_dir, &config_path, &render_config(&prefix))?;
     }
 
-    // .gitignore — fixed content, LF endings; safe to rewrite each run.
+    // .gitignore — clove's entries, LF endings. A re-run keeps every line that
+    // is already there (a user may have added their own) and appends only the
+    // entries that are missing.
     let gitignore = clove_dir.join(".gitignore");
-    write_clove_file(
-        &clove_dir,
-        &gitignore,
-        &format!("{}\n", GITIGNORE_ENTRIES.join("\n")),
-    )?;
+    let existing = read_to_string_opt(&gitignore)?;
+    let merged = merge_gitignore(&existing);
+    if merged != existing {
+        write_clove_file(&clove_dir, &gitignore, &merged)?;
+    }
 
     if args.merge_driver {
         install_merge_driver(&root)?;
@@ -88,6 +90,21 @@ fn render_config(prefix: &str) -> String {
          # command resets this, so it only fires after a long gap of no activity.\n\
          idle_shutdown_min = 240\n"
     )
+}
+
+/// `existing` plus every clove entry it does not already list, one per line.
+fn merge_gitignore(existing: &str) -> String {
+    let mut merged = existing.to_owned();
+    if !merged.is_empty() && !merged.ends_with('\n') {
+        merged.push('\n');
+    }
+    for entry in GITIGNORE_ENTRIES {
+        if !existing.lines().any(|line| line.trim() == entry) {
+            merged.push_str(entry);
+            merged.push('\n');
+        }
+    }
+    merged
 }
 
 /// Install the 3-way merge driver: a `.gitattributes` line plus a

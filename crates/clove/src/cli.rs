@@ -494,7 +494,7 @@ pub struct AssignArgs {
     /// The assignee (omit with `--clear` to unset).
     pub assignee: Option<String>,
     /// Clear the assignee.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "assignee")]
     pub clear: bool,
 }
 
@@ -733,13 +733,16 @@ pub struct SearchArgs {
 pub struct StatsArgs {
     /// Cap the assignee/label breakdowns to the N highest counts (default 10;
     /// use `0` for no cap).
-    #[arg(long, value_name = "N")]
+    #[arg(long, value_name = "N", conflicts_with = "history")]
     pub top: Option<usize>,
     /// Skip the per-epic completion rollup.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "history")]
     pub no_epics: bool,
     /// Persist this report to the durable history in the index (`.clove/index.db`).
-    #[arg(long)]
+    // These three shape or record the *live* report. `--history` prints the
+    // recorded series instead and applied none of them, so the pairing is
+    // refused rather than silently ignored.
+    #[arg(long, conflicts_with = "history")]
     pub snapshot: bool,
     /// Show the recorded snapshot history instead of a live report.
     #[arg(long)]
@@ -771,7 +774,7 @@ pub struct AgentDocArgs {
     #[arg(long)]
     pub check: bool,
     /// The file to check (with `--check`).
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", requires = "check")]
     pub file: Option<Utf8PathBuf>,
 }
 
