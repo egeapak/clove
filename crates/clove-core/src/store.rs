@@ -334,8 +334,9 @@ impl ItemStore {
     /// [`StoreWriteLock::lock`] and holds the guard for the whole
     /// read-modify-write window.
     ///
-    /// It also puts `write.lock` into a `.clove/.gitignore` that lacks it (one
-    /// written by an older clove), so the lock file never lands in a commit.
+    /// It also puts `write.lock` and the item temp-file pattern into a
+    /// `.clove/.gitignore` that lacks them (one written by an older clove), so
+    /// neither the lock file nor a leftover temp file lands in a commit.
     pub fn write_lock(&self) -> Result<StoreWriteLock, CloveError> {
         let clove_dir = self.repo_root.join(".clove");
         let path = clove_dir.join(WRITE_LOCK_FILE);
@@ -346,6 +347,7 @@ impl ItemStore {
         // Best effort: the lock works either way, and `clove doctor` reports
         // the missing entry.
         let _ = crate::config::ensure_gitignored(&clove_dir, WRITE_LOCK_FILE);
+        let _ = crate::config::ensure_gitignored(&clove_dir, crate::config::ITEM_TEMP_FILE_PATTERN);
         Ok(StoreWriteLock {
             path,
             lock: fd_lock::RwLock::new(file),
@@ -613,14 +615,27 @@ mod tests {
         drop(store.write_lock().unwrap());
         assert_eq!(
             std::fs::read_to_string(&gitignore).unwrap(),
-            "index.db\nsync/\nwrite.lock\n"
+            "index.db\nsync/\nwrite.lock\nissues/.tmp*\n"
         );
         drop(store.write_lock().unwrap());
         assert_eq!(
             std::fs::read_to_string(&gitignore).unwrap(),
-            "index.db\nsync/\nwrite.lock\n",
+            "index.db\nsync/\nwrite.lock\nissues/.tmp*\n",
             "the entry is added once"
         );
+    }
+
+    /// The ignored pattern is the name `tempfile` gives the item temp file.
+    #[test]
+    fn the_item_temp_file_matches_its_gitignore_pattern() {
+        let (_tmp, store) = temp_store();
+        let temp = tempfile::NamedTempFile::new_in(store.issues_dir()).unwrap();
+        let name = temp.path().file_name().unwrap().to_str().unwrap();
+        let prefix = crate::config::ITEM_TEMP_FILE_PATTERN
+            .strip_prefix("issues/")
+            .and_then(|p| p.strip_suffix('*'))
+            .unwrap();
+        assert!(name.starts_with(prefix), "{name} does not match {prefix}*");
     }
 
     /// A symlinked `.gitignore` is not written through, and the lock still opens.
