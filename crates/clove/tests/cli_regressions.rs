@@ -118,3 +118,37 @@ fn human_output_strips_terminal_control_sequences() {
     show.args(["show", id.as_str()]);
     assert_eq!(json_ok(&mut show)["data"]["title"], title);
 }
+
+/// A human-format list that stops at the window must say so: without the note
+/// a capped `clove ls` reads as the whole list.
+#[test]
+fn human_list_reports_a_truncated_page() {
+    let repo = init_repo();
+    for title in ["one", "two", "three"] {
+        new_item(repo.path(), title, &[]);
+    }
+
+    let capped = clove(repo.path())
+        .args(["ls", "--limit", "2"])
+        .output()
+        .unwrap();
+    assert_eq!(stdout(&capped).lines().count(), 2, "{capped:?}");
+    assert!(
+        stderr(&capped).contains("showing 2 of 3 items"),
+        "{capped:?}"
+    );
+
+    for args in [vec!["ls"], vec!["ls", "--limit", "2", "--offset", "1"]] {
+        let whole = clove(repo.path()).args(&args).output().unwrap();
+        assert!(!stderr(&whole).contains("showing"), "{args:?}: {whole:?}");
+    }
+
+    // `ready` and `search` share the renderer.
+    for args in [
+        vec!["ready", "--limit", "1"],
+        vec!["search", "t", "--limit", "1"],
+    ] {
+        let out = clove(repo.path()).args(&args).output().unwrap();
+        assert!(stderr(&out).contains("showing 1 of"), "{args:?}: {out:?}");
+    }
+}

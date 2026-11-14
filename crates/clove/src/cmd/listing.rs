@@ -189,6 +189,18 @@ pub fn emit(format: OutputFormat, objects: Vec<ListObject>, opts: ListOpts<'_>) 
                     crate::util::term_line(s("title"))
                 );
             }
+            // The default cap must not truncate in silence: without this a
+            // capped list reads as the whole list. On stderr, so stdout stays
+            // one row per line.
+            let shown_through = opts.window.offset.saturating_add(page.len());
+            if !page.is_empty() && shown_through < opts.total {
+                eprintln!(
+                    "note: showing {} of {} items (--limit 0 for all, --offset {} for the next page)",
+                    page.len(),
+                    opts.total,
+                    shown_through
+                );
+            }
         }
     }
 }
