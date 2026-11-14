@@ -586,9 +586,8 @@ fn graph_terms_whole_store(
 /// computed `ready`/`blocked_by` (the same shape as `clove show --format json`).
 pub fn show(store: &ItemStore, id: &CloveId) -> Result<Value, CloveError> {
     let item = store.get(id)?;
-    let comment_count = list_comments(store.issues_dir(), id)
-        .map(|c| c.len())
-        .unwrap_or(0);
+    // A thread that cannot be read is an error, not "no comments".
+    let comment_count = list_comments(store.issues_dir(), id)?.len();
 
     let mut obj = item_object(&item);
     obj.insert("body".to_owned(), json!(item.body));
@@ -1094,6 +1093,17 @@ mod tests {
         )
         .unwrap();
         CloveId::new(v["id"].as_str().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn show_counts_a_thread_with_a_non_utf8_comment() {
+        let (_d, store) = store();
+        let id = new_id(&store, "commented");
+        comment(&store, &id, "a@x", "first").unwrap();
+        let second = comment(&store, &id, "a@x", "second").unwrap();
+        let path = store.repo_root().join(second["path"].as_str().unwrap());
+        std::fs::write(&path, b"caf\xff").unwrap();
+        assert_eq!(show(&store, &id).unwrap()["comment_count"], 2);
     }
 
     #[test]
