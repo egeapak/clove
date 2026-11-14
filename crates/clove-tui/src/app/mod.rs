@@ -952,14 +952,14 @@ impl App {
 
         let tree = self.data.graph.dep_tree(&id, 25);
 
-        self.detail.detail = Some(Detail {
+        self.detail.detail = Some(Detail::new(
             item,
             comments,
             blocking_deps,
             dangling_deps,
             children,
             tree,
-        });
+        ));
     }
 }
 
@@ -1162,6 +1162,35 @@ mod tests {
                 app.detail.detail_scroll
             );
         }
+    }
+
+    /// Redrawing the same item does not render its Markdown again; a new width
+    /// or a reload does.
+    #[test]
+    fn body_markdown_is_rendered_once_per_item_and_width() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        app.select_first();
+        let renders = |app: &App| app.detail.detail.as_ref().unwrap().body_renders();
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        for _ in 0..5 {
+            app.scroll_detail_down();
+            terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        }
+        assert_eq!(renders(&app), 1, "five frames, one render");
+
+        let mut narrow = Terminal::new(TestBackend::new(40, 30)).unwrap();
+        app.focus = Focus::Detail;
+        narrow.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert_eq!(renders(&app), 2, "a new width renders again");
+
+        app.select_next();
+        terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert_eq!(renders(&app), 1, "another item starts its own cache");
     }
 
     #[test]
