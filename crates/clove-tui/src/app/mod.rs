@@ -830,10 +830,30 @@ impl App {
             return Ok(format!("no changes to {id}"));
         }
 
-        // Not transactional: the scalar/label/body edit is applied first, then the
-        // graph edges. If a later parent/dep op fails (e.g. a typed id that would
-        // cycle), the earlier change is already on disk and the form stays open
-        // showing the error; resubmitting re-applies idempotently.
+        // Check the typed ids before anything is written: both lists parsed
+        // above, and every newly referenced item must exist and must not be the
+        // item itself. A typo in Parent or Deps then leaves the file untouched,
+        // where it used to fail only after the scalar edit had been saved.
+        let added = new_deps.iter().filter(|dep| !old_deps.contains(dep));
+        let reparented = new_parent.iter().filter(|_| new_parent != old_parent);
+        for target in reparented.chain(added) {
+            if target == &id {
+                return Err(clove_types::CloveError::InvalidField {
+                    field: "parent/deps".to_owned(),
+                    reason: format!("{id} cannot refer to itself"),
+                });
+            }
+            if !store.exists(target) {
+                return Err(clove_types::CloveError::NotFound {
+                    id: target.to_string(),
+                });
+            }
+        }
+
+        // Not transactional beyond that: the scalar/label/body edit is applied
+        // first, then the graph edges. If a later parent/dep op fails (a typed id
+        // that would close a cycle), the earlier change is already on disk and the
+        // form stays open showing the error; resubmitting re-applies idempotently.
         // Scalars / labels / body via the unified structured edit.
         clove_core::apply_edit(store, &id, &request, now)?;
 
@@ -1395,6 +1415,43 @@ mod tests {
         assert_eq!(app.mode, Mode::Browse);
         assert_eq!(app.status, format!("no changes to {id}"));
         assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    /// A malformed or unknown id typed into Parent or Deps is rejected before
+    /// the scalar edit is written. The title used to reach disk first.
+    #[test]
+    fn edit_form_rejects_bad_ids_before_writing_anything() {
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        app.select_first();
+        let id = app.selected_frontmatter().unwrap().id.clone();
+        let path = app.data.store.path_for(&id);
+        let before = std::fs::read(&path).unwrap();
+
+        let cases: [(&str, &str); 4] = [
+            ("bogus id", ""),
+            ("proj-ZZZZZZZZ", ""),
+            ("", "proj-ZZZZZZZZ"),
+            ("", id.as_str()),
+        ];
+        for (parent, deps) in cases {
+            app.start_edit();
+            app.form.title = "Renamed".to_owned();
+            app.form.parent = parent.to_owned();
+            if !deps.is_empty() {
+                app.form.deps = deps.to_owned();
+            }
+            app.form_submit();
+
+            assert_eq!(app.mode, Mode::Form, "parent={parent:?} deps={deps:?}");
+            assert!(app.form.error.is_some(), "parent={parent:?} deps={deps:?}");
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                before,
+                "nothing written for parent={parent:?} deps={deps:?}"
+            );
+            app.cancel_form();
+        }
     }
 
     #[test]
