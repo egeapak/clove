@@ -249,12 +249,17 @@ pub fn dep_add(
             });
         }
         // A cycle needs a path `dep_id → … → id` over `deps`, and every item
-        // on such a path is in the forward closure of `dep_id`. Walk only that.
-        // When the walk finds a path, or the closure is too large to walk, the
-        // whole-store graph decides and gives the chain for the error.
-        let cycle = match dep_path_exists(store, dep_id, id)? {
-            Some(false) => None,
-            Some(true) | None => {
+        // on such a path is in the forward closure of `dep_id`. Walk only that;
+        // a very large closure falls back to the whole-store graph. Both give
+        // the closed chain `[id, dep_id, …, id]` for the error.
+        let cycle = match dep_path(store, dep_id, id)? {
+            Some(None) => None,
+            Some(Some(chain)) => {
+                let mut cycle = vec![id.clone()];
+                cycle.extend(chain);
+                Some(cycle)
+            }
+            None => {
                 let frontmatters = scan_or_fail(store)?;
                 let (graph, _dangling) = GraphStore::build(&frontmatters);
                 graph.would_cycle_path(id, dep_id)
@@ -402,31 +407,46 @@ fn read_for_walk(store: &ItemStore, id: &CloveId) -> Result<Option<ItemFrontmatt
         })
 }
 
-/// Whether a path `from → … → target` exists over hard dependencies, reading
-/// only the items in the forward closure of `from`. `Ok(None)` when the closure
-/// passes [`LOCAL_CLOSURE_BUDGET`] items; the caller then builds the whole graph.
-fn dep_path_exists(
+/// A shortest path `[from, …, target]` over hard dependencies, reading only
+/// the items in the forward closure of `from`. `Ok(Some(None))` when no path
+/// exists. `Ok(None)` when the closure passes [`LOCAL_CLOSURE_BUDGET`] items;
+/// the caller then builds the whole graph.
+#[allow(clippy::type_complexity)]
+fn dep_path(
     store: &ItemStore,
     from: &CloveId,
     target: &CloveId,
-) -> Result<Option<bool>, CloveError> {
-    let mut seen: std::collections::HashSet<CloveId> = std::collections::HashSet::new();
-    let mut stack = vec![from.clone()];
-    while let Some(node) = stack.pop() {
+) -> Result<Option<Option<Vec<CloveId>>>, CloveError> {
+    use std::collections::{HashMap, VecDeque};
+    // Breadth-first, so the first arrival at `target` is a shortest path.
+    // `came_from` also marks the visited items.
+    let mut came_from: HashMap<CloveId, Option<CloveId>> = HashMap::new();
+    came_from.insert(from.clone(), None);
+    let mut queue = VecDeque::from([from.clone()]);
+    while let Some(node) = queue.pop_front() {
         if &node == target {
-            return Ok(Some(true));
+            let mut path = vec![node.clone()];
+            let mut at = &node;
+            while let Some(Some(prev)) = came_from.get(at) {
+                path.push(prev.clone());
+                at = prev;
+            }
+            path.reverse();
+            return Ok(Some(Some(path)));
         }
-        if !seen.insert(node.clone()) {
-            continue;
-        }
-        if seen.len() > LOCAL_CLOSURE_BUDGET {
+        if came_from.len() > LOCAL_CLOSURE_BUDGET {
             return Ok(None);
         }
         if let Some(fm) = read_for_walk(store, &node)? {
-            stack.extend(fm.deps);
+            for dep in fm.deps {
+                if !came_from.contains_key(&dep) {
+                    came_from.insert(dep.clone(), Some(node.clone()));
+                    queue.push_back(dep);
+                }
+            }
         }
     }
-    Ok(Some(false))
+    Ok(Some(None))
 }
 
 /// `ready` / `blocked_by` for **one** item, without scanning the whole store.
