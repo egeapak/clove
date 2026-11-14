@@ -37,39 +37,26 @@ pub fn export_json<W: Write>(writer: &mut W, items: &[Value], meta: Value) -> io
     writer.write_all(b"\n")
 }
 
-/// [`export_json`] for a store too large to hold as one `Vec<Value>`: `items`
-/// is pulled one object at a time, so memory stays bounded by a single item.
+/// [`export_json`] for a store too large to hold as one `Vec<Value>`: write
+/// the envelope around already-serialized items.
 ///
-/// The envelope puts `_meta` before `data` (serde_json's sorted keys), and
-/// `_meta` can only be finished after the last item is produced (it carries the
-/// warnings found on the way). So the items are spooled — in memory up to 8 MiB,
-/// then to an anonymous temp file — and copied in behind the finished `_meta`.
-/// `meta` is called once, after `items` is exhausted. The bytes are the same as
-/// [`export_json`] writes for the same items and meta. Returns the item count.
-pub fn export_json_streamed<W: Write>(
+/// `items_json` yields the item objects as JSON text joined by `,` (no
+/// brackets) — the caller serializes one item at a time into a spool and hands
+/// the spool over, so memory stays bounded by a single item. The envelope puts
+/// `_meta` before `data` (serde_json's sorted keys), which is why the items
+/// cannot simply be streamed first: `meta` carries the warnings found while
+/// producing them. The bytes are the same as [`export_json`] writes for the
+/// same items and meta.
+pub fn export_json_spooled<W: Write, R: io::Read>(
     writer: &mut W,
-    items: &mut dyn Iterator<Item = Value>,
-    meta: &mut dyn FnMut() -> Value,
-) -> io::Result<usize> {
-    use std::io::{Seek, SeekFrom};
-
-    let mut spool = tempfile::spooled_tempfile(8 * 1024 * 1024);
-    let mut count = 0usize;
-    for item in items {
-        if count > 0 {
-            spool.write_all(b",")?;
-        }
-        serde_json::to_writer(&mut spool, &item)?;
-        count += 1;
-    }
-    spool.seek(SeekFrom::Start(0))?;
-
+    items_json: &mut R,
+    meta: Value,
+) -> io::Result<()> {
     writer.write_all(b"{\"_meta\":")?;
-    serde_json::to_writer(&mut *writer, &with_export_provenance(meta()))?;
+    serde_json::to_writer(&mut *writer, &with_export_provenance(meta))?;
     writer.write_all(b",\"data\":[")?;
-    io::copy(&mut spool, writer)?;
-    write!(writer, "],\"ok\":true,\"v\":{ENVELOPE_VERSION}}}\n")?;
-    Ok(count)
+    io::copy(items_json, writer)?;
+    writeln!(writer, "],\"ok\":true,\"v\":{ENVELOPE_VERSION}}}")
 }
 
 /// Stamp export provenance into the caller-supplied `_meta` object so a later
@@ -152,21 +139,24 @@ mod tests {
         assert_eq!(v["_meta"]["warnings"], json!([]));
     }
 
-    /// The streamed writer must produce exactly the bytes of the in-memory
+    /// The spooled writer must produce exactly the bytes of the in-memory
     /// one — an export's layout does not depend on which path wrote it.
     #[test]
-    fn streamed_json_is_byte_identical_to_the_in_memory_writer() {
+    fn spooled_json_is_byte_identical_to_the_in_memory_writer() {
         for set in [items(), Vec::new()] {
             let meta = || json!({ "source": "files", "warnings": ["w"] });
             let mut whole = Vec::new();
             export_json(&mut whole, &set, meta()).unwrap();
-            let mut streamed = Vec::new();
-            let count =
-                export_json_streamed(&mut streamed, &mut set.clone().into_iter(), &mut || meta())
-                    .unwrap();
-            assert_eq!(count, set.len());
+
+            let joined = set
+                .iter()
+                .map(|item| serde_json::to_string(item).unwrap())
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut spooled = Vec::new();
+            export_json_spooled(&mut spooled, &mut joined.as_bytes(), meta()).unwrap();
             assert_eq!(
-                String::from_utf8(streamed).unwrap(),
+                String::from_utf8(spooled).unwrap(),
                 String::from_utf8(whole).unwrap()
             );
         }

@@ -12,13 +12,13 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::io::{self, Write};
+use std::io::{self, Seek, SeekFrom, Write};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::error::ErrorKind;
 use clap::Parser;
 use clove_core::{GraphStore, OutputFormat, ScanError};
-use clove_import::export::export_json_streamed;
+use clove_import::export::export_json_spooled;
 use clove_types::{CloveError, CloveId};
 use serde_json::{json, Value};
 use tempfile::NamedTempFile;
@@ -134,21 +134,33 @@ fn write_items<W: Write>(
             .chain(late.borrow().iter().cloned())
             .collect()
     };
-    let mut items = objects(ctx, plan, &late);
-    let count = match fmt {
-        ExportFormat::Json => export_json_streamed(writer, &mut items, &mut || {
-            json!({ "source": "files", "warnings": all_warnings() })
-        })?,
+    let items = objects(ctx, plan, &late);
+    let mut count = 0usize;
+    match fmt {
+        ExportFormat::Json => {
+            // `_meta` precedes `data` in the envelope and carries the warnings
+            // found while reading the items, so the items are spooled first: in
+            // memory up to 8 MiB, then in an anonymous temp file.
+            let mut spool = tempfile::spooled_tempfile(8 * 1024 * 1024);
+            for item in items {
+                if count > 0 {
+                    spool.write_all(b",")?;
+                }
+                serde_json::to_writer(&mut spool, &item)?;
+                count += 1;
+            }
+            spool.seek(SeekFrom::Start(0))?;
+            let meta = json!({ "source": "files", "warnings": all_warnings() });
+            export_json_spooled(writer, &mut spool, meta)?;
+        }
         ExportFormat::Jsonl => {
-            let mut count = 0;
             for item in items {
                 serde_json::to_writer(&mut *writer, &item)?;
                 writer.write_all(b"\n")?;
                 count += 1;
             }
-            count
         }
-    };
+    }
     writer.flush()?;
     Ok((count, all_warnings()))
 }
@@ -194,7 +206,7 @@ pub fn run(ctx: &Ctx, format: OutputFormat, args: ExportArgs) -> Result<ExitCode
     // Pick the sink: a file (atomic: temp file + rename) when `--out` is set,
     // else stdout. Either way the items stream through, so memory does not grow
     // with the total size of the bodies.
-    let (count, warnings) = match &parsed.out {
+    let (_, warnings) = match &parsed.out {
         Some(path) => {
             let parent = match path.parent() {
                 Some(parent) if !parent.as_str().is_empty() => parent,
