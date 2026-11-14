@@ -102,20 +102,22 @@ fn objects<'a>(
     plan: &'a Plan,
     late_warnings: &'a RefCell<Vec<String>>,
 ) -> impl Iterator<Item = Value> + 'a {
-    plan.order.iter().filter_map(move |id| match ctx.store.get(id) {
-        Ok(item) => Some(Value::Object(export_object(
-            &item,
-            &ctx.issues_dir,
-            &plan.ready,
-            &plan.blocked,
-        ))),
-        Err(error) => {
-            late_warnings
-                .borrow_mut()
-                .push(format!("skipped (not exported): {id}: {error}"));
-            None
-        }
-    })
+    plan.order
+        .iter()
+        .filter_map(move |id| match ctx.store.get(id) {
+            Ok(item) => Some(Value::Object(export_object(
+                &item,
+                &ctx.issues_dir,
+                &plan.ready,
+                &plan.blocked,
+            ))),
+            Err(error) => {
+                late_warnings
+                    .borrow_mut()
+                    .push(format!("skipped (not exported): {id}: {error}"));
+                None
+            }
+        })
 }
 
 /// Write the export to `writer`, one item at a time, and return the item count

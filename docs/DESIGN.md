@@ -804,8 +804,8 @@ everywhere else.
 
 | `Projection` | Meaning | Used by |
 |---|---|---|
-| `Lean` | The five columns `ls` renders suffice, so an index/daemon row is returned as-is and **no** item file is read. | `clove ls`/`ready`/`query` |
-| `Full` | Full frontmatter is required. A tier still answers the *query* — filtering, ordering, and counting stay in SQL — and only the returned page is read back from disk (frontmatter only, in parallel above 500 rows). | `clove blocked`, the MCP read tools, the web |
+| `Lean` | The five columns `ls` renders suffice, so an index/daemon row is returned as-is and **no** item file is read. | `clove ls`/`ready`/`query` in human format, or with `--fields` inside the lean row |
+| `Full` | Full frontmatter is required. A tier still answers the *query* — filtering, ordering, and counting stay in SQL — and only the returned page is read back from disk (frontmatter only, in parallel above 500 rows). | `clove blocked`, `clove ls`/`ready`/`query` in JSON or JSONL without `--fields` (so a row has the same keys from every tier), the MCP read tools, the web |
 | `Files` | Full frontmatter required **and** no tier may answer. A caller policy, not a property of the store. | `clove ls --fields id,created` (a field outside the lean row) |
 
 **Fallback conditions** for the list reads, in one place (`clove dep tree` and

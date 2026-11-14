@@ -35,9 +35,6 @@ pub struct ListOpts<'a> {
     /// Drop null/empty-list keys (and `schema`) from JSON output, through the
     /// same `view::compact_read` the MCP read tools use.
     ///
-    /// Note this is the *file* path's shape. The index and daemon paths select a
-    /// lean five-column row, so `--compact` there yields fewer keys still —
-    /// see `clove_engine::LEAN_FIELDS`.
     pub compact: bool,
     /// Which tier answered: `"daemon"`, `"index"`, or `"files"`. Always
     /// `clove_engine::Source::as_str`, never a literal, so the reported tier
@@ -99,6 +96,30 @@ fn lean_object(id: &str, status: &str, item_type: &str, priority: u8, title: &st
 /// paths can answer from. Defined by `clove-engine`, which is what decides
 /// whether a tier may answer at all.
 pub use clove_engine::lean_can_serve;
+
+/// The projection `ls`, `ready`, and `query` ask the engine for.
+///
+/// The row shape must not depend on which tier answers, so it is decided here
+/// from the request alone:
+///
+/// - `--fields` inside the lean five columns: the lean row, from any tier.
+/// - `--fields` reaching outside them: the file scan.
+/// - no `--fields`, human format: the lean row, which is all a human line prints.
+/// - no `--fields`, JSON or JSONL: the whole frontmatter. A tier answers the
+///   query and only the page is read back from disk, so an index or daemon
+///   answer carries the same keys as a file scan.
+pub fn list_projection(
+    format: OutputFormat,
+    fields: Option<&[String]>,
+) -> clove_engine::Projection {
+    use clove_engine::Projection;
+    match fields {
+        Some(_) if lean_can_serve(fields) => Projection::Lean,
+        Some(_) => Projection::Files,
+        None if matches!(format, OutputFormat::Human) => Projection::Lean,
+        None => Projection::Full,
+    }
+}
 
 /// Build the renderable list objects from an engine answer.
 ///

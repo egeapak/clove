@@ -73,7 +73,10 @@ fn clove_dir_must_be_a_dot_clove_directory() {
         .unwrap();
     assert_eq!(out.status.code(), Some(4), "{out:?}");
     assert!(stderr(&out).contains("--clove-dir"), "{out:?}");
-    assert!(!store.exists(), "init must not create the refused directory");
+    assert!(
+        !store.exists(),
+        "init must not create the refused directory"
+    );
 }
 
 /// A sibling directory beside a real `.clove` must not be accepted as an
@@ -103,7 +106,11 @@ fn human_output_strips_terminal_control_sequences() {
     let title = "safe\u{1b}[2K\rforged";
     let id = new_item(repo.path(), title, &["-b", "body\u{1b}]52;c;QUJD\u{7}end"]);
 
-    for args in [vec!["ls"], vec!["show", id.as_str()], vec!["search", "safe"]] {
+    for args in [
+        vec!["ls"],
+        vec!["show", id.as_str()],
+        vec!["search", "safe"],
+    ] {
         let out = clove(repo.path()).args(&args).output().unwrap();
         assert!(out.status.success(), "{args:?}: {out:?}");
         let text = stdout(&out);
@@ -197,7 +204,10 @@ fn export_names_item_files_it_could_not_export() {
     assert!(to_file.status.success(), "{to_file:?}");
     assert!(stderr(&to_file).contains("wrote 1 items"), "{to_file:?}");
     assert!(stderr(&to_file).contains(&bad), "{to_file:?}");
-    assert_eq!(std::fs::read_to_string(out_path).unwrap().lines().count(), 1);
+    assert_eq!(
+        std::fs::read_to_string(out_path).unwrap().lines().count(),
+        1
+    );
 }
 
 /// `import --dry-run` and the real import must agree. An invalid item used to
@@ -256,7 +266,14 @@ fn edit_sets_the_body_from_a_flag_or_a_file() {
     };
 
     let mut edit = clove(repo.path());
-    edit.args(["edit", id.as_str(), "--body", "new text", "--field", "priority=1"]);
+    edit.args([
+        "edit",
+        id.as_str(),
+        "--body",
+        "new text",
+        "--field",
+        "priority=1",
+    ]);
     let v = json_ok(&mut edit);
     assert_eq!(v["data"]["priority"], 1);
     assert_eq!(body_of(repo.path()), "new text\n");
@@ -322,7 +339,8 @@ fn editor_edit_is_saved_through_the_store() {
 
     let editor = in_place_editor(repo.path(), "s/^status: open$/status: closed/");
     let mut edit = clove(repo.path());
-    edit.env("CLOVE_EDITOR", &editor).args(["edit", id.as_str()]);
+    edit.env("CLOVE_EDITOR", &editor)
+        .args(["edit", id.as_str()]);
     let saved = json_ok(&mut edit);
     assert_eq!(saved["data"]["status"], "closed");
     assert!(saved["data"]["closed"].is_string(), "{saved}");
@@ -370,7 +388,12 @@ fn editor_edit_that_does_not_validate_is_rolled_back() {
     let kept = std::fs::read_dir(repo.path())
         .unwrap()
         .filter_map(Result::ok)
-        .find(|entry| entry.file_name().to_string_lossy().starts_with("clove-edit-"))
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("clove-edit-")
+        })
         .expect("the rejected text is kept");
     assert!(std::fs::read_to_string(kept.path())
         .unwrap()
@@ -434,7 +457,10 @@ fn init_rerun_keeps_user_gitignore_lines() {
     let merged = std::fs::read_to_string(&path).unwrap();
     assert!(merged.lines().any(|l| l == "my-notes/"), "{merged}");
     for entry in original.lines() {
-        assert!(merged.lines().any(|l| l == entry), "missing {entry}: {merged}");
+        assert!(
+            merged.lines().any(|l| l == entry),
+            "missing {entry}: {merged}"
+        );
     }
 
     // A second run changes nothing.
@@ -459,7 +485,14 @@ fn agent_doc_out_and_check_work_in_json_format() {
     assert_eq!(v["data"]["markdown"], written);
 
     let check = clove(dir.path())
-        .args(["--format", "json", "agent-doc", "--check", "--file", "AGENTS.md"])
+        .args([
+            "--format",
+            "json",
+            "agent-doc",
+            "--check",
+            "--file",
+            "AGENTS.md",
+        ])
         .output()
         .unwrap();
     assert!(check.status.success(), "{check:?}");
@@ -485,7 +518,10 @@ fn usage_errors_carry_a_json_envelope() {
         assert_eq!(v["ok"], false, "{args:?}");
         assert_eq!(v["error"]["code"], "USAGE_ERROR", "{args:?}");
         assert_eq!(v["error"]["exit"], 1, "{args:?}");
-        assert!(!stderr(&out).is_empty(), "{args:?}: clap's message stays on stderr");
+        assert!(
+            !stderr(&out).is_empty(),
+            "{args:?}: clap's message stays on stderr"
+        );
     }
 
     // Human mode is unchanged: nothing on stdout. `--help` is not an error.
@@ -496,7 +532,10 @@ fn usage_errors_carry_a_json_envelope() {
         .args(["--format", "json", "show", "--help"])
         .output()
         .unwrap();
-    assert!(help.status.success() && !stdout(&help).starts_with('{'), "{help:?}");
+    assert!(
+        help.status.success() && !stdout(&help).starts_with('{'),
+        "{help:?}"
+    );
 }
 
 /// An argument that is not UTF-8 is a usage error, not a panic.
@@ -531,4 +570,32 @@ fn missing_import_provider_hint_names_the_sync_plugin() {
         stderr(&out).contains("clove plugin install sync-nosuchprovider"),
         "{out:?}"
     );
+}
+
+/// A JSON list row has the same keys whether the index or the file scan
+/// answers; the lean row stays available through `--fields`.
+#[test]
+fn json_list_rows_have_the_same_keys_on_every_tier() {
+    let dir = init_repo();
+    new_item(dir.path(), "first", &["--label", "x"]);
+    new_item(dir.path(), "second", &[]);
+    clove(dir.path()).arg("reindex").assert().success();
+
+    for sub in [
+        vec!["ls"],
+        vec!["ready"],
+        vec!["query", "--filter", r#"{"status":"open"}"#],
+    ] {
+        let indexed = json_ok(clove(dir.path()).args(&sub));
+        let scanned = json_ok(clove(dir.path()).args(&sub).arg("--no-index"));
+        assert_eq!(indexed["_meta"]["source"], "index", "{sub:?}: {indexed}");
+        assert_eq!(scanned["_meta"]["source"], "files", "{sub:?}: {scanned}");
+        assert_eq!(indexed["data"], scanned["data"], "{sub:?}");
+        assert!(indexed["data"][0].get("created").is_some(), "{indexed}");
+    }
+
+    let lean = json_ok(clove(dir.path()).args(["ls", "--fields", "id,title"]));
+    assert_eq!(lean["_meta"]["source"], "index", "{lean}");
+    let row = lean["data"][0].as_object().unwrap();
+    assert_eq!(row.len(), 2, "{lean}");
 }

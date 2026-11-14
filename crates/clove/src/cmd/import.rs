@@ -147,7 +147,11 @@ fn validate_writable(
         if let Err(error) = clove_types::fields::parse_assignee(fm.assignee.clone()) {
             reasons.push(error.to_string());
         }
-        reasons.extend(clove_types::validate_item(fm).iter().map(ToString::to_string));
+        reasons.extend(
+            clove_types::validate_item(fm)
+                .iter()
+                .map(ToString::to_string),
+        );
         if !reasons.is_empty() {
             problems.push(format!("{}: {}", fm.id, reasons.join(", ")));
         }
