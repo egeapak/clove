@@ -314,15 +314,72 @@ impl FormState {
 
     /// Build an [`EditRequest`] for the scalar/label/body surface (parent and
     /// deps are applied separately via the graph-validated ops).
+    ///
+    /// The request carries only what the user changed, measured against the
+    /// item the form was opened with: an untouched field is `None`, and labels
+    /// go out as an add/remove delta. A field that another process changed on
+    /// disk while the form was open is therefore left alone, where sending the
+    /// whole snapshot used to put the stale value back (closing an item
+    /// elsewhere and then saving a title change here reopened it). A submit
+    /// with no change yields an empty request, which `apply_edit` does not
+    /// write.
     pub fn to_edit_request(&self) -> EditRequest {
+        let Some(original) = &self.original else {
+            return EditRequest {
+                title: Some(self.title.trim().to_owned()),
+                body: Some(self.body.clone()),
+                status: Some(self.status),
+                priority: clove_types::Priority::new(self.priority).ok(),
+                item_type: Some(self.item_type),
+                assignee: Some(opt(&self.assignee)),
+                labels: Some(LabelEdit::Set(split_csv(&self.labels))),
+            };
+        };
+        let fm = &original.frontmatter;
+        let title = self.title.trim();
+        let assignee = opt(&self.assignee);
         EditRequest {
-            title: Some(self.title.trim().to_owned()),
-            body: Some(self.body.clone()),
-            status: Some(self.status),
-            priority: clove_types::Priority::new(self.priority).ok(),
-            item_type: Some(self.item_type),
-            assignee: Some(opt(&self.assignee)),
-            labels: Some(LabelEdit::Set(split_csv(&self.labels))),
+            title: (title != fm.title).then(|| title.to_owned()),
+            // A body that differs only by the trailing newline the write path
+            // adds is not a change.
+            body: (self.body != original.body
+                && clove_types::normalize_body(&self.body) != original.body)
+                .then(|| self.body.clone()),
+            status: (self.status != fm.status).then_some(self.status),
+            priority: (self.priority != fm.priority.get())
+                .then(|| clove_types::Priority::new(self.priority).ok())
+                .flatten(),
+            item_type: (self.item_type != fm.item_type).then_some(self.item_type),
+            assignee: (assignee != fm.assignee).then_some(assignee),
+            labels: self.label_delta(&fm.labels),
+        }
+    }
+
+    /// The labels typed in the form as a delta against `old` (the labels the
+    /// form was opened with), or `None` when the set is unchanged. Typed labels
+    /// are compared in canonical form; one that does not canonicalize is passed
+    /// through as an addition so the shared write path reports it.
+    fn label_delta(&self, old: &[String]) -> Option<LabelEdit> {
+        let typed = split_csv(&self.labels);
+        let canonical: Vec<String> = typed
+            .iter()
+            .map(|raw| clove_types::normalize_label(raw).unwrap_or_else(|_| raw.clone()))
+            .collect();
+        let mut add: Vec<String> = Vec::new();
+        for label in &canonical {
+            if !old.contains(label) && !add.contains(label) {
+                add.push(label.clone());
+            }
+        }
+        let remove: Vec<String> = old
+            .iter()
+            .filter(|label| !canonical.contains(label))
+            .cloned()
+            .collect();
+        if add.is_empty() && remove.is_empty() {
+            None
+        } else {
+            Some(LabelEdit::Delta { add, remove })
         }
     }
 

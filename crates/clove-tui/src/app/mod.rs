@@ -808,25 +808,15 @@ impl App {
                 })?;
         let store = &self.data.store;
 
-        // Not transactional: the scalar/label/body edit is applied first, then the
-        // graph edges. If a later parent/dep op fails (e.g. a typed id that would
-        // cycle), the earlier change is already on disk and the form stays open
-        // showing the error; resubmitting re-applies idempotently.
-        // Scalars / labels / body via the unified structured edit.
-        clove_core::apply_edit(store, &id, &self.form.to_edit_request(), now)?;
-
-        // Parent (graph-validated) — only when it changed.
+        // Only what the user changed goes out (see `FormState::to_edit_request`),
+        // so a field changed on disk while the form was open is not reverted.
+        let request = self.form.to_edit_request();
         let new_parent = self.form.parent_id()?;
         let old_parent = self
             .form
             .original
             .as_ref()
             .and_then(|i| i.frontmatter.parent.clone());
-        if new_parent != old_parent {
-            clove_core::ops::set_parent(store, &id, new_parent.as_ref(), now)?;
-        }
-
-        // Deps (graph-validated) — diff add/remove.
         let new_deps = self.form.dep_ids()?;
         let old_deps = self
             .form
@@ -834,6 +824,25 @@ impl App {
             .as_ref()
             .map(|i| i.frontmatter.deps.clone())
             .unwrap_or_default();
+
+        // Nothing changed: write nothing, so `updated` does not move.
+        if request.is_empty() && new_parent == old_parent && same_ids(&new_deps, &old_deps) {
+            return Ok(format!("no changes to {id}"));
+        }
+
+        // Not transactional: the scalar/label/body edit is applied first, then the
+        // graph edges. If a later parent/dep op fails (e.g. a typed id that would
+        // cycle), the earlier change is already on disk and the form stays open
+        // showing the error; resubmitting re-applies idempotently.
+        // Scalars / labels / body via the unified structured edit.
+        clove_core::apply_edit(store, &id, &request, now)?;
+
+        // Parent (graph-validated) — only when it changed.
+        if new_parent != old_parent {
+            clove_core::ops::set_parent(store, &id, new_parent.as_ref(), now)?;
+        }
+
+        // Deps (graph-validated) — diff add/remove.
         for dep in &new_deps {
             if !old_deps.contains(dep) {
                 clove_core::ops::dep_add(store, &id, dep, now)?;
@@ -889,6 +898,11 @@ impl App {
             tree,
         });
     }
+}
+
+/// Whether two id lists name the same set (order and repeats ignored).
+fn same_ids(a: &[CloveId], b: &[CloveId]) -> bool {
+    a.iter().all(|id| b.contains(id)) && b.iter().all(|id| a.contains(id))
 }
 
 /// Format a UTC timestamp for display (date + minute precision, local-agnostic).
@@ -1312,6 +1326,75 @@ mod tests {
             vec!["x".to_owned(), "y".to_owned()]
         );
         assert_eq!(item.body, "edited body\n", "body normalized with newline");
+    }
+
+    /// The edit form sends only what the user changed. It used to send every
+    /// field with the value loaded when the form opened, so a save put back
+    /// whatever another process had changed in the meantime: an item closed
+    /// elsewhere was reopened by a title edit here.
+    #[test]
+    fn edit_form_keeps_fields_changed_on_disk_while_open() {
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        app.select_first();
+        let id = app.selected_frontmatter().unwrap().id.clone();
+        app.start_edit();
+
+        // Another process closes the item and relabels it while the form is open.
+        clove_core::ops::transition(&app.data.store, &id, ItemStatus::Closed, Utc::now()).unwrap();
+        clove_core::apply_edit(
+            &app.data.store,
+            &id,
+            &clove_types::EditRequest {
+                labels: Some(clove_types::LabelEdit::Delta {
+                    add: vec!["elsewhere".to_owned()],
+                    remove: vec![],
+                }),
+                priority: Some(Priority::new(0).unwrap()),
+                ..Default::default()
+            },
+            Utc::now(),
+        )
+        .unwrap();
+
+        app.form.title.push_str("!!");
+        app.form.labels.push_str(", mine");
+        app.form_submit();
+
+        assert_eq!(app.mode, Mode::Browse, "{:?}", app.form.error);
+        let item = app.data.store.get(&id).unwrap();
+        assert!(item.frontmatter.title.ends_with("!!"));
+        assert_eq!(item.frontmatter.status, ItemStatus::Closed);
+        assert!(item.frontmatter.closed.is_some());
+        assert_eq!(item.frontmatter.priority.get(), 0);
+        assert_eq!(
+            item.frontmatter.labels,
+            vec![
+                "area:core".to_owned(),
+                "elsewhere".to_owned(),
+                "mine".to_owned()
+            ]
+        );
+    }
+
+    /// Saving an untouched edit form writes nothing: the file keeps its
+    /// `updated` stamp and its bytes.
+    #[test]
+    fn edit_form_without_changes_does_not_write() {
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        app.select_first();
+        let id = app.selected_frontmatter().unwrap().id.clone();
+        let path = app.data.store.path_for(&id);
+        let before = std::fs::read(&path).unwrap();
+
+        app.start_edit();
+        assert!(app.form.to_edit_request().is_empty());
+        app.form_submit();
+
+        assert_eq!(app.mode, Mode::Browse);
+        assert_eq!(app.status, format!("no changes to {id}"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[test]
