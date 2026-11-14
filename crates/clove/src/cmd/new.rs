@@ -45,7 +45,7 @@ pub fn run(ctx: &Ctx, format: OutputFormat, args: NewArgs) -> Result<(), CloveEr
             "{}  {}  {}",
             value["id"].as_str().unwrap_or_default(),
             value["path"].as_str().unwrap_or_default(),
-            value["title"].as_str().unwrap_or_default()
+            crate::util::term_line(value["title"].as_str().unwrap_or_default())
         ),
     }
     Ok(())
