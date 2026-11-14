@@ -43,7 +43,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_norway = "0.9"           # strict YAML (maintained serde_yaml fork; serde_yaml_neo pulled the unmaintained unsafe-libyaml)
 petgraph = { version = "0.6", default-features = false, features = ["stable_graph"] }  # DAG engine (graphmap/matrix_graph unused)
-rusqlite = { version = "0.37", features = ["bundled"] }  # embedded SQLite, no runtime dep (M1). DESIGN §1 named 0.40, but its libsqlite3-sys 0.38 build script needs unstable `cfg_select!`; 0.37 (libsqlite3-sys 0.35) builds on the pinned toolchain. (The pin was originally justified by FTS5 `contentless_delete`; the FTS was removed in index schema 6 — see roadmap §6.1 — so only the toolchain reason remains.)
+rusqlite = { version = "0.41", features = ["bundled", "fallible_uint"] }  # embedded SQLite, no runtime dep (M1). 0.41 bundles SQLite 3.54 (RUSTSEC-2026-0459 fix); it needs Rust 1.89.
 # file-watch (M3); 9.0-rc is NOT production-ready — do not bump. We use the
 # closure-callback watcher API, not the channel API, so drop the default
 # `crossbeam-channel` feature (notify falls back to std mpsc internally).
