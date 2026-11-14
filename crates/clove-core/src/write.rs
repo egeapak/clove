@@ -101,6 +101,10 @@ pub fn write_item_file(item: &Item, path: &Utf8Path) -> Result<(), CloveError> {
             })?;
     }
     buffer.extend_from_slice(item.body.as_bytes());
+    // Refuse to write bytes the read path rejects (size budgets, the alias
+    // guard, field validation): such a file makes the item unreadable and
+    // fails every whole-store scan until it is repaired by hand.
+    crate::parse::parse_item_bytes(&buffer, path, &item.frontmatter.id)?;
     atomic_write(path, &buffer)
 }
 
@@ -113,10 +117,29 @@ fn rfc3339(ts: DateTime<Utc>) -> String {
 
 /// Render a free-text scalar with correct YAML quoting, delegated to
 /// `serde_norway`. Serializing a string to YAML is infallible in practice.
+///
+/// The rendering is used only if it reads back as `value` once it sits after a
+/// `key: `. A block scalar for a value with several trailing line breaks does
+/// not (the chomping indicator keeps at most one), so such a value is written
+/// double-quoted instead.
 fn render_scalar(value: &str) -> String {
     let rendered =
         serde_norway::to_string(value).expect("serializing a string scalar to YAML cannot fail");
-    rendered.trim_end_matches('\n').to_string()
+    let rendered = rendered.trim_end_matches('\n');
+    if scalar_reads_back(rendered, value) {
+        rendered.to_string()
+    } else {
+        force_double_quoted(value)
+    }
+}
+
+/// Whether `rendered`, placed as a mapping value, parses back to `value`.
+fn scalar_reads_back(rendered: &str, value: &str) -> bool {
+    #[derive(serde::Deserialize)]
+    struct Probe {
+        k: String,
+    }
+    serde_norway::from_str::<Probe>(&format!("k: {rendered}\n")).is_ok_and(|probe| probe.k == value)
 }
 
 /// Render a scalar for use inside a flow `[...]` sequence.
@@ -145,7 +168,8 @@ fn contains_flow_indicator(s: &str) -> bool {
         .any(|b| matches!(b, b',' | b'[' | b']' | b'{' | b'}'))
 }
 
-/// Minimal inline double-quoted YAML scalar (defensive fallback only).
+/// Inline double-quoted YAML scalar (the fallback when the library rendering
+/// cannot be used as-is).
 fn force_double_quoted(value: &str) -> String {
     let mut out = String::with_capacity(value.len() + 2);
     out.push('"');
@@ -156,6 +180,12 @@ fn force_double_quoted(value: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            // Control characters and the Unicode line breaks: YAML folds a raw
+            // U+0085/U+2028/U+2029 inside a quoted scalar into a space, and a
+            // raw C0 control is not allowed there at all.
+            c if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}' | '\u{feff}') => {
+                out.push_str(&format!("\\u{:04X}", c as u32));
+            }
             other => out.push(other),
         }
     }
@@ -417,5 +447,85 @@ mod tests {
             ],
             "got:\n{out}"
         );
+    }
+
+    fn temp_item_path(item: &Item) -> (tempfile::TempDir, camino::Utf8PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = Utf8Path::from_path(tmp.path()).unwrap().join("issues");
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join(format!("{}.md", item.frontmatter.id));
+        (tmp, path)
+    }
+
+    #[test]
+    fn write_refuses_what_the_reader_rejects() {
+        use crate::limits::{MAX_BODY_BYTES, MAX_FRONTMATTER_BYTES};
+
+        let mut big_body = full_item();
+        big_body.body = "x".repeat(MAX_BODY_BYTES + 1);
+        let (_tmp, path) = temp_item_path(&big_body);
+        let err = write_item_file(&big_body, &path).unwrap_err();
+        assert!(
+            matches!(err, CloveError::BodyTooLarge { .. }),
+            "got {err:?}"
+        );
+        assert!(!path.exists(), "a rejected write must leave no file");
+
+        let mut long_title = full_item();
+        long_title.frontmatter.title = "t".repeat(MAX_FRONTMATTER_BYTES + 1);
+        let err = write_item_file(&long_title, &path).unwrap_err();
+        assert!(
+            matches!(err, CloveError::FrontmatterTooLarge { .. }),
+            "got {err:?}"
+        );
+
+        let mut many_labels = full_item();
+        many_labels.frontmatter.labels = (0..9_000).map(|n| format!("label-{n}")).collect();
+        let err = write_item_file(&many_labels, &path).unwrap_err();
+        assert!(
+            matches!(err, CloveError::FrontmatterTooLarge { .. }),
+            "got {err:?}"
+        );
+        assert!(!path.exists());
+
+        // The limits themselves are writable.
+        let mut at_limit = full_item();
+        at_limit.body = "x".repeat(MAX_BODY_BYTES);
+        write_item_file(&at_limit, &path).unwrap();
+        assert!(crate::parse::parse_item_file(&path).is_ok());
+    }
+
+    #[test]
+    fn unusual_scalars_read_back_unchanged() {
+        for title in [
+            "foo\n\n",
+            "foo\n",
+            "a\n\nb\n\n\n",
+            " lead and trail ",
+            "x\u{2028}y",
+        ] {
+            let mut item = full_item();
+            item.frontmatter.title = title.to_owned();
+            item.frontmatter.assignee = Some(title.to_owned());
+            let (_tmp, path) = temp_item_path(&item);
+            write_item_file(&item, &path).unwrap();
+            let parsed = crate::parse::parse_item_file(&path).unwrap();
+            assert_eq!(parsed.frontmatter.title, title);
+            assert_eq!(parsed.frontmatter.assignee.as_deref(), Some(title));
+        }
+        for label in [
+            "a\u{2028},b",
+            "a\u{2029}[b",
+            "a\u{85},b",
+            "tab\t,x",
+            "bell\u{7},x",
+        ] {
+            let mut item = full_item();
+            item.frontmatter.labels = vec![label.to_owned()];
+            let (_tmp, path) = temp_item_path(&item);
+            write_item_file(&item, &path).unwrap();
+            let parsed = crate::parse::parse_item_file(&path).unwrap();
+            assert_eq!(parsed.frontmatter.labels, vec![label.to_owned()]);
+        }
     }
 }
