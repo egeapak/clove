@@ -20,8 +20,11 @@ const SDK_LICENSE: &str = "MIT OR Apache-2.0";
 const SEP: &str = " ||| ";
 
 fn cargo_output(args: &[&str]) -> anyhow::Result<Output> {
+    // The guards parse this output. CI sets `CARGO_TERM_COLOR=always`, which
+    // makes `cargo tree` wrap the `(*)` marker in colour codes.
     Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
         .args(args)
+        .env("CARGO_TERM_COLOR", "never")
         .output()
         .with_context(|| format!("running cargo {}", args.join(" ")))
 }
