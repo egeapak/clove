@@ -2,11 +2,12 @@
 schema: 1
 id: clov-EXMARRXC
 title: 'Windows: reindex fails while a process has index.db open'
-status: open
+status: closed
 type: bug
 priority: 2
 created: 2026-11-14T19:17:42.924Z
-updated: 2026-11-14T19:17:42.924Z
+updated: 2026-11-15T07:24:10.470Z
+closed: 2026-11-15T07:24:10.470Z
 labels: []
 deps: []
 relates: []
