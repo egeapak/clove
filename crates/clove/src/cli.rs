@@ -435,10 +435,12 @@ pub struct NewArgs {
 pub struct ShowArgs {
     /// The item id.
     pub id: String,
-    /// Comma-separated field projection.
+    /// Comma-separated field projection. Human output prints one
+    /// `name: value` line per field.
     #[arg(long, value_name = "LIST")]
     pub fields: Option<String>,
-    /// Compute `ready`/`blocked_by` even for human output.
+    /// Human output: also print `blocked_by`, the parent and other links, the
+    /// external ref, and the timestamps. JSON always has every field.
     #[arg(short = 'v', long)]
     pub verbose: bool,
     /// Omit null and empty-list keys from JSON output (as `clove_show` does).

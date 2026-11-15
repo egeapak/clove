@@ -92,6 +92,51 @@ fn new_show_round_trip() {
     assert_eq!(v["data"]["status"], "open");
 }
 
+/// Human `show --fields` prints only the fields asked for, one `name: value`
+/// line each; `-v` adds `blocked_by`, the links, and the timestamps.
+#[test]
+fn show_human_honours_fields_and_verbose() {
+    let dir = init_repo();
+    let dep = new_item(dir.path(), "Dependency", &[]);
+    let id = new_item(
+        dir.path(),
+        "Dependent",
+        &["--dep", &dep, "-l", "a", "-l", "b"],
+    );
+    let human = |args: &[&str]| {
+        let out = clove(dir.path())
+            .arg("show")
+            .arg(&id)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+
+    let fields = human(&["--fields", "status,labels,nope,blocked_by"]);
+    assert_eq!(
+        fields,
+        format!("status: open\nlabels: a, b\nblocked_by: {dep}\n"),
+        "only the asked fields, in the asked order"
+    );
+
+    let plain = human(&[]);
+    assert!(!plain.contains("created:"), "{plain}");
+    assert!(!plain.contains("blocked:"), "{plain}");
+    let verbose = human(&["-v"]);
+    assert!(
+        verbose.starts_with(&plain[..plain.find("  comments:").unwrap()]),
+        "{verbose}"
+    );
+    assert!(
+        verbose.contains(&format!("  blocked:  {dep}\n")),
+        "{verbose}"
+    );
+    assert!(verbose.contains("  created:  "), "{verbose}");
+    assert!(verbose.contains("  updated:  "), "{verbose}");
+}
+
 #[test]
 fn ready_and_blocked_partition_by_dependency() {
     let dir = init_repo();

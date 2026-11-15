@@ -129,7 +129,7 @@ changes (`clove agent-doc --check --file <path>` verifies a saved copy).\n\
 - `clove setup [--global] [--dry-run]` — register the `clove mcp` server (+ tool\n\
   permissions) with Claude Code and write `CLOVE.md` agent directives.\n\
 - `clove new <title> [--type T] [-p N] [-l LABEL]... [--dep ID]... [--parent ID] [-a WHO] [-b TEXT]`\n\
-- `clove show <id> [--fields LIST] [--compact]` — one item. `ready`/`blocked_by` are always computed (`-v` is accepted but no longer needed for them).\n\
+- `clove show <id> [--fields LIST] [-v] [--compact]` — one item. `ready`/`blocked_by` are always computed. In human output `--fields` prints one `name: value` line per field, and `-v` adds `blocked_by`, the links, and the timestamps.\n\
 - `clove edit <id> [--field KEY=VALUE]...` / `clove set <id> KEY=VALUE...`\n\
 - `clove status <id>... <open|in_progress|closed>` (aliases `start <id>...`, `close <id>...`). With one id the output is the item, as before. With several ids every id is attempted: JSON `data` is one `{{id, ok, item}}` or `{{id, ok, error}}` entry per id (JSONL: one line per id), the envelope `ok` is `false` if any id failed, and the exit code is the first failure's.\n\
 - `clove label <id> <add|rm> <label>`, `clove assign <id> <who|--clear>`, `clove parent <id> <parent-id|--clear>` (cycle-checked), `clove priority <id> <0-4>`.\n\

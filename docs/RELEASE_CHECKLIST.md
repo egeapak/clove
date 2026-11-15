@@ -268,7 +268,8 @@ Everything `release-smoke.sh` does not already cover:
       (file tier), `comments --limit`, `export jsonl` → `import jsonl`,
       `init --merge-driver` (`merge.clove-item.driver` + `.gitattributes`),
       `--quiet` (no stderr notes; the result still prints), no-repo error,
-      `version -f json`, `setup --help`.
+      `version -f json`, `setup --help`, human `show <id> --fields status,labels`
+      (only those lines) and `show <id> -v` (adds links and timestamps).
 - [ ] List filters on every tier: `ls --synced`, `--unsynced`, `--parent <id>` (also
       via `query` JSON and the web `?synced=` / `?parent=`) agree with the files; against
       a stale (older-protocol) daemon they still answer, falling back.
