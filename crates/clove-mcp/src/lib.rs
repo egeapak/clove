@@ -115,10 +115,22 @@ fn notify_interval() -> Duration {
 }
 
 /// Whether a change from `last` → `current` should fire `resources/updated`.
-/// `None` (the first poll) only sets the baseline; any later difference — an
-/// increase *or* a decrease (a daemon restart resets the counter) — is a change.
-fn should_notify(last: Option<u64>, current: u64) -> bool {
-    last.is_some_and(|l| l != current)
+/// Any difference — an increase *or* a decrease (a daemon restart resets the
+/// counter) — is a change.
+fn should_notify(last: u64, current: u64) -> bool {
+    last != current
+}
+
+/// The generation the notifier compares its first successful poll against.
+///
+/// `first` is the daemon's generation read when the notifier starts, before
+/// its first sleep, so a write made right after a client subscribes is not
+/// absorbed into the baseline. When no daemon answers yet (`None`), the
+/// baseline is 0: a daemon, and each project it loads, counts from 0, so the
+/// writes it handles before the first successful poll still fire. The cost
+/// is at most one extra notification, which only asks the client to re-read.
+fn baseline(first: Option<u64>) -> u64 {
+    first.unwrap_or(0)
 }
 
 /// Spawn a background thread that polls the daemon's change-generation and pushes
@@ -140,7 +152,7 @@ fn spawn_notifier(
         // daemon is down (or an incompatible version lingers after an upgrade) we
         // quietly re-probe each tick rather than launching doomed `cloved`s.
         let mut client = clove_ipc::DaemonClient::probe(&clove_dir);
-        let mut last: Option<u64> = None;
+        let mut last = baseline(client.as_mut().and_then(|c| c.change_generation().ok()));
         loop {
             std::thread::sleep(interval);
             match client.as_mut().and_then(|c| c.change_generation().ok()) {
@@ -169,7 +181,7 @@ fn spawn_notifier(
                             let _ = peer.notify_resource_list_changed().await;
                         });
                     }
-                    last = Some(generation);
+                    last = generation;
                 }
                 // Daemon down/unreachable: keep `last`, re-probe next tick.
                 None => client = clove_ipc::DaemonClient::probe(&clove_dir),
@@ -195,21 +207,33 @@ async fn serve(engine: Engine, clove_dir: Utf8PathBuf, daemon_active: bool) -> a
 
 #[cfg(test)]
 mod tests {
-    use super::should_notify;
+    use super::{baseline, should_notify};
 
     #[test]
-    fn should_notify_baselines_then_fires_on_any_change() {
-        assert!(!should_notify(None, 0), "first poll only sets the baseline");
-        assert!(!should_notify(None, 7), "first poll never notifies");
+    fn should_notify_fires_on_any_change() {
+        assert!(!should_notify(5, 5), "unchanged generation → no notify");
+        assert!(should_notify(5, 6), "increment → notify");
         assert!(
-            !should_notify(Some(5), 5),
-            "unchanged generation → no notify"
-        );
-        assert!(should_notify(Some(5), 6), "increment → notify");
-        assert!(
-            should_notify(Some(5), 1),
+            should_notify(5, 1),
             "decrease (daemon restart reset) → notify"
         );
+    }
+
+    /// The race `subscribed_resource_updated_on_mutation` once hit: the
+    /// daemon was not up when the notifier started, and the one write bumped
+    /// the generation before the first successful poll. That poll must still
+    /// fire, so the baseline without a daemon is 0, never the first value read.
+    #[test]
+    fn a_write_before_the_first_successful_poll_still_notifies() {
+        let last = baseline(None);
+        assert!(should_notify(last, 1), "daemon came up and took one write");
+        assert!(!should_notify(last, 0), "daemon came up, nothing written");
+        let last = baseline(Some(4));
+        assert!(
+            !should_notify(last, 4),
+            "a daemon at start sets the baseline"
+        );
+        assert!(should_notify(last, 5));
     }
 
     #[test]
