@@ -22,8 +22,8 @@ into memory and served from there (gzip or identity by `Accept-Encoding`).
 - `dist/` is **git-ignored and generated** — never commit it. (`dist-gz/` lives in
   Cargo's `OUT_DIR` now, not in the source tree.)
 - A **published** `clove-web` has no `web/` sources: its `build.rs` downloads
-  `clove-web-dist-v<version>.tar.gz` (+ `.sha256`) from that version's GitHub
-  Release, verifies it and embeds it. `CLOVE_WEB_DIST_DIR=<built dist/>` skips the
+  `clove-web-dist-v<version>.tar.gz` from that version's GitHub Release, verifies
+  it against the digest pinned in the crate (`build/web-dist.sha256`) and embeds it. `CLOVE_WEB_DIST_DIR=<built dist/>` skips the
   download (offline builds), and `CLOVE_WEB_DIST_BASE_URL` points it at a mirror.
   The web server itself is the opt-in `web` feature of `clove-cli` and `cloved`.
 

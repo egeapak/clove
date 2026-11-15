@@ -154,9 +154,14 @@ fn gunzip(gz: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Hashed assets are immutable; the entry HTML must always revalidate.
+/// Hashed assets are immutable; everything else must always revalidate.
+///
+/// Only `_app/immutable/` carries a content hash in its file names. The rest
+/// of `_app/` does not: `_app/version.json` is the file the SPA polls to learn
+/// that a new build is being served, so a year-long cache on it hides every
+/// upgrade from an open tab.
 fn cache_for(path: &str) -> &'static str {
-    if path.starts_with("_app/") || path.contains("immutable") {
+    if path.starts_with("_app/immutable/") {
         "public, max-age=31536000, immutable"
     } else {
         "no-cache"
@@ -179,6 +184,14 @@ pub async fn static_handler(
     let map = table();
     let candidate = if path.is_empty() { "index.html" } else { path };
     let asset = map.get(candidate);
+
+    // A build file that is not in this build is a genuine 404, not a page. A
+    // tab left open across an upgrade asks for the old build's hashed chunks;
+    // answering with `index.html` made the dynamic import fail on its MIME
+    // type instead of on a status the SPA's loader understands.
+    if asset.is_none() && candidate.starts_with("_app/") {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
 
     // The SPA entry page: under a hub prefix the rewritten copy, else the page
     // as built. Never cached — the prefix is per-project, the build is not.
@@ -280,7 +293,19 @@ fn accepts_gzip(headers: &HeaderMap) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::rewrite_base;
+    use super::{cache_for, rewrite_base};
+
+    #[test]
+    fn cache_is_immutable_only_for_hashed_assets() {
+        assert!(cache_for("_app/immutable/chunks/abc123.js").contains("immutable"));
+        // Unhashed: the SPA polls it to detect a new build.
+        assert_eq!(cache_for("_app/version.json"), "no-cache");
+        assert_eq!(cache_for("_app/env.js"), "no-cache");
+        assert_eq!(cache_for("index.html"), "no-cache");
+        assert_eq!(cache_for("favicon.png"), "no-cache");
+        // A name that merely contains the word is not a hashed asset.
+        assert_eq!(cache_for("immutable.css"), "no-cache");
+    }
 
     const PAGE: &str = r#"<link href="/_app/immutable/entry/start.js" rel="modulepreload">
 <script>

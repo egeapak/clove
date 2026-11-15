@@ -15,6 +15,8 @@ pub const MAX_DOWNLOAD: u64 = 64 << 20;
 pub const MAX_EXTRACTED: u64 = 256 << 20;
 
 /// The release asset holding the built SPA, and the one holding its checksum.
+/// The build downloads only the first; the second is for people and for
+/// `publish.sh`, which copies its digest into the crate.
 pub fn asset_names(version: &str) -> (String, String) {
     let tarball = format!("clove-web-dist-v{version}.tar.gz");
     let checksum = format!("{tarball}.sha256");
@@ -66,6 +68,29 @@ pub fn parse_sha256(text: &str) -> Result<String, String> {
     Ok(token.to_ascii_lowercase())
 }
 
+/// The digest pinned in the crate's `build/web-dist.sha256`: the first line
+/// that is not blank and not a `#` comment. `None` when the file pins nothing,
+/// which is its state in the repository.
+pub fn pinned_sha256(text: &str) -> Result<Option<String>, String> {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('#'));
+    line.map(parse_sha256).transpose()
+}
+
+/// The digest the downloaded archive must have. It comes only from the crate
+/// itself, never from the download location: a `.sha256` served beside the
+/// archive proves nothing against whoever can replace the archive.
+pub fn expected_digest(pin_file: &str) -> Result<String, String> {
+    pinned_sha256(pin_file)?.ok_or_else(|| {
+        "this clove-web package pins no digest for its web UI archive \
+         (build/web-dist.sha256 holds none), so a download cannot be verified; \
+         scripts/release/publish.sh writes the digest when it publishes the crate"
+            .to_owned()
+    })
+}
+
 /// Check `bytes` against `expected_hex`.
 pub fn verify(bytes: &[u8], expected_hex: &str) -> Result<(), String> {
     let actual = Sha256::digest(bytes)
@@ -76,7 +101,7 @@ pub fn verify(bytes: &[u8], expected_hex: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "checksum mismatch: the download hashes to {actual}, the release lists {expected_hex}"
+            "checksum mismatch: the download hashes to {actual}, this crate pins {expected_hex}"
         ))
     }
 }

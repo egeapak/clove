@@ -27,6 +27,8 @@ use crate::{build_router, host_guard, nosniff, AppState};
 #[derive(Clone, Default)]
 pub struct HubWeb {
     projects: Arc<RwLock<Registry>>,
+    /// The access token of the whole hub ([`HubWeb::with_auth`]).
+    auth: Option<crate::WebAuth>,
 }
 
 #[derive(Default)]
@@ -61,6 +63,13 @@ pub struct ProjectEntry {
 impl HubWeb {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Require `auth`'s token on every request to the hub: the project list,
+    /// the root page and every mounted project (DESIGN §8.4).
+    pub fn with_auth(mut self, auth: crate::WebAuth) -> Self {
+        self.auth = Some(auth);
+        self
     }
 
     /// Mount the project rooted at `root` (its canonical path) and return its
@@ -161,12 +170,17 @@ impl HubWeb {
 
     /// The hub router: the project listing, the root page, and prefix dispatch.
     pub fn router(&self) -> Router {
-        Router::new()
+        let router = Router::new()
             .route("/", get(root_page))
             .route("/favicon.svg", get(favicon))
             .route("/favicon.ico", get(favicon))
             .route("/api/v1/projects", get(list_projects))
-            .fallback(dispatch)
+            .fallback(dispatch);
+        let router = match &self.auth {
+            Some(auth) => auth.protect(router),
+            None => router,
+        };
+        router
             .layer(axum::middleware::from_fn(host_guard))
             .layer(axum::middleware::from_fn(nosniff))
             .with_state(self.clone())
