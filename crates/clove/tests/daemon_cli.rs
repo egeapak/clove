@@ -1437,3 +1437,104 @@ fn a_protocol_8_hub_leaves_the_synced_and_parent_filters_to_the_local_tiers() {
         }
     }
 }
+
+/// A project whose watched daemon does not see a write behind its back: the
+/// watcher's quiet window is ten minutes and reads do not refresh, so the
+/// daemon's index and graph keep lacking the item for the whole test.
+fn start_a_daemon_that_misses_writes(dir: &Path, run: &Path) {
+    init(dir, run);
+    let config = dir.join(".clove/config.toml");
+    let text = std::fs::read_to_string(&config).unwrap();
+    assert!(text.contains("auto_refresh = true"), "{text}");
+    assert!(text.contains("watch_debounce_ms = 200"), "{text}");
+    let text = text
+        .replace("auto_refresh = true", "auto_refresh = false")
+        .replace("watch_debounce_ms = 200", "watch_debounce_ms = 600000");
+    std::fs::write(&config, text).unwrap();
+    clove(dir, run)
+        .args(["new", "seen by the daemon"])
+        .assert()
+        .success();
+    clove(dir, run).args(["daemon", "start"]).assert().success();
+    wait_watching(dir, run);
+}
+
+fn ls_json(dir: &Path, run: &Path) -> serde_json::Value {
+    json(
+        &clove(dir, run)
+            .args(["ls", "-f", "json"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+}
+
+/// `dep tree` of an item the daemon's graph lacks answers from the files, not
+/// with a false "not found".
+#[test]
+fn dep_tree_of_an_item_the_daemon_lacks_reads_the_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let run = Run::new();
+    start_a_daemon_that_misses_writes(dir, &run.path);
+    let id = write_item_behind_the_daemons_back(dir, "behind its back");
+
+    // The daemon answers and does not have the item.
+    let listed = ls_json(dir, &run.path);
+    assert_eq!(listed["_meta"]["source"], "daemon", "{listed}");
+    assert_eq!(titles(&listed), vec!["seen by the daemon".to_owned()]);
+
+    let out = clove(dir, &run.path)
+        .args(["dep", "tree", &id, "-f", "json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(json(&out.stdout)["data"]["id"], id.as_str());
+
+    clove(dir, &run.path)
+        .args(["daemon", "stop", "--all"])
+        .assert()
+        .success();
+}
+
+/// `doctor --fix` rebuilds the index through the running daemon, as `clove
+/// reindex` does, so the daemon serves the rebuilt index afterwards.
+#[test]
+fn doctor_fix_rebuilds_the_index_through_the_running_daemon() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let run = Run::new();
+    start_a_daemon_that_misses_writes(dir, &run.path);
+    write_item_behind_the_daemons_back(dir, "behind its back");
+    let listed = ls_json(dir, &run.path);
+    assert_eq!(listed["_meta"]["source"], "daemon", "{listed}");
+    assert_eq!(titles(&listed).len(), 1, "{listed}");
+
+    let out = clove(dir, &run.path)
+        .args(["doctor", "--fix", "-f", "json"])
+        .output()
+        .unwrap();
+    let report = json(&out.stdout);
+    assert!(
+        report["data"]["summary"]["fixed"].as_u64().unwrap_or(0) >= 1,
+        "{report}"
+    );
+
+    let listed = ls_json(dir, &run.path);
+    assert_eq!(listed["_meta"]["source"], "daemon", "{listed}");
+    let mut listed_titles = titles(&listed);
+    listed_titles.sort();
+    assert_eq!(
+        listed_titles,
+        vec![
+            "behind its back".to_owned(),
+            "seen by the daemon".to_owned()
+        ],
+        "the daemon serves the rebuilt index: {listed}"
+    );
+
+    clove(dir, &run.path)
+        .args(["daemon", "stop", "--all"])
+        .assert()
+        .success();
+}
