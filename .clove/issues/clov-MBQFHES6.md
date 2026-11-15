@@ -2,11 +2,12 @@
 schema: 1
 id: clov-MBQFHES6
 title: 'tui: a save rescans the store on the UI thread and tab badges recount each frame'
-status: open
+status: closed
 type: chore
 priority: 4
 created: 2026-11-14T19:14:59.746Z
-updated: 2026-11-14T19:14:59.746Z
+updated: 2026-11-15T06:49:12.844Z
+closed: 2026-11-15T06:49:12.844Z
 labels: []
 deps: []
 relates: []
