@@ -88,6 +88,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The daemon indexes an item file that an editor saves in place, reloads the
   project when `.clove/issues` is removed and created again (for example by
   `git checkout`), and follows an `index.db` that another process replaced.
+- The daemon no longer misses an item file that another process wrote just
+  before a read (seen on macOS).
 - A daemon read that cannot be brought up to date is refused with
   `INDEX_BEHIND`, and the client reads the index or the files itself.
 - A daemon-side create uses the current `id_prefix` and `default_type` from
