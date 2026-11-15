@@ -404,6 +404,46 @@ mod tests {
         );
     }
 
+    /// A sync whose apply fails consumes nothing: the reported ids are kept,
+    /// so the watcher's retry applies them. An in-place save does not move
+    /// the directory mtime, so a lost report would never be found again.
+    #[test]
+    fn a_failed_apply_keeps_the_reports_for_the_retry() {
+        let mut fx = fixture(3);
+        // A second connection makes every write to `items` fail, as a full
+        // disk or a lock held past the busy timeout would.
+        let db = fx.issues.parent().unwrap().join("index.db");
+        let other = rusqlite::Connection::open(db.as_std_path()).unwrap();
+        let refuse = |when: &str| {
+            format!(
+                "CREATE TRIGGER refuse_{w} BEFORE {when} ON items \
+                 BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+                w = when.to_lowercase()
+            )
+        };
+        for when in ["INSERT", "UPDATE", "DELETE"] {
+            other.execute_batch(&refuse(when)).unwrap();
+        }
+
+        fx.write(1, "Saved in place");
+        fx.report(1);
+        assert_eq!(fx.fresh.sync(&mut fx.index, Some(20)), Sync::Failed);
+        assert_eq!(fx.title(1).as_deref(), Some("Item 1"), "nothing applied");
+
+        other
+            .execute_batch(
+                "DROP TRIGGER refuse_insert; DROP TRIGGER refuse_update; \
+                 DROP TRIGGER refuse_delete;",
+            )
+            .unwrap();
+        // The retry has no new report to go on; only the kept id finds it.
+        assert_eq!(
+            fx.fresh.sync(&mut fx.index, Some(20)),
+            Sync::Fresh { changed: true }
+        );
+        assert_eq!(fx.title(1).as_deref(), Some("Saved in place"));
+    }
+
     #[test]
     fn a_change_over_the_limit_is_refused_and_kept_for_the_watcher() {
         let mut fx = fixture(2);

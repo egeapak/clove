@@ -890,6 +890,7 @@ dependencies = [
  "git2",
  "interprocess",
  "notify",
+ "rusqlite",
  "serde_json",
  "tarpc",
  "tempfile",
