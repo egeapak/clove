@@ -185,6 +185,11 @@ pub fn run(
 ) -> Result<(), CloveError> {
     let project_dir = current_dir()?;
     let claude_dir = resolve_claude_dir(&project_dir, global, claude_dir_override)?;
+    // A cloned `.claude` that is itself a symlink would send every write below
+    // outside the project, even though each file in it is a regular one.
+    if !global && claude_dir_override.is_none() {
+        refuse_linked_dir(&claude_dir)?;
+    }
 
     let mut actions: Vec<String> = Vec::new();
     // Project scope registers the server in the `.mcp.json` next to `.claude/`.
@@ -230,6 +235,24 @@ pub fn run(
                 }
             }
         }
+    }
+    Ok(())
+}
+
+/// Fail when `dir` is a symlink: in project scope, the link comes with the
+/// clone and may point anywhere.
+fn refuse_linked_dir(dir: &Utf8Path) -> Result<(), CloveError> {
+    if std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(CloveError::Io {
+            path: dir.to_owned(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "refusing to write into the symlinked directory {dir} (replace the \
+                     link with a regular directory, then run the command again)"
+                ),
+            ),
+        });
     }
     Ok(())
 }
@@ -593,7 +616,8 @@ fn write_atomic(path: &Utf8Path, contents: &str, links: Links) -> Result<(), Clo
             return Err(io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!(
-                    "refusing to write through the symlink {path}                      (replace the link with a regular file, then run the command again)"
+                    "refusing to write through the symlink {path} (replace the link \
+                     with a regular file, then run the command again)"
                 ),
             )))
         }

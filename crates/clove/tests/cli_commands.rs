@@ -80,6 +80,24 @@ fn init_never_writes_through_a_planted_gitignore() {
     assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious\n");
 }
 
+/// Project-scope `setup` refuses a `.claude` that is itself a symlink: every
+/// file it writes there would land outside the project.
+#[cfg(unix)]
+#[test]
+fn setup_refuses_a_symlinked_claude_dir() {
+    let dir = init_repo();
+    let outside = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), dir.path().join(".claude")).unwrap();
+    for args in [&["setup"][..], &["setup", "--dry-run"][..]] {
+        let out = clove(dir.path()).args(args).output().unwrap();
+        assert!(!out.status.success(), "{args:?}: {out:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("symlinked directory"), "{stderr}");
+    }
+    assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
+    assert!(!dir.path().join(".mcp.json").exists());
+}
+
 #[test]
 fn new_show_round_trip() {
     let dir = init_repo();
