@@ -12,7 +12,10 @@ use std::time::Instant;
 use camino::Utf8PathBuf;
 use chrono::{DateTime, Utc};
 use clove_core::ItemStore;
-use clove_index::{Filter, Index, ItemListRow, PostFilter, QueryMode};
+// Above `STALE_REFRESH_LIMIT` out-of-date items, a read does not bring the
+// index up to date itself: it is refused (the client reads the next tier) and
+// the watcher task applies the catch-up. The engine uses the same constant.
+use clove_index::{Filter, Index, ItemListRow, PostFilter, QueryMode, STALE_REFRESH_LIMIT};
 use clove_ipc::{
     GraphRequest, GraphResponse, LeanRow, QueryKind, QueryListResponse, QueryRequest, ReindexDone,
     RpcError, StatusResponse,
@@ -25,12 +28,6 @@ use crate::fresh::{Freshness, Sync};
 use crate::graph_cache::GraphCache;
 use crate::readers::Readers;
 use crate::state::DaemonState;
-
-/// Above this many out-of-date items, a read does not bring the index up to
-/// date itself: it is refused (the client reads the next tier) and the watcher
-/// task applies the catch-up. Mirrors the CLI's `STALE_REFRESH_LIMIT`
-/// (DESIGN §6.4).
-const STALE_REFRESH_LIMIT: usize = 20;
 
 /// Shared context every connection handler needs. Cloned per request by tarpc,
 /// so all fields are cheap (`Arc`) handles.
@@ -459,6 +456,16 @@ impl Dispatcher {
             .index
             .query_filtered(&filter, residue.as_ref(), window)
             .map_err(|e| RpcError::new("query_failed", e.to_string()))?;
+        // `ready` names the items it left out for a missing dependency, as the
+        // index and file tiers do, so `_meta.warnings` does not depend on which
+        // tier answered.
+        let warnings = match filter.mode {
+            QueryMode::Ready => reader
+                .index
+                .ready_warnings(&filter, residue.as_ref())
+                .map_err(|e| RpcError::new("query_failed", e.to_string()))?,
+            QueryMode::List | QueryMode::Blocked => Vec::new(),
+        };
         self.readers.give(reader);
         let total = total as u64;
         // Send only what the window can reach.
@@ -479,7 +486,7 @@ impl Dispatcher {
         Ok(QueryListResponse {
             rows: rows.iter().map(to_lean).collect(),
             total,
-            warnings: Vec::new(),
+            warnings,
         })
     }
 

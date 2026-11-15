@@ -645,3 +645,45 @@ fn plugin_store_writes_route_through_the_daemon() {
 fn daemon_sock(clove_dir: &std::path::Path) -> PathBuf {
     runtime_dir(clove_dir.parent().unwrap()).join("hub.sock")
 }
+
+/// `clove ready` through the daemon carries the same dangling-dependency
+/// warning as the file scan. The daemon answer once returned no warnings, so
+/// an item left out of `ready` for a missing dep vanished without a word.
+#[test]
+fn ready_through_the_daemon_warns_about_dangling_deps() {
+    let bin = cloved_bin();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    assert!(run_in(root, &["init"]).status.success());
+    let ok = new_id(&run_in(root, &["new", "unblocked", "-f", "json"]).stdout);
+    let broken = new_id(&run_in(root, &["new", "names a ghost", "-f", "json"]).stdout);
+    // Hand-write a reference to an id that does not exist (`dep add` refuses).
+    let path = root.join(format!(".clove/issues/{broken}.md"));
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("deps: []"), "{text}");
+    std::fs::write(&path, text.replace("deps: []", "deps: [proj-ZZZZZZZZ]")).unwrap();
+    assert!(run_in(root, &["reindex"]).status.success());
+
+    let warnings_of = |out: &[u8]| -> Vec<String> {
+        let v: serde_json::Value = serde_json::from_slice(out).unwrap();
+        v["_meta"]["warnings"]
+            .as_array()
+            .map(|a| a.iter().map(|w| w.as_str().unwrap().to_owned()).collect())
+            .unwrap_or_default()
+    };
+    let want = warnings_of(&run_in(root, &["--no-index", "ready", "-f", "json"]).stdout);
+    assert_eq!(want.len(), 1, "the file scan warns once: {want:?}");
+    assert!(want[0].contains(&broken), "{want:?}");
+
+    let clove_dir = root.join(".clove");
+    let _daemon = spawn_daemon(&clove_dir, &bin);
+    let out = run_in(root, &["ready", "-f", "json"]);
+    let (ids, source) = ids_and_source(&out.stdout);
+    assert_eq!(source, "daemon", "ready must be served by the daemon");
+    assert_eq!(ids, vec![ok], "the dangling item is not ready");
+    assert_eq!(
+        warnings_of(&out.stdout),
+        want,
+        "the daemon warns exactly as the file scan does"
+    );
+}

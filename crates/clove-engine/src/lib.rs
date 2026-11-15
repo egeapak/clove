@@ -51,8 +51,9 @@ use serde_json::Value;
 
 /// Up to this many out-of-date items are always refreshed one by one. Above it
 /// the engine still refreshes, and rebuilds the index instead when the changes
-/// are also more than a quarter of the indexed store (DESIGN §6.4).
-pub const STALE_REFRESH_LIMIT: usize = 20;
+/// are also more than a quarter of the indexed store (DESIGN §6.4). The daemon
+/// uses the same value.
+pub use clove_index::STALE_REFRESH_LIMIT;
 
 /// Above this many items in a page, hydrate in parallel. Mirrors
 /// `ItemStore::scan_frontmatter`'s own threshold, so a hydrated page and a

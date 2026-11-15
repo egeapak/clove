@@ -24,6 +24,12 @@ use crate::write::{content_hash8, write_row, RowMeta};
 /// distinguish a fast in-place rewrite (DESIGN §6.2).
 const RECENT_WINDOW_MS: i64 = 2_000;
 
+/// How many out-of-date items one read applies by itself (DESIGN §6.4). The
+/// engine refreshes up to this many one by one and decides on a rebuild above
+/// it; the daemon refuses a read above it and lets its watcher catch up. One
+/// value, so the two tiers agree on what counts as a large change.
+pub const STALE_REFRESH_LIMIT: usize = 20;
+
 /// The set of items that differ between the files and the index.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct StalenessReport {
