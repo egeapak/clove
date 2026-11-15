@@ -1181,17 +1181,42 @@ fn subscribed_resource_updated_on_mutation() {
 
     // A write routes through the daemon → mark_dirty → change-generation bump →
     // the notifier polls (50ms) and pushes resources/updated for the subscription.
-    send(
-        &mut stdin,
-        json!({ "jsonrpc":"2.0","id":3,"method":"tools/call","params":{
-            "name":"clove_new","arguments":{"title":"trigger a push"}}}),
-    );
-
-    // Wait for the resources/updated notification for clove://ready (tolerating the
-    // interleaved tool-call response and the coarse resources/list_changed frame).
-    let note = wait_for(&rx, deadline, &|v| {
+    //
+    // The notifier's first successful poll only sets its baseline. The daemon
+    // can start after the subscribe, so the first write can land before that
+    // baseline and push nothing. Write again each second until a push arrives:
+    // the assertion is still that a write after the baseline is pushed.
+    let is_note = |v: &Value| {
         v["method"] == "notifications/resources/updated" && v["params"]["uri"] == "clove://ready"
-    });
+    };
+    let mut note = None;
+    for attempt in 0u64.. {
+        send(
+            &mut stdin,
+            json!({ "jsonrpc":"2.0","id":3 + attempt,"method":"tools/call","params":{
+                "name":"clove_new","arguments":{"title":format!("trigger a push {attempt}")}}}),
+        );
+        let step = (Instant::now() + Duration::from_secs(1)).min(deadline);
+        let found = loop {
+            let remaining = step
+                .checked_duration_since(Instant::now())
+                .unwrap_or_default();
+            match rx.recv_timeout(remaining.max(Duration::from_millis(1))) {
+                Ok(v) if is_note(&v) => break Some(v),
+                Ok(_) => {}
+                Err(_) => break None,
+            }
+        };
+        if found.is_some() {
+            note = found;
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for resources/updated"
+        );
+    }
+    let note = note.unwrap();
     assert_eq!(note["params"]["uri"], "clove://ready");
 
     drop(stdin);
