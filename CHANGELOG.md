@@ -60,6 +60,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Rust version is 1.91.
 - Release: Linux binaries are built on Ubuntu 22.04 and need glibc 2.35 or
   newer. A tag is built only when CI succeeded on the tagged commit.
+- `clove close` (open-dependents warning), `clove dep tree`, `clove dep
+  cycle`, `clove stats`, and the daemon's `stats` read a fresh index instead
+  of parsing every item file. `clove stats` reports `_meta.source` (`index`
+  or `files`).
+- A `clove sync github` run scans the store once.
+- `cargo xtask pack-web-dist` and `cargo xtask check-dco` replace the shell
+  scripts of the same job.
+- `octocrab` 0.54, built without JWT support.
 
 ### Fixed
 
@@ -148,6 +156,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   to the end of bodies with indented code. The filter menu keeps active values
   that no item has any more; Up/Down move between Body lines in the form; the
   help overlay scrolls on short terminals.
+- `clove ready` served by the daemon gives the same dangling-dependency
+  warning in `_meta.warnings` as the index and the files.
+- An MCP client that subscribes before the daemon is up gets
+  `resources/updated` for the first change.
+- `clove sync github` waits out a GitHub rate limit that names its wait
+  (`Retry-After`, or `x-ratelimit-reset` on a 403 or 429) for up to 60
+  seconds. A longer wait fails at once and says when to run the sync again.
+- `clove show -v` and `--fields` work in human output.
+- `clove setup` refuses a symlinked `.claude` directory in project scope.
+- A TUI save no longer freezes the UI while the store is scanned again. The
+  tab counts are computed once per refresh.
+- After the web server restarts with a new token, an open tab shows "no
+  access" and a banner with the URL to open. It no longer reconnects forever.
+- A keyboard move on the web board keeps focus on the moved card.
 
 ### Security
 
