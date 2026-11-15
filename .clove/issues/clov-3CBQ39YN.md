@@ -2,11 +2,12 @@
 schema: 1
 id: clov-3CBQ39YN
 title: 'sync github: the issue-list retry ignores Retry-After and the 403 rate-limit wait'
-status: open
+status: closed
 type: bug
 priority: 2
 created: 2026-11-15T07:01:15.848Z
-updated: 2026-11-15T07:01:15.848Z
+updated: 2026-11-15T07:16:42.184Z
+closed: 2026-11-15T07:16:42.184Z
 labels: []
 deps: []
 relates: []

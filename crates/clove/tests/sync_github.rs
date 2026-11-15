@@ -67,6 +67,12 @@ struct State {
     list_transient_fails: usize,
     /// Count of issue-list GETs actually received.
     list_get_count: u64,
+    /// Upcoming issue-list GETs that fail with this status and these extra
+    /// response headers (rate limits: `Retry-After`, `x-ratelimit-*`), one
+    /// entry per GET, before the list behaves normally.
+    list_failures: std::collections::VecDeque<(u16, Vec<(String, String)>)>,
+    /// Extra headers for the response being written (set by `route`).
+    extra_headers: Vec<(String, String)>,
     /// While `Some(n)`, a comment POST to issue `n` responds 500 and adds nothing.
     fail_comment_post_for: Option<u64>,
     /// Count of issue-create POSTs actually received.
@@ -148,6 +154,8 @@ impl MockGitHub {
             patch_transient_fails: 0,
             list_transient_fails: 0,
             list_get_count: 0,
+            list_failures: std::collections::VecDeque::new(),
+            extra_headers: Vec::new(),
             fail_comment_post_for: None,
             issue_post_count: 0,
             patch_count: 0,
@@ -240,6 +248,19 @@ impl MockGitHub {
     /// Arm the next `n` issue-list GETs to fail 503 (transient) before succeeding.
     fn arm_list_transient_fails(&self, n: usize) {
         self.state.lock().unwrap().list_transient_fails = n;
+    }
+
+    /// Fail the next issue-list GET with `status` and the extra `headers`.
+    fn arm_list_failure(&self, status: u16, headers: &[(&str, String)]) {
+        let headers = headers
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), value.clone()))
+            .collect();
+        self.state
+            .lock()
+            .unwrap()
+            .list_failures
+            .push_back((status, headers));
     }
 
     fn list_get_count(&self) -> u64 {
@@ -482,6 +503,11 @@ fn handle_conn(mut stream: TcpStream, state: &Arc<Mutex<State>>) {
         .take()
         .map(|url| format!("Link: <{url}>; rel=\"next\"\r\n"))
         .unwrap_or_default();
+    let extra: String = std::mem::take(&mut state.lock().unwrap().extra_headers)
+        .into_iter()
+        .map(|(name, value)| format!("{name}: {value}\r\n"))
+        .collect();
+    let link = format!("{link}{extra}");
     let body_str = if status.starts_with("204") {
         String::new()
     } else {
@@ -643,6 +669,13 @@ fn route(
             if s.list_transient_fails > 0 {
                 s.list_transient_fails -= 1;
                 return (status_line(503), json!({ "message": "try again later" }));
+            }
+            if let Some((status, headers)) = s.list_failures.pop_front() {
+                s.extra_headers = headers;
+                return (
+                    status_line(status),
+                    json!({ "message": "API rate limit exceeded" }),
+                );
             }
             // Real GitHub reports each issue's live comment count in the list;
             // the sync's comment-fetch skip relies on it.
@@ -835,6 +868,7 @@ fn item_rejection(s: &State, body: &Value) -> Option<(&'static str, Value)> {
 /// Map an HTTP status code to a status line for the fault-injection responses.
 fn status_line(code: u16) -> &'static str {
     match code {
+        403 => "403 Forbidden",
         422 => "422 Unprocessable Entity",
         429 => "429 Too Many Requests",
         500 => "500 Internal Server Error",
@@ -2451,6 +2485,93 @@ fn issue_list_is_retried_on_5xx() {
         3,
         "two transient failures then success"
     );
+}
+
+/// Seconds since the epoch, `ahead` seconds from now (for `x-ratelimit-reset`).
+fn epoch_in(ahead: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    (now.as_secs() + ahead).to_string()
+}
+
+/// A `429` with `Retry-After` is waited out for the time it names, then the
+/// list is fetched again and the sync succeeds.
+#[test]
+fn a_rate_limited_issue_list_waits_for_retry_after() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    mock.seed(1, "Remote", "body", "open");
+    mock.arm_list_failure(429, &[("Retry-After", "1".to_owned())]);
+
+    let started = std::time::Instant::now();
+    let v = sync(dir.path(), mock.addr, &["--no-comments"]);
+    assert_eq!(v["data"]["pulled_created"], 1, "{v}");
+    assert_eq!(mock.list_get_count(), 2, "one 429, then the retry");
+    // The 1 ms test backoff would retry at once: the wait is the header's.
+    assert!(started.elapsed() >= std::time::Duration::from_secs(1));
+}
+
+/// A `403` for an exhausted primary rate limit waits for `x-ratelimit-reset`;
+/// a `403` without rate-limit headers is a permission error and is not retried.
+#[test]
+fn a_403_is_retried_only_when_it_is_a_rate_limit() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    mock.seed(1, "Remote", "body", "open");
+    mock.arm_list_failure(
+        403,
+        &[
+            ("x-ratelimit-remaining", "0".to_owned()),
+            ("x-ratelimit-reset", epoch_in(0)),
+        ],
+    );
+    let v = sync(dir.path(), mock.addr, &["--no-comments"]);
+    assert_eq!(v["data"]["pulled_created"], 1, "{v}");
+    assert_eq!(mock.list_get_count(), 2);
+
+    mock.arm_list_failure(403, &[("x-ratelimit-remaining", "4999".to_owned())]);
+    let out = sync_raw(dir.path(), mock.addr, &["--no-comments"]);
+    assert!(!out.status.success(), "{out:?}");
+    assert_eq!(mock.list_get_count(), 3, "a permission 403 is not retried");
+}
+
+/// A rate limit that asks for longer than the sync waits fails at once and
+/// says when to run the sync again.
+#[test]
+#[cfg_attr(not(feature = "test-knobs"), ignore = "needs a `test-knobs` clove")]
+fn a_rate_limit_longer_than_the_cap_fails_without_waiting() {
+    let mock = MockGitHub::start();
+    let dir = init_repo();
+    mock.seed(1, "Remote", "body", "open");
+    // The cap is 60 s; the test knob lowers it to 1 s.
+    mock.arm_list_failure(429, &[("Retry-After", "5".to_owned())]);
+
+    let started = std::time::Instant::now();
+    let out = clove(dir.path(), mock.addr)
+        .env("CLOVE_GITHUB_RATE_LIMIT_MAX_WAIT_MS", "1000")
+        .args([
+            "sync",
+            "--format",
+            "json",
+            "github",
+            "owner/repo",
+            "--no-comments",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{out:?}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "it waited"
+    );
+    assert_eq!(mock.list_get_count(), 1);
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(text.contains("retry in 5s, longer than the 1s"), "{text}");
 }
 
 /// A create whose response was lost left the issue on GitHub and the local item

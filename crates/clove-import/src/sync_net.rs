@@ -1716,6 +1716,19 @@ where
             Ok(value) => return Ok(value),
             Err(err) => {
                 attempt += 1;
+                // A rate-limited response names its wait. GitHub did not
+                // process the request, so even a create is safe to send again.
+                if let Some(wait) = rate_limit_wait(&err) {
+                    let max = rate_limit_max_wait();
+                    if wait > max {
+                        return Err(CallFailure::Fatal(rate_limited(operation, &err, wait, max)));
+                    }
+                    if attempt >= MAX_ATTEMPTS {
+                        return Err(classify_failure(operation, &err));
+                    }
+                    tokio::time::sleep(wait).await;
+                    continue;
+                }
                 if attempt >= MAX_ATTEMPTS || !idempotent || !is_transient(&err) {
                     return Err(classify_failure(operation, &err));
                 }
@@ -1723,6 +1736,51 @@ where
                 delay = delay.saturating_mul(2);
             }
         }
+    }
+}
+
+/// The wait a `403`/`429` failure asked for (`Retry-After`, or the reset of
+/// an exhausted primary limit), from the hint the HTTP client recorded. `None`
+/// for any other failure, and for a `403` that is not a rate limit.
+fn rate_limit_wait(err: &octocrab::Error) -> Option<std::time::Duration> {
+    let octocrab::Error::GitHub { source, .. } = err else {
+        return None;
+    };
+    if ![403, 429].contains(&source.status_code.as_u16()) {
+        return None;
+    }
+    crate::rate_limit::take_wait()
+}
+
+/// The longest rate-limit wait a sync sits out before it gives up: 60 seconds,
+/// or `CLOVE_GITHUB_RATE_LIMIT_MAX_WAIT_MS` in a `test-knobs` build.
+fn rate_limit_max_wait() -> std::time::Duration {
+    const DEFAULT: std::time::Duration = std::time::Duration::from_secs(60);
+    if !cfg!(feature = "test-knobs") {
+        return DEFAULT;
+    }
+    std::env::var("CLOVE_GITHUB_RATE_LIMIT_MAX_WAIT_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map_or(DEFAULT, std::time::Duration::from_millis)
+}
+
+/// The error for a rate limit whose wait is longer than [`rate_limit_max_wait`].
+fn rate_limited(
+    operation: &str,
+    err: &octocrab::Error,
+    wait: std::time::Duration,
+    max: std::time::Duration,
+) -> ImportError {
+    ImportError::GitHub {
+        operation: operation.to_owned(),
+        reason: format!(
+            "{}; GitHub rate limit: retry in {}s, longer than the {}s a sync waits; \
+             run the sync again then",
+            crate::github::net::describe_octocrab_error(err),
+            wait.as_secs().max(1),
+            max.as_secs()
+        ),
     }
 }
 

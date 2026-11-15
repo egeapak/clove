@@ -18,6 +18,8 @@ pub mod merge;
 pub mod plan;
 #[cfg(feature = "github")]
 mod proxy;
+#[cfg(feature = "github")]
+mod rate_limit;
 pub mod render;
 pub mod restore;
 pub mod store;

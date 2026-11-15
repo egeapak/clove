@@ -535,10 +535,21 @@ pub(crate) mod net {
             .parse::<http::Uri>();
         if let Ok(base_uri) = base_uri {
             let proxy = crate::proxy::ProxyConfig::for_destination(&base_uri).map_err(setup_err)?;
-            if let Some(proxy) = proxy {
-                return build_proxied_client(token, proxy, base_uri, &setup_err);
-            }
+            return match proxy {
+                Some(proxy) => build_stack(
+                    token,
+                    crate::proxy::ProxyConnector::new(proxy),
+                    base_uri,
+                    &setup_err,
+                ),
+                None => {
+                    let mut direct = hyper_util::client::legacy::connect::HttpConnector::new();
+                    direct.enforce_http(false);
+                    build_stack(token, direct, base_uri, &setup_err)
+                }
+            };
         }
+        // A base that does not parse: the default builder reports it.
         let mut builder = Octocrab::builder().personal_token(token);
         if let Some(base) = base {
             builder = builder.base_uri(base.clone()).map_err(|err| {
@@ -553,21 +564,27 @@ pub(crate) mod net {
             .map_err(|err| setup_err(describe_octocrab_error(&err)))
     }
 
-    /// Build the client for a configured proxy (`HTTPS_PROXY` & co., see
-    /// [`crate::proxy`]).
+    /// Build the client around `connector`: a direct one, or one that tunnels
+    /// through a configured proxy (`HTTPS_PROXY` & co., see [`crate::proxy`];
+    /// hosts in `NO_PROXY` still connect directly).
     ///
-    /// octocrab's default builder cannot take a custom connector, so this
-    /// assembles the same stack it builds (rustls with the native roots, the
-    /// legacy hyper client, follow-redirect, the `User-Agent` header, the base
-    /// URI and the token header, which is only sent to the API host) around a
-    /// connector that tunnels through the proxy. Hosts in `NO_PROXY` still
-    /// connect directly.
-    fn build_proxied_client(
+    /// octocrab's default builder cannot take a custom connector or a layer, so
+    /// this assembles the same stack it builds (rustls with the native roots,
+    /// the legacy hyper client, follow-redirect, the `User-Agent` header, the
+    /// base URI and the token header, which is only sent to the API host). The
+    /// one addition, [`crate::rate_limit::RateLimitHints`] around the hyper
+    /// client, records the wait a rate-limited response names, which octocrab's
+    /// error drops.
+    fn build_stack<C>(
         token: String,
-        proxy: crate::proxy::ProxyConfig,
+        connector: C,
         base_uri: http::Uri,
         setup_err: &impl Fn(String) -> ImportError,
-    ) -> Result<Octocrab, ImportError> {
+    ) -> Result<Octocrab, ImportError>
+    where
+        hyper_rustls::HttpsConnector<C>:
+            hyper_util::client::legacy::connect::Connect + Clone + Send + Sync + 'static,
+    {
         use http::header::{HeaderValue, USER_AGENT};
         use http::Uri;
         use octocrab::service::middleware::auth_header::AuthHeaderLayer;
@@ -588,12 +605,12 @@ pub(crate) mod net {
             .map_err(|err| setup_err(format!("cannot load the TLS root certificates: {err}")))?
             .https_or_http()
             .enable_http1()
-            .wrap_connector(crate::proxy::ProxyConnector::new(proxy));
+            .wrap_connector(connector);
         let client: hyper_util::client::legacy::Client<_, OctoBody> =
             hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
                 .build(connector);
         OctocrabBuilder::new_empty()
-            .with_service(client)
+            .with_service(crate::rate_limit::RateLimitHints::new(client))
             .with_layer(&tower_http::follow_redirect::FollowRedirectLayer::new())
             .with_layer(&ExtraHeadersLayer::new(Arc::new(vec![(
                 USER_AGENT,
