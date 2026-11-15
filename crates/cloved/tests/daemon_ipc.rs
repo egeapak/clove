@@ -485,3 +485,42 @@ fn a_residue_does_not_ship_the_whole_match_set() {
         assert_eq!(ids, want, "offset={offset} limit={limit}");
     }
 }
+
+/// The daemon's `stats` is computed from its refreshed index, with no item
+/// file read, and equals the file report.
+///
+/// The proof that no item file is read: after the index is built, one file is
+/// overwritten with unparseable bytes of the same size and its old mtime is
+/// put back, so the staleness check still trusts its row. A file scan leaves
+/// that item out; the index still counts it.
+#[test]
+fn stats_over_ipc_answers_from_the_index() {
+    let (_tmp, clove_dir) = init_repo_with_items(3);
+    let store = ItemStore::new(clove_dir.parent().unwrap().to_owned());
+    let issues = clove_dir.join("issues");
+    let old = filetime::FileTime::from_unix_time(1_600_000_000, 0);
+    let mut paths: Vec<_> = std::fs::read_dir(&issues)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    paths.sort();
+    for path in &paths {
+        filetime::set_file_mtime(path, old).unwrap();
+    }
+    clove_index::reindex(&issues, &clove_dir.join("index.db")).unwrap();
+    let want = clove_core::ops::stats(&store, 10, true, Utc::now()).unwrap();
+    assert_eq!(want["total"], 3);
+
+    let size = std::fs::metadata(&paths[0]).unwrap().len() as usize;
+    std::fs::write(&paths[0], "\u{1}".repeat(size)).unwrap();
+    filetime::set_file_mtime(&paths[0], old).unwrap();
+    let scanned = clove_core::ops::stats(&store, 10, true, Utc::now()).unwrap();
+    assert_eq!(scanned["total"], 2, "a file scan leaves the item out");
+
+    let hub = TestHub::spawn(Some(&clove_dir));
+    let mut client = hub.client(&clove_dir);
+    let got = client.stats(10, true).unwrap();
+    for key in ["total", "by_status", "by_type", "by_priority", "unassigned"] {
+        assert_eq!(got[key], want[key], "{key}: {got}");
+    }
+}

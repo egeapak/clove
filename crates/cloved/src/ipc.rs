@@ -272,8 +272,30 @@ impl Dispatcher {
     pub async fn stats(self, top: u32, include_epics: bool) -> Result<Value, RpcError> {
         self.touch();
         self.blocking(move |this| {
-            clove_core::ops::stats(&this.store(), top as usize, include_epics, now())
-                .map_err(rpc_err)
+            // The hot index mirrors the files once refreshed, so the report is
+            // built from it with no item file read. An index that cannot be
+            // brought up to date leaves the answer to the file scan.
+            let mirrored = this.index.lock().ok().and_then(|mut index| {
+                this.refresh(&mut index).ok()?;
+                index.graph_frontmatters().ok()
+            });
+            match mirrored {
+                Some(frontmatters) => {
+                    let (graph, _dangling) = clove_core::GraphStore::build(&frontmatters);
+                    let report = clove_core::compute_stats(
+                        &frontmatters,
+                        &graph,
+                        now(),
+                        clove_core::StatsOptions {
+                            top: top as usize,
+                            include_epics,
+                        },
+                    );
+                    Ok(serde_json::to_value(&report).unwrap_or(Value::Null))
+                }
+                None => clove_core::ops::stats(&this.store(), top as usize, include_epics, now())
+                    .map_err(rpc_err),
+            }
         })
         .await
     }

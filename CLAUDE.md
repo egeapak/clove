@@ -87,8 +87,11 @@ file scan — and the engine owns that choice **once per method** (`list`, `read
 `clove-web`'s `read.rs` are adapters: parse arguments → call the engine →
 render. `_meta.source` (plain `source` on the MCP page) names the tier that
 answered on the five list commands, where it is `clove_engine::Source::as_str`
-rather than a literal. `stats`/`export`, the TUI, and CLI
-`show`/`comments`/`dep tree` do not route through the engine.
+rather than a literal. The whole-graph reads (CLI `stats`, `dep tree`/`dep
+cycle` after the daemon, and the `close` warning) get their frontmatters from
+`Engine::frontmatters` / `Engine::open_dependents`, so a fresh index answers
+them with no item file read. `export`, the TUI, and CLI `show`/`comments` do
+not route through the engine.
 
 Three things to know before touching it:
 

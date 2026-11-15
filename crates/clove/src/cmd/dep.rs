@@ -85,11 +85,22 @@ fn tree(
     let root = match dep_tree_via_daemon(ctx, no_index, &id, depth) {
         Some(node) => node,
         None => {
-            let (frontmatters, _errors) = ctx.store.scan_frontmatter()?;
-            let (graph, _dangling) = GraphStore::build(&frontmatters);
-            graph
-                .dep_tree(&id, depth)
-                .ok_or_else(|| CloveError::NotFound { id: id.to_string() })?
+            // The index when it can be brought up to date, else the files.
+            let answer = ctx.engine(no_index, false).frontmatters()?;
+            let (graph, _dangling) = GraphStore::build(&answer.value);
+            match graph.dep_tree(&id, depth) {
+                Some(node) => node,
+                // The item file exists, so an index with no node for it is
+                // behind the files: the file scan answers.
+                None if answer.source != clove_engine::Source::Files => {
+                    let (frontmatters, _errors) = ctx.store.scan_frontmatter()?;
+                    let (graph, _dangling) = GraphStore::build(&frontmatters);
+                    graph
+                        .dep_tree(&id, depth)
+                        .ok_or_else(|| CloveError::NotFound { id: id.to_string() })?
+                }
+                None => return Err(CloveError::NotFound { id: id.to_string() }),
+            }
         }
     };
 
@@ -119,7 +130,7 @@ fn cycle(
     let cycles: Vec<Vec<String>> = match cycles_via_daemon(ctx, no_index) {
         Some(cycles) => cycles,
         None => {
-            let (frontmatters, _errors) = ctx.store.scan_frontmatter()?;
+            let frontmatters = ctx.engine(no_index, false).frontmatters()?.value;
             let (graph, _dangling) = GraphStore::build(&frontmatters);
             graph
                 .all_cycles()

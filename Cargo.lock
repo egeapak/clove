@@ -885,6 +885,7 @@ dependencies = [
  "clove-ipc",
  "clove-types",
  "clove-web",
+ "filetime",
  "futures",
  "git2",
  "interprocess",
