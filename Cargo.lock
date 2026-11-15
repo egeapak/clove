@@ -5246,7 +5246,11 @@ dependencies = [
  "anyhow",
  "camino",
  "clove-core",
+ "flate2",
  "serde_json",
+ "sha2",
+ "tar",
+ "tempfile",
 ]
 
 [[package]]

@@ -38,7 +38,8 @@ Signed-off-by: Your Name <you@example.com>
 ```
 
 The email must match the commit's author email. When the check is on, CI
-checks every commit of a pull request (`scripts/ci/check-dco.sh`).
+checks every commit of a pull request (`cargo xtask check-dco <base> <head>`,
+which you can also run locally).
 
 To sign off commits that you already made on your branch, run:
 

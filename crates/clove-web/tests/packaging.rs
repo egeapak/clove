@@ -239,8 +239,10 @@ fn extract_unpacks_a_well_formed_archive() {
     assert!(tmp.path().join("_app/immutable/a.js").is_file());
 }
 
-/// What `tar -czf … -C dist .` (pack-web-dist.sh) actually produces: a `./`
-/// directory entry and `./`-prefixed paths.
+/// What `tar -czf … -C dist .` produces: a `./` directory entry and
+/// `./`-prefixed paths. Release assets packed by the old shell script have
+/// this shape; `cargo xtask pack-web-dist` writes plain
+/// relative paths, which `xtask/src/web_dist.rs` tests against this extractor.
 #[test]
 fn extract_unpacks_the_archive_shape_the_pack_script_makes() {
     let tmp = tempfile::tempdir().unwrap();
