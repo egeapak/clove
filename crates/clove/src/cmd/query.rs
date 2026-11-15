@@ -7,12 +7,11 @@
 use std::io::{IsTerminal, Read};
 
 use clove_core::OutputFormat;
-use clove_engine::Projection;
 use clove_types::CloveError;
 use serde::Deserialize;
 
 use crate::cli::QueryArgs;
-use crate::cmd::listing::{emit, lean_can_serve, objects_from_answer, window, Filters, ListOpts};
+use crate::cmd::listing::{emit, list_projection, objects_from_answer, window, Filters, ListOpts};
 use crate::context::Ctx;
 use crate::item_json::parse_fields;
 
@@ -125,10 +124,7 @@ pub fn run(
     let fields = args.fields.as_deref().map(parse_fields);
     let window = window(args.offset.or(qf.offset), args.limit.or(qf.limit));
 
-    let projection = match lean_can_serve(fields.as_deref()) {
-        true => Projection::Lean,
-        false => Projection::Files,
-    };
+    let projection = list_projection(format, fields.as_deref());
     let answer = ctx
         .engine(no_index, deep)
         .list(&filters, order, window, projection)?;

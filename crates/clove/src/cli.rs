@@ -424,8 +424,11 @@ pub struct NewArgs {
     #[arg(short = 'a', long, value_name = "WHO")]
     pub assignee: Option<String>,
     /// Set the item body.
-    #[arg(short = 'b', long, value_name = "TEXT")]
+    #[arg(short = 'b', long, value_name = "TEXT", conflicts_with = "body_file")]
     pub body: Option<String>,
+    /// Set the item body from the contents of FILE (`-` reads stdin).
+    #[arg(long, value_name = "FILE")]
+    pub body_file: Option<Utf8PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -447,9 +450,16 @@ pub struct ShowArgs {
 pub struct EditArgs {
     /// The item id.
     pub id: String,
-    /// A `KEY=VALUE` field edit (repeatable). If omitted, opens `$EDITOR`.
+    /// A `KEY=VALUE` field edit (repeatable). With no `--field`, `--body` or
+    /// `--body-file`, opens `$EDITOR`.
     #[arg(long = "field", value_name = "KEY=VALUE")]
     pub fields: Vec<String>,
+    /// Replace the item body (an empty string clears it).
+    #[arg(short = 'b', long, value_name = "TEXT", conflicts_with = "body_file")]
+    pub body: Option<String>,
+    /// Replace the item body with the contents of FILE (`-` reads stdin).
+    #[arg(long, value_name = "FILE")]
+    pub body_file: Option<Utf8PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -487,7 +497,7 @@ pub struct AssignArgs {
     /// The assignee (omit with `--clear` to unset).
     pub assignee: Option<String>,
     /// Clear the assignee.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "assignee")]
     pub clear: bool,
 }
 
@@ -726,13 +736,16 @@ pub struct SearchArgs {
 pub struct StatsArgs {
     /// Cap the assignee/label breakdowns to the N highest counts (default 10;
     /// use `0` for no cap).
-    #[arg(long, value_name = "N")]
+    #[arg(long, value_name = "N", conflicts_with = "history")]
     pub top: Option<usize>,
     /// Skip the per-epic completion rollup.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "history")]
     pub no_epics: bool,
     /// Persist this report to the durable history in the index (`.clove/index.db`).
-    #[arg(long)]
+    // These three shape or record the *live* report. `--history` prints the
+    // recorded series instead and applied none of them, so the pairing is
+    // refused rather than silently ignored.
+    #[arg(long, conflicts_with = "history")]
     pub snapshot: bool,
     /// Show the recorded snapshot history instead of a live report.
     #[arg(long)]
@@ -764,7 +777,7 @@ pub struct AgentDocArgs {
     #[arg(long)]
     pub check: bool,
     /// The file to check (with `--check`).
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", requires = "check")]
     pub file: Option<Utf8PathBuf>,
 }
 
@@ -798,16 +811,22 @@ pub struct DoctorArgs {
 /// A router mirroring [`ExportArgs`]: the built-in native formats (`json`,
 /// `jsonl`, clove's own restore) parse `rest` themselves (see `cmd::import`), and
 /// any other provider (`tk`, `beads`, …) falls through to a
-/// `clove-import-<provider>` plugin, with `rest` forwarded verbatim. Global flags
-/// (e.g. `--format`) must precede the provider token, since everything after it
-/// is captured raw for plugin forwarding.
+/// `clove-import-<provider>` plugin, with `rest` forwarded verbatim.
+///
+/// Put global flags (e.g. `--format`) before the provider token. The host still
+/// reads a global flag that directly follows the provider
+/// (`clove import json --format json f`), because the forwarded arguments start
+/// at the first token that is not a global flag. From that token on, everything
+/// is captured raw, so `clove import json f --format json` forwards `--format`.
+/// The same rule holds for `export` and `sync`.
 #[derive(Debug, Args)]
 pub struct ImportArgs {
     /// The source provider (built-in `json`/`jsonl`, or a
     /// `clove-import-<provider>` plugin, e.g. `tk` or `beads`).
     pub provider: String,
-    /// Everything after the provider — the `<src>` and any provider flags
-    /// (`--dry-run`) — forwarded to the plugin.
+    /// The `<src>` and any provider flags (`--dry-run`), forwarded to the
+    /// plugin. Starts at the first token after the provider that is not a
+    /// clove global flag.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub rest: Vec<String>,
 }
@@ -832,9 +851,9 @@ pub struct ExportArgs {
 ///
 /// A pure router mirroring [`ImportArgs`]/[`ExportArgs`]: `sync` has **no**
 /// built-in providers — every provider (including `github`) resolves to a
-/// `clove-sync-<provider>` plugin, with `rest` forwarded verbatim. Global flags
-/// (e.g. `--format`) must precede the provider token, since everything after it
-/// is captured raw for plugin forwarding.
+/// `clove-sync-<provider>` plugin, with `rest` forwarded verbatim. Put global
+/// flags (e.g. `--format`) before the provider token; see [`ImportArgs`] for
+/// where the forwarded arguments start.
 #[derive(Debug, Args)]
 pub struct SyncArgs {
     /// The provider to sync with (a `clove-sync-<provider>` plugin, e.g.

@@ -3,7 +3,7 @@
 //!
 //! It is the fat-plugin extraction of `clove sync github`: a `clove-plugin`
 //! `main` that materializes the host-exported [`PluginContext`], parses the
-//! forwarded `OWNER/REPO [--dry-run] [--prefer POLICY] [--no-comments] [--delete-remote-comments]` args, and
+//! forwarded `OWNER/REPO [--dry-run] [--prefer POLICY] [--no-comments] [--delete-remote-comments] [--adopt-links]` args, and
 //! drives `clove_import::sync_net::sync_github` — the *same* entry point the
 //! in-process `cmd/sync.rs` used. Its `sync github` stdout/stderr and exit codes
 //! are kept byte-for-byte identical to that built-in so scripts, agents, and the
@@ -73,6 +73,10 @@ struct Cli {
     /// unedited on GitHub). Without it such deletions are only reported.
     #[arg(long)]
     delete_remote_comments: bool,
+    /// Sync even when the local `gh-<number>` links look like links to another
+    /// repository (they were last synced with a different `owner/repo`).
+    #[arg(long)]
+    adopt_links: bool,
     /// Output format override. Also arrives via `$CLOVE_FORMAT`; accepted here
     /// (per PLUGIN_SYSTEM.md §6.3) so `clove sync github <repo> --format json`
     /// works even with the flag after the provider.
@@ -153,11 +157,14 @@ fn run(
         // Every read and write goes through the `clove` that runs this plugin
         // (the host IPC channel, PLUGIN_SYSTEM.md §6.6).
         &clove_import::HostStore::connect(cx)?,
-        policy,
-        !cli.no_comments,
-        cli.delete_remote_comments,
-        cli.dry_run,
-        direction,
+        clove_import::sync_net::SyncOptions {
+            policy,
+            sync_comments: !cli.no_comments,
+            delete_remote_comments: cli.delete_remote_comments,
+            dry_run: cli.dry_run,
+            direction,
+            adopt_links: cli.adopt_links,
+        },
     )
     .map_err(sync_err)?;
 
@@ -185,6 +192,7 @@ fn run(
                 "in_sync": report.in_sync,
                 "conflicts": summary.conflicts,
                 "remote_missing": summary.remote_missing,
+                "local_missing": summary.local_missing,
                 "foreign": summary.foreign,
                 "skipped": report.skipped,
                 "bodies_corrected": report.bodies_corrected,
@@ -366,6 +374,11 @@ fn print_comment_changes(comments: &clove_import::sync::CommentSummary, verb: &s
 fn print_remote_missing(summary: &clove_import::SyncSummary) {
     for ext in &summary.remote_missing {
         eprintln!("warning: local item links {ext} but the GitHub issue was not found");
+    }
+    for ext in &summary.local_missing {
+        eprintln!(
+            "note: the local item of {ext} was deleted; the issue is unchanged on GitHub and was not pulled again"
+        );
     }
     for ext in &summary.foreign {
         eprintln!("note: local item links {ext} (not a GitHub link) — skipped");

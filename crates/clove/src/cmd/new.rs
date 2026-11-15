@@ -16,6 +16,7 @@ use crate::context::Ctx;
 use crate::output::print_json_success;
 
 pub fn run(ctx: &Ctx, format: OutputFormat, args: NewArgs) -> Result<(), CloveError> {
+    let body = crate::cmd::edit::body_argument(args.body.as_deref(), args.body_file.as_deref())?;
     let spec = NewSpec {
         title: args.title,
         item_type: args.item_type,
@@ -24,7 +25,7 @@ pub fn run(ctx: &Ctx, format: OutputFormat, args: NewArgs) -> Result<(), CloveEr
         deps: args.deps,
         parent: args.parent,
         assignee: args.assignee,
-        body: args.body,
+        body,
     };
 
     let value = clove_core::ops::create(
@@ -45,7 +46,7 @@ pub fn run(ctx: &Ctx, format: OutputFormat, args: NewArgs) -> Result<(), CloveEr
             "{}  {}  {}",
             value["id"].as_str().unwrap_or_default(),
             value["path"].as_str().unwrap_or_default(),
-            value["title"].as_str().unwrap_or_default()
+            crate::util::term_line(value["title"].as_str().unwrap_or_default())
         ),
     }
     Ok(())

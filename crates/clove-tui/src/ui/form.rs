@@ -107,18 +107,15 @@ pub(crate) fn render_form(f: &mut Frame, app: &App, area: Rect) {
         ]));
     }
 
-    if let Some(err) = &form.error {
-        lines.push(Line::raw(""));
-        lines.push(Line::from(Span::styled(
-            format!("  {err}"),
-            Style::default().fg(Color::Red),
-        )));
-    }
-    lines.push(Line::raw(""));
-    lines.push(Line::from(Span::styled(
+    // The error and the key hint live in a footer below the field rows. The
+    // footer does not scroll, so a submit error stays on screen however long
+    // the body is. (Both used to be appended to the scrolling rows, where a body
+    // taller than the popup pushed the error out of view and a failed Ctrl-S
+    // looked like a no-op.)
+    let hint = Line::from(Span::styled(
         "Ctrl-S save · Esc cancel · Tab/↑↓ field · ←→ move/change",
         Style::default().fg(DIM),
-    )));
+    ));
 
     let title = match form.mode {
         FormMode::New => " New item ".to_owned(),
@@ -131,21 +128,38 @@ pub(crate) fn render_form(f: &mut Frame, app: &App, area: Rect) {
         ),
     };
 
-    let rows = lines.len() as u16;
-    let popup = if area.width < 56 || area.height < 16 {
+    let field_rows = lines.len() as u16;
+    let full_screen = area.width < 56 || area.height < 16;
+    let popup_w = if full_screen {
+        area.width
+    } else {
+        64.min(area.width.saturating_sub(2))
+    };
+    let inner_w = popup_w.saturating_sub(4); // 2 borders + 2 padding cols
+    let error_rows = form
+        .error
+        .as_deref()
+        .map_or(0, |err| wrap_error(err, inner_w).len() as u16);
+    // Field rows, then (spacer + error), then spacer + hint.
+    let wanted = field_rows + if error_rows > 0 { error_rows + 1 } else { 0 } + 2;
+    let popup = if full_screen {
         area
     } else {
-        let w = 64.min(area.width.saturating_sub(2));
-        let h = (rows + 2).min(area.height.saturating_sub(2)).min(30);
-        centered_fixed(area, w, h)
+        let h = (wanted + 2).min(area.height.saturating_sub(2)).min(30);
+        centered_fixed(area, popup_w, h)
     };
     let inner_h = popup.height.saturating_sub(2);
-    let inner_w = popup.width.saturating_sub(4); // 2 borders + 2 padding cols
+
+    let footer = footer_lines(form.error.as_deref(), hint, inner_w, inner_h);
+    let footer_h = footer.len() as u16;
+    // The field rows get what the footer leaves; the footer sits right under
+    // them (not pinned to the popup's bottom edge) when they are short.
+    let fields_h = field_rows.min(inner_h.saturating_sub(footer_h));
 
     // Vertical scroll so the caret (or, for enum fields, the focused row) stays
     // visible.
     let focus_line = caret.map(|(l, _)| l).unwrap_or(cursor_line);
-    let scroll = focus_line.saturating_sub(inner_h.saturating_sub(2));
+    let scroll = focus_line.saturating_sub(fields_h.saturating_sub(1));
     // Horizontal scroll so a caret past the right edge of a long value is
     // brought back into view instead of vanishing (blind typing). Only the
     // caret line's *value* scrolls: the labels of every row (and the caret
@@ -168,11 +182,20 @@ pub(crate) fn render_form(f: &mut Frame, app: &App, area: Rect) {
         .padding(Padding::new(1, 1, 0, 0))
         .title(title)
         .style(Style::default().bg(Color::Black));
+    let inner = block.inner(popup);
     f.render_widget(Clear, popup);
-    f.render_widget(
-        Paragraph::new(lines).block(block).scroll((scroll, 0)),
-        popup,
-    );
+    f.render_widget(block, popup);
+    let fields_area = Rect {
+        height: fields_h.min(inner.height),
+        ..inner
+    };
+    f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), fields_area);
+    let footer_area = Rect {
+        y: inner.y + fields_area.height,
+        height: footer_h.min(inner.height - fields_area.height),
+        ..inner
+    };
+    f.render_widget(Paragraph::new(footer), footer_area);
 
     // Place the terminal's hardware cursor on the caret cell (coincides with the
     // glyph) when it's within the visible, scrolled content area — so real
@@ -184,10 +207,80 @@ pub(crate) fn render_form(f: &mut Frame, app: &App, area: Rect) {
         let inner_x = popup.x + 2; // left border + left padding
         let inner_y = popup.y + 1; // top border (no top padding)
         let vis_col = col.saturating_sub(hscroll);
-        if line >= scroll && line < scroll + inner_h && vis_col < inner_w {
+        if line >= scroll && line < scroll + fields_h && vis_col < inner_w {
             f.set_cursor_position((inner_x + vis_col, inner_y + (line - scroll)));
         }
     }
+}
+
+/// The most rows a submit error may take in the footer; a longer one ends in `…`.
+const ERROR_ROWS: u16 = 2;
+
+/// The form's fixed footer: the submit error (when there is one), then the key
+/// hint, each under a blank spacer row. The error is hard-wrapped to `width`
+/// and capped at [`ERROR_ROWS`] rows. When the popup is too short for all of it
+/// plus one field row, the spacers go first and then the hint: the error is the
+/// last thing dropped.
+fn footer_lines<'a>(error: Option<&str>, hint: Line<'a>, width: u16, height: u16) -> Vec<Line<'a>> {
+    let style = Style::default().fg(Color::Red);
+    let error_rows: Vec<Line> = error
+        .map(|err| wrap_error(err, width))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|row| Line::from(Span::styled(row, style)))
+        .collect();
+
+    let budget = height.saturating_sub(1) as usize; // leave one row for the fields
+    let has_error = !error_rows.is_empty();
+    let full = error_rows.len() + if has_error { 3 } else { 2 };
+    let mut out: Vec<Line> = Vec::new();
+    if full <= budget {
+        if has_error {
+            out.push(Line::raw(""));
+            out.extend(error_rows);
+        }
+        out.push(Line::raw(""));
+        out.push(hint);
+    } else if error_rows.len() < budget {
+        out.extend(error_rows);
+        out.push(hint);
+    } else {
+        out.extend(error_rows.into_iter().take(budget));
+    }
+    out
+}
+
+/// Hard-wrap an error message to `width` columns (after a two-column indent),
+/// at most [`ERROR_ROWS`] rows; what does not fit is cut with `…`.
+fn wrap_error(err: &str, width: u16) -> Vec<String> {
+    let cols = (width as usize).saturating_sub(2).max(1);
+    let flat = err.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut rows: Vec<String> = Vec::new();
+    let mut row = String::new();
+    let mut used = 0usize;
+    for g in flat.graphemes(true) {
+        let w = g.width();
+        if used + w > cols {
+            rows.push(std::mem::take(&mut row));
+            used = 0;
+        }
+        row.push_str(g);
+        used += w;
+    }
+    if !row.is_empty() {
+        rows.push(row);
+    }
+    if rows.len() > ERROR_ROWS as usize {
+        rows.truncate(ERROR_ROWS as usize);
+        if let Some(last) = rows.last_mut() {
+            // Make room for the ellipsis by dropping the last grapheme.
+            if let Some((b, _)) = last.grapheme_indices(true).next_back() {
+                last.truncate(b);
+            }
+            last.push('…');
+        }
+    }
+    rows.into_iter().map(|r| format!("  {r}")).collect()
 }
 
 /// Scroll the value of a caret line `cols` display columns to the left. The

@@ -13,7 +13,9 @@ categories.workspace = true
 [dependencies]
 clove-types.workspace = true
 clove-core.workspace = true
-ratatui.workspace = true        # terminal UI; re-exports crossterm at `ratatui::crossterm`
+# `unstable-rendered-line-info` gives `Paragraph::line_count`: the detail pane
+# clamps its scroll to the height ratatui itself wraps the body to.
+ratatui = { workspace = true, features = ["unstable-rendered-line-info"] }  # terminal UI; re-exports crossterm at `ratatui::crossterm`
 unicode-width.workspace = true  # display-column widths (truncation, wrapping, form caret)
 unicode-segmentation.workspace = true  # grapheme widths for the form caret (as ratatui renders)
 pulldown-cmark.workspace = true # Markdown body rendering in the detail pane

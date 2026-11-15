@@ -29,3 +29,23 @@ export function chipCenter(x: number, half: number, visibleStart: number, visibl
   if (hi < lo) return lo;
   return Math.min(hi, Math.max(lo, x));
 }
+
+/**
+ * The rows to render for a column of `count` fixed-height rows of which the
+ * pixels `[top, bottom]` (measured from the top of the first row) are on
+ * screen: `first` inclusive, `last` exclusive, widened by `overscan` rows on
+ * each side so a scroll or a Tab step lands on a row that already exists.
+ */
+export function rowWindow(
+  top: number,
+  bottom: number,
+  rowH: number,
+  count: number,
+  overscan: number
+): { first: number; last: number } {
+  const lo = Math.max(0, Math.min(top, count * rowH));
+  const hi = Math.max(lo, Math.min(bottom, count * rowH));
+  const first = Math.max(0, Math.floor(lo / rowH) - overscan);
+  const last = Math.min(count, Math.ceil(hi / rowH) + overscan);
+  return { first: Math.min(first, last), last };
+}

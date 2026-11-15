@@ -6,11 +6,10 @@
 //! `ready`/`blocked`/`query` too — is read-path roadmap §4.
 
 use clove_core::OutputFormat;
-use clove_engine::Projection;
 use clove_types::CloveError;
 
 use crate::cli::FilterArgs;
-use crate::cmd::listing::{emit, lean_can_serve, objects_from_answer, window, ListOpts};
+use crate::cmd::listing::{emit, list_projection, objects_from_answer, window, ListOpts};
 use crate::context::Ctx;
 use crate::item_json::parse_fields;
 
@@ -28,10 +27,7 @@ pub fn run(
 
     // A `--fields` request reaching outside the lean row pins this to the file
     // scan rather than quietly arriving from a different projection.
-    let projection = match lean_can_serve(fields.as_deref()) {
-        true => Projection::Lean,
-        false => Projection::Files,
-    };
+    let projection = list_projection(format, fields.as_deref());
     let answer = ctx
         .engine(no_index, deep)
         .list(&filters, order, window, projection)?;

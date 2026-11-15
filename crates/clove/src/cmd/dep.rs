@@ -19,7 +19,11 @@ pub fn run(
     format: OutputFormat,
     action: DepAction,
     no_index: bool,
+    deep: bool,
 ) -> Result<ExitCode, CloveError> {
+    // The daemon answers from its hot graph, which only the fast staleness
+    // check refreshes. Under `--deep` the files answer, as in `clove-engine`.
+    let no_index = no_index || deep;
     match action {
         DepAction::Add { id, dep_id } => add(ctx, format, &id, &dep_id).map(|_| ExitCode::Success),
         DepAction::Rm { id, dep_id } => rm(ctx, format, &id, &dep_id).map(|_| ExitCode::Success),
@@ -75,9 +79,11 @@ fn tree(
             n => n,
         }
     };
-    // Daemon fast path: serve the tree from the daemon's cached graph.
+    // Daemon fast path: serve the tree from the daemon's cached graph. The
+    // item exists (checked above), so a daemon that has no node for it is
+    // behind the files: the file scan answers instead of a false "not found".
     let root = match dep_tree_via_daemon(ctx, no_index, &id, depth) {
-        Some(node_opt) => node_opt.ok_or_else(|| CloveError::NotFound { id: id.to_string() })?,
+        Some(node) => node,
         None => {
             let (frontmatters, _errors) = ctx.store.scan_frontmatter()?;
             let (graph, _dangling) = GraphStore::build(&frontmatters);
@@ -175,7 +181,7 @@ fn dep_tree_via_daemon(
     no_index: bool,
     root: &CloveId,
     depth: usize,
-) -> Option<Option<DepTreeNode>> {
+) -> Option<DepTreeNode> {
     if no_index {
         return None;
     }
@@ -184,7 +190,7 @@ fn dep_tree_via_daemon(
         root: root.to_string(),
         depth,
     }) {
-        Ok(GraphResponse::Tree { node }) => Some(node),
+        Ok(GraphResponse::Tree { node }) => node,
         _ => None,
     }
 }

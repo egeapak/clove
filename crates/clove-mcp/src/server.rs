@@ -19,6 +19,8 @@ use serde_json::Value;
 use clove_service::{Engine, ToolError};
 use clove_types::tool::*;
 
+use crate::strict::Checked;
+
 /// The two live resources clove exposes. Their contents change on every
 /// graph-affecting mutation; a subscribed client is pushed `resources/updated`
 /// (see the notifier in `lib.rs`).
@@ -63,6 +65,19 @@ impl CloveServer {
     /// JSON content; an engine error → an `isError` tool result carrying its
     /// text (not a protocol error); a task panic → a protocol-level internal
     /// error.
+    /// [`run`](Self::run) for a tool call: refuse an argument the tool does not
+    /// define (a tool error naming the valid ones) before the engine sees it.
+    async fn run_args<T, F>(&self, args: Checked<T>, f: F) -> Result<CallToolResult, ErrorData>
+    where
+        T: Send + 'static,
+        F: FnOnce(T) -> Result<Value, ToolError> + Send + 'static,
+    {
+        match args.into_args() {
+            Ok(args) => self.run(move || f(args)).await,
+            Err(message) => Ok(CallToolResult::error(vec![Content::text(message)])),
+        }
+    }
+
     async fn run<F>(&self, f: F) -> Result<CallToolResult, ErrorData>
     where
         F: FnOnce() -> Result<Value, ToolError> + Send + 'static,
@@ -91,10 +106,10 @@ impl CloveServer {
     )]
     async fn clove_ready(
         &self,
-        Parameters(a): Parameters<FilterArgs>,
+        Parameters(a): Parameters<Checked<FilterArgs>>,
     ) -> Result<CallToolResult, ErrorData> {
         let e = self.engine.clone();
-        self.run(move || e.ready(a)).await
+        self.run_args(a, move |a| e.ready(a)).await
     }
 
     #[tool(
@@ -107,10 +122,10 @@ impl CloveServer {
     )]
     async fn clove_blocked(
         &self,
-        Parameters(a): Parameters<BlockedArgs>,
+        Parameters(a): Parameters<Checked<BlockedArgs>>,
     ) -> Result<CallToolResult, ErrorData> {
         let e = self.engine.clone();
-        self.run(move || e.blocked(a)).await
+        self.run_args(a, move |a| e.blocked(a)).await
     }
 
     #[tool(
@@ -120,10 +135,10 @@ impl CloveServer {
     )]
     async fn clove_list(
         &self,
-        Parameters(a): Parameters<ListArgs>,
+        Parameters(a): Parameters<Checked<ListArgs>>,
     ) -> Result<CallToolResult, ErrorData> {
         let e = self.engine.clone();
-        self.run(move || e.list(a)).await
+        self.run_args(a, move |a| e.list(a)).await
     }
 
     #[tool(
@@ -132,10 +147,10 @@ impl CloveServer {
     )]
     async fn clove_show(
         &self,
-        Parameters(a): Parameters<IdArgs>,
+        Parameters(a): Parameters<Checked<IdArgs>>,
     ) -> Result<CallToolResult, ErrorData> {
         let e = self.engine.clone();
-        self.run(move || e.show(a)).await
+        self.run_args(a, move |a| e.show(a)).await
     }
 
     #[tool(
@@ -147,25 +162,25 @@ impl CloveServer {
     )]
     async fn clove_search(
         &self,
-        Parameters(a): Parameters<SearchArgs>,
+        Parameters(a): Parameters<Checked<SearchArgs>>,
     ) -> Result<CallToolResult, ErrorData> {
         let e = self.engine.clone();
-        self.run(move || e.search(a)).await
+        self.run_args(a, move |a| e.search(a)).await
     }
 
     #[tool(
         description = "Read an item's comment thread, oldest first. The read \
                        counterpart to clove_comment — clove_show reports only a \
                        `comment_count`. `limit` keeps the most recent comments; \
-                       `offset` pages back through older ones.",
+                       `skip_newest` pages back through older ones.",
         output_schema = crate::schema::comment_page()
     )]
     async fn clove_comments(
         &self,
-        Parameters(a): Parameters<CommentsArgs>,
+        Parameters(a): Parameters<Checked<CommentsArgs>>,
     ) -> Result<CallToolResult, ErrorData> {
         let e = self.engine.clone();
-        self.run(move || e.comments(a)).await
+        self.run_args(a, move |a| e.comments(a)).await
     }
 
     #[tool(description = "Render the dependency tree rooted at an item, with \
@@ -175,10 +190,10 @@ impl CloveServer {
                           has no children here.")]
     async fn clove_dep_tree(
         &self,
-        Parameters(a): Parameters<DepTreeArgs>,
+        Parameters(a): Parameters<Checked<DepTreeArgs>>,
     ) -> Result<CallToolResult, ErrorData> {
         let e = self.engine.clone();
-        self.run(move || e.dep_tree(a)).await
+        self.run_args(a, move |a| e.dep_tree(a)).await
     }
 
     #[tool(description = "Repository analytics: counts by status/type/priority/\
@@ -186,10 +201,10 @@ impl CloveServer {
                        cycle count, per-epic rollups, and throughput.")]
     async fn clove_stats(
         &self,
-        Parameters(a): Parameters<StatsArgs>,
+        Parameters(a): Parameters<Checked<StatsArgs>>,
     ) -> Result<CallToolResult, ErrorData> {
         let e = self.engine.clone();
-        self.run(move || e.stats(a)).await
+        self.run_args(a, move |a| e.stats(a)).await
     }
 
     #[tool(
@@ -201,10 +216,10 @@ impl CloveServer {
     )]
     async fn clove_new(
         &self,
-        Parameters(a): Parameters<NewArgs>,
+        Parameters(a): Parameters<Checked<NewArgs>>,
     ) -> Result<CallToolResult, ErrorData> {
         let e = self.engine.clone();
-        self.run(move || e.create(a)).await
+        self.run_args(a, move |a| e.create(a)).await
     }
 
     #[tool(
@@ -213,10 +228,10 @@ impl CloveServer {
     )]
     async fn clove_status(
         &self,
-        Parameters(a): Parameters<StatusArgs>,
+        Parameters(a): Parameters<Checked<StatusArgs>>,
     ) -> Result<CallToolResult, ErrorData> {
         let e = self.engine.clone();
-        self.run(move || e.set_status(a)).await
+        self.run_args(a, move |a| e.set_status(a)).await
     }
 
     #[tool(
@@ -225,10 +240,10 @@ impl CloveServer {
     )]
     async fn clove_edit(
         &self,
-        Parameters(a): Parameters<EditArgs>,
+        Parameters(a): Parameters<Checked<EditArgs>>,
     ) -> Result<CallToolResult, ErrorData> {
         let e = self.engine.clone();
-        self.run(move || e.edit(a)).await
+        self.run_args(a, move |a| e.edit(a)).await
     }
 
     #[tool(
@@ -236,10 +251,10 @@ impl CloveServer {
     )]
     async fn clove_comment(
         &self,
-        Parameters(a): Parameters<CommentArgs>,
+        Parameters(a): Parameters<Checked<CommentArgs>>,
     ) -> Result<CallToolResult, ErrorData> {
         let e = self.engine.clone();
-        self.run(move || e.comment(a)).await
+        self.run_args(a, move |a| e.comment(a)).await
     }
 
     #[tool(
@@ -248,10 +263,10 @@ impl CloveServer {
     )]
     async fn clove_dep_add(
         &self,
-        Parameters(a): Parameters<DepAddArgs>,
+        Parameters(a): Parameters<Checked<DepAddArgs>>,
     ) -> Result<CallToolResult, ErrorData> {
         let e = self.engine.clone();
-        self.run(move || e.dep_add(a)).await
+        self.run_args(a, move |a| e.dep_add(a)).await
     }
 
     #[tool(
@@ -260,10 +275,10 @@ impl CloveServer {
     )]
     async fn clove_dep_remove(
         &self,
-        Parameters(a): Parameters<DepAddArgs>,
+        Parameters(a): Parameters<Checked<DepAddArgs>>,
     ) -> Result<CallToolResult, ErrorData> {
         let e = self.engine.clone();
-        self.run(move || e.dep_remove(a)).await
+        self.run_args(a, move |a| e.dep_remove(a)).await
     }
 
     #[tool(
@@ -272,10 +287,10 @@ impl CloveServer {
     )]
     async fn clove_set_parent(
         &self,
-        Parameters(a): Parameters<SetParentArgs>,
+        Parameters(a): Parameters<Checked<SetParentArgs>>,
     ) -> Result<CallToolResult, ErrorData> {
         let e = self.engine.clone();
-        self.run(move || e.set_parent(a)).await
+        self.run_args(a, move |a| e.set_parent(a)).await
     }
 }
 

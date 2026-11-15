@@ -215,6 +215,11 @@ pub mod codes {
     /// still being set up, so its index may miss a change. The caller reads
     /// the index or the files itself.
     pub const WATCHER_ARMING: &str = "WATCHER_ARMING";
+    /// A read the project's daemon will not answer from its index right now:
+    /// the index is behind the files by more than a read applies inline, or
+    /// the file watch no longer covers the project. The caller reads the index
+    /// or the files itself.
+    pub const INDEX_BEHIND: &str = "INDEX_BEHIND";
 }
 
 /// The reply to `hub_status`.

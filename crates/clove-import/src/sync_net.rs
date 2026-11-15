@@ -25,7 +25,7 @@ use octocrab::models::issues::Issue;
 use octocrab::Octocrab;
 
 use crate::error::ImportError;
-use crate::github::net::{build_client, fetch_all, net_err, parse_repo_spec};
+use crate::github::net::{build_client, net_err, parse_repo_spec, to_intermediate};
 use crate::github::{parse_gh_number, StagedIssue};
 use crate::map::build_external_ref_index;
 use crate::store::Store;
@@ -38,6 +38,24 @@ use crate::sync::{
 /// The marker `source_system` value stamped on synced items.
 const SOURCE_GITHUB: &str = "github";
 
+/// How one [`sync_github`] run behaves.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SyncOptions {
+    /// Which side wins an item or comment changed on both sides.
+    pub policy: ConflictPolicy,
+    /// Reconcile comment threads too (only a [`Direction::Both`] run does).
+    pub sync_comments: bool,
+    /// Delete a GitHub comment whose local file was removed.
+    pub delete_remote_comments: bool,
+    /// Plan only; write nothing on either side.
+    pub dry_run: bool,
+    /// Which sides the run applies.
+    pub direction: Direction,
+    /// Sync even though the local `gh-<number>` links look like links to
+    /// another repository (see [`crate::sync::foreign_links_reason`]).
+    pub adopt_links: bool,
+}
+
 /// Run a full two-way sync of `store` against `spec` (`owner/repo`).
 ///
 /// Returns the plan summary always, and the apply report when not a dry run. The
@@ -46,12 +64,16 @@ const SOURCE_GITHUB: &str = "github";
 pub fn sync_github(
     spec: &str,
     store: &dyn Store,
-    policy: ConflictPolicy,
-    sync_comments: bool,
-    delete_remote_comments: bool,
-    dry_run: bool,
-    direction: Direction,
+    options: SyncOptions,
 ) -> Result<(SyncSummary, Option<SyncReport>), ImportError> {
+    let SyncOptions {
+        policy,
+        sync_comments,
+        delete_remote_comments,
+        dry_run,
+        direction,
+        adopt_links,
+    } = options;
     let (owner, repo) = parse_repo_spec(spec)?;
 
     let state_path = SyncState::path_for(store.repo_root(), spec);
@@ -91,8 +113,38 @@ pub fn sync_github(
     })?;
     let issues = rt.block_on(async {
         let crab = build_client()?;
-        fetch_all(&crab, &owner, &repo).await
+        fetch_issues(&crab, &owner, &repo).await
     })?;
+
+    // A `gh-<number>` link does not name its repository: refuse to pair the
+    // local links with another repository's issues of the same numbers.
+    // The tracked record of the synced repository decides when there is one;
+    // a store from before the record falls back on the evidence in the sync
+    // states and the issues' `clove-meta`.
+    let marker_path = crate::sync::repo_marker_path(store.repo_root());
+    let recorded = crate::sync::load_repo_marker(&marker_path);
+    if !adopt_links {
+        let reason = match &recorded {
+            Some(repo) if repo.eq_ignore_ascii_case(spec.trim()) => None,
+            Some(repo) => crate::sync::has_github_links(&local).then(|| {
+                format!("`{marker_path}` records that this store is synced with `{repo}`")
+            }),
+            None => {
+                let others = SyncState::load_siblings(&state_path);
+                crate::sync::foreign_links_reason(&issues, &local, &state, &others)
+            }
+        };
+        if let Some(reason) = reason {
+            return Err(ImportError::Source {
+                path: state_path,
+                message: format!(
+                    "the local `gh-<number>` links do not look like links to `{spec}`: {reason}. \
+                     A sync would overwrite unrelated items or issues; nothing was changed. \
+                     Pass --adopt-links if `{spec}` is the right repository"
+                ),
+            });
+        }
+    }
 
     let mut plan: SyncPlan = plan_sync(&issues, &local, &state, policy)
         .map_err(|message| ImportError::Record { message })?;
@@ -127,6 +179,7 @@ pub fn sync_github(
                     store,
                     &state,
                     &remote_comment_counts,
+                    &summary.remote_missing,
                     policy,
                     delete_remote_comments,
                 )
@@ -141,6 +194,10 @@ pub fn sync_github(
             }
         }
         return Ok((summary, None));
+    }
+
+    if recorded.as_deref() != Some(spec.trim()) {
+        crate::sync::save_repo_marker(&marker_path, spec)?;
     }
 
     let apply_result = rt.block_on(async {
@@ -159,6 +216,7 @@ pub fn sync_github(
                 store,
                 &state,
                 &remote_comment_counts,
+                &summary.remote_missing,
                 policy,
                 delete_remote_comments,
             )
@@ -313,6 +371,18 @@ async fn apply_plan(
     };
     let mut reconciled: std::collections::HashSet<String> = std::collections::HashSet::new();
 
+    // Unlinked items that are on GitHub already: write the link. The write
+    // moves the item's `updated`, which is the clock to record.
+    let mut plan = plan;
+    for link in &plan.link {
+        let local_updated = link_local(store, &link.clove_id, &link.external_ref)?;
+        for entry in &mut plan.in_sync {
+            if entry.external_ref == link.external_ref {
+                entry.local_updated = local_updated;
+            }
+        }
+    }
+
     // Already-in-sync pairs: just (re)record their fingerprint so a first sync
     // over an old one-way link becomes incremental next time.
     for entry in &plan.in_sync {
@@ -322,6 +392,7 @@ async fn apply_plan(
             entry.local_updated,
         );
         state.record_content_hash(&entry.external_ref, entry.gh_content_hash);
+        state.record_assignees(&entry.external_ref, entry.gh_assignees.clone());
         reconciled.insert(entry.external_ref.clone());
         report.in_sync += 1;
     }
@@ -338,13 +409,20 @@ async fn apply_plan(
             .map(|fm| fm.id)
             .collect()
     };
+    let mut created: Vec<(CloveId, &StagedIssue)> = Vec::new();
     for pull in &plan.pull_create {
-        pull_create(store, &pull.staged, state, &mut taken)?;
+        let id = pull_create(store, &pull.staged, state, &mut taken)?;
+        created.push((id, &pull.staged));
         reconciled.insert(pull.staged.external_ref.clone());
         report.pulled_created += 1;
     }
+    // The deps of the new items, once every item of this run exists: a dep on
+    // an issue pulled later in the same run then finds its target.
+    for (id, staged) in created {
+        pull_create_deps(store, &id, staged, state, &mut report)?;
+    }
     for pull in &plan.pull_update {
-        pull_update(store, pull, state)?;
+        pull_update(store, pull, state, &mut report)?;
         reconciled.insert(pull.staged.external_ref.clone());
         report.pulled_updated += 1;
     }
@@ -394,12 +472,15 @@ enum PushOutcome {
 /// (an issue clove pushed from another store), so deps and id mentions that
 /// name it stay valid; otherwise it gets a fresh id. `created` is the issue's
 /// `created_at`, so a closed issue never has `closed` before `created`.
+///
+/// The item is written without deps; [`pull_create_deps`] adds them through
+/// the checked graph op. Returns the new item's id.
 fn pull_create(
     store: &dyn Store,
     staged: &StagedIssue,
     state: &mut SyncState,
     taken: &mut std::collections::HashSet<CloveId>,
-) -> Result<(), ImportError> {
+) -> Result<CloveId, ImportError> {
     let now = truncate(Utc::now());
     let id = match &staged.meta_id {
         Some(id) if !taken.contains(id) => id.clone(),
@@ -415,7 +496,7 @@ fn pull_create(
         title: staged.title.clone(),
         status: staged.status,
         item_type: staged.item_type.unwrap_or_default(),
-        priority: staged.priority,
+        priority: staged.priority.unwrap_or_default(),
         created,
         updated: now,
         closed: staged.closed.or(if staged.status == ItemStatus::Closed {
@@ -426,7 +507,7 @@ fn pull_create(
         assignee: staged.assignee.clone(),
         parent: None,
         labels: staged.labels.clone(),
-        deps: staged.deps.clone().unwrap_or_default(),
+        deps: Vec::new(),
         relates: Vec::new(),
         duplicates: Vec::new(),
         supersedes: Vec::new(),
@@ -438,12 +519,72 @@ fn pull_create(
         body: staged.body.clone(),
     };
     store.create_item(&item)?;
-    state.record(&staged.external_ref, staged.updated_at, now);
-    state.record_content_hash(
-        &staged.external_ref,
-        crate::sync::staged_fingerprint(staged),
-    );
+    record_pull(state, staged, now, &[], &id, None);
+    Ok(id)
+}
+
+/// Add the `clove-meta` deps of a just pull-created item through the
+/// existence- and cycle-checked graph op (the issue body is remote input: a
+/// dep on a missing item, or one that closes a cycle, must not reach the
+/// store). Then record the item's final clock.
+fn pull_create_deps(
+    store: &dyn Store,
+    id: &CloveId,
+    staged: &StagedIssue,
+    state: &mut SyncState,
+    report: &mut SyncReport,
+) -> Result<(), ImportError> {
+    let Some(deps) = staged.deps.as_ref().filter(|deps| !deps.is_empty()) else {
+        return Ok(());
+    };
+    let mut failed = Vec::new();
+    for dep in deps {
+        if let Err(err) = store.dep_add(id, dep) {
+            failed.push((dep.clone(), err.to_string()));
+        }
+    }
+    // Each added dep moved the item's `updated`.
+    let local_updated = store.get(id)?.frontmatter.updated;
+    record_pull(state, staged, local_updated, &failed, id, Some(report));
     Ok(())
+}
+
+/// Record the sync fingerprint of a pulled issue.
+///
+/// `failed_deps` are the remote deps the pull could not apply locally. They
+/// are left out of the recorded fingerprint and the remote clock is left
+/// unset, so the next sync sees the issue as changed and tries them again;
+/// recorded as synced, a dep would be lost for good (and the next push would
+/// drop it from the issue).
+fn record_pull(
+    state: &mut SyncState,
+    staged: &StagedIssue,
+    local_updated: DateTime<Utc>,
+    failed_deps: &[(CloveId, String)],
+    clove_id: &CloveId,
+    report: Option<&mut SyncReport>,
+) {
+    let ext = &staged.external_ref;
+    if failed_deps.is_empty() {
+        state.record(ext, staged.updated_at, local_updated);
+        state.record_content_hash(ext, crate::sync::staged_fingerprint(staged));
+    } else {
+        let mut applied = staged.clone();
+        if let Some(deps) = &mut applied.deps {
+            deps.retain(|dep| !failed_deps.iter().any(|(failed, _)| failed == dep));
+        }
+        state.record(ext, None, local_updated);
+        state.record_content_hash(ext, crate::sync::staged_fingerprint(&applied));
+        if let Some(report) = report {
+            for (dep, reason) in failed_deps {
+                report.warnings.push(format!(
+                    "could not add the dependency {dep} that {ext} declares to {clove_id}: \
+                     {reason}; the next sync tries again"
+                ));
+            }
+        }
+    }
+    state.record_assignees(ext, staged.assignees.clone());
 }
 
 /// Apply remote edits to an existing local item via the unified `apply_edit`
@@ -452,6 +593,7 @@ fn pull_update(
     store: &dyn Store,
     pull: &PullUpdate,
     state: &mut SyncState,
+    report: &mut SyncReport,
 ) -> Result<(), ImportError> {
     let staged = &pull.staged;
 
@@ -474,15 +616,22 @@ fn pull_update(
         .item_type
         .filter(|t| *t != current.frontmatter.item_type);
 
+    // The local assignee stays when it is still one of the issue's assignees:
+    // GitHub does not fix their order, so "the first one" can change by itself.
+    let assignee = match &current.frontmatter.assignee {
+        Some(local) if staged.assignees.contains(local) => Some(local.clone()),
+        _ => staged.assignee.clone(),
+    };
     let req = EditRequest {
         title: Some(staged.title.clone()),
         body: Some(staged.body.clone()),
         status,
-        priority: Some(staged.priority),
+        // `None` (no priority in the remote meta) leaves the local one alone.
+        priority: staged.priority,
         item_type,
         // `Some(None)` clears the assignee when GitHub has none, `Some(Some(x))`
         // sets it — exactly the tri-state `apply_edit` expects.
-        assignee: Some(staged.assignee.clone()),
+        assignee: Some(assignee),
         labels: Some(LabelEdit::Set(staged.labels.clone())),
     };
     let now = Utc::now();
@@ -495,12 +644,15 @@ fn pull_update(
     // BEFORE `apply_edit` so the fingerprint recorded from `apply_edit`'s
     // returned `updated` covers these writes too. A single edge that fails
     // (target not present locally, would-cycle) is skipped rather than
-    // aborting the whole sync.
+    // aborting the whole sync, and is not recorded as synced.
+    let mut failed_deps = Vec::new();
     if let Some(remote_deps) = &staged.deps {
         let want: std::collections::BTreeSet<&CloveId> = remote_deps.iter().collect();
         let have: std::collections::BTreeSet<&CloveId> = current.frontmatter.deps.iter().collect();
         for dep in want.difference(&have) {
-            let _ = store.dep_add(&pull.clove_id, dep);
+            if let Err(err) = store.dep_add(&pull.clove_id, dep) {
+                failed_deps.push(((*dep).clone(), err.to_string()));
+            }
         }
         for dep in have.difference(&want) {
             let _ = store.dep_remove(&pull.clove_id, dep);
@@ -509,10 +661,13 @@ fn pull_update(
 
     let value = store.apply_edit(&pull.clove_id, &req)?;
     let local_updated = value_updated(&value).unwrap_or_else(|| truncate(now));
-    state.record(&staged.external_ref, staged.updated_at, local_updated);
-    state.record_content_hash(
-        &staged.external_ref,
-        crate::sync::staged_fingerprint(staged),
+    record_pull(
+        state,
+        staged,
+        local_updated,
+        &failed_deps,
+        &pull.clove_id,
+        Some(report),
     );
     Ok(())
 }
@@ -584,6 +739,7 @@ async fn push_create(
             ..item.clone()
         };
         state.record_content_hash(&external_ref, crate::sync::export_fingerprint(&open_item));
+        state.record_assignees(&external_ref, issue_logins(issue));
     };
     record_open(state, &created, item);
 
@@ -762,7 +918,13 @@ async fn push_update(
         &external_ref,
         crate::sync::export_fingerprint(&stored_item(item, &updated)),
     );
+    state.record_assignees(&external_ref, issue_logins(&updated));
     Ok(PushOutcome::Done(external_ref))
+}
+
+/// The assignee logins of an issue GitHub returned.
+fn issue_logins(issue: &Issue) -> Vec<String> {
+    issue.assignees.iter().map(|a| a.login.clone()).collect()
 }
 
 /// Whether GitHub stored `stored` for a body clove sent as `sent`: the same
@@ -884,6 +1046,7 @@ async fn plan_comment_threads(
     store: &dyn Store,
     state: &SyncState,
     remote_comment_counts: &std::collections::HashMap<String, u64>,
+    remote_missing: &[String],
     policy: ConflictPolicy,
     delete_remote_comments: bool,
 ) -> Result<Vec<ThreadPlan>, ImportError> {
@@ -893,6 +1056,13 @@ async fn plan_comment_threads(
         let Some(number) = parse_gh_number(&external_ref) else {
             continue;
         };
+        // The issue list did not return this issue (deleted or transferred
+        // away; the plan reports it as `remote_missing`). Its comments endpoint
+        // answers 404, which would abort the whole comment phase. (An issue
+        // this run created is not in the list either, and does have a thread.)
+        if remote_missing.contains(&external_ref) {
+            continue;
+        }
         let local: Vec<LocalComment> = store
             .comments(&id)?
             .into_iter()
@@ -1332,6 +1502,36 @@ async fn fetch_comments(
             updated_at: c.updated_at,
         })
         .collect())
+}
+
+/// Fetch every issue (all states, paginated) from `owner/repo`. Each page is a
+/// read, so a transient failure of one page is retried instead of failing the
+/// whole sync before it starts.
+async fn fetch_issues(
+    crab: &Octocrab,
+    owner: &str,
+    repo: &str,
+) -> Result<Vec<crate::github::GitHubIssue>, ImportError> {
+    let operation = format!("issue list fetch from {owner}/{repo}");
+    let handler = crab.issues(owner, repo);
+    let operation = &operation;
+    let handler = &handler;
+    let all = crate::github::net::collect_pages(
+        |issue: &Issue| issue.number,
+        |page| async move {
+            with_retry(true, operation, || {
+                handler
+                    .list()
+                    .state(octocrab::params::State::All)
+                    .per_page(100)
+                    .page(page)
+                    .send()
+            })
+            .await
+        },
+    )
+    .await?;
+    all.iter().map(to_intermediate).collect()
 }
 
 /// Stamp `source_system = github` + `external_ref` onto a local item and persist

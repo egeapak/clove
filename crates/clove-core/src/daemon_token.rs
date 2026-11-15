@@ -94,17 +94,15 @@ fn is_private_dir(dir: &Utf8Path) -> bool {
     let Ok(meta) = std::fs::symlink_metadata(dir) else {
         return false;
     };
-    if meta.file_type().is_symlink() || !meta.is_dir() {
-        return false;
-    }
+    let is_real_dir = !meta.file_type().is_symlink() && meta.is_dir();
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        meta.uid() == current_uid() && meta.mode() & 0o022 == 0
+        is_real_dir && meta.uid() == current_uid() && meta.mode() & 0o022 == 0
     }
     #[cfg(not(unix))]
     {
-        true
+        is_real_dir
     }
 }
 

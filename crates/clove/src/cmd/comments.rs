@@ -18,6 +18,12 @@ pub fn add(
     quiet: bool,
 ) -> Result<(), CloveError> {
     let id = parse_id(id)?;
+    if message.trim().is_empty() {
+        return Err(CloveError::InvalidField {
+            field: "comment".to_owned(),
+            reason: "comment cannot be empty".to_owned(),
+        });
+    }
     if !ctx.store.exists(&id) {
         return Err(CloveError::NotFound { id: id.to_string() });
     }
@@ -95,9 +101,12 @@ pub fn list(
                 outln!(
                     "{}  {}",
                     c["timestamp"].as_str().unwrap_or_default(),
-                    c["author"].as_str().unwrap_or_default()
+                    crate::util::term_line(c["author"].as_str().unwrap_or_default())
                 );
-                outln!("{}\n", c["body"].as_str().unwrap_or_default().trim_end());
+                outln!(
+                    "{}\n",
+                    crate::util::term_text(c["body"].as_str().unwrap_or_default().trim_end())
+                );
             }
         }
     }

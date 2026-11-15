@@ -24,10 +24,22 @@
 //! | unmapped beads-internal fields | folded into `external_ref` as a `meta:<json>` blob |
 //! | — | `source_system = "beads"` |
 //!
+//! ## References between issues
+//!
+//! A dependency edge names its target in `depends_on_id` (the `bd export`
+//! shape) or `id`, and the target is a **beads id** (`bd-101`). Every imported
+//! issue gets a fresh clove id, so each reference is translated
+//! ([`crate::map::RefResolver`]): to the clove id minted for an issue of this
+//! import, else to the item an earlier import made from that beads id, else it
+//! is kept when it already is a clove id (clove's own export). A reference that
+//! is none of these is dropped with a warning; it never fails the line.
+//!
 //! ## external_ref / meta-blob rule
 //!
-//! The clove `external_ref` is the idempotency key (DESIGN §11.3: skip incoming
-//! items whose `external_ref` matches an existing item). The encoding is:
+//! The beads id inside the clove `external_ref` is the idempotency key (DESIGN
+//! §11.3: skip incoming items that an earlier import already created). The meta
+//! blob is not part of the key: it holds fields such as `updated_at`, which
+//! change between two exports of the same issue. The encoding is:
 //!
 //! - If the incoming line already carries a clove-style `external_ref` (this is
 //!   the case when re-importing clove's own `export jsonl` output), it is used
@@ -36,9 +48,7 @@
 //! - If the issue has unmapped beads-internal fields, a compact, key-sorted JSON
 //!   object of them is appended as `" meta:<json>"`, producing
 //!   `"beads:<id> meta:{...}"`. The JSON keys are sorted (serde_json::Map under
-//!   the `preserve_order` feature is *not* assumed) so the encoding is stable and
-//!   re-import reproduces the identical string — idempotency holds even with a
-//!   meta blob.
+//!   the `preserve_order` feature is *not* assumed) so the encoding is stable.
 //!
 //! ## Dual-shape tolerance (round-trip with clove's own export)
 //!
@@ -70,7 +80,7 @@
 //! (M4, report-only).
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use camino::Utf8Path;
 use chrono::{DateTime, Utc};
@@ -81,8 +91,8 @@ use serde_json::Value;
 
 use crate::error::ImportError;
 use crate::map::{
-    beads_type, cap_dep_array, coerce_priority, coerce_status, dangling_targets, map_labels,
-    MAX_IMPORT_UNIT_BYTES,
+    beads_type, cap_dep_array, coerce_priority, coerce_status, map_labels, mint_ids,
+    push_dangling_warning, source_id_of, RefResolver, RefTarget, MAX_IMPORT_UNIT_BYTES,
 };
 use crate::plan::{ImportPlan, ImportReport, PlanItem, SkipItem};
 use crate::store::Store;
@@ -122,9 +132,14 @@ const MAPPED_KEYS: &[&str] = &[
     "closed",
 ];
 
-/// A single structured beads dependency edge (`{ "id": "...", "type": "..." }`).
+/// A single structured beads dependency edge. `bd export` writes
+/// `{ "issue_id": "...", "depends_on_id": "...", "type": "..." }`; the short
+/// `{ "id": "...", "type": "..." }` form is read too.
 #[derive(Debug, Clone, Deserialize)]
 struct BeadsDependency {
+    /// The edge's target (`bd export` shape).
+    #[serde(default)]
+    depends_on_id: Option<String>,
     #[serde(default)]
     id: Option<String>,
     #[serde(default, rename = "type")]
@@ -217,11 +232,12 @@ struct StagedIssue {
     item_type: ItemType,
     priority: Priority,
     assignee: Option<String>,
-    parent: Option<CloveId>,
-    deps: Vec<CloveId>,
-    relates: Vec<CloveId>,
-    duplicates: Vec<CloveId>,
-    supersedes: Vec<CloveId>,
+    /// At most one target.
+    parent: Vec<RefTarget>,
+    deps: Vec<RefTarget>,
+    relates: Vec<RefTarget>,
+    duplicates: Vec<RefTarget>,
+    supersedes: Vec<RefTarget>,
     labels: Vec<String>,
     body: String,
 }
@@ -270,6 +286,8 @@ impl Importer for BeadsImporter {
         // (C1): the first occurrence is staged; later ones are skipped, never
         // silently overwriting the first staged record's data.
         let mut seen_ids: HashSet<String> = HashSet::new();
+        // beads id → the item an earlier import created from it.
+        let imported = ctx.imported_from("beads:");
 
         for (lineno, raw_line) in text.lines().enumerate() {
             let line = raw_line.trim();
@@ -338,28 +356,6 @@ impl Importer for BeadsImporter {
                 &mut self.warnings.borrow_mut(),
             );
 
-            // M4: flag dangling dependency targets (ids absent from the store).
-            let dangling = dangling_targets(
-                &ctx.store_ids,
-                staged_issue
-                    .parent
-                    .iter()
-                    .chain(staged_issue.deps.iter())
-                    .chain(staged_issue.relates.iter())
-                    .chain(staged_issue.duplicates.iter())
-                    .chain(staged_issue.supersedes.iter()),
-            );
-            if !dangling.is_empty() {
-                let list = dangling
-                    .iter()
-                    .map(CloveId::as_str)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                self.warnings.borrow_mut().push(format!(
-                    "item `{source_id}`: dangling dependency target(s) not present in the store: {list}"
-                ));
-            }
-
             // C1: skip a second line that shares an already-seen source id.
             if !seen_ids.insert(staged_issue.source_id.clone()) {
                 plan.would_skip.push(SkipItem {
@@ -369,10 +365,15 @@ impl Importer for BeadsImporter {
                 continue;
             }
 
-            if ctx.is_imported(&staged_issue.external_ref) {
+            // The key is the beads id inside the ref. A ref from another
+            // namespace (clove's own export) is matched verbatim.
+            let existing = match source_id_of(&staged_issue.external_ref, "beads:") {
+                Some(beads_id) => imported.get(beads_id).copied(),
+                None => ctx.existing(&staged_issue.external_ref),
+            };
+            if let Some(existing) = existing {
                 // M3: report field-level divergences against the existing item.
-                let conflicts = ctx.conflicts_for(
-                    &staged_issue.external_ref,
+                let conflicts = existing.conflicts_with(
                     &staged_issue.source_id,
                     staged_issue.status,
                     staged_issue.priority,
@@ -392,6 +393,42 @@ impl Importer for BeadsImporter {
             }
         }
 
+        // The references are beads ids; turn them into clove ids now that the
+        // whole batch is known.
+        let batch: HashSet<String> = staged.iter().map(|i| i.source_id.clone()).collect();
+        let imported: HashMap<String, CloveId> = imported
+            .into_iter()
+            .map(|(source_id, existing)| (source_id, existing.id.clone()))
+            .collect();
+        let resolver = RefResolver {
+            batch: &batch,
+            imported: &imported,
+            store_ids: &ctx.store_ids,
+        };
+        let mut warnings = self.warnings.borrow_mut();
+        for issue in staged.iter_mut() {
+            let own = issue.source_id.clone();
+            // M4: flag dangling dependency targets (ids absent from the store).
+            // Report-only: the write still proceeds.
+            let mut dangling = Vec::new();
+            for (field, targets) in [
+                ("parent", &mut issue.parent),
+                ("deps", &mut issue.deps),
+                ("relates", &mut issue.relates),
+                ("duplicates", &mut issue.duplicates),
+                ("supersedes", &mut issue.supersedes),
+            ] {
+                *targets = resolver.resolve(
+                    &own,
+                    field,
+                    std::mem::take(targets),
+                    &mut dangling,
+                    &mut warnings,
+                );
+            }
+            push_dangling_warning(&own, dangling, &mut warnings);
+        }
+
         Ok(plan)
     }
 
@@ -403,8 +440,9 @@ impl Importer for BeadsImporter {
         // directly. `plan` (the create set) and `staged` are pushed together in
         // lock-step during `plan`, so each staged record is written exactly once
         // with its own data.
+        let minted = mint_ids(store, staged.iter().map(|i| i.source_id.as_str()))?;
         for issue in staged.iter() {
-            let id = store.new_id()?;
+            let id = minted[&issue.source_id].clone();
             let closed = if issue.status == ItemStatus::Closed {
                 Some(self.now)
             } else {
@@ -421,12 +459,14 @@ impl Importer for BeadsImporter {
                 updated: self.now,
                 closed,
                 assignee: issue.assignee.clone(),
-                parent: issue.parent.clone(),
+                parent: RefTarget::clove_ids(&issue.parent, &minted)
+                    .into_iter()
+                    .next(),
                 labels: issue.labels.clone(),
-                deps: issue.deps.clone(),
-                relates: issue.relates.clone(),
-                duplicates: issue.duplicates.clone(),
-                supersedes: issue.supersedes.clone(),
+                deps: RefTarget::clove_ids(&issue.deps, &minted),
+                relates: RefTarget::clove_ids(&issue.relates, &minted),
+                duplicates: RefTarget::clove_ids(&issue.duplicates, &minted),
+                supersedes: RefTarget::clove_ids(&issue.supersedes, &minted),
                 source_system: Some("beads".to_owned()),
                 external_ref: Some(issue.external_ref.clone()),
             };
@@ -519,7 +559,13 @@ fn map_line(line: &str) -> Result<(StagedIssue, Option<i64>), String> {
         parent_raw = issue.parent.clone();
     } else {
         for dep in &issue.dependencies {
-            let Some(dep_id) = dep.id.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+            let Some(dep_id) = dep
+                .depends_on_id
+                .as_deref()
+                .or(dep.id.as_deref())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            else {
                 continue;
             };
             match dep
@@ -544,17 +590,17 @@ fn map_line(line: &str) -> Result<(StagedIssue, Option<i64>), String> {
         }
     }
 
-    let parent = match parent_raw {
-        Some(p) => Some(parse_id(&p)?),
-        None => None,
-    };
-    let deps = parse_ids(deps_raw.iter().map(String::as_str))?;
-    let relates = parse_ids(relates_raw.iter().map(String::as_str))?;
+    let parent: Vec<RefTarget> = RefTarget::raw_list(parent_raw.as_deref())
+        .into_iter()
+        .take(1)
+        .collect();
+    let deps = RefTarget::raw_list(deps_raw.iter().map(String::as_str));
+    let relates = RefTarget::raw_list(relates_raw.iter().map(String::as_str));
     // `duplicates`/`supersedes` exist only in the clove-export shape (there is
     // no structured-beads-edge equivalent), so they are consumed directly —
     // they are in `MAPPED_KEYS` and must round-trip, not be dropped.
-    let duplicates = parse_ids(issue.duplicates.iter().map(String::as_str))?;
-    let supersedes = parse_ids(issue.supersedes.iter().map(String::as_str))?;
+    let duplicates = RefTarget::raw_list(issue.duplicates.iter().map(String::as_str));
+    let supersedes = RefTarget::raw_list(issue.supersedes.iter().map(String::as_str));
 
     let mut labels = map_labels(&issue.labels).map_err(|e| e.to_string())?;
     if let Some(label) = extra_label {
@@ -651,19 +697,6 @@ pub fn parse_beads_bytes(bytes: &[u8]) -> Result<(), ImportError> {
     Ok(())
 }
 
-/// Parse a single raw id string into a [`CloveId`].
-fn parse_id(raw: &str) -> Result<CloveId, String> {
-    CloveId::new(raw.trim()).map_err(|err| format!("invalid id reference `{raw}`: {err}"))
-}
-
-/// Parse each raw id string into a [`CloveId`].
-fn parse_ids<'a, I>(raw: I) -> Result<Vec<CloveId>, String>
-where
-    I: IntoIterator<Item = &'a str>,
-{
-    raw.into_iter().map(parse_id).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -679,7 +712,7 @@ mod tests {
         assert_eq!(s.assignee.as_deref(), Some("ege"));
         assert_eq!(s.labels, vec!["area:core"]);
         assert_eq!(s.deps.len(), 1);
-        assert!(s.parent.is_some());
+        assert_eq!(s.parent.len(), 1);
         assert_eq!(s.relates.len(), 1);
         assert_eq!(s.external_ref, "beads:bd-1");
     }
@@ -700,9 +733,9 @@ mod tests {
         let line = r#"{"id":"bd-9","title":"X","duplicates":["proj-AAAA1111"],"supersedes":["proj-BBBB2222"]}"#;
         let (s, _) = map_line(line).unwrap();
         assert_eq!(s.duplicates.len(), 1);
-        assert_eq!(s.duplicates[0].as_str(), "proj-AAAA1111");
+        assert_eq!(s.duplicates[0], RefTarget::Raw("proj-AAAA1111".to_owned()));
         assert_eq!(s.supersedes.len(), 1);
-        assert_eq!(s.supersedes[0].as_str(), "proj-BBBB2222");
+        assert_eq!(s.supersedes[0], RefTarget::Raw("proj-BBBB2222".to_owned()));
         assert!(!s.external_ref.contains("meta:"), "{}", s.external_ref);
     }
 
@@ -733,7 +766,7 @@ mod tests {
         assert_eq!(s.body, "hello");
         assert_eq!(s.deps.len(), 1);
         assert_eq!(s.relates.len(), 1);
-        assert!(s.parent.is_some());
+        assert_eq!(s.parent.len(), 1);
         // A pre-existing clove external_ref is used verbatim.
         assert_eq!(s.external_ref, "beads:bd-99");
     }

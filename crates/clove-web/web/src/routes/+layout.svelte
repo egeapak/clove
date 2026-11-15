@@ -10,7 +10,7 @@
   import SourceLink from '$lib/components/SourceLink.svelte';
   import ProjectSwitcher from '$lib/components/ProjectSwitcher.svelte';
   import { api } from '$lib/api';
-  import { projectSlug } from '$lib/urls';
+  import { isActiveTab, projectSlug } from '$lib/urls';
   import Toasts from '$lib/components/Toasts.svelte';
   import NewItemModal from '$lib/components/NewItemModal.svelte';
   import { tooltip } from '$lib/tooltip';
@@ -36,7 +36,7 @@
   // The tabular views use the whole window; reading views keep a measure.
   const fullWidth = $derived(/\/(list|timeline|board)\/?$/.test(path));
   function isActive(href: string): boolean {
-    return path.includes('/' + href) || (href === 'board' && (path === '/' || path.endsWith('/')));
+    return isActiveTab(path, base, href);
   }
 
   const connLabel = $derived(

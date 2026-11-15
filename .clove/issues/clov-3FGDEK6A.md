@@ -2,11 +2,12 @@
 schema: 1
 id: clov-3FGDEK6A
 title: 'clove edit: a body changed in $EDITOR keeps the old updated timestamp'
-status: open
+status: closed
 type: bug
 priority: 2
 created: 2026-11-04T09:57:37.064Z
-updated: 2026-11-06T22:42:13.390Z
+updated: 2026-11-14T19:44:50.058Z
+closed: 2026-11-14T19:44:50.058Z
 labels: [sync]
 deps: []
 relates: []

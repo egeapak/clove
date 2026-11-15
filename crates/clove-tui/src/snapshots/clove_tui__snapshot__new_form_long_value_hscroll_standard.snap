@@ -1,0 +1,28 @@
+---
+source: crates/clove-tui/src/snapshot.rs
+expression: rendered
+---
+┌ clove ───────────────────────────────────────────────────────────────────────┐
+│  All 7  │  Ready 4  │  Blocked 1                                             │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌ Items (7) ───────────────────────────┐┌ Overview · Dep tree · Comments ──────┐
+│▌◐ F #9QX4D1B7 ! Build REST API ●     ││ #9QX4D1B7  ! FEATURE                 │
+│ ○ B #0┌ New item ────────────────────────────────────────────────────┐       │
+│ ● C #7│ ▌   Title: …s well past the right edge of the form popup ok▏ │       │
+│ ○ E #3│      Type: feature                                           │dy     │
+│ ○ F #K│  Priority: p2                                                │       │
+│ ○ F #5│  Assignee:                                                   │       │
+│ ● D #8│    Labels:                                                   │       │
+│       │    Parent:                                                   │       │
+│       │      Deps:                                                   │       │
+│       │      Body:                                                   │       │
+│       │                                                              │────── │
+│       │                                                              │       │
+│       │ Ctrl-S save · Esc cancel · Tab/↑↓ field · ←→ move/change     │       │
+│       └──────────────────────────────────────────────────────────────┘e      │
+│                                      ││ docs/api.md.                         │
+│                                      ││                                      │
+│                                      ││ • CRUD endpoints                     │
+│                                      ││ • Auth middleware                    │
+└──────────────────────────────────────┘└──────────────────────────────────────┘
+new item  Ctrl-S save · Esc cancel

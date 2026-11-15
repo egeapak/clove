@@ -1,0 +1,7 @@
+# SHA-256 of clove-web-dist-v<version>.tar.gz, the built web UI that a
+# published clove-web downloads at build time.
+#
+# In the repository this file holds no digest. scripts/release/publish.sh
+# writes the digest of the release asset here before `cargo publish -p
+# clove-web`, so the published crate pins the exact archive it embeds. The
+# build never takes the expected digest from the download location.

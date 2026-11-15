@@ -80,7 +80,7 @@ pub fn print_human(item: &Item) {
         fm.status.as_str(),
         fm.priority.get(),
         fm.item_type.as_str(),
-        fm.title
+        crate::util::term_line(&fm.title)
     );
 }
 

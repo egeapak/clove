@@ -89,12 +89,12 @@ where
 /// import, while guaranteeing the written file never violates the store's own
 /// validation cap. `field` (e.g. `"deps"`) and `source_id` are only for the
 /// warning text.
-pub fn cap_dep_array(
-    mut ids: Vec<CloveId>,
+pub fn cap_dep_array<T>(
+    mut ids: Vec<T>,
     field: &str,
     source_id: &str,
     warnings: &mut Vec<String>,
-) -> Vec<CloveId> {
+) -> Vec<T> {
     if ids.len() > MAX_DEP_ARRAY_LEN {
         let original = ids.len();
         ids.truncate(MAX_DEP_ARRAY_LEN);
@@ -123,6 +123,152 @@ where
     dangling.sort();
     dangling.dedup();
     dangling
+}
+
+/// A reference from an imported item to another item (`parent`, `deps`,
+/// `relates`, …), on its way from the id the source tracker wrote to a clove id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RefTarget {
+    /// As written in the source; not resolved yet.
+    Raw(String),
+    /// An item this import creates, by its source id. Its clove id is minted
+    /// when the import is applied.
+    Batch(String),
+    /// An item with a known clove id.
+    Id(CloveId),
+}
+
+impl RefTarget {
+    /// Wrap the non-empty source references in `raw`.
+    pub(crate) fn raw_list<'a>(raw: impl IntoIterator<Item = &'a str>) -> Vec<RefTarget> {
+        raw.into_iter()
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+            .map(|r| RefTarget::Raw(r.to_owned()))
+            .collect()
+    }
+
+    /// The clove ids of resolved `targets`, with each [`RefTarget::Batch`]
+    /// looked up in `minted` (source id → the id minted for it).
+    pub(crate) fn clove_ids(
+        targets: &[RefTarget],
+        minted: &HashMap<String, CloveId>,
+    ) -> Vec<CloveId> {
+        targets
+            .iter()
+            .filter_map(|target| match target {
+                RefTarget::Id(id) => Some(id.clone()),
+                RefTarget::Batch(source) => minted.get(source).cloned(),
+                RefTarget::Raw(_) => None,
+            })
+            .collect()
+    }
+}
+
+/// Resolves the references of an import batch (see [`RefTarget`]).
+///
+/// A source tracker writes references in its own ids (`nw-5c46`, `bd-101`),
+/// while every imported item gets a freshly minted clove id. A reference is
+/// looked up, in order, as: an item this import creates; an item an earlier
+/// import created (by the source id in its `external_ref`); a clove id (the
+/// shape of clove's own exports). Anything else cannot be an edge in the store
+/// and is dropped with a warning.
+pub(crate) struct RefResolver<'a> {
+    /// Source ids of the items this import creates.
+    pub(crate) batch: &'a HashSet<String>,
+    /// Source id → clove id of the items an earlier import created.
+    pub(crate) imported: &'a HashMap<String, CloveId>,
+    /// Every clove id in the store (for the dangling-target report).
+    pub(crate) store_ids: &'a HashSet<CloveId>,
+}
+
+impl RefResolver<'_> {
+    /// Resolve the `field` references of the item with source id `own`.
+    /// Dropped references are explained in `warnings`; clove ids absent from
+    /// the store are kept and collected into `dangling` (report-only).
+    pub(crate) fn resolve(
+        &self,
+        own: &str,
+        field: &str,
+        targets: Vec<RefTarget>,
+        dangling: &mut Vec<CloveId>,
+        warnings: &mut Vec<String>,
+    ) -> Vec<RefTarget> {
+        let mut resolved = Vec::with_capacity(targets.len());
+        for target in targets {
+            let RefTarget::Raw(raw) = target else {
+                resolved.push(target);
+                continue;
+            };
+            if raw == own {
+                warnings.push(format!(
+                    "item `{own}`: `{field}` refers to the item itself; dropped"
+                ));
+            } else if self.batch.contains(&raw) {
+                resolved.push(RefTarget::Batch(raw));
+            } else if let Some(id) = self.imported.get(&raw) {
+                resolved.push(RefTarget::Id(id.clone()));
+            } else if let Ok(id) = CloveId::new(&raw) {
+                if !self.store_ids.contains(&id) {
+                    dangling.push(id.clone());
+                }
+                resolved.push(RefTarget::Id(id));
+            } else {
+                warnings.push(format!(
+                    "item `{own}`: `{field}` reference `{raw}` matches no item of this import \
+                     and no item in the store; dropped"
+                ));
+            }
+        }
+        resolved
+    }
+}
+
+/// Push the report-only "dangling dependency target" warning of item `own`,
+/// if any of its targets is absent from the store.
+pub(crate) fn push_dangling_warning(own: &str, dangling: Vec<CloveId>, warnings: &mut Vec<String>) {
+    if dangling.is_empty() {
+        return;
+    }
+    let mut seen = HashSet::new();
+    let list = dangling
+        .iter()
+        .filter(|id| seen.insert(id.as_str()))
+        .map(CloveId::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    warnings.push(format!(
+        "item `{own}`: dangling dependency target(s) not present in the store: {list}"
+    ));
+}
+
+/// Mint one fresh clove id per source id, before any item is written, so an
+/// item can refer to one that the same import writes later.
+pub(crate) fn mint_ids<'a>(
+    store: &dyn crate::store::Store,
+    source_ids: impl IntoIterator<Item = &'a str>,
+) -> Result<HashMap<String, CloveId>, crate::error::ImportError> {
+    let mut minted: HashMap<String, CloveId> = HashMap::new();
+    let mut taken: HashSet<CloveId> = HashSet::new();
+    for source_id in source_ids {
+        // No item is written yet, so the store cannot see the ids minted so far.
+        let mut id = store.new_id()?;
+        while !taken.insert(id.clone()) {
+            id = store.new_id()?;
+        }
+        minted.insert(source_id.to_owned(), id);
+    }
+    Ok(minted)
+}
+
+/// The source id inside an importer's `external_ref` (`"tk:nw-5c46 upstream:…"`
+/// → `nw-5c46`), when the ref is in `namespace` (`"tk:"`, `"beads:"`). Whatever
+/// follows the first space (an upstream ref, a meta blob) can change between two
+/// exports of the same source item, so it is not part of the item's identity.
+pub(crate) fn source_id_of<'a>(external_ref: &'a str, namespace: &str) -> Option<&'a str> {
+    let rest = external_ref.strip_prefix(namespace)?;
+    let id = rest.split(' ').next().unwrap_or(rest);
+    (!id.is_empty()).then_some(id)
 }
 
 /// The key fields of an already-imported item, kept in the idempotency index so

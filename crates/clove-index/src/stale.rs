@@ -189,8 +189,17 @@ pub fn check_staleness(
     issues_dir: &Utf8Path,
 ) -> Result<StalenessReport, IndexError> {
     let now_ms = chrono::Utc::now().timestamp_millis();
-    let entries = scan_dir(issues_dir)?;
+    // The directory mtime is read **before** the scan. It becomes the `meta`
+    // oracle the fast path trusts, so it must not be newer than what the scan
+    // saw: a file renamed into place after its stat but before a later read of
+    // the directory mtime would be recorded as "seen" without being in the
+    // report, and the fast path would then call the index clean. Read first,
+    // such an edit leaves the stored mtime behind the directory's, and the next
+    // check does the per-file pass.
     let cur_dir_mtime = dir_mtime_ms(issues_dir)?;
+    let entries = scan_dir(issues_dir)?;
+    #[cfg(test)]
+    tests::after_scan_hook();
     let cur_count = entries.len() as i64;
 
     // Per-file comparison against the items oracle.
@@ -334,6 +343,66 @@ pub fn check_staleness_fast(
     check_staleness(conn, issues_dir)
 }
 
+/// Compare only the named items with the index: the targeted counterpart of
+/// [`check_staleness`] for a caller that already knows which files changed (a
+/// file watcher's batch, or the id it has just written).
+///
+/// Each id costs one `stat` and one indexed row lookup, so the work is
+/// O(changed) and not O(store). A named file is hashed when its mtime or size
+/// moved or it was touched within the recent window, exactly as in the full
+/// pass, so an in-place rewrite of a named file is detected. The report has no
+/// `observed` directory snapshot: applying it leaves the `meta` oracle alone,
+/// because a targeted pass says nothing about the files it was not told about.
+pub fn check_staleness_of(
+    conn: &Connection,
+    issues_dir: &Utf8Path,
+    ids: &[CloveId],
+) -> Result<StalenessReport, IndexError> {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let mut report = StalenessReport::default();
+    let mut stmt =
+        conn.prepare_cached("SELECT file_mtime, file_size, content_hash FROM items WHERE id = ?1")?;
+    for id in ids {
+        let path = issues_dir.join(format!("{id}.md"));
+        let stored: Option<(i64, i64, Vec<u8>)> = stmt
+            .query_row([id.as_str()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .optional()?;
+        // Symlinks and directories are not item files (the scan's rule).
+        let on_disk = std::fs::symlink_metadata(&path)
+            .ok()
+            .filter(std::fs::Metadata::is_file);
+        match (on_disk, stored) {
+            (None, None) => {}
+            (None, Some(_)) => report.deleted_ids.push(id.clone()),
+            (Some(_), None) => report.new_ids.push(id.clone()),
+            (Some(meta), Some((stored_mtime, stored_size, stored_hash))) => {
+                let mtime_ms = mtime_to_ms(&meta);
+                let size = meta.len() as i64;
+                let recent = now_ms - mtime_ms < RECENT_WINDOW_MS;
+                let moved = mtime_ms != stored_mtime || size != stored_size;
+                if !(moved || recent) {
+                    continue;
+                }
+                let Ok(bytes) = std::fs::read(&path) else {
+                    // Vanished since the stat: the next pass sees it gone.
+                    continue;
+                };
+                if content_hash8(&bytes).as_slice() != stored_hash.as_slice() {
+                    report.stale_ids.push(id.clone());
+                } else if moved {
+                    report.touched.push(TouchedFile {
+                        id: id.clone(),
+                        mtime_ms,
+                        mtime_ns: mtime_to_ns(&meta),
+                        size,
+                    });
+                }
+            }
+        }
+    }
+    Ok(report)
+}
+
 /// Apply a [`StalenessReport`]: re-parse and upsert new/changed items, delete
 /// removed ones, then recompute the derived graph columns — all in one
 /// transaction (T-S03; M4 P1 made the derived columns exact).
@@ -453,14 +522,14 @@ pub(crate) fn apply_staleness_tracked(
     // derived placeholders here are fixed up before commit.
     for id in &report.new_ids {
         let path = issues_dir.join(format!("{id}.md"));
-        let Ok(bytes) = std::fs::read(&path) else {
+        let Some((mtime_ms, mtime_ns, bytes)) = stat_then_read(&path) else {
             continue; // file vanished mid-sweep
         };
         let Ok(item) = parse_item_bytes(&bytes, &path, id) else {
             continue; // malformed-skip
         };
         let meta = RowMeta {
-            file_mtime_ms: file_mtime_ms(&path)?,
+            file_mtime_ms: mtime_ms,
             file_size: bytes.len() as i64,
             content_hash: content_hash8(&bytes),
             topo_rank: None,
@@ -468,7 +537,7 @@ pub(crate) fn apply_staleness_tracked(
             excluded: false,
         };
         write_row(&tx, &item, &meta)?;
-        upsert_file_mtime(&tx, id, &path, &bytes)?;
+        upsert_file_mtime(&tx, id, mtime_ns, &bytes)?;
     }
 
     // Changed-content items: preserve their exact derived columns. If the topology
@@ -476,7 +545,7 @@ pub(crate) fn apply_staleness_tracked(
     // if it changed, the recompute overwrites it.
     for id in &report.stale_ids {
         let path = issues_dir.join(format!("{id}.md"));
-        let Ok(bytes) = std::fs::read(&path) else {
+        let Some((mtime_ms, mtime_ns, bytes)) = stat_then_read(&path) else {
             continue;
         };
         let Ok(item) = parse_item_bytes(&bytes, &path, id) else {
@@ -487,7 +556,7 @@ pub(crate) fn apply_staleness_tracked(
             topology_changed = true;
         }
         let meta = RowMeta {
-            file_mtime_ms: file_mtime_ms(&path)?,
+            file_mtime_ms: mtime_ms,
             file_size: bytes.len() as i64,
             content_hash: content_hash8(&bytes),
             topo_rank: Some(old_derived.topo_rank),
@@ -495,7 +564,7 @@ pub(crate) fn apply_staleness_tracked(
             excluded: old_derived.excluded,
         };
         write_row(&tx, &item, &meta)?;
-        upsert_file_mtime(&tx, id, &path, &bytes)?;
+        upsert_file_mtime(&tx, id, mtime_ns, &bytes)?;
     }
 
     // Touched files: content unchanged, so only the stat columns move. The
@@ -554,14 +623,9 @@ pub(crate) fn apply_staleness_tracked(
 fn upsert_file_mtime(
     tx: &rusqlite::Transaction<'_>,
     id: &CloveId,
-    path: &Utf8Path,
+    mtime_ns: i64,
     bytes: &[u8],
 ) -> Result<(), IndexError> {
-    let meta = std::fs::metadata(path).map_err(|source| IndexError::IoError {
-        path: path.to_owned(),
-        source,
-    })?;
-    let mtime_ns = mtime_to_ns(&meta);
     tx.execute(
         "INSERT INTO file_mtimes (path, mtime_ns, content_hash) VALUES (?1, ?2, ?3) \
          ON CONFLICT(path) DO UPDATE SET \
@@ -579,12 +643,19 @@ fn delete_row(tx: &rusqlite::Transaction<'_>, id: &str) -> Result<(), IndexError
     Ok(())
 }
 
-fn file_mtime_ms(path: &Utf8Path) -> Result<i64, IndexError> {
-    let meta = std::fs::metadata(path).map_err(|source| IndexError::IoError {
-        path: path.to_owned(),
-        source,
-    })?;
-    Ok(mtime_to_ms(&meta))
+/// Stat an item file and **then** read it, returning `(mtime_ms, mtime_ns,
+/// bytes)`, or `None` when the file is gone (it vanished mid-sweep; the next
+/// check reports it deleted).
+///
+/// The order matters. The stored mtime must not be newer than the stored
+/// content: if the file is rewritten between the two calls, stat-first stores
+/// the *old* mtime with the new content, so the next check sees the mtime move,
+/// hashes the file, and settles. Read-first stored the new mtime with the old
+/// content, which no later check looks at again.
+fn stat_then_read(path: &Utf8Path) -> Option<(i64, i64, Vec<u8>)> {
+    let meta = std::fs::metadata(path).ok()?;
+    let bytes = std::fs::read(path).ok()?;
+    Some((mtime_to_ms(&meta), mtime_to_ns(&meta), bytes))
 }
 
 impl Index {
@@ -603,6 +674,16 @@ impl Index {
         check_staleness_fast(self.conn(), issues_dir)
     }
 
+    /// Targeted staleness check of the named items only. See
+    /// [`check_staleness_of`].
+    pub fn check_staleness_of(
+        &self,
+        issues_dir: &Utf8Path,
+        ids: &[CloveId],
+    ) -> Result<StalenessReport, IndexError> {
+        check_staleness_of(self.conn(), issues_dir, ids)
+    }
+
     /// Apply a staleness report, resyncing the index in one transaction (T-S03).
     pub fn apply_staleness(
         &mut self,
@@ -615,6 +696,19 @@ impl Index {
 
 #[cfg(test)]
 mod tests {
+    thread_local! {
+        /// Runs once, right after `check_staleness` has scanned the directory,
+        /// so a test can change a file at the exact point a racing writer would.
+        static AFTER_SCAN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn after_scan_hook() {
+        if let Some(hook) = AFTER_SCAN.with(|h| h.borrow_mut().take()) {
+            hook();
+        }
+    }
+
     use super::*;
     use crate::reindex::reindex;
     use camino::Utf8PathBuf;
@@ -677,6 +771,89 @@ mod tests {
         }
         // Also backdate the directory itself.
         filetime::set_file_mtime(issues.as_std_path(), past).unwrap();
+    }
+
+    /// An edit that lands while a staleness check is running must not be
+    /// recorded as seen.
+    ///
+    /// The check used to read the directory mtime *after* it had stat-ed the
+    /// files, and store it as the fast path's oracle. A file renamed into place
+    /// in between was then missing from the report while the stored mtime
+    /// already covered it, so every later fast check called the index clean and
+    /// the old row was served until something else touched the directory.
+    #[test]
+    fn an_edit_during_the_scan_is_caught_by_the_next_fast_check() {
+        let fx = fixture(5);
+        backdate(&fx.issues);
+        reindex(&fx.issues, &fx.db).unwrap();
+        let mut index = Index::open(&fx.db).unwrap();
+
+        // The racing writer: replace item 0 by rename, as every clove write
+        // does. The mtimes are set to a fixed past instant so neither the file
+        // nor the directory is inside the 2 s "recent" window, which would
+        // hide the bug by forcing the per-file pass.
+        let id = id_for(0);
+        let issues = fx.issues.clone();
+        let edited = id.clone();
+        AFTER_SCAN.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let path = issues.join(format!("{edited}.md"));
+                let tmp = issues.join(".tmp-racing-write");
+                std::fs::write(&tmp, item_md(&edited, "Edited during the scan", "new")).unwrap();
+                std::fs::rename(&tmp, &path).unwrap();
+                let later = filetime::FileTime::from_unix_time(1_600_000_100, 0);
+                filetime::set_file_mtime(&path, later).unwrap();
+                filetime::set_file_mtime(issues.as_std_path(), later).unwrap();
+            }));
+        });
+
+        let report = index.check_staleness(&fx.issues).unwrap();
+        assert!(
+            report.is_clean(),
+            "the scan ran before the edit, so it cannot contain it: {report:?}"
+        );
+        assert_eq!(
+            report.observed.map(|(mtime, _)| mtime),
+            Some(1_600_000_000_000),
+            "the oracle must be the directory mtime from before the scan"
+        );
+        index.apply_staleness(&report, &fx.issues).unwrap();
+
+        let next = index.check_staleness_fast(&fx.issues).unwrap();
+        assert_eq!(
+            next.stale_ids,
+            vec![CloveId::new(&id).unwrap()],
+            "the fast path must not call the index clean"
+        );
+    }
+
+    /// A file that disappears between the report and the apply is skipped, and
+    /// the rest of the batch still lands.
+    #[test]
+    fn apply_skips_a_file_that_vanished_after_the_check() {
+        let fx = fixture(3);
+        reindex(&fx.issues, &fx.db).unwrap();
+        let mut index = Index::open(&fx.db).unwrap();
+        for i in [0, 1] {
+            let id = id_for(i);
+            std::fs::write(
+                fx.issues.join(format!("{id}.md")),
+                item_md(&id, "Changed", "changed body"),
+            )
+            .unwrap();
+        }
+        let report = index.check_staleness(&fx.issues).unwrap();
+        assert_eq!(report.stale_ids.len(), 2);
+        std::fs::remove_file(fx.issues.join(format!("{}.md", id_for(0)))).unwrap();
+
+        index.apply_staleness(&report, &fx.issues).unwrap();
+        let title: String = index
+            .conn()
+            .query_row("SELECT title FROM items WHERE id = ?1", [id_for(1)], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(title, "Changed");
     }
 
     #[test]
@@ -1099,5 +1276,58 @@ mod tests {
         let recomputed = apply_staleness_tracked(index.conn_mut(), &report, &fx.issues).unwrap();
         assert!(recomputed, "adding an item must trigger the recompute");
         assert_eq!(derived(&index), gold(&fx.issues));
+    }
+
+    /// The targeted check sees an in-place rewrite of a named file that the
+    /// directory-level fast path cannot see, and classifies new and deleted
+    /// files, while leaving every unnamed file alone.
+    #[test]
+    fn targeted_check_classifies_only_the_named_items() {
+        let fx = fixture(4);
+        reindex(&fx.issues, &fx.db).unwrap();
+        backdate(&fx.issues);
+        let mut index = Index::open(&fx.db).unwrap();
+        let settle = index.check_staleness(&fx.issues).unwrap();
+        index.apply_staleness(&settle, &fx.issues).unwrap();
+
+        let (changed, removed, untouched) = (id_for(0), id_for(1), id_for(2));
+        let added = id_for(9);
+        // In place: same directory mtime, same file count.
+        std::fs::write(
+            fx.issues.join(format!("{changed}.md")),
+            item_md(&changed, "Renamed in place", "body number 0"),
+        )
+        .unwrap();
+        // A second in-place rewrite that the caller does not name.
+        std::fs::write(
+            fx.issues.join(format!("{untouched}.md")),
+            item_md(&untouched, "Not named", "body number 2"),
+        )
+        .unwrap();
+        std::fs::remove_file(fx.issues.join(format!("{removed}.md"))).unwrap();
+        std::fs::write(
+            fx.issues.join(format!("{added}.md")),
+            item_md(&added, "Added", "new"),
+        )
+        .unwrap();
+
+        let ids: Vec<CloveId> = [&changed, &removed, &added, &id_for(30)]
+            .iter()
+            .map(|id| CloveId::new(id).unwrap())
+            .collect();
+        let report = index.check_staleness_of(&fx.issues, &ids).unwrap();
+        assert_eq!(report.stale_ids, vec![CloveId::new(&changed).unwrap()]);
+        assert_eq!(report.deleted_ids, vec![CloveId::new(&removed).unwrap()]);
+        assert_eq!(report.new_ids, vec![CloveId::new(&added).unwrap()]);
+        assert_eq!(report.observed, None, "a targeted pass must not move meta");
+
+        index.apply_staleness(&report, &fx.issues).unwrap();
+        let after = index.check_staleness(&fx.issues).unwrap();
+        assert_eq!(
+            after.stale_ids,
+            vec![CloveId::new(&untouched).unwrap()],
+            "only the unnamed rewrite is left for the full pass"
+        );
+        assert!(after.new_ids.is_empty() && after.deleted_ids.is_empty());
     }
 }

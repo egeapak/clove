@@ -1,7 +1,8 @@
 <script lang="ts">
   import type { Item } from '$lib/types';
   import { store } from '$lib/store.svelte';
-  import { api } from '$lib/api';
+  import { api, ApiError } from '$lib/api';
+  import { base } from '$app/paths';
   import { toasts } from '$lib/toast.svelte';
   import { goto } from '$app/navigation';
   import ItemForm from '$lib/components/ItemForm.svelte';
@@ -19,18 +20,37 @@
   const item = $derived<Item | undefined>((full && full.id === id ? full : undefined) ?? stored);
 
   let saving = $state(false);
+  // Why there is nothing to edit, for the id it was recorded against (see the
+  // detail route).
+  let failure = $state<{ id: string; kind: 'gone' | 'error' } | null>(null);
+
+  function load(curId: string) {
+    api
+      .item(curId)
+      .then((it) => {
+        store.upsert(it);
+        if (curId !== id) return;
+        full = it;
+        failure = null;
+      })
+      .catch((e) => {
+        if (curId !== id) return;
+        if (e instanceof ApiError && e.status === 404) {
+          failure = { id: curId, kind: 'gone' };
+          store.remove(curId);
+        } else {
+          failure = { id: curId, kind: 'error' };
+          toasts.error('Failed to load item');
+        }
+      });
+  }
 
   // Load the full item (body etc.) for the form.
   $effect(() => {
     const curId = id;
     full = null;
-    api
-      .item(curId)
-      .then((it) => {
-        store.upsert(it);
-        if (curId === id) full = it;
-      })
-      .catch(() => toasts.error('Failed to load item'));
+    failure = null;
+    load(curId);
   });
 
   function detailHref() {
@@ -105,7 +125,19 @@
 </script>
 
 <div class="screen panel edit-screen">
-  {#if !item}
+  {#if failure?.id === id && (failure.kind === 'gone' || !item)}
+    <div class="loadfail" role="alert">
+      {#if failure.kind === 'gone'}
+        <div class="loadfail-title">Item {shortId(id)} not found</div>
+        <p class="dim">It does not exist in this project. It may have been deleted.</p>
+      {:else}
+        <div class="loadfail-title">Couldn’t load {shortId(id)}</div>
+        <p class="dim">The backend did not answer.</p>
+        <button class="btn primary" onclick={() => load(id)}>Retry</button>
+      {/if}
+      <a class="btn" href="{base}/list">Back to the list</a>
+    </div>
+  {:else if !item}
     <div class="loading dim">Loading {shortId(id)}…</div>
   {:else}
     <div class="ehead">
@@ -135,7 +167,7 @@
             <p class="dim sm">No dependencies.</p>
           {/if}
           <div class="rel-add">
-            <input bind:value={newDep} placeholder="add dep #id…" onkeydown={(e) => e.key === 'Enter' && addDep()} />
+            <input bind:value={newDep} aria-label="Dependency id to add" placeholder="add dep #id…" onkeydown={(e) => e.key === 'Enter' && addDep()} />
             <button type="button" class="btn sm" onclick={addDep}>Add</button>
           </div>
         </div>
@@ -149,7 +181,7 @@
             </div>
           {:else}
             <div class="rel-add">
-              <input bind:value={parentDraft} placeholder="parent #id (empty to clear)" onkeydown={(e) => e.key === 'Enter' && saveParent()} />
+              <input bind:value={parentDraft} aria-label="Parent id" placeholder="parent #id (empty to clear)" onkeydown={(e) => e.key === 'Enter' && saveParent()} />
               <button type="button" class="btn sm primary" onclick={saveParent}>Set</button>
             </div>
           {/if}
@@ -166,6 +198,22 @@
   .loading {
     padding: 40px;
     text-align: center;
+  }
+  .loadfail {
+    text-align: center;
+    padding: 40px 24px;
+  }
+  .loadfail-title {
+    font-size: 15px;
+    font-weight: 600;
+    margin-bottom: 6px;
+    color: var(--text);
+  }
+  .loadfail p {
+    margin: 0 0 14px;
+  }
+  .loadfail .btn {
+    margin: 0 4px;
   }
   .ehead {
     display: flex;

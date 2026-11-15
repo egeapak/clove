@@ -1,0 +1,28 @@
+---
+source: crates/clove-tui/src/snapshot.rs
+expression: rendered
+---
+┌ clove ───────────────────────────────────────────────────────────────────────┐
+│  All 7  │  Ready 4  │  Blocked 1                                             │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌ Items (7) ───────────────────────────┐┌ Overview · Dep tree · Comments ──────┐
+│▌◐ F #9QX4D1B7 ! Build REST API ●     ││ grace-example-com  2026-01-05 10:00  │
+│ ○ B #0HZ6C3PW ↑ Investigate flaky… ● ││ UTC                                  │
+│ ● C #7AF3K2MN ↑ Set up database s…   ││ Started on the CRUD layer.           │
+│ ○ E #3HT6WYG5 • Ship v1 release ●    ││                                      │
+│ ○ F #K2M8ZP5R • Write integration… ✗ ││ ada-example-com  2026-01-06 14:30    │
+│ ○ F #5RB9NC2V • Frontend dashboard ● ││ UTC                                  │
+│ ● D #8XQ4F7DM ↓ Docs site            ││ Schema is ready — you're unblocked.  │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+└──────────────────────────────────────┘└──────────────────────────────────────┘
+7 item(s) loaded   ?: help · q: quit

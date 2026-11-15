@@ -94,7 +94,7 @@ embedders who require an older toolchain).
 ```
 .clove/
   config.toml           # repo-level config — committed
-  .gitignore            # ignores: index.db, *.db-shm, *.db-wal, daemon.sock, daemon.pid, reindex.lock, daemon.lock, index.db.tmp, daemon.token, sync/, write.lock
+  .gitignore            # ignores: index.db, *.db-shm, *.db-wal, daemon.sock, daemon.pid, reindex.lock, daemon.lock, index.db.tmp, daemon.token, sync/, write.lock, issues/.tmp*
   issues/
     <id>.md             # one item per file — committed (source of truth)
     <id>/               # only present when comments exist (sibling dir to <id>.md)
@@ -652,10 +652,10 @@ filters on — see §6.5; v5 `items_fts.labels`; v6 **dropped `items_fts`/`fts_m
 also took the index from ~21 MB to ~4.8 MB and `clove reindex` from ~1.46 s to ~0.39 s on a
 10,000-item store).
 
-On a mismatch, `Index::open_or_rebuild` **rebuilds from the files**: `reindex` builds a
-temp database under the reindex lock and renames it over the live one, so a rebuild that
+On a mismatch, `Index::open_or_rebuild` **rebuilds from the files**: `reindex` replaces the
+cache tables inside the file under the reindex lock (§6.6), so a rebuild that
 cannot run leaves the old database in place and the next open retries. The older
-`Index::open_or_create` discards and returns an *empty* index — it has no store to
+`Index::open_or_create` empties the cache tables and returns an *empty* index — it has no store to
 rebuild from — and that discard is unrecoverable, since the replacement carries the
 current version and no later open can distinguish empty from up-to-date. Read paths must
 use `open_or_rebuild`. The same `index.db`
@@ -724,9 +724,15 @@ same transaction. Direct SQL writes to `items` outside this function are forbidd
 
 ### 6.4 Auto-Refresh Threshold
 
-On any read command: run Level 1 staleness check (~10 µs). If stale_count ≤ 20: apply
-incremental resync inline before running the query (transparent to user). If stale_count > 20
-OR > 5% of total items: print one-line warning to stderr and use file-scan fallback.
+On any read command: run Level 1 staleness check (~10 µs), then bring the index up to date
+before running the query (transparent to user). Up to 20 changed items are always applied
+incrementally. More than 20 are applied incrementally too, unless they are also more than a
+quarter of the indexed items; then the index is rebuilt (§6.6), which costs about the same per
+item. An index is never left behind: bypassing it instead made every later read repeat the
+staleness pass and then scan the files, until a manual `clove reindex`.
+
+If the refresh or the query fails (a locked database, a file that vanished mid-apply), the
+read answers from the files and names the error in `_meta.warnings`; it does not fail.
 `index.auto_refresh = false` in `config.toml` disables auto-refresh entirely (for agents that
 control all writes).
 
@@ -750,27 +756,32 @@ ORDER BY i.priority ASC, i.topological_rank ASC;
 
 ### 6.6 Reindex Protocol
 
-`clove reindex` writes to `index.db.tmp`, rebuilds, then renames to `index.db`. This means a
-crashed reindex never corrupts the live index. Concurrent reindex prevention: PID-based
-lockfile at `.clove/reindex.lock`.
+`clove reindex` rebuilds the cache tables **inside `index.db`, in one transaction**.
+A crashed reindex rolls back to the old contents, readers keep their snapshot until the
+commit, and a process that holds a connection open (the daemon) reads the rebuilt rows after
+it. The file is never unlinked while SQLite can read it: a reader that opens a missing path
+creates an empty database there. The `snapshots` history table is not part of the cache and
+is not touched. Concurrent reindex prevention: an advisory lock on `.clove/reindex.lock`.
 
 Steps:
-1. Open `index.db.tmp`.
-2. `BEGIN EXCLUSIVE` transaction.
-3. Create all tables and indexes.
-4. Parse all `.md` files in parallel (rayon, above 500 items; sequential below).
-5. Insert in batches of 500.
-6. Update `file_mtimes` for all files.
-7. Compute topological sort; update `topological_rank`.
-8. `COMMIT`. Write `meta` row last (so a crash before this step leaves `schema_version` unset,
-   detectable as corrupt).
-9. `PRAGMA wal_checkpoint(TRUNCATE)`.
-10. `rename(index.db.tmp, index.db)`.
+1. Take the lock. Read the `issues/` mtime, then parse all `.md` files in parallel (rayon,
+   above 500 items; sequential below). Item bodies are dropped as soon as a file is hashed.
+2. Open `index.db` and `BEGIN IMMEDIATE`.
+3. Drop every schema object except `snapshots`; create the cache tables; set `user_version`.
+4. Insert all rows and `file_mtimes`, with the topological rank and the derived flags.
+5. Write the `meta` row, create the covering index, `COMMIT`.
+6. `PRAGMA wal_checkpoint(TRUNCATE)` (best effort; a reader on an older snapshot defers it).
+
+Only a file that SQLite cannot use at all (not a database, or an object that cannot be
+dropped) is deleted and rebuilt from empty; its stats history is carried over as far as it
+can still be read.
 
 Target: < 1 second for 10,000 items on an SSD.
 
-**`PRAGMA synchronous=OFF`** during reindex (reset to NORMAL after) for maximum throughput,
-with the understanding that a crash during reindex is detected via `PRAGMA user_version` check.
+**Untrusted schema.** `index.db` is git-ignored, but can still arrive with a repository.
+Every connection sets `trusted_schema=OFF` and `SQLITE_DBCONFIG_DEFENSIVE`. An index at the
+current schema version that contains a view or a trigger, or lacks a cache table, is treated
+as corrupt and rebuilt from the files.
 
 ### 6.7 Missing Index Fallback
 
@@ -781,7 +792,7 @@ Missing `index.db`:
   no index — it has no index tier and no daemon tier to degrade from. See §7.8 "Search
   semantics" and read-path roadmap §6.1; its `_meta.source` is therefore always `"files"`.
 
-All JSON responses include `"_meta": { "source": "daemon" | "index" | "files", "took_ms": N }`.
+The list commands report the tier that answered in `"_meta": { "source": "daemon" | "index" | "files" }`.
 
 ### 6.8 The read tier (`clove-engine`)
 
@@ -804,19 +815,21 @@ everywhere else.
 
 | `Projection` | Meaning | Used by |
 |---|---|---|
-| `Lean` | The five columns `ls` renders suffice, so an index/daemon row is returned as-is and **no** item file is read. | `clove ls`/`ready`/`query` |
-| `Full` | Full frontmatter is required. A tier still answers the *query* — filtering, ordering, and counting stay in SQL — and only the returned page is read back from disk (frontmatter only, in parallel above 500 rows). | `clove blocked`, the MCP read tools, the web |
+| `Lean` | The five columns `ls` renders suffice, so an index/daemon row is returned as-is and **no** item file is read. | `clove ls`/`ready`/`query` in human format, or with `--fields` inside the lean row |
+| `Full` | Full frontmatter is required. A tier still answers the *query* — filtering, ordering, and counting stay in SQL — and only the returned page is read back from disk (frontmatter only, in parallel above 500 rows). | `clove blocked`, `clove ls`/`ready`/`query` in JSON or JSONL without `--fields` (so a row has the same keys from every tier), the MCP read tools, the web |
 | `Files` | Full frontmatter required **and** no tier may answer. A caller policy, not a property of the store. | `clove ls --fields id,created` (a field outside the lean row) |
 
 **Fallback conditions** for the list reads, in one place (`clove dep tree` and
 `clove stats` still gate on `--no-index` themselves — they do not route through
 the engine): `--no-index` (which disables the
 daemon tier too — the flag promises a file scan, and a daemon answering from its
-hot index is no more of one); no daemon or any IPC error; a missing, broken, or
-too-stale index (> 20 changed items); and a query SQLite cannot *shape*
-(`Expression tree is too large`, `too many SQL variables`, `parser stack
-overflow` — the index is a cache, so "too big for SQLite" selects the other path
-rather than failing).
+hot index is no more of one); no daemon or any IPC error; a missing or broken
+index, or one whose refresh or query failed (named in `_meta.warnings`); a query
+SQLite cannot *shape* (`Expression tree is too large`, `too many SQL variables`,
+`parser stack overflow` — the index is a cache, so "too big for SQLite" selects
+the other path rather than failing); and a `Full` page that is a large share of
+the store (more than 1000 rows and more than a third of the items, a tenth for
+`blocked`), which the file scan answers sooner than per-file hydration.
 
 **The engine applies the window before it returns**, so a caller renders what it
 is given and cannot double-page. `total` is always the pre-window match count,
@@ -866,21 +879,23 @@ it — so their `--help` text names the scope instead of leaving it silent.
 ### 7.2 Complete Command Table
 
 ```
-clove init [--prefix STR] [--no-gitignore] [--merge-driver]
-clove new <title> [-t|--type bug|feature|chore|docs|epic]
+clove init [--prefix STR] [--merge-driver]
+clove new <title> [--type bug|feature|chore|docs|epic]
           [-p|--priority 0-4] [-l|--label KEY:VAL ...]
-          [-d|--dep ID ...] [--parent ID] [--assignee STR]
-          [--body STR | --body-file PATH] [--format json]
+          [--dep ID ...] [--parent ID] [-a|--assignee STR]
+          [-b|--body STR | --body-file PATH] [--format json]
 clove show <id> [--format json] [--fields FIELD,...]
 clove edit <id>                             # opens $EDITOR
 clove edit <id> --field KEY=VALUE [--field KEY=VALUE ...]  # non-interactive
+clove edit <id> [-b|--body STR | --body-file PATH]         # replace the body (PATH `-` = stdin);
+                                                            # combines with --field in one write
 clove set <id> <field>=<value> [<field>=<value> ...]        # agent alias
 clove status <id>... <open|in_progress|closed> [--format json]
 clove start <id>...                         # alias: status in_progress
 clove close <id>...                         # alias: status closed
 clove label <id> add <label>
 clove label <id> rm <label>
-clove assign <id> <assignee>
+clove assign <id> <assignee> | --clear
 clove parent <id> <parent-id> | --clear     # cycle-checked, like dep add
 clove priority <id> <0-4>
 clove dep add <id> <dep-id>
@@ -915,7 +930,7 @@ clove stats [--top N] [--no-epics] [--snapshot]      # work-item analytics + dae
             [--history [--since RFC3339] [--limit N] [--offset N]] [--format json]
 clove comment <id> <message> [--format json]
 clove comments <id> [--limit N] [--skip-newest N] [--format json]
-clove reindex [--force] [--format json]
+clove reindex [--format json]
 clove import [--format json] <json|jsonl> <file> [--dry-run] [--overwrite]  # BUILT-IN native restore (inverse of export);
 clove import [--format json] <beads|tk> <src> [--dry-run]   # tk/beads are clove-import-<p> plugins;
 clove export [--format json] <json|jsonl> [--out FILE]      # export json/jsonl are built-in; clove global flags precede the
@@ -924,18 +939,17 @@ clove export [--format json] beads [--out FILE]             # export beads → c
 clove sync   [--format json] github <owner/repo> [--dry-run]        # two-way; clove-sync-github plugin
 clove import [--format json] github <owner/repo> [--dry-run]        # pull-only view of the sync (same plugin)
 clove export [--format json] github <owner/repo> [--dry-run]        # push-only view of the sync (same plugin)
-clove agent-doc [--format markdown|json] [--out FILE]
+clove agent-doc [--format human|json] [--out FILE]   # human = the Markdown document
 clove agent-doc --check [--file PATH]       # verify embedded doc vs binary
-clove migrate [--yes] [--dry-run]
 clove doctor [--fix] [--strict] [--format json]
 clove daemon start|stop [--all]|status [--format json]
-clove completions <bash|zsh|fish|powershell>
 clove version [--format json]
 ```
 
-**`clove edit --field`** supports: `status`, `priority`, `assignee`, `type`,
-`labels+=key:val` (append), `labels-=key:val` (remove). This is the agent-safe non-interactive
-edit path; `$EDITOR` is never opened from an agent subprocess.
+**`clove edit --field`** supports: `title`, `status`, `priority`, `assignee`, `type`,
+`labels+=key:val` (append), `labels-=key:val` (remove); the body is set with
+`--body` / `--body-file`. This is the agent-safe non-interactive edit path;
+`$EDITOR` is never opened from an agent subprocess.
 
 ### 7.3 JSON Output Envelope
 
@@ -948,10 +962,8 @@ Every response is a top-level object. Never a bare array.
   "ok": true,
   "data": <payload>,
   "_meta": {
-    "took_ms": 4,
     "source": "index",
-    "warnings": [],
-    "stale_index": false
+    "warnings": []
   }
 }
 ```
@@ -1018,9 +1030,6 @@ That splits the two kinds of command:
     "comment_count": 2,
     "ready": false,
     "blocked_by": ["proj-3k2"],
-    "dangling_deps": [],
-    "warnings": [],
-    "children_summary": null,
     "source_system": null,
     "external_ref": null
   }
@@ -1127,7 +1136,7 @@ the model one copy), so both stay.
 | 3 | CycleDetected | `dep add` when a cycle-path is detected; also used with `--fail-on-cycle` flag on `dep cycle` |
 | 4 | ValidationError | Bad field value, ID collision, invalid priority |
 | 5 | IoError | `.clove/` missing, file unreadable, filesystem error; also `REGISTRY_ERROR` — the plugin registry, `cargo` or `git` unreachable, returned by `plugin install`/`uninstall`/`update`. `plugin list`/`search` instead degrade to a warning at exit 0, since discovery is optional |
-| 6 | IndexError | Stale index with `--strict`; index unrecoverable |
+| 6 | IndexError | Reserved; never returned. An index failure surfaces as IoError (5), and `doctor --strict` findings exit 4 |
 | 7 | DaemonError | Daemon communication failure |
 
 ### 7.7 Health Check (`clove doctor`)
@@ -1544,7 +1553,9 @@ every project's *acceleration*, never its data.
 | `.clove/reindex.lock` | Prevents concurrent `clove reindex` | held for reindex duration |
 
 `<runtime>` is `$CLOVE_RUNTIME_DIR`; else, on Unix, `$XDG_RUNTIME_DIR/clove`, else
-`${TMPDIR:-/tmp}/clove-<uid>`; on Windows `%LOCALAPPDATA%\clove\run` (a per-user
+`${TMPDIR:-/tmp}/clove-<uid>` (or `<clove-home>/run` when that name already
+exists and is not the user's own private directory, so another local user cannot
+block the daemon by creating it first); on Windows `%LOCALAPPDATA%\clove\run` (a per-user
 profile directory), else `%USERPROFILE%\AppData\Local\clove\run` — and with
 neither set there is no per-user directory, so no hub is used or started (set
 `CLOVE_RUNTIME_DIR`). It is always made absolute. It is short on Unix because a socket path is capped at 103 bytes
@@ -1579,8 +1590,7 @@ malicious clone can plant any of them as a symlink to a file the user cares
 about. The lock files (`daemon.lock`, `reindex.lock`, `write.lock`, the sync
 state's `.lock`) are opened with `O_NOFOLLOW` and never truncated; `index.db`
 (and its `-wal`/`-shm`) is refused outright when it is a symlink, since SQLite
-would write through it; `index.db.tmp` is unlinked (the link, not its target)
-before it is created; `daemon.token` is read `O_NOFOLLOW` and created through an
+would write through it; `daemon.token` is read `O_NOFOLLOW` and created through an
 `O_EXCL` temp file linked into place without replacing anything; and every
 other file — items, comments, the GitHub sync state, `.gitignore` (repaired by
 `clove doctor --fix`, written by `clove init`), `config.toml` — is written
@@ -1732,8 +1742,9 @@ bytes — so whatever it holds now is what counts, however it was rewritten.
 **It is a gate for automation, not a security boundary against the local
 user**, who can read every token they own; hub-wide calls (`ping`,
 `hub_status`, and `clove daemon stop --all`, which signals the hub's pid) need
-no token, and the web UI is not token-gated — it stays loopback-only, behind
-the `Host`/`Origin` guards (§8.10), and may list every project.
+no token. The web UI has its own access token (§8.10): a loopback TCP port is
+open to every local user, so the port alone must not give what the socket's
+peer-uid check withholds.
 
 **`CloveRpc`:** hub-level `ping` and `hub_status` (pid, uptime, web address,
 token records directory, and each project's `STATUS`); per project `attach` (is it served — loading it when
@@ -1750,7 +1761,10 @@ it still stopping; see §8.3), `status`, `change_generation`, `query`,
 `graph`) while the project's watch is not yet in place (§8.6). Both of the
 latter two additions — `hub_status.token_records` and `WATCHER_ARMING` — are
 additive within protocol 8: an older client ignores the field and falls back
-on the refusal like on any daemon error.
+on the refusal like on any daemon error. `INDEX_BEHIND` is the same kind of
+refusal for an index read that the daemon cannot make current inside the call:
+more item files changed than a read may apply (the watcher applies them), the
+check failed, or the watch on `.clove/issues` is lost.
 
 **`PROTOCOL_VERSION`** gates a mixed-version pair; the client fails a mismatch
 and falls back, which is safe because the daemon is a cache, not a source of
@@ -1815,9 +1829,31 @@ then is the state `watching` and reads are answered. So a write made the moment
 a load returns — through the daemon or behind its back — is served once the
 project watches, never lost until the next change.
 
+While watching, the daemon keeps the set of item files the watch reported and
+the `.clove/issues` modification time it last saw. A read costs one `stat` when
+nothing was reported; otherwise the daemon checks only the reported files, and
+does the full directory pass only when the directory changed with no report. A
+read that cannot be made current is refused with `INDEX_BEHIND` (§8.4). When
+`.clove/issues` is removed or replaced, the watch is lost: the daemon unloads
+the project, and the next call loads it again with a fresh sweep and watch. A
+failed batch is retried (five times, one second apart) before the project is
+unloaded.
+
 ### 8.7 Git Auto-Sync (Disabled by Default)
 
-Enabled via `[daemon] git_sync = true` in `config.toml`.
+Enabled via `[daemon] git_sync = true` in `config.toml`, **and** allowed in the
+clone: `git config clove.automation true`.
+
+**Daemon automation needs the clone's permission.** `.clove/config.toml` arrives
+with the repository, and the daemon loads a project as soon as any command
+touches it (`clove daemon start`, or `clove mcp` from a committed `.mcp.json`).
+`git_sync` commits under the user's git identity, and periodic GitHub sync
+(`github_sync_interval_min` + `github_sync_repo`) uses the user's token. So the
+daemon acts on these keys only when git configuration sets `clove.automation`
+to true (the clone's `.git/config`, or the user's global file; a clone never
+carries either). Otherwise both stay off, the daemon log says so, and
+`clove doctor` reports `DAEMON_AUTOMATION_NOT_ALLOWED` with the command to
+run. `clove sync github <owner/repo>` typed by the user is not gated.
 
 Behavior: after successful index update for a file, check `git diff --name-only HEAD -- <path>`.
 If modified-but-uncommitted AND frontmatter parses cleanly (malformed-skip rule): run
@@ -1838,7 +1874,7 @@ the git index update.
 ```toml
 [daemon]
 git_sync = false          # opt-in auto-commit
-watch_debounce_ms = 200   # per-file debounce window
+watch_debounce_ms = 200   # per-file debounce window (a burst is flushed after 10x this, at least 1 s)
 idle_shutdown_min = 240   # default 4h; 0 = never; N = unload this project after N idle minutes
 stats_snapshot_min = 60   # auto-record a `clove stats` history point every N min; 0 = off
 ```
@@ -1965,7 +2001,34 @@ from the `__sveltekit_<hash> = { base: "" }` global in the fallback `index.html`
 so each project's router serves that page with `base: "/p/<slug>"` (and its
 `/_app/` asset URLs) rewritten; every `{base}` link, the API root, and the event
 socket URL derive from it. The top bar offers a project switcher when the hub
-serves more than one. The DNS-rebinding `Host` guard wraps the whole listener;
+serves more than one.
+
+**Access token.** A loopback TCP port has no owner: any local user or process
+can connect to it. So every web server has a random access token
+(`clove_web::WebAuth`, 32 random bytes, hex), made when the server starts: one
+per `clove serve`, one per hub (it covers the project list, the root page and
+every mounted project). A request without it is answered `401` with a text
+that says where the token is. The token reaches the user in the URL that the
+CLI prints: `clove serve` prints `http://127.0.0.1:<port>/?token=<hex>`, and a
+project's `web_url` in `STATUS` (which travels over the uid-checked socket) is
+`http://127.0.0.1:<port>/p/<slug>/?token=<hex>`. Three ways to present it:
+
+- `?token=` on a page load: the server sets the cookie `clove_web_<port>`
+  (`HttpOnly`, `SameSite=Strict`, `Path=/`) and answers `303` to the same URL
+  without the token, so it does not stay in the address bar, the history or
+  a `Referer`. The SPA, its API calls and its event socket then ride on the
+  cookie; the SPA has no token code.
+- `Authorization: Bearer <token>`, for scripts.
+- `?token=` on an API request, also for scripts (no redirect).
+
+The token lives as long as the server process: after a daemon restart an open
+tab gets `401` until the user opens the URL that `clove serve` prints again.
+The cookie is named for the port because cookies are shared by all ports of a
+host. A library caller that builds a router without `with_auth` gets an open
+router (the hub's per-project routers sit behind the hub's guard).
+
+The DNS-rebinding `Host` guard wraps the whole listener (it runs before the
+token check);
 the event socket additionally requires its `Origin` to be exactly this server
 (host *and* port — another local port is another origin); every HTML page
 carries a `Content-Security-Policy` — `default-src 'self'`, `connect-src 'self'
@@ -2018,9 +2081,12 @@ driver, so they are deliberately excluded from it.
 **`clove merge-driver <ancestor> <ours> <theirs> <marker-size>` algorithm:**
 1. Parse all three files' frontmatter.
 2. For each scalar field: same-value conflict → accept; standard 3-way otherwise.
-3. For each list field: compute `union(ours, theirs) \ (ancestor \ ours \ theirs)` (standard
-   three-way set merge), then sort. Dep removal conflict (A removes X, B adds X) → flag
-   conflict.
+3. For each list field: compute `union(ours, theirs) \ (ancestor \ ours \ theirs)`, then
+   sort. An element is dropped only when both sides removed it. Removal conflict: an
+   element of the ancestor that exactly one side removed (A removes X, B still has X) →
+   flag a conflict on that field, also when B did not change the field. The driver
+   does not drop X silently, because a set cannot tell "B kept X on purpose" from "B
+   did not look at X".
 4. For the body: delegate to `git merge-file`.
 
 **Union-merge semantics for `deps`:** if branch A adds `proj-3k2` and branch B adds
@@ -2182,6 +2248,36 @@ and id mentions that name it stay valid; otherwise clove mints a fresh
 **Link write-back:** a *created* issue's number is written back onto the local
 item (`external_ref = "gh-<number>"`), so the next sync UPDATES it rather than
 creating a duplicate.
+
+**One repository per store.** A `gh-<number>` link does not name its repository.
+A sync against repository B of a store whose links point at repository A would
+pair each item with B's unrelated issue of the same number. The sync refuses
+(nothing is changed). The first sync records its repository in
+`.clove/sync-github.json` (`{"repo": "owner/repo"}`), a tracked file, so every
+clone knows it; a sync against another repository of a store that has `gh-`
+links is refused. A store from before that file has no record: there the sync
+refuses when this repository's sync state records none of the local links and
+either another repository's sync state records them, or the linked issues carry
+`clove-meta` ids and none is the id of the item linked to it. `--adopt-links`
+overrides the refusal and records the new repository.
+
+**`clove-meta` is trusted.** The `id`, `type`, `priority` and `deps` in an issue
+body are applied to the item that mirrors that issue, whoever wrote them: the
+people who can edit an issue body (its author and the repository's triagers)
+can already change that item's title and body. The effect stays on that one
+item: deps go through the checked dep op (no dangling edge, no cycle), an `id`
+is kept only when no local item has it, and an unlinked local item is paired
+with an issue that names its id only when their content is equal.
+
+**Lost link, deleted item.** An unlinked local item whose content equals an
+issue that names its id in `clove-meta` (a create whose response was lost) is
+linked to that issue instead of pushed a second time. An issue that was synced
+before, is unchanged since, and has no local item any more is reported under
+`local_missing` and not pulled again; an edit of the issue pulls it again.
+
+**Pulled deps.** The `clove-meta` deps of a pulled issue are added through the
+existence- and cycle-checked dep op. A dep that cannot be added is left out,
+reported as a warning, and tried again by the next sync.
 
 **Two-way reconcile:** one pass that pulls remote changes *and* pushes local
 changes, plus bidirectional issue-comment sync. A per-repo last-sync fingerprint

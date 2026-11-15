@@ -1,9 +1,11 @@
-//! TUI application state and the read-only data layer.
+//! TUI application state and the data layer.
 //!
 //! All data comes from the file store (the source of truth): a fresh
-//! `scan_frontmatter` + `GraphStore::build` on launch and on every manual
-//! refresh. This keeps the TUI always-correct and decoupled from the optional
-//! SQLite index and daemon — it never mutates anything.
+//! `scan_frontmatter` + `GraphStore::build` on launch and on every refresh.
+//! This keeps the TUI always-correct and decoupled from the optional SQLite
+//! index and daemon. Browsing never mutates anything; the add/edit form writes
+//! through the shared `clove_core` write path (`ops::create`, `apply_edit`,
+//! `set_parent`, `dep_add`, `dep_remove`) and re-scans.
 
 mod data;
 pub use data::Data;
@@ -55,6 +57,8 @@ pub struct App {
     pub detail: DetailPane,
     pub focus: Focus,
     pub show_help: bool,
+    /// Rows the help overlay is scrolled down (clamped to its content at render).
+    pub help_scroll: u16,
     pub status: String,
     pub should_quit: bool,
     /// Whether a background scan is in flight — drives the 10fps cadence and the
@@ -91,6 +95,7 @@ impl App {
             detail: DetailPane::default(),
             focus: Focus::List,
             show_help: false,
+            help_scroll: 0,
             status: String::new(),
             should_quit: false,
             busy: false,
@@ -315,9 +320,15 @@ impl App {
     fn rebuild_facets(&mut self) {
         use std::collections::BTreeSet;
 
+        // A value that is active in the filter stays in the menu even when no
+        // item has it any more (the last item with that label was relabelled,
+        // then a refresh): otherwise it keeps filtering the list with no row
+        // left to toggle it off, and only `x` (clear everything) removes it.
+        let filter = &self.list.filter;
+
         let mut statuses = Vec::new();
         for s in [ItemStatus::Open, ItemStatus::InProgress, ItemStatus::Closed] {
-            if self.data.all.iter().any(|fm| fm.status == s) {
+            if filter.status == Some(s) || self.data.all.iter().any(|fm| fm.status == s) {
                 statuses.push(MenuValue::Status(s));
             }
         }
@@ -329,11 +340,12 @@ impl App {
             ItemType::Docs,
             ItemType::Epic,
         ] {
-            if self.data.all.iter().any(|fm| fm.item_type == t) {
+            if filter.types.contains(&t) || self.data.all.iter().any(|fm| fm.item_type == t) {
                 types.push(MenuValue::Type(t));
             }
         }
         let mut priorities: Vec<u8> = self.data.all.iter().map(|fm| fm.priority.get()).collect();
+        priorities.extend(filter.priorities.iter().copied());
         priorities.sort_unstable();
         priorities.dedup();
         let labels: BTreeSet<String> = self
@@ -341,12 +353,14 @@ impl App {
             .all
             .iter()
             .flat_map(|fm| fm.labels.iter().cloned())
+            .chain(filter.labels.iter().cloned())
             .collect();
         let assignees: BTreeSet<String> = self
             .data
             .all
             .iter()
             .filter_map(|fm| fm.assignee.clone())
+            .chain(filter.assignee.clone())
             .collect();
 
         let mut menu = Vec::new();
@@ -719,6 +733,35 @@ impl App {
         self.form.prev_field();
     }
 
+    /// ↓ in the form: move the caret down a line inside a multi-line Body, and
+    /// on to the next field from its last line (or from any other field).
+    pub fn form_down(&mut self) {
+        if !self.form.move_line(1) {
+            self.form.next_field();
+        }
+    }
+
+    /// ↑ in the form: move the caret up a line inside a multi-line Body, and
+    /// back to the previous field from its first line (or from any other field).
+    pub fn form_up(&mut self) {
+        if !self.form.move_line(-1) {
+            self.form.prev_field();
+        }
+    }
+
+    // --- Help overlay -----------------------------------------------------
+
+    pub fn open_help(&mut self) {
+        self.show_help = true;
+        self.help_scroll = 0;
+    }
+
+    /// Scroll the help overlay by `delta` rows (the renderer clamps the far end).
+    pub fn scroll_help(&mut self, delta: i32) {
+        self.help_scroll =
+            (i32::from(self.help_scroll) + delta).clamp(0, i32::from(u16::MAX)) as u16;
+    }
+
     /// Route a key to the focused field: cycle enum values with ←/→, otherwise
     /// edit text (Enter inserts a newline in the body, else advances a field).
     pub fn form_key(&mut self, code: ratatui::crossterm::event::KeyCode) {
@@ -808,25 +851,15 @@ impl App {
                 })?;
         let store = &self.data.store;
 
-        // Not transactional: the scalar/label/body edit is applied first, then the
-        // graph edges. If a later parent/dep op fails (e.g. a typed id that would
-        // cycle), the earlier change is already on disk and the form stays open
-        // showing the error; resubmitting re-applies idempotently.
-        // Scalars / labels / body via the unified structured edit.
-        clove_core::apply_edit(store, &id, &self.form.to_edit_request(), now)?;
-
-        // Parent (graph-validated) — only when it changed.
+        // Only what the user changed goes out (see `FormState::to_edit_request`),
+        // so a field changed on disk while the form was open is not reverted.
+        let request = self.form.to_edit_request();
         let new_parent = self.form.parent_id()?;
         let old_parent = self
             .form
             .original
             .as_ref()
             .and_then(|i| i.frontmatter.parent.clone());
-        if new_parent != old_parent {
-            clove_core::ops::set_parent(store, &id, new_parent.as_ref(), now)?;
-        }
-
-        // Deps (graph-validated) — diff add/remove.
         let new_deps = self.form.dep_ids()?;
         let old_deps = self
             .form
@@ -834,6 +867,45 @@ impl App {
             .as_ref()
             .map(|i| i.frontmatter.deps.clone())
             .unwrap_or_default();
+
+        // Nothing changed: write nothing, so `updated` does not move.
+        if request.is_empty() && new_parent == old_parent && same_ids(&new_deps, &old_deps) {
+            return Ok(format!("no changes to {id}"));
+        }
+
+        // Check the typed ids before anything is written: both lists parsed
+        // above, and every newly referenced item must exist and must not be the
+        // item itself. A typo in Parent or Deps then leaves the file untouched,
+        // where it used to fail only after the scalar edit had been saved.
+        let added = new_deps.iter().filter(|dep| !old_deps.contains(dep));
+        let reparented = new_parent.iter().filter(|_| new_parent != old_parent);
+        for target in reparented.chain(added) {
+            if target == &id {
+                return Err(clove_types::CloveError::InvalidField {
+                    field: "parent/deps".to_owned(),
+                    reason: format!("{id} cannot refer to itself"),
+                });
+            }
+            if !store.exists(target) {
+                return Err(clove_types::CloveError::NotFound {
+                    id: target.to_string(),
+                });
+            }
+        }
+
+        // Not transactional beyond that: the scalar/label/body edit is applied
+        // first, then the graph edges. If a later parent/dep op fails (a typed id
+        // that would close a cycle), the earlier change is already on disk and the
+        // form stays open showing the error; resubmitting re-applies idempotently.
+        // Scalars / labels / body via the unified structured edit.
+        clove_core::apply_edit(store, &id, &request, now)?;
+
+        // Parent (graph-validated) — only when it changed.
+        if new_parent != old_parent {
+            clove_core::ops::set_parent(store, &id, new_parent.as_ref(), now)?;
+        }
+
+        // Deps (graph-validated) — diff add/remove.
         for dep in &new_deps {
             if !old_deps.contains(dep) {
                 clove_core::ops::dep_add(store, &id, dep, now)?;
@@ -880,15 +952,20 @@ impl App {
 
         let tree = self.data.graph.dep_tree(&id, 25);
 
-        self.detail.detail = Some(Detail {
+        self.detail.detail = Some(Detail::new(
             item,
             comments,
             blocking_deps,
             dangling_deps,
             children,
             tree,
-        });
+        ));
     }
+}
+
+/// Whether two id lists name the same set (order and repeats ignored).
+fn same_ids(a: &[CloveId], b: &[CloveId]) -> bool {
+    a.iter().all(|id| b.contains(id)) && b.iter().all(|id| a.contains(id))
 }
 
 /// Format a UTC timestamp for display (date + minute precision, local-agnostic).
@@ -1040,6 +1117,80 @@ mod tests {
         // The dep tree roots at this item with the base task as its one child.
         let tree = detail.tree.as_ref().expect("dep tree present");
         assert_eq!(tree.children.len(), 1);
+    }
+
+    /// The detail pane scrolls to the very end of a body whose lines are
+    /// indented. The scroll clamp used an estimate that ignored leading spaces,
+    /// so wrapped code lines were counted too short and the last body lines
+    /// stayed out of reach.
+    #[test]
+    fn detail_scrolls_to_the_end_of_an_indented_body() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        app.select_first();
+        let id = app.selected_frontmatter().unwrap().id.clone();
+        let code: String = (1..=60)
+            .map(|n| format!("let v{n} = [{}];\n", "word, ".repeat(n)))
+            .collect();
+        let body = format!("intro\n\n```\n{code}```\n\nTHE-LAST-LINE\n");
+        clove_core::apply_edit(
+            &app.data.store,
+            &id,
+            &clove_types::EditRequest {
+                body: Some(body),
+                ..Default::default()
+            },
+            Utc::now(),
+        )
+        .unwrap();
+        app.refresh();
+        assert_eq!(app.selected_frontmatter().unwrap().id, id);
+
+        for (w, h) in [(60, 24), (80, 24), (100, 24), (120, 24), (40, 48)] {
+            app.focus = Focus::Detail;
+            app.detail.detail_scroll = u16::MAX;
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+            terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            let screen: String = buffer.content().iter().map(|c| c.symbol()).collect();
+            assert!(
+                screen.contains("THE-LAST-LINE"),
+                "{w}x{h}: scrolled to {} and the end of the body is not on screen",
+                app.detail.detail_scroll
+            );
+        }
+    }
+
+    /// Redrawing the same item does not render its Markdown again; a new width
+    /// or a reload does.
+    #[test]
+    fn body_markdown_is_rendered_once_per_item_and_width() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        app.select_first();
+        let renders = |app: &App| app.detail.detail.as_ref().unwrap().body_renders();
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        for _ in 0..5 {
+            app.scroll_detail_down();
+            terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        }
+        assert_eq!(renders(&app), 1, "five frames, one render");
+
+        let mut narrow = Terminal::new(TestBackend::new(40, 30)).unwrap();
+        app.focus = Focus::Detail;
+        narrow.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert_eq!(renders(&app), 2, "a new width renders again");
+
+        app.select_next();
+        terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert_eq!(renders(&app), 1, "another item starts its own cache");
     }
 
     #[test]
@@ -1314,6 +1465,158 @@ mod tests {
         assert_eq!(item.body, "edited body\n", "body normalized with newline");
     }
 
+    /// The edit form sends only what the user changed. It used to send every
+    /// field with the value loaded when the form opened, so a save put back
+    /// whatever another process had changed in the meantime: an item closed
+    /// elsewhere was reopened by a title edit here.
+    #[test]
+    fn edit_form_keeps_fields_changed_on_disk_while_open() {
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        app.select_first();
+        let id = app.selected_frontmatter().unwrap().id.clone();
+        app.start_edit();
+
+        // Another process closes the item and relabels it while the form is open.
+        clove_core::ops::transition(&app.data.store, &id, ItemStatus::Closed, Utc::now()).unwrap();
+        clove_core::apply_edit(
+            &app.data.store,
+            &id,
+            &clove_types::EditRequest {
+                labels: Some(clove_types::LabelEdit::Delta {
+                    add: vec!["elsewhere".to_owned()],
+                    remove: vec![],
+                }),
+                priority: Some(Priority::new(0).unwrap()),
+                ..Default::default()
+            },
+            Utc::now(),
+        )
+        .unwrap();
+
+        app.form.title.push_str("!!");
+        app.form.labels.push_str(", mine");
+        app.form_submit();
+
+        assert_eq!(app.mode, Mode::Browse, "{:?}", app.form.error);
+        let item = app.data.store.get(&id).unwrap();
+        assert!(item.frontmatter.title.ends_with("!!"));
+        assert_eq!(item.frontmatter.status, ItemStatus::Closed);
+        assert!(item.frontmatter.closed.is_some());
+        assert_eq!(item.frontmatter.priority.get(), 0);
+        assert_eq!(
+            item.frontmatter.labels,
+            vec![
+                "area:core".to_owned(),
+                "elsewhere".to_owned(),
+                "mine".to_owned()
+            ]
+        );
+    }
+
+    /// Saving an untouched edit form writes nothing: the file keeps its
+    /// `updated` stamp and its bytes.
+    #[test]
+    fn edit_form_without_changes_does_not_write() {
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        app.select_first();
+        let id = app.selected_frontmatter().unwrap().id.clone();
+        let path = app.data.store.path_for(&id);
+        let before = std::fs::read(&path).unwrap();
+
+        app.start_edit();
+        assert!(app.form.to_edit_request().is_empty());
+        app.form_submit();
+
+        assert_eq!(app.mode, Mode::Browse);
+        assert_eq!(app.status, format!("no changes to {id}"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    /// A failed submit shows its error whatever the body length and wherever the
+    /// caret is. The error used to be the last scrolling row, so a body taller
+    /// than the popup pushed it off screen and Ctrl-S looked like a no-op.
+    #[test]
+    fn form_error_stays_visible_with_a_long_body() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        app.select_first();
+
+        for (w, h) in [(80, 24), (40, 48), (120, 18), (60, 12)] {
+            for focus_body in [false, true] {
+                app.start_edit();
+                app.form.body = (1..=40)
+                    .map(|n| format!("line {n}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                app.form.deps = "not an id".to_owned();
+                if focus_body {
+                    while app.form.focused() != Field::Body {
+                        app.form_next_field();
+                    }
+                }
+                app.form_submit();
+                let error = app.form.error.clone().expect("submit failed");
+
+                let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+                terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+                let buffer = terminal.backend().buffer().clone();
+                let screen: String = buffer.content().iter().map(|c| c.symbol()).collect();
+                let shown: String = error.chars().take(12).collect();
+                assert!(
+                    screen.contains(&shown),
+                    "{w}x{h} focus_body={focus_body}: {shown:?} not on screen"
+                );
+                assert!(
+                    screen.contains("line 40") == focus_body,
+                    "{w}x{h}: the caret row is what the fields scroll to"
+                );
+                app.cancel_form();
+            }
+        }
+    }
+
+    /// A malformed or unknown id typed into Parent or Deps is rejected before
+    /// the scalar edit is written. The title used to reach disk first.
+    #[test]
+    fn edit_form_rejects_bad_ids_before_writing_anything() {
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        app.select_first();
+        let id = app.selected_frontmatter().unwrap().id.clone();
+        let path = app.data.store.path_for(&id);
+        let before = std::fs::read(&path).unwrap();
+
+        let cases: [(&str, &str); 4] = [
+            ("bogus id", ""),
+            ("proj-ZZZZZZZZ", ""),
+            ("", "proj-ZZZZZZZZ"),
+            ("", id.as_str()),
+        ];
+        for (parent, deps) in cases {
+            app.start_edit();
+            app.form.title = "Renamed".to_owned();
+            app.form.parent = parent.to_owned();
+            if !deps.is_empty() {
+                app.form.deps = deps.to_owned();
+            }
+            app.form_submit();
+
+            assert_eq!(app.mode, Mode::Form, "parent={parent:?} deps={deps:?}");
+            assert!(app.form.error.is_some(), "parent={parent:?} deps={deps:?}");
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                before,
+                "nothing written for parent={parent:?} deps={deps:?}"
+            );
+            app.cancel_form();
+        }
+    }
+
     #[test]
     fn edit_form_diffs_parent_and_deps() {
         let (_dir, store) = fixture();
@@ -1348,6 +1651,104 @@ mod tests {
         let updated = app.data.store.get(&independent).unwrap();
         assert_eq!(updated.frontmatter.parent.as_ref(), Some(&base));
         assert_eq!(updated.frontmatter.deps, vec![base.clone()]);
+    }
+
+    /// A filter value no item has any more stays in the menu, so it can be
+    /// toggled off there. It used to vanish from the menu while still filtering
+    /// the list, leaving `x` (clear everything) as the only way out.
+    #[test]
+    fn active_filter_values_stay_in_the_menu_after_a_refresh() {
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        app.list.filter.labels = vec!["gone".to_owned()];
+        app.list.filter.assignee = Some("nobody".to_owned());
+        app.list.filter.priorities = vec![4];
+        app.list.filter.types = vec![ItemType::Epic];
+        app.list.filter.status = Some(ItemStatus::Closed);
+        app.refresh();
+        assert_eq!(app.visible_count(), 0);
+
+        for text in ["gone", "nobody", "p4", "epic", "closed"] {
+            let row = app
+                .filter_menu
+                .menu
+                .iter()
+                .position(|item| item.text == text)
+                .unwrap_or_else(|| panic!("{text} is still a menu row"));
+            app.start_filter();
+            app.filter_menu.cursor = row;
+            app.filter_toggle();
+        }
+        assert!(!app.list.filter.is_active(), "{:?}", app.list.filter);
+        assert_eq!(app.visible_count(), 3);
+    }
+
+    /// ↑/↓ walk the lines of a multi-line Body and only leave the field from
+    /// its first/last line. They used to change field from anywhere, so the
+    /// body could be navigated only with ←/→.
+    #[test]
+    fn form_up_down_move_between_body_lines() {
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        app.start_new();
+        while app.form.focused() != Field::Body {
+            app.form_next_field();
+        }
+        app.form.body = "ab\ncdef\ng".to_owned();
+        app.form.cursor = 6; // `cdef`, after the `e`
+
+        app.form_up();
+        assert_eq!((app.form.focused(), app.form.cursor), (Field::Body, 2));
+        app.form_down();
+        assert_eq!(app.form.cursor, 5, "column kept where the line allows");
+        app.form.cursor = 7;
+        app.form_down();
+        assert_eq!(app.form.cursor, 9, "clamped to the shorter last line");
+        app.form_down();
+        assert_ne!(app.form.focused(), Field::Body, "↓ on the last line leaves");
+
+        app.form_prev_field();
+        app.form.cursor = 1;
+        app.form_up();
+        assert_eq!(
+            app.form.focused(),
+            Field::Deps,
+            "↑ on the first line leaves"
+        );
+        // Outside the body ↑/↓ still change field.
+        app.form_down();
+        assert_eq!(app.form.focused(), Field::Body);
+    }
+
+    /// The help overlay scrolls on a terminal shorter than its text, and the
+    /// scroll stops at the last row.
+    #[test]
+    fn help_scrolls_on_a_short_terminal() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        let draw = |app: &mut App| -> String {
+            let mut terminal = Terminal::new(TestBackend::new(60, 10)).unwrap();
+            terminal.draw(|f| crate::ui::render(f, app)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            buffer.content().iter().map(|c| c.symbol()).collect()
+        };
+
+        app.open_help();
+        let top = draw(&mut app);
+        assert!(top.contains("move selection") && top.contains("↑↓ scroll"));
+        assert!(!top.contains("by color"), "the last row starts off screen");
+
+        app.scroll_help(1000);
+        let bottom = draw(&mut app);
+        assert!(bottom.contains("by color"), "scrolled to the last row");
+        assert!(!bottom.contains("move selection"));
+        assert!(app.help_scroll < 1000, "clamped to the content");
+
+        app.scroll_help(-1000);
+        assert!(draw(&mut app).contains("move selection"));
     }
 
     #[test]

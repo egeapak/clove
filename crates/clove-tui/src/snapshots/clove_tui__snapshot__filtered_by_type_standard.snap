@@ -1,0 +1,28 @@
+---
+source: crates/clove-tui/src/snapshot.rs
+expression: rendered
+---
+┌ clove ───────────────────────────────────────────────────────────────────────┐
+│  All 7  │  Ready 4  │  Blocked 1                                             │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌ Items (3/7) ─────────────────────────┐┌ Overview · Dep tree · Comments ──────┐
+│▌◐ F #9QX4D1B7 ! Build REST API ●     ││ #9QX4D1B7  ! FEATURE                 │
+│ ○ F #K2M8ZP5R • Write integration… ✗ ││ Build REST API                       │
+│ ○ F #5RB9NC2V • Frontend dashboard ● ││                                      │
+│                                      ││ status     ◐ in_progress · ready     │
+│                                      ││ assignee   @grace                    │
+│                                      ││ deps       1                         │
+│                                      ││ labels     area:api, backend         │
+│                                      ││ created    Jan 1                     │
+│                                      ││ updated    Jan 20                    │
+│                                      ││                                      │
+│                                      ││ ──────────────────────────────────── │
+│                                      ││ Goals                                │
+│                                      ││                                      │
+│                                      ││ Build a REST API with axum; see      │
+│                                      ││ docs/api.md.                         │
+│                                      ││                                      │
+│                                      ││ • CRUD endpoints                     │
+│                                      ││ • Auth middleware                    │
+└──────────────────────────────────────┘└──────────────────────────────────────┘
+type:feature  7 item(s) loaded   ?: help · q: quit

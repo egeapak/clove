@@ -38,6 +38,13 @@ caught, add the step in the same change (see `CLAUDE.md`).
       the checksum, then `tar -tzf` it: `index.html`, `_app/` and
       `THIRD_PARTY_LICENSES.txt` (the bundled npm packages' notices) at the root,
       no `._*` files, and more than a handful of files.
+- [ ] **Web UI pin (after the crates are published)** — the published
+      `clove-web` carries the archive's digest. Run
+      `cargo download clove-web==X.Y.Z -x` (or unpack the `.crate` from
+      crates.io) and check that the last line of `build/web-dist.sha256` equals
+      the digest in the Release's `clove-web-dist-vX.Y.Z.tar.gz.sha256`. In the
+      checkout, `git status` must show `crates/clove-web/build/web-dist.sha256`
+      unchanged after `publish.sh`.
 - [ ] **Source offer (AGPL-3.0 §13)** — `clove version` prints
       `license: AGPL-3.0-only; source: https://github.com/egeapak/clove/tree/vX.Y.Z`,
       that URL opens, and the web UI's top bar shows the source link (`</>`)
@@ -90,6 +97,11 @@ TMPDIR=/tmp CLOVE_HOME=$(mktemp -d /tmp/cvd.XXXX)/h scripts/ci/daemon-smoke.sh <
 - [ ] `clove daemon start` → serving, watcher `watching`; `clove daemon status` shows
       the hub pid, project, web URL and log path.
 - [ ] `.clove/daemon.token` is `0600` and git-ignored (`git check-ignore`).
+- [ ] **Automation needs the clone's permission** — in a scratch git repo set
+      `[daemon] git_sync = true`, start the daemon and edit an item: no commit
+      appears, and `clove doctor` reports `DAEMON_AUTOMATION_NOT_ALLOWED` with
+      the command to run. Run `git config clove.automation true`, then
+      `clove daemon stop` and edit an item again: the daemon commits it.
 - [ ] After the CLI and daemon steps, `git status --porcelain --untracked-files=all .clove`
       lists only item and comment files: no `*.lock`, `index.db*`, `daemon.token` or `sync/`.
 - [ ] `clove -f json ls|ready|blocked` report `_meta.source == "daemon"`.
@@ -154,6 +166,11 @@ empty or a real GitHub user.
       (the same-second case is covered by
       `sync::tests::local_edit_in_the_same_second_as_the_last_pull_is_pushed`; by hand,
       run the close immediately after the sync in one command line).
+- [ ] Wrong repository: `.clove/sync-github.json` names `egeapak/clove` after the
+      first sync. `clove sync github egeapak/<another repo> --dry-run` is refused
+      with a message that names `egeapak/clove` and `--adopt-links`; nothing changes.
+- [ ] Delete the throwaway item's file locally and sync: the run notes that the
+      local item was deleted and does not create it again; the issue stays open.
 - [ ] Sync again and `--dry-run`: `0 new / 0 updated`, everything in sync, no
       duplicated comments on the issue.
 - [ ] A transient "local item links gh-N but the GitHub issue was not found" right
@@ -163,6 +180,12 @@ empty or a real GitHub user.
 
 Drive with a real browser (Playwright MCP is fine). Check the console on every page.
 
+- [ ] **Access token** — open the URL that `clove serve` prints (it ends in
+      `?token=…`): the board loads, the address bar no longer shows the token,
+      and the live indicator is green (the event socket rides on the cookie).
+      In a private window open the same address without `?token=…`: the page
+      is a `401` text that names `clove serve`. `curl` without the token gets
+      `401`; with `-H "Authorization: Bearer <token>"` it gets the items.
 - [ ] With one project loaded `/` redirects to `/p/<slug>/board`; with two, `/` is the
       project picker (no console errors, favicon loads) and each entry opens its board.
 - [ ] **Board, List, Timeline, Detail** all render the real store; the live indicator
@@ -198,6 +221,20 @@ read with `tmux capture-pane -p`.
 - [ ] Help (`?`), filter menu (`f`), search (`/`).
 - [ ] Edit form (`e`): change a field on the throwaway item, `Ctrl-S` → it lands in
       the file; `q` exits cleanly. `clove tui </dev/null` errors without panicking.
+- [ ] Edit form does not revert outside changes: open `e` on the throwaway
+      item, and in another shell run `clove close <id>`. Change only the title,
+      `Ctrl-S` → `clove show <id>` has the new title and is still `closed`.
+      Open `e` again and `Ctrl-S` with no change → the status line says
+      `no changes to <id>` and `updated` in the file is the same.
+- [ ] Form error stays visible: at 80x24 (`tmux resize-window -t t -x 80 -y 24`),
+      open `e` on an item whose body is longer than 15 lines, type `nope` in
+      Deps, `Ctrl-S` → the red error is on screen above the key hint, and the
+      file is unchanged. In Body, `↑`/`↓` move between its lines.
+- [ ] Detail body: an item with a nested list, a table, a link, and a long
+      indented code block renders one line per nested item and per table row,
+      shows the link URL, and `PgDn` reaches the last body line.
+- [ ] Help on a short terminal (`-y 12`): the title reads `Help · ↑↓ scroll`
+      and `↓` reaches the `priority` row.
 - [ ] Form horizontal scroll: press `n` and type a title of about 100 characters.
       In `capture-pane -p`, the title scrolls behind a leading `…` and every
       field label stays in its column. `tmux display -p -t t '#{cursor_x}'`

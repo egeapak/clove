@@ -11,6 +11,18 @@
   let { onclose }: { onclose: () => void } = $props();
 
   let saving = $state(false);
+  // Escape and a click on the backdrop are easy to hit by accident. With
+  // something typed they ask first instead of throwing the draft away.
+  let dirty = $state(false);
+  let confirmingDiscard = $state(false);
+
+  function requestClose() {
+    if (dirty && !confirmingDiscard) {
+      confirmingDiscard = true;
+      return;
+    }
+    onclose();
+  }
 
   let dialogEl = $state<HTMLDivElement | undefined>();
   let firstField = $state<HTMLInputElement | undefined>();
@@ -36,7 +48,9 @@
   function onKeydown(e: KeyboardEvent) {
     if (e.key === 'Escape') {
       e.preventDefault();
-      onclose();
+      // A second Escape answers the question with "keep editing".
+      if (confirmingDiscard) confirmingDiscard = false;
+      else requestClose();
       return;
     }
     if (e.key !== 'Tab') return;
@@ -72,7 +86,7 @@
   }
 </script>
 
-<button class="scrim" aria-label="close" onclick={onclose}></button>
+<button class="scrim" aria-label="close" onclick={requestClose}></button>
 <div
   class="modal panel"
   role="dialog"
@@ -83,10 +97,31 @@
   onkeydown={onKeydown}
 >
   <h2>New item</h2>
-  <ItemForm mode="create" submitting={saving} onsubmit={create} oncancel={onclose} bind:firstField />
+  {#if confirmingDiscard}
+    <div class="discard" role="alert">
+      <span>Discard this draft?</span>
+      <button type="button" class="btn sm" onclick={() => (confirmingDiscard = false)}>Keep editing</button>
+      <button type="button" class="btn sm" onclick={onclose}>Discard</button>
+    </div>
+  {/if}
+  <ItemForm mode="create" submitting={saving} onsubmit={create} oncancel={onclose} bind:firstField bind:dirty />
 </div>
 
 <style>
+  .discard {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    margin-bottom: 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface-hover);
+    font-size: 13px;
+  }
+  .discard span {
+    margin-right: auto;
+  }
   .scrim {
     position: fixed;
     inset: 0;

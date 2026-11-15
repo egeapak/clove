@@ -49,6 +49,7 @@ pub fn run(paths: &HubPaths) -> anyhow::Result<()> {
         status!("cloved: a daemon is already running in {}", paths.dir());
         std::process::exit(1);
     }
+    discard_stale_pid(paths);
 
     // 2. Tokio runtime — 2 workers, per DESIGN §8.1. Every project's blocking
     //    work (loads, sweeps, queries) runs on the blocking pool.
@@ -212,6 +213,14 @@ fn restrict_to_owner(_path: &Utf8Path, _mode: u32) {}
 /// Write the current process id to `hub.pid` (DESIGN §8.2). Written aside and
 /// renamed into place, owner-only from the start: the pid file's appearance is
 /// the readiness signal, so it must never be seen empty or world-readable.
+/// Remove the pid file a previous hub left behind. Call only with the hub lock
+/// held: then no live hub owns the file, and the pid in it may already belong
+/// to another process. Until [`write_pid`] runs, "no pid file" tells `clove
+/// daemon stop` and the clients that no hub is ready.
+fn discard_stale_pid(paths: &HubPaths) {
+    let _ = std::fs::remove_file(paths.pid());
+}
+
 fn write_pid(paths: &HubPaths) -> std::io::Result<()> {
     let staged = paths.dir().join("hub.pid.tmp");
     let mut file = clove_core::fs_safe::create_private_file(&staged)?;

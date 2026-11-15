@@ -78,9 +78,14 @@ clove serve --port 0 >/dev/null 2>"$work/serve.log" &
 serve_pid=$!
 for _ in $(seq 1 50); do grep -q 'http://' "$work/serve.log" 2>/dev/null && break; sleep 0.2; done
 url=$(grep -o 'http://[0-9.:]*' "$work/serve.log" | head -1)
-check "serve SPA" bash -c "curl -fsS '$url/' | grep -qi '<html'"
-check "serve SPA is the real build, not the placeholder" bash -c "! curl -fsS '$url/' | grep -qi placeholder"
-check "serve API" bash -c "curl -fsS '$url/api/v1/items' | grep -q 'Alpha task'"
+# The printed URL ends in `?token=<hex>`; the server refuses a request without it.
+token=$(grep -o 'token=[0-9a-f]*' "$work/serve.log" | head -1 | cut -d= -f2)
+auth="Authorization: Bearer $token"
+check "serve prints an access token" test -n "$token"
+check "serve refuses a request without the token" bash -c "[ \"\$(curl -s -o /dev/null -w '%{http_code}' '$url/api/v1/items')\" = 401 ]"
+check "serve SPA" bash -c "curl -fsS -H '$auth' '$url/' | grep -qi '<html'"
+check "serve SPA is the real build, not the placeholder" bash -c "! curl -fsS -H '$auth' '$url/' | grep -qi placeholder"
+check "serve API" bash -c "curl -fsS -H '$auth' '$url/api/v1/items' | grep -q 'Alpha task'"
 kill "$serve_pid" 2>/dev/null
 wait "$serve_pid" 2>/dev/null
 serve_pid=

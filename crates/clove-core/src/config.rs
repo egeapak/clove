@@ -21,7 +21,7 @@ pub const CURRENT_CONFIG_SCHEMA: u32 = 1;
 /// writes this set (LF endings on every platform) and `clove doctor` verifies it
 /// is present (`GITIGNORE_DRIFT`), so the canonical list lives here, shared by
 /// both rather than duplicated.
-pub const GITIGNORE_ENTRIES: [&str; 11] = [
+pub const GITIGNORE_ENTRIES: [&str; 12] = [
     "index.db",
     "*.db-shm",
     "*.db-wal",
@@ -37,7 +37,15 @@ pub const GITIGNORE_ENTRIES: [&str; 11] = [
     "sync/",
     // The store-wide advisory write lock, created on the first write.
     crate::store::WRITE_LOCK_FILE,
+    // The temp file of an item write that was interrupted before its rename.
+    ITEM_TEMP_FILE_PATTERN,
 ];
+
+/// The `.clove/.gitignore` pattern for the temp file an item write creates next
+/// to its target (`tempfile` names it `.tmp<random>`). The file exists only
+/// between create and rename, but a process killed in that window leaves it
+/// behind, and `git add .clove` must not pick it up.
+pub(crate) const ITEM_TEMP_FILE_PATTERN: &str = "issues/.tmp*";
 
 /// Add `entry` to `.clove/.gitignore` (creating the file if absent) when no line
 /// of it is `entry` — a list written by a clove that predates the entry. The
@@ -104,6 +112,42 @@ pub struct DaemonConfig {
     /// `github_sync_interval_min > 0`).
     #[serde(default)]
     pub github_sync_repo: Option<String>,
+}
+
+/// The git configuration key that allows the daemon to act on the automation
+/// keys of `[daemon]` in one clone: `git config clove.automation true`. Git
+/// configuration is not part of a clone, so the repository cannot set it.
+pub const AUTOMATION_GIT_CONFIG_KEY: &str = "clove.automation";
+
+impl DaemonConfig {
+    /// The `[daemon]` keys of this configuration that make the daemon act on
+    /// its own with the user's identity: commit (`git_sync`) or talk to
+    /// GitHub (`github_sync_*`). `.clove/config.toml` arrives with the
+    /// repository, so the daemon acts on them only in a clone that allowed it
+    /// ([`AUTOMATION_GIT_CONFIG_KEY`]). Empty when none is set.
+    pub fn automation_keys(&self) -> Vec<&'static str> {
+        let mut keys = Vec::new();
+        if self.git_sync {
+            keys.push("git_sync");
+        }
+        if self.github_sync_interval_min > 0 && self.github_sync_repo.is_some() {
+            keys.push("github_sync_interval_min");
+        }
+        keys
+    }
+
+    /// What to tell a user whose clone has not allowed the automation that
+    /// `keys` ask for.
+    pub fn automation_hint(keys: &[&str], repo_root: &camino::Utf8Path) -> String {
+        format!(
+            ".clove/config.toml sets [daemon] {}, but this clone has not allowed daemon \
+             automation, so the daemon does not commit or sync here. The config file \
+             arrives with the repository; the permission does not. To allow it in this \
+             clone, run `git -C {repo_root} config {AUTOMATION_GIT_CONFIG_KEY} true`, \
+             then `clove daemon stop` (the next command starts the daemon again)",
+            keys.join(" and ")
+        )
+    }
 }
 
 impl Default for DaemonConfig {

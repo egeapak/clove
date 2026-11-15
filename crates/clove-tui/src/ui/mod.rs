@@ -93,7 +93,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
         render_form(f, app, area);
     }
     if app.show_help {
-        render_help(f, area);
+        render_help(f, app, area);
     }
 }
 

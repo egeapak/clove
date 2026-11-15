@@ -1,0 +1,28 @@
+---
+source: crates/clove-tui/src/snapshot.rs
+expression: rendered
+---
+┌ clove ───────────────────────────────────────────────────────────────────────┐
+│  All 7┌ Edit proj-9QX4D1B7 ──────────────────────────────────────────┐       │
+└───────│ ▌   Title: Build REST API▏                                   │───────┘
+┌ Items │    Status: in_progress                                       │ ──────┐
+│▌◐ F #9│      Type: feature                                           │       │
+│ ○ B #0│  Priority: p0                                                │       │
+│ ● C #7│  Assignee: grace                                             │       │
+│ ○ E #3│    Labels: area:api, backend                                 │dy     │
+│ ○ F #K│    Parent:                                                   │       │
+│ ○ F #5│      Deps: proj-7AF3K2MN                                     │       │
+│ ● D #8│      Body:                                                   │       │
+│       │   ## Goals                                                   │       │
+│       │                                                              │       │
+│       │   Build a **REST API** with `axum`; see `docs/api.md`.       │       │
+│       │                                                              │────── │
+│       │   - CRUD endpoints                                           │       │
+│       │   - Auth middleware                                          │       │
+│       │                                                              │e      │
+│       │   ### Steps                                                  │       │
+│       │                                                              │       │
+│       │                                                              │       │
+│       │ Ctrl-S save · Esc cancel · Tab/↑↓ field · ←→ move/change     │       │
+└───────└──────────────────────────────────────────────────────────────┘───────┘
+edit item  Ctrl-S save · Esc cancel

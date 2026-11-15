@@ -1,7 +1,8 @@
 //! Render snapshot tests (insta) validating the TUI across states and terminal
-//! shapes. Every state is captured at three shapes so the adaptive layout is
+//! shapes. Every state is captured at four shapes so the adaptive layout is
 //! exercised: portrait (40×48 → single pane), landscape (120×18 → side-by-side,
-//! compact tab bar), and square (60×60 → stacked).
+//! compact tab bar), square (60×60 → stacked), and standard (80×24 → the
+//! default terminal size, side-by-side at its narrowest).
 //!
 //! Snapshots are taken from a deterministic fixture (fixed ids, timestamps, and
 //! comments) and rendered to a [`TestBackend`]; the buffer is flattened to a
@@ -18,11 +19,14 @@ use ratatui::Terminal;
 
 use crate::app::App;
 
-/// The three terminal shapes every state is snapshotted at.
-const SHAPES: [(&str, u16, u16); 3] = [
+/// The terminal shapes every state is snapshotted at.
+const SHAPES: [(&str, u16, u16); 4] = [
     ("portrait", 40, 48),
     ("landscape", 120, 18),
     ("square", 60, 60),
+    // The default terminal size: side-by-side panes at the narrowest width that
+    // allows them, with popups that have to fit 24 rows.
+    ("standard", 80, 24),
 ];
 
 fn ts(s: &str) -> DateTime<Utc> {
@@ -275,7 +279,7 @@ fn render_to_string(app: &mut App, w: u16, h: u16) -> String {
     out
 }
 
-/// Snapshot `app` at all three shapes under `name`.
+/// Snapshot `app` at every shape under `name`.
 fn snap(name: &str, app: &mut App) {
     for (shape, w, h) in SHAPES {
         let rendered = render_to_string(app, w, h);

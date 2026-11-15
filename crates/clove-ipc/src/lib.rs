@@ -75,7 +75,8 @@ pub const SUN_PATH_MAX: usize = 107;
 ///
 /// 1. `$CLOVE_RUNTIME_DIR` — an explicit override (tests use it);
 /// 2. Unix: `$XDG_RUNTIME_DIR/clove`, else `$TMPDIR/clove-<uid>`, else
-///    `/tmp/clove-<uid>`; Windows: `%LOCALAPPDATA%\clove\run` (a per-user
+///    `/tmp/clove-<uid>` — or `<clove-home>/run` when that temporary-directory
+///    name already exists and is not this user's private directory; Windows: `%LOCALAPPDATA%\clove\run` (a per-user
 ///    profile directory), else `%USERPROFILE%\AppData\Local\clove\run`.
 ///
 /// Always absolute. Only the daemon creates it ([`ensure_runtime_dir`]);
@@ -84,7 +85,11 @@ pub const SUN_PATH_MAX: usize = 107;
 /// there is no per-user directory to use, and this fails.
 pub fn runtime_dir() -> std::io::Result<Utf8PathBuf> {
     #[cfg(unix)]
-    let dir = resolve_runtime_dir(utf8_var, current_uid());
+    let dir = resolve_runtime_dir(utf8_var, current_uid(), taken_by_another_user, || {
+        clove_core::home::clove_home()
+            .ok()
+            .map(|home| home.join("run"))
+    });
     #[cfg(not(unix))]
     let dir = resolve_windows_runtime_dir(utf8_var)?;
     Ok(absolute(&dir))
@@ -128,7 +133,12 @@ pub fn parse_pid(text: &str) -> Option<u32> {
 }
 
 #[cfg(unix)]
-fn resolve_runtime_dir(var: impl Fn(&str) -> Option<Utf8PathBuf>, uid: u32) -> Utf8PathBuf {
+fn resolve_runtime_dir(
+    var: impl Fn(&str) -> Option<Utf8PathBuf>,
+    uid: u32,
+    taken: impl Fn(&Utf8Path) -> bool,
+    home_run: impl Fn() -> Option<Utf8PathBuf>,
+) -> Utf8PathBuf {
     if let Some(dir) = var("CLOVE_RUNTIME_DIR") {
         return dir;
     }
@@ -136,7 +146,25 @@ fn resolve_runtime_dir(var: impl Fn(&str) -> Option<Utf8PathBuf>, uid: u32) -> U
         return dir.join("clove");
     }
     let tmp = var("TMPDIR").unwrap_or_else(|| Utf8PathBuf::from("/tmp"));
-    tmp.join(format!("clove-{uid}"))
+    let shared = tmp.join(format!("clove-{uid}"));
+    // The name is predictable and its parent is writable by everyone, so
+    // another local user can create it first. The daemon then refuses it
+    // (`ensure_private_dir`) and could never start. Step aside to a directory
+    // under the user's own home instead.
+    if taken(&shared) {
+        if let Some(dir) = home_run() {
+            return dir;
+        }
+    }
+    shared
+}
+
+/// Whether `dir` exists and is not this user's private directory: someone else
+/// made it, or it is open to others. The daemon and its clients both evaluate
+/// this, so they agree on the directory.
+#[cfg(unix)]
+fn taken_by_another_user(dir: &Utf8Path) -> bool {
+    std::fs::symlink_metadata(dir).is_ok() && !runtime_dir_is_private(dir)
 }
 
 /// Create the [`runtime_dir`] owner-only if missing, and refuse one that another
@@ -341,26 +369,80 @@ mod tests {
                     .map(|(_, value)| Utf8PathBuf::from(*value))
             }
         };
+        let free = |_: &Utf8Path| false;
+        let home = || Some(Utf8PathBuf::from("/home/u/.local/share/clove/run"));
         let all = env(&[
             ("CLOVE_RUNTIME_DIR", "/explicit"),
             ("XDG_RUNTIME_DIR", "/run/user/7"),
             ("TMPDIR", "/var/tmp"),
         ]);
-        assert_eq!(resolve_runtime_dir(all, 7), Utf8PathBuf::from("/explicit"));
+        assert_eq!(
+            resolve_runtime_dir(all, 7, free, home),
+            Utf8PathBuf::from("/explicit")
+        );
         let xdg = env(&[("XDG_RUNTIME_DIR", "/run/user/7"), ("TMPDIR", "/var/tmp")]);
         assert_eq!(
-            resolve_runtime_dir(xdg, 7),
+            resolve_runtime_dir(xdg, 7, free, home),
             Utf8PathBuf::from("/run/user/7/clove")
         );
         let tmpdir = env(&[("TMPDIR", "/var/tmp")]);
         assert_eq!(
-            resolve_runtime_dir(tmpdir, 7),
+            resolve_runtime_dir(tmpdir, 7, free, home),
             Utf8PathBuf::from("/var/tmp/clove-7")
         );
         assert_eq!(
-            resolve_runtime_dir(env(&[]), 7),
+            resolve_runtime_dir(env(&[]), 7, free, home),
             Utf8PathBuf::from("/tmp/clove-7")
         );
+    }
+
+    /// `/tmp/clove-<uid>` is a predictable name in a directory everyone can
+    /// write to. When another user made it first, the daemon uses a directory
+    /// under the user's own clove home; an explicit or XDG directory is never
+    /// second-guessed.
+    #[cfg(unix)]
+    #[test]
+    fn a_taken_temporary_runtime_dir_is_replaced_by_one_under_the_clove_home() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| Utf8PathBuf::from(*value))
+            }
+        };
+        let taken = |_: &Utf8Path| true;
+        let home = || Some(Utf8PathBuf::from("/home/u/.local/share/clove/run"));
+        assert_eq!(
+            resolve_runtime_dir(env(&[]), 7, taken, home),
+            Utf8PathBuf::from("/home/u/.local/share/clove/run")
+        );
+        // No home to fall back to: the temporary name stays, and the daemon
+        // refuses it with the error that names CLOVE_RUNTIME_DIR.
+        assert_eq!(
+            resolve_runtime_dir(env(&[]), 7, taken, || None),
+            Utf8PathBuf::from("/tmp/clove-7")
+        );
+        let xdg = env(&[("XDG_RUNTIME_DIR", "/run/user/7")]);
+        assert_eq!(
+            resolve_runtime_dir(xdg, 7, taken, home),
+            Utf8PathBuf::from("/run/user/7/clove")
+        );
+
+        // The real check: a directory open to others is taken, a private one
+        // and a missing one are not.
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8Path::from_path(tmp.path()).unwrap();
+        let open = root.join("open");
+        std::fs::create_dir(&open).unwrap();
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let private = root.join("private");
+        std::fs::create_dir(&private).unwrap();
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(taken_by_another_user(&open));
+        assert!(!taken_by_another_user(&private));
+        assert!(!taken_by_another_user(&root.join("missing")));
     }
 
     #[cfg(not(windows))]

@@ -226,12 +226,19 @@ pub struct StagedIssue {
     pub source_id: String,
     pub title: String,
     pub status: ItemStatus,
-    pub priority: Priority,
+    /// The priority from `clove-meta`. `None` when the body carried none (an
+    /// issue clove never pushed), so a pull knows not to reset the local
+    /// priority to the default.
+    pub priority: Option<Priority>,
     /// The item type from `clove-meta`. `None` when the body carried no (or an
     /// unrecognized) type — e.g. an issue clove never pushed — so a pull knows
     /// not to reset the local type to a default.
     pub item_type: Option<ItemType>,
     pub assignee: Option<String>,
+    /// Every assignee login of the issue, sorted (GitHub does not fix their
+    /// order). Not part of the content fingerprint; the sync records it apart
+    /// ([`crate::sync::SyncEntry::gh_assignees`]).
+    pub assignees: Vec<String>,
     /// The dependency ids from `clove-meta`. `None` when the body carried no
     /// meta at all (dep ownership unknown — a pull must not clear local deps);
     /// `Some` (possibly empty) when clove owns the dep set.
@@ -276,10 +283,7 @@ pub fn map_issue(issue: &GitHubIssue) -> Result<StagedIssue, String> {
     let meta = meta.unwrap_or_default();
     let body = strip_clove_meta(&raw_body);
 
-    let priority = meta
-        .priority
-        .map(|p| coerce_priority(i64::from(p)))
-        .unwrap_or(Priority::DEFAULT);
+    let priority = meta.priority.map(|p| coerce_priority(i64::from(p)));
 
     let item_type = meta
         .item_type
@@ -310,6 +314,14 @@ pub fn map_issue(issue: &GitHubIssue) -> Result<StagedIssue, String> {
         .first()
         .map(|u| u.login.clone())
         .filter(|s| !s.trim().is_empty());
+    let mut assignees: Vec<String> = issue
+        .assignees
+        .iter()
+        .map(|u| u.login.clone())
+        .filter(|s| !s.trim().is_empty())
+        .collect();
+    assignees.sort();
+    assignees.dedup();
 
     Ok(StagedIssue {
         external_ref,
@@ -319,6 +331,7 @@ pub fn map_issue(issue: &GitHubIssue) -> Result<StagedIssue, String> {
         priority,
         item_type,
         assignee,
+        assignees,
         deps,
         labels,
         closed: issue.closed_at,
@@ -619,32 +632,6 @@ pub(crate) mod net {
         serde_json::from_value(value).map_err(|err| ImportError::Record {
             message: format!("github issue map failed: {err}"),
         })
-    }
-
-    /// Fetch every issue (all states, paginated) from `owner/repo`.
-    pub(crate) async fn fetch_all(
-        crab: &Octocrab,
-        owner: &str,
-        repo: &str,
-    ) -> Result<Vec<GitHubIssue>, ImportError> {
-        let operation = format!("issue list fetch from {owner}/{repo}");
-        let handler = &crab.issues(owner, repo);
-        let operation = &operation;
-        let all = collect_pages(
-            |issue: &octocrab::models::issues::Issue| issue.number,
-            |page| async move {
-                handler
-                    .list()
-                    .state(octocrab::params::State::All)
-                    .per_page(100)
-                    .page(page)
-                    .send()
-                    .await
-                    .map_err(|err| net_err(operation, &err))
-            },
-        )
-        .await?;
-        all.iter().map(to_intermediate).collect()
     }
 
     /// Every item of a paginated list, fetched page by page with `fetch(n)`
@@ -984,7 +971,7 @@ mod tests {
         // assignees[0].login → assignee.
         assert_eq!(s.assignee.as_deref(), Some("octocat"));
         // clove-meta deps + priority parsed (meta present → deps owned).
-        assert_eq!(s.priority, Priority(0));
+        assert_eq!(s.priority, Some(Priority(0)));
         assert_eq!(s.deps.as_deref().map(<[CloveId]>::len), Some(1));
         // The human body survives, the marker is stripped.
         assert!(s.body.contains("It crashes."));
@@ -1003,7 +990,7 @@ mod tests {
         let s = map_issue(&issue).unwrap();
         assert_eq!(s.status, ItemStatus::Open);
         assert!(s.closed.is_none());
-        assert_eq!(s.priority, Priority::DEFAULT);
+        assert_eq!(s.priority, None);
         // No meta at all → dep ownership unknown, type unknown.
         assert!(s.deps.is_none());
         assert!(s.item_type.is_none());

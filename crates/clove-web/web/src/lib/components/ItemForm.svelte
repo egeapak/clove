@@ -12,7 +12,8 @@
     submitLabel,
     onsubmit,
     oncancel,
-    firstField = $bindable()
+    firstField = $bindable(),
+    dirty = $bindable(false)
   }: {
     mode: 'create' | 'edit';
     item?: Item;
@@ -21,6 +22,8 @@
     onsubmit: (form: FormState) => void;
     oncancel?: () => void;
     firstField?: HTMLInputElement | undefined;
+    /** Out: whether the user has typed anything that closing would lose. */
+    dirty?: boolean;
   } = $props();
 
   // One form-state object, snapshotted from the item once at mount (the parent
@@ -34,6 +37,19 @@
 
   let labelDraft = $state('');
   let bodyTab = $state<'write' | 'preview'>('write');
+
+  const initial = untrack(() => $state.snapshot(form));
+  $effect(() => {
+    dirty =
+      form.title !== initial.title ||
+      form.body !== initial.body ||
+      form.assignee !== initial.assignee ||
+      form.type !== initial.type ||
+      form.priority !== initial.priority ||
+      form.status !== initial.status ||
+      form.labels.join(',') !== initial.labels.join(',') ||
+      labelDraft.trim() !== '';
+  });
 
   const canSubmit = $derived(isSubmittable(form) && !submitting);
 
@@ -109,6 +125,7 @@
     {/if}
     <input
       bind:value={labelDraft}
+      aria-label="Label to add"
       placeholder="add label, Enter to add…"
       onkeydown={onLabelKey}
       onblur={addLabels}
@@ -124,7 +141,7 @@
       </div>
     </div>
     {#if bodyTab === 'write'}
-      <textarea bind:value={form.body} rows="10" placeholder="Markdown…"></textarea>
+      <textarea bind:value={form.body} aria-label="Body" rows="10" placeholder="Markdown…"></textarea>
     {:else}
       <div class="preview">
         {#if form.body.trim()}

@@ -901,14 +901,6 @@ None of these is a regression from this work — the first two are pre-existing 
   loaded runner is simply slow, but that is a guess, not a diagnosis. If it
   recurs, do not re-investigate the pid/socket ordering.
 
-- **Write endpoints still report the serving mode in `_meta.source`.**
-  `POST`/`PATCH`/`DELETE /api/v1/items` emit `"standalone"` (`write.rs:43,274`),
-  which is outside the `["daemon","index","files"]` enum the published schemas
-  declare. The read half was fixed; a client reading the key uniformly still
-  gets a tier on reads and a serving mode on writes. Nothing formally violated —
-  `item.json` declares no `_meta` — but it is the same defect on the other half
-  of the API.
-
 - **Windows: the daemon pipe name is a hash of the un-canonicalized path.**
   `clove_ipc::repo_hash` is FNV-1a over `clove_dir.as_str()`, and the Windows
   named pipe is `\\.\pipe\clove-<hash>`. Two spellings of the same directory —
@@ -919,8 +911,3 @@ None of these is a regression from this work — the first two are pre-existing 
   Not exercised today: every daemon test in the repo is `#[cfg(unix)]`, which is
   also why this went unnoticed. Canonicalizing before hashing would fix it, and
   would be a pipe-name change (i.e. a compatibility break for a running daemon).
-
-- **`DELETE /api/v1/items/:id?force=`** is still a lenient `== "true"`, so
-  `?force=1` — the spelling `?compact=1` accepts — is silently ignored. It fails
-  *safe* (a delete is refused, never forced), which is why §7 left it, but it is
-  the same defect class the rest of the API no longer has.

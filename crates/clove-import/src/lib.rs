@@ -83,6 +83,21 @@ impl ImportCtx {
         self.external_refs.contains_key(external_ref)
     }
 
+    /// The items an earlier import from `namespace` (`"tk:"`, `"beads:"`)
+    /// created, keyed by their source id (see [`map::source_id_of`]).
+    pub(crate) fn imported_from(&self, namespace: &str) -> HashMap<String, &ExistingItem> {
+        let mut refs: Vec<(&String, &ExistingItem)> = self.external_refs.iter().collect();
+        // Deterministic when two items claim one source id (first ref wins).
+        refs.sort_by(|a, b| a.0.cmp(b.0));
+        let mut by_source = HashMap::new();
+        for (external_ref, existing) in refs {
+            if let Some(source_id) = map::source_id_of(external_ref, namespace) {
+                by_source.entry(source_id.to_owned()).or_insert(existing);
+            }
+        }
+        by_source
+    }
+
     /// The already-imported item for `external_ref`, if any.
     pub fn existing(&self, external_ref: &str) -> Option<&ExistingItem> {
         self.external_refs.get(external_ref)

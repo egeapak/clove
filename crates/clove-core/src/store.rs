@@ -334,8 +334,9 @@ impl ItemStore {
     /// [`StoreWriteLock::lock`] and holds the guard for the whole
     /// read-modify-write window.
     ///
-    /// It also puts `write.lock` into a `.clove/.gitignore` that lacks it (one
-    /// written by an older clove), so the lock file never lands in a commit.
+    /// It also puts `write.lock` and the item temp-file pattern into a
+    /// `.clove/.gitignore` that lacks them (one written by an older clove), so
+    /// neither the lock file nor a leftover temp file lands in a commit.
     pub fn write_lock(&self) -> Result<StoreWriteLock, CloveError> {
         let clove_dir = self.repo_root.join(".clove");
         let path = clove_dir.join(WRITE_LOCK_FILE);
@@ -346,6 +347,7 @@ impl ItemStore {
         // Best effort: the lock works either way, and `clove doctor` reports
         // the missing entry.
         let _ = crate::config::ensure_gitignored(&clove_dir, WRITE_LOCK_FILE);
+        let _ = crate::config::ensure_gitignored(&clove_dir, crate::config::ITEM_TEMP_FILE_PATTERN);
         Ok(StoreWriteLock {
             path,
             lock: fd_lock::RwLock::new(file),
@@ -372,7 +374,9 @@ impl ItemStore {
     /// Delete an item's file and its sibling comment directory (if any).
     ///
     /// Unless `force`, refuses with [`CloveError::HasDependents`] when other
-    /// items list this id in their `deps`.
+    /// items list this id in their `deps` or name it as their `parent`, and
+    /// with [`CloveError::ScanFailed`] when an item file cannot be parsed (a
+    /// dependent or a child may be in it).
     pub fn delete(&self, id: &CloveId, force: bool) -> Result<(), CloveError> {
         // Held across the dependents check + removal so a concurrent locked
         // writer (e.g. `dep_add` re-verifying this id exists before writing
@@ -386,7 +390,7 @@ impl ItemStore {
         }
 
         if !force {
-            let dependents = self.dependents_of(id);
+            let dependents = self.dependents_of(id)?;
             if !dependents.is_empty() {
                 return Err(CloveError::HasDependents {
                     id: id.to_string(),
@@ -491,17 +495,23 @@ impl ItemStore {
         Ok(partition(results))
     }
 
-    /// IDs of items whose `deps` list contains `id` (best-effort: unparseable
-    /// files are skipped).
-    fn dependents_of(&self, id: &CloveId) -> Vec<CloveId> {
-        let Ok((frontmatters, _errors)) = self.scan_frontmatter() else {
-            return Vec::new();
-        };
-        frontmatters
+    /// IDs of items that depend on `id` or have it as their `parent`. Fails
+    /// when any item file cannot be parsed: the check would otherwise pass on a
+    /// partial view of the store.
+    fn dependents_of(&self, id: &CloveId) -> Result<Vec<CloveId>, CloveError> {
+        let (frontmatters, errors) = self.scan_frontmatter()?;
+        if let Some(ScanError::ParseFailed { path, source }) = errors.first() {
+            return Err(CloveError::ScanFailed {
+                path: path.clone(),
+                count: errors.len(),
+                message: source.to_string(),
+            });
+        }
+        Ok(frontmatters
             .into_iter()
-            .filter(|fm| fm.deps.contains(id))
+            .filter(|fm| fm.deps.contains(id) || fm.parent.as_ref() == Some(id))
             .map(|fm| fm.id)
-            .collect()
+            .collect())
     }
 
     /// A symlinked `issues/` would serve (and receive) another directory's files
@@ -605,14 +615,27 @@ mod tests {
         drop(store.write_lock().unwrap());
         assert_eq!(
             std::fs::read_to_string(&gitignore).unwrap(),
-            "index.db\nsync/\nwrite.lock\n"
+            "index.db\nsync/\nwrite.lock\nissues/.tmp*\n"
         );
         drop(store.write_lock().unwrap());
         assert_eq!(
             std::fs::read_to_string(&gitignore).unwrap(),
-            "index.db\nsync/\nwrite.lock\n",
+            "index.db\nsync/\nwrite.lock\nissues/.tmp*\n",
             "the entry is added once"
         );
+    }
+
+    /// The ignored pattern is the name `tempfile` gives the item temp file.
+    #[test]
+    fn the_item_temp_file_matches_its_gitignore_pattern() {
+        let (_tmp, store) = temp_store();
+        let temp = tempfile::NamedTempFile::new_in(store.issues_dir()).unwrap();
+        let name = temp.path().file_name().unwrap().to_str().unwrap();
+        let prefix = crate::config::ITEM_TEMP_FILE_PATTERN
+            .strip_prefix("issues/")
+            .and_then(|p| p.strip_suffix('*'))
+            .unwrap();
+        assert!(name.starts_with(prefix), "{name} does not match {prefix}*");
     }
 
     /// A symlinked `.gitignore` is not written through, and the lock still opens.

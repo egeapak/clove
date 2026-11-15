@@ -13,7 +13,7 @@
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
-use petgraph::algo::{has_path_connecting, kosaraju_scc};
+use petgraph::algo::{astar, has_path_connecting, kosaraju_scc};
 use petgraph::stable_graph::{NodeIndex, StableDiGraph};
 use petgraph::visit::{EdgeFiltered, EdgeRef, IntoEdgeReferences};
 use smol_str::SmolStr;
@@ -319,6 +319,17 @@ impl GraphStore {
 
     // ---- Ready / blocked ----------------------------------------------------
 
+    /// The `ready` predicate for one node, given [`Self::excluded_node_set`].
+    /// The single definition behind [`Self::ready_items`] and the `ready` flag
+    /// of [`Self::dep_tree`].
+    fn node_is_ready(&self, node: NodeIndex, excluded: &HashSet<NodeIndex>) -> bool {
+        let meta = &self.graph[node];
+        meta.status.is_active()
+            && !meta.has_dangling_deps()
+            && !excluded.contains(&node)
+            && self.hard_deps_all_closed(node)
+    }
+
     /// Items eligible to be worked on now: `open`/`in_progress`, all hard
     /// dependencies closed, no dangling deps, and not excluded by a cycle or a
     /// malformed parent. Sorted by `(priority, topological_rank, id)`.
@@ -329,13 +340,7 @@ impl GraphStore {
         let mut ready: Vec<NodeIndex> = self
             .graph
             .node_indices()
-            .filter(|&node| {
-                let meta = &self.graph[node];
-                meta.status.is_active()
-                    && !meta.has_dangling_deps()
-                    && !excluded.contains(&node)
-                    && self.hard_deps_all_closed(node)
-            })
+            .filter(|&node| self.node_is_ready(node, &excluded))
             .collect();
 
         ready.sort_by(|&a, &b| {
@@ -434,6 +439,18 @@ impl GraphStore {
         has_path_connecting(&hard, to_node, from_node, None)
     }
 
+    /// The cycle that the hard edge `from → to` would close, as the closed path
+    /// `[from, to, …, from]` along a shortest existing `to ⇝ from` chain, or
+    /// `None` when the edge would not create a cycle.
+    pub fn would_cycle_path(&self, from: &CloveId, to: &CloveId) -> Option<Vec<CloveId>> {
+        let (&from_node, &to_node) = (self.id_to_node.get(from)?, self.id_to_node.get(to)?);
+        let hard = EdgeFiltered::from_fn(&self.graph, |e| is_hard_dep(*e.weight()));
+        let (_, chain) = astar(&hard, to_node, |n| n == from_node, |_| 1usize, |_| 0)?;
+        let mut cycle = vec![from.clone()];
+        cycle.extend(chain.into_iter().map(|n| self.graph[n].id.clone()));
+        Some(cycle)
+    }
+
     /// All hard-dependency cycles, each as the list of member ids. Includes
     /// single-node self-loops.
     pub fn all_cycles(&self) -> Vec<Vec<CloveId>> {
@@ -464,17 +481,19 @@ impl GraphStore {
     /// expanded, so cyclic graphs terminate.
     pub fn dep_tree(&self, root: &CloveId, max_depth: usize) -> Option<DepTreeNode> {
         let &root_node = self.id_to_node.get(root)?;
-        let ready: HashSet<CloveId> = self.ready_items().into_iter().collect();
+        // Readiness is tested per visited node. `ready_items()` would rank and
+        // sort the whole graph to flag the few nodes of one tree.
+        let excluded = self.excluded_node_set();
         let mut path = HashSet::new();
         let mut expanded = HashSet::new();
-        Some(self.dep_tree_node(root_node, max_depth, &ready, &mut path, &mut expanded))
+        Some(self.dep_tree_node(root_node, max_depth, &excluded, &mut path, &mut expanded))
     }
 
     fn dep_tree_node(
         &self,
         node: NodeIndex,
         remaining_depth: usize,
-        ready: &HashSet<CloveId>,
+        excluded: &HashSet<NodeIndex>,
         path: &mut HashSet<NodeIndex>,
         expanded: &mut HashSet<NodeIndex>,
     ) -> DepTreeNode {
@@ -483,7 +502,7 @@ impl GraphStore {
             id: meta.id.clone(),
             title: meta.title.to_string(),
             status: meta.status,
-            ready: ready.contains(&meta.id),
+            ready: self.node_is_ready(node, excluded),
             cycle_ref: false,
             repeat_ref: false,
             children: Vec::new(),
@@ -524,7 +543,7 @@ impl GraphStore {
 
         let children = child_targets
             .into_iter()
-            .map(|child| self.dep_tree_node(child, remaining_depth - 1, ready, path, expanded))
+            .map(|child| self.dep_tree_node(child, remaining_depth - 1, excluded, path, expanded))
             .collect();
         path.remove(&node);
 
@@ -1001,6 +1020,43 @@ mod tests {
     }
 
     // V-U08
+    /// The tree's `ready` flag is the `ready_items()` answer for each node.
+    #[test]
+    fn dep_tree_ready_flags_match_ready_items() {
+        let (graph, _) = GraphStore::build(&[
+            fm(
+                "proj-ROOT0000",
+                ItemStatus::Open,
+                &["proj-A0000000", "proj-B0000000"],
+            ),
+            // Ready: its only dep is closed.
+            fm("proj-A0000000", ItemStatus::Open, &["proj-D0NE0000"]),
+            fm("proj-D0NE0000", ItemStatus::Closed, &[]),
+            // Not ready: one dangling dep, one dep in a cycle.
+            fm(
+                "proj-B0000000",
+                ItemStatus::Open,
+                &["proj-M1SS1NG0", "proj-C0000000"],
+            ),
+            fm("proj-C0000000", ItemStatus::Open, &["proj-E0000000"]),
+            fm("proj-E0000000", ItemStatus::Open, &["proj-C0000000"]),
+        ]);
+        let ready: HashSet<CloveId> = graph.ready_items().into_iter().collect();
+        assert_eq!(ready, HashSet::from([id("proj-A0000000")]));
+
+        fn walk(node: &DepTreeNode, ready: &HashSet<CloveId>, seen: &mut usize) {
+            assert_eq!(node.ready, ready.contains(&node.id), "{}", node.id);
+            *seen += 1;
+            for child in &node.children {
+                walk(child, ready, seen);
+            }
+        }
+        let tree = graph.dep_tree(&id("proj-ROOT0000"), usize::MAX).unwrap();
+        let mut seen = 0;
+        walk(&tree, &ready, &mut seen);
+        assert!(seen >= 6, "the walk covered {seen} nodes");
+    }
+
     #[test]
     fn dep_tree_cycle_marker() {
         let items = [
@@ -1108,6 +1164,30 @@ mod tests {
         assert!(graph.check_would_cycle(&id("proj-CCCCCCCC"), &id("proj-AAAAAAAA")));
         // Adding A→C would NOT cycle (A already reaches C).
         assert!(!graph.check_would_cycle(&id("proj-AAAAAAAA"), &id("proj-CCCCCCCC")));
+    }
+
+    #[test]
+    fn would_cycle_path_is_the_closed_chain() {
+        // A→B→C; adding C→A closes C→A→B→C.
+        let items = [
+            fm("proj-AAAAAAAA", ItemStatus::Open, &["proj-BBBBBBBB"]),
+            fm("proj-BBBBBBBB", ItemStatus::Open, &["proj-CCCCCCCC"]),
+            fm("proj-CCCCCCCC", ItemStatus::Open, &[]),
+        ];
+        let (graph, _) = GraphStore::build(&items);
+        assert_eq!(
+            graph.would_cycle_path(&id("proj-CCCCCCCC"), &id("proj-AAAAAAAA")),
+            Some(vec![
+                id("proj-CCCCCCCC"),
+                id("proj-AAAAAAAA"),
+                id("proj-BBBBBBBB"),
+                id("proj-CCCCCCCC"),
+            ])
+        );
+        assert_eq!(
+            graph.would_cycle_path(&id("proj-AAAAAAAA"), &id("proj-CCCCCCCC")),
+            None
+        );
     }
 
     #[test]

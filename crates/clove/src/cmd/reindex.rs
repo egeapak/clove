@@ -12,27 +12,14 @@ use crate::context::{index_error, Ctx};
 use crate::output::print_json_success;
 
 /// A reindex report (items, duration, warnings) from whichever side rebuilt.
-struct Report {
+pub(crate) struct Report {
     items_indexed: u64,
     duration_ms: u64,
     warnings: Vec<String>,
 }
 
 pub fn run(ctx: &Ctx, format: OutputFormat, quiet: bool) -> Result<(), CloveError> {
-    // Delegate to a running daemon: it rebuilds and reopens its own handle, so
-    // the CLI and daemon stay coherent (a CLI-side rebuild would leave the
-    // daemon pointing at the replaced inode until its next reopen).
-    let report = match reindex_via_daemon(ctx, quiet) {
-        Some(report) => report,
-        None => {
-            let r = reindex_locally(ctx)?;
-            Report {
-                items_indexed: r.items_indexed as u64,
-                duration_ms: r.duration_ms as u64,
-                warnings: r.warnings,
-            }
-        }
-    };
+    let report = rebuild(ctx, quiet)?;
 
     match format {
         OutputFormat::Json | OutputFormat::Jsonl => print_json_success(
@@ -57,6 +44,25 @@ pub fn run(ctx: &Ctx, format: OutputFormat, quiet: bool) -> Result<(), CloveErro
         }
     }
     Ok(())
+}
+
+/// Rebuild the index: through a running daemon when there is one, else here.
+///
+/// The daemon rebuilds and reopens its own handle, so the CLI and the daemon
+/// stay coherent. A CLI-side rebuild would leave the daemon on the replaced
+/// inode until its next reopen. `clove doctor --fix` uses this too.
+pub(crate) fn rebuild(ctx: &Ctx, quiet: bool) -> Result<Report, CloveError> {
+    match reindex_via_daemon(ctx, quiet) {
+        Some(report) => Ok(report),
+        None => {
+            let r = reindex_locally(ctx)?;
+            Ok(Report {
+                items_indexed: r.items_indexed as u64,
+                duration_ms: r.duration_ms as u64,
+                warnings: r.warnings,
+            })
+        }
+    }
 }
 
 /// Ask a running daemon to reindex (so it reopens its own handle). `None` → the

@@ -77,6 +77,18 @@ pub fn run(
 
 /// Print the persisted snapshot series (`--history`).
 fn show_history(ctx: &Ctx, format: OutputFormat, args: &StatsArgs) -> Result<(), CloveError> {
+    // The history query drops a `since` it cannot parse and returns the whole
+    // series, so a mistyped bound must be refused here rather than ignored.
+    if let Some(since) = &args.since {
+        if clove_types::parse_rfc3339(since).is_none() {
+            return Err(CloveError::InvalidField {
+                field: "--since".to_owned(),
+                reason: format!(
+                    "`{since}` is not an RFC 3339 timestamp (for example 2026-01-31T00:00:00Z)"
+                ),
+            });
+        }
+    }
     if !ctx.db_path.exists() {
         // No index yet → no history. Empty series rather than an error.
         match format {
@@ -254,7 +266,7 @@ fn render_human(report: &StatsReport, daemon: &Value, index: &Value, snapshotted
         let mut parts: Vec<String> = report
             .by_assignee
             .iter()
-            .map(|kc| format!("{} {}", kc.key, kc.count))
+            .map(|kc| format!("{} {}", crate::util::term_line(&kc.key), kc.count))
             .collect();
         parts.push(format!("unassigned {}", report.unassigned));
         outln!("Assignees  {}", parts.join("  "));
@@ -263,7 +275,7 @@ fn render_human(report: &StatsReport, daemon: &Value, index: &Value, snapshotted
         let parts: Vec<String> = report
             .by_label
             .iter()
-            .map(|kc| format!("{} {}", kc.key, kc.count))
+            .map(|kc| format!("{} {}", crate::util::term_line(&kc.key), kc.count))
             .collect();
         outln!("Labels     {}", parts.join("  "));
     }
@@ -286,7 +298,7 @@ fn render_human(report: &StatsReport, daemon: &Value, index: &Value, snapshotted
             outln!(
                 "  {:14} {:<24} {}/{}  {}%{}",
                 e.id,
-                e.title,
+                crate::util::term_line(&e.title),
                 e.closed,
                 e.total,
                 e.pct,

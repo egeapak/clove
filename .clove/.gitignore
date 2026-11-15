@@ -9,3 +9,4 @@ index.db.tmp
 daemon.token
 sync/
 write.lock
+issues/.tmp*

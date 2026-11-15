@@ -278,6 +278,30 @@ fn mux_candidates(mux: &str) -> &'static [&'static str] {
     }
 }
 
+/// The install hint for a `<mux> <provider>` request that resolved to no
+/// binary. It names every plugin that can serve the request, in the order
+/// [`resolve_mux`] tries them: the dedicated `<mux>-<provider>` crate may not
+/// exist at all (`clove import github` is served by `sync-github`), so naming
+/// only that one sends the user to a crate that is not there.
+pub fn missing_provider_hint(mux: &str, provider: &str) -> String {
+    let mut homes = mux_candidates(mux).iter();
+    let first = homes.next().copied().unwrap_or(mux);
+    let mut hint = format!(
+        "unknown {mux} provider `{provider}`; install it with \
+         `clove plugin install {first}-{provider}`"
+    );
+    let others: Vec<String> = homes
+        .map(|home| format!("`clove plugin install {home}-{provider}`"))
+        .collect();
+    if !others.is_empty() {
+        hint.push_str(&format!(
+            " (a `{mux}` provider can also come from a sync or one-way plugin: try {})",
+            others.join(" or ")
+        ));
+    }
+    hint
+}
+
 /// Resolve the plugin binary for `clove <mux> <provider>` (`PLUGIN_SYSTEM.md`
 /// §4.2), walking the umbrella candidates ([`mux_candidates`]) and returning the
 /// first existing executable. Purely structural — no `--clove-plugin-info` probe,
@@ -788,6 +812,27 @@ pub fn run_plugin(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `clove import github` has no `clove-import-github` crate — the sync
+    /// plugin serves it — so the hint must name the umbrella candidates too.
+    #[test]
+    fn missing_provider_hint_names_every_plugin_that_can_serve_it() {
+        let hint = missing_provider_hint("import", "github");
+        assert!(
+            hint.contains("`clove plugin install import-github`"),
+            "{hint}"
+        );
+        assert!(
+            hint.contains("`clove plugin install sync-github`"),
+            "{hint}"
+        );
+        // `sync` has no fallback, so its hint names one crate only.
+        let hint = missing_provider_hint("sync", "github");
+        assert!(
+            hint.ends_with("`clove plugin install sync-github`"),
+            "{hint}"
+        );
+    }
 
     #[test]
     fn the_suffix_aware_helpers_agree_under_an_injected_suffix() {

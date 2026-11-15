@@ -513,9 +513,9 @@ fn jsonl_round_trip_is_lossless_and_idempotent() {
     assert_eq!(dep["type"], "bug");
     assert_eq!(dep["priority"], 1);
     assert_eq!(dep["labels"], serde_json::json!(["perf"]));
-    // The dep edge survived: it points at the *source* repo's id (preserved as a
-    // literal reference through export → import).
-    assert_eq!(dep["deps"], serde_json::json!([a]));
+    // The dep edge survived: it points at the imported copy of its target
+    // (every imported item gets a new id, and the reference follows it).
+    assert_eq!(dep["deps"], serde_json::json!([base["id"]]));
 
     // Re-import into the SAME dest repo: external_ref (the source's
     // `beads:<id>`-derived ref, carried verbatim) matches → zero new items.
@@ -645,8 +645,17 @@ fn export_beads_round_trips_native_shape() {
     assert_eq!(bug["priority"], 1);
     assert_eq!(bug["assignee"], "ege", "assignee round-trips");
     assert_eq!(bug["labels"], serde_json::json!(["area:core"]));
-    assert_eq!(bug["deps"], serde_json::json!([a]), "blocks edge → deps");
-    assert_eq!(bug["parent"], p, "parent-child edge → parent");
+    // The edges point at the imported copies of their targets.
+    assert_eq!(
+        bug["deps"],
+        serde_json::json!([find_by_beads_id(&items, &a)["id"]]),
+        "blocks edge → deps"
+    );
+    assert_eq!(
+        bug["parent"],
+        find_by_beads_id(&items, &p)["id"],
+        "parent-child edge → parent"
+    );
 
     // The deferred inverse round-trips: status back to open + the `deferred` label.
     let deferred = find_by_beads_id(&items, &c);
@@ -720,4 +729,74 @@ fn export_beads_preserves_relates_and_flat_edges() {
     assert_eq!(item["parent"], "proj-EEEE5555");
     assert_eq!(item["duplicates"], serde_json::json!(["proj-AAAA1111"]));
     assert_eq!(item["supersedes"], serde_json::json!(["proj-BBBB2222"]));
+}
+
+/// `bd export` writes a dependency as `{issue_id, depends_on_id, type}` with
+/// beads ids. The import translates them to the clove ids of the imported
+/// issues; a line with such ids is imported, not skipped as malformed.
+#[test]
+fn dependencies_in_beads_ids_become_edges_between_the_imported_items() {
+    let (_src, path) = write_jsonl(&[
+        r#"{"id":"bd-100","title":"Epic","issue_type":"epic"}"#,
+        r#"{"id":"bd-101","title":"Child","dependencies":[{"issue_id":"bd-101","depends_on_id":"bd-102","type":"blocks"},{"issue_id":"bd-101","depends_on_id":"bd-100","type":"parent-child"},{"issue_id":"bd-101","depends_on_id":"bd-999","type":"blocks"}]}"#,
+        r#"{"id":"bd-102","title":"Blocker"}"#,
+    ]);
+    let repo = init_repo();
+    let out = clove(repo.path())
+        .args([
+            "import",
+            "--format",
+            "json",
+            "beads",
+            path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "import failed: {out:?}");
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["data"]["created"], 3, "{v}");
+    assert_eq!(v["data"]["skipped"], 0, "{v}");
+    let warnings = v["_meta"]["warnings"].to_string();
+    assert!(warnings.contains("bd-999"), "warnings: {warnings}");
+
+    let items = list_items(repo.path());
+    let id_of = |beads_id: &str| {
+        find_by_beads_id(&items, beads_id)["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let child = show(repo.path(), &id_of("bd-101"));
+    assert_eq!(child["deps"], serde_json::json!([id_of("bd-102")]));
+    assert_eq!(child["parent"], id_of("bd-100").as_str());
+}
+
+/// The beads id is the idempotency key. An issue whose unmapped fields (here
+/// `updated_at`) changed since the first import is skipped, not duplicated.
+#[test]
+fn re_import_after_an_unmapped_field_changed_creates_nothing() {
+    let repo = init_repo();
+    let (_a, first) =
+        write_jsonl(&[r#"{"id":"bd-7","title":"T","updated_at":"2026-01-01T00:00:00Z"}"#]);
+    clove(repo.path())
+        .args(["import", "beads", first.to_str().unwrap()])
+        .assert()
+        .success();
+    let (_b, second) =
+        write_jsonl(&[r#"{"id":"bd-7","title":"T","updated_at":"2026-02-02T00:00:00Z"}"#]);
+    let out = clove(repo.path())
+        .args([
+            "import",
+            "--format",
+            "json",
+            "beads",
+            second.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "re-import failed: {out:?}");
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["data"]["created"], 0, "{v}");
+    assert_eq!(v["data"]["skipped"], 1, "{v}");
+    assert_eq!(item_file_count(repo.path()), 1);
 }

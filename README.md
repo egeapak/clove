@@ -93,8 +93,8 @@ never needed to *run* clove. Building with `web`:
 
 - **from crates.io** (`cargo install clove-cli --features web`) downloads the
   built web UI for that exact version from its GitHub Release at build time and
-  checks it against the checksum published beside it (integrity, not
-  authenticity: both come from the release) — it needs network access, not Node. Offline or packager
+  checks it against the SHA-256 that the crate itself pins (so a changed
+  release asset fails the build) — it needs network access, not Node. Offline or packager
   builds can point `CLOVE_WEB_DIST_DIR` at a built `dist/` directory instead;
 - **from git** builds the SPA from source and so needs `npm` on your machine;
   without it the binary falls back to a placeholder page while the JSON API stays
@@ -212,6 +212,12 @@ server takes a free one and `clove serve` prints where; an explicit `--port` is
 always honored. The web API mirrors the CLI under `/api/v1` with the same JSON
 envelope and exit-code semantics.
 
+The web UI needs an access token, because a local port is open to every user
+of the machine. The URL that `clove serve` prints ends in `?token=…`; open that
+URL once and the browser keeps a cookie. A request without the token gets
+`401`. A script sends `Authorization: Bearer <token>`. The token changes when
+the server (or the daemon) restarts: run `clove serve` again for the new URL.
+
 ## Interop & GitHub sync
 
 ```sh
@@ -241,7 +247,8 @@ resolves the conflict by policy (`--prefer newer|local|remote|manual`; default
 too (`--no-comments` to skip). `--dry-run` plans without touching either side. A
 per-repo last-sync clock lives under `.clove/sync/` (git-ignored), and a running
 daemon can run the sync on a timer (`[daemon] github_sync_interval_min` +
-`github_sync_repo`, which must be one of the project's own GitHub remotes). Auth
+`github_sync_repo`, which must be one of the project's own GitHub remotes) once
+the clone allows it with `git config clove.automation true`. Auth
 via `GITHUB_TOKEN` or the `gh` CLI — the daemon's timed sync uses `gh` only, since
 the daemon does not inherit your shell's `GITHUB_TOKEN`. Behind a proxy, set
 `HTTPS_PROXY` (and `NO_PROXY` for hosts that must connect directly); the sync
