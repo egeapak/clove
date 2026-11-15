@@ -649,7 +649,6 @@ dependencies = [
 name = "clove-import"
 version = "0.3.0"
 dependencies = [
- "anyhow",
  "blake3",
  "camino",
  "chrono",

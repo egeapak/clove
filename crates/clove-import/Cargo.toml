@@ -34,7 +34,6 @@ serde.workspace = true
 serde_json.workspace = true
 serde_norway.workspace = true
 camino.workspace = true
-anyhow.workspace = true
 thiserror.workspace = true
 chrono.workspace = true
 # Stable, versioned content hash for the persisted comment-dedup fingerprints.
