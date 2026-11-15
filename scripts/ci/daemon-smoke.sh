@@ -6,8 +6,14 @@
 # CI runs it on Windows (Git Bash), where the daemon integration suites are
 # `#![cfg(unix)]`; it runs unchanged on macOS and Linux.
 #
-#   scripts/ci/daemon-smoke.sh <dir holding clove + cloved>
+# CI also runs it on Linux against the default-features (lean) build, which has
+# no web server: with CLOVE_SMOKE_WEB=0 the script checks that the daemon serves
+# no web UI, instead of checking the web UI.
+#
+#   [CLOVE_SMOKE_WEB=0] scripts/ci/daemon-smoke.sh <dir holding clove + cloved>
 set -euo pipefail
+
+smoke_web=${CLOVE_SMOKE_WEB:-1}
 
 bin_dir=${1:?usage: daemon-smoke.sh <dir holding clove + cloved>}
 export PATH="$bin_dir:$PATH"
@@ -97,7 +103,11 @@ projects=$(status_of a | field '.data.hub.projects | length')
 ok "one hub serves both projects"
 
 web_url=$(status_of a | field .data.web_url)
-if [ -n "$web_url" ] && [ "$web_url" != null ]; then
+if [ "$smoke_web" = 0 ]; then
+	[ -z "$web_url" ] || [ "$web_url" = null ] \
+		|| fail "CLOVE_SMOKE_WEB=0, but the daemon serves a web UI at $web_url (not a lean build?)"
+	ok "the lean daemon serves no web UI"
+elif [ -n "$web_url" ] && [ "$web_url" != null ]; then
 	# The URL carries the hub's access token (`…/p/<slug>/?token=<hex>`).
 	web_page=${web_url%%\?*}
 	web_token=${web_url##*token=}
