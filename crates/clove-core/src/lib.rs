@@ -32,7 +32,8 @@ pub(crate) use clove_types::{error, fields, id, limits, model, time, validate};
 
 pub use comments::{add_comment, list_comments, Comment};
 pub use config::{
-    load_config, CloveConfig, DaemonConfig, IndexConfig, OutputFormat, WebConfig, GITIGNORE_ENTRIES,
+    load_config, CloveConfig, DaemonConfig, IndexConfig, OutputFormat, WebConfig,
+    AUTOMATION_GIT_CONFIG_KEY, GITIGNORE_ENTRIES,
 };
 pub use doctor::{diagnose, fix as doctor_fix, DoctorIssue, DoctorReport, Severity};
 pub use edit::apply_edit;

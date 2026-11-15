@@ -98,7 +98,13 @@ ok "one hub serves both projects"
 
 web_url=$(status_of a | field .data.web_url)
 if [ -n "$web_url" ] && [ "$web_url" != null ]; then
-	items=$(curl -fsS "${web_url}api/v1/items") || fail "web API at $web_url did not answer"
+	# The URL carries the hub's access token (`…/p/<slug>/?token=<hex>`).
+	web_page=${web_url%%\?*}
+	web_token=${web_url##*token=}
+	items=$(curl -fsS -H "Authorization: Bearer $web_token" "${web_page}api/v1/items") \
+		|| fail "web API at $web_page did not answer"
+	[ "$(curl -s -o /dev/null -w '%{http_code}' "${web_page}api/v1/items")" = 401 ] \
+		|| fail "web API at $web_page answers without the access token"
 	echo "$items" | grep -q "smoke item a" || fail "web API at $web_url does not list project a: $items"
 	ok "web UI serves project a at $web_url"
 else

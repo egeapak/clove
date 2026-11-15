@@ -73,7 +73,7 @@ pub fn check_sync_target(repo_root: &camino::Utf8Path, spec: &str) -> Result<Str
 /// trusted: a bare repository, or any directory of repository files a clone
 /// can carry, would let the project's content choose its remotes.
 #[cfg(feature = "git-sync")]
-fn open_work_tree(repo_root: &camino::Utf8Path) -> Result<git2::Repository, String> {
+pub(crate) fn open_work_tree(repo_root: &camino::Utf8Path) -> Result<git2::Repository, String> {
     let not_a_root = || format!("{repo_root} is not the root of a git work tree");
     let dot_git = repo_root.join(".git");
     let dot_git_kind = std::fs::symlink_metadata(&dot_git).map_err(|_| not_a_root())?;
