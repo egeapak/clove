@@ -76,7 +76,7 @@ no SQLite surface.
 | `git2` | 0.19 | worktree detection (no `git` subprocess) |
 | `chrono` | 0.4 | RFC3339 timestamps |
 | `jiff` | 0.1 | nanosecond timestamps for comment filenames |
-| `octocrab` | 0.51 | GitHub REST API client (clove-import GitHub importer/exporter) |
+| `octocrab` | 0.54 | GitHub REST API client (clove-import GitHub importer/exporter) |
 
 **Rust edition/MSRV:** `edition = "2021"`. **No pinned MSRV — clove tracks current
 stable Rust** (decision 2026-06-02: a strict 1.80 MSRV added dependency-version friction
