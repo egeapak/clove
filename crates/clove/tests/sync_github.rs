@@ -1623,6 +1623,106 @@ fn idle_issue_comment_fetch_is_skipped_on_the_next_sync() {
     assert!(mock.comment_get_count() > before);
 }
 
+/// The hand-kept sync flag lists (`clove sync --help` and `clove agent-doc`)
+/// name every flag the plugin really takes, as its own `--help` lists them.
+#[test]
+fn the_sync_flag_lists_name_every_plugin_flag() {
+    let dir = init_repo();
+    let addr: SocketAddr = "127.0.0.1:1".parse().unwrap();
+    let run = |args: &[&str]| {
+        let out = clove(dir.path(), addr).args(args).output().unwrap();
+        assert!(out.status.success(), "{args:?} failed: {out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let plugin_help = run(&["sync", "github", "owner/repo", "--help"]);
+    let flags: Vec<&str> = plugin_help
+        .lines()
+        .filter_map(|line| line.trim_start().strip_prefix("--"))
+        .filter_map(|rest| rest.split([' ', ',', '=', '<']).next())
+        .filter(|flag| !matches!(*flag, "help" | "version" | "format"))
+        .collect();
+    assert!(flags.contains(&"adopt-links"), "{plugin_help}");
+    assert!(
+        plugin_help.starts_with("Two-way sync of clove items with GitHub Issues"),
+        "the plugin help opens with its own summary: {plugin_help}"
+    );
+
+    // The `Form:` line of the after-help and the `[REST]` help of `clove sync`.
+    let host_help = run(&["sync", "--help"]);
+    let flat = host_help.split_whitespace().collect::<Vec<_>>().join(" ");
+    let form = flat
+        .split_once("Form: clove sync")
+        .and_then(|(_, rest)| rest.split_once(". "))
+        .map(|(form, _)| form)
+        .unwrap_or_else(|| panic!("no Form: line in\n{host_help}"));
+    let rest = flat
+        .split_once("Everything after the provider")
+        .and_then(|(_, rest)| rest.split_once("forwarded to the plugin"))
+        .map(|(rest, _)| rest)
+        .unwrap_or_else(|| panic!("no [REST] help in\n{host_help}"));
+    let doc = run(&["agent-doc"]);
+    let flat_doc = doc.split_whitespace().collect::<Vec<_>>().join(" ");
+    let doc_line = flat_doc
+        .split_once("`clove sync github <owner/repo>")
+        .and_then(|(_, rest)| rest.split_once('`'))
+        .map(|(line, _)| line)
+        .unwrap_or_else(|| panic!("no sync line in the agent doc\n{doc}"));
+
+    for flag in flags {
+        let flag = format!("--{flag}");
+        assert!(
+            form.contains(&flag),
+            "`clove sync --help` Form: lacks {flag}: {form}"
+        );
+        assert!(
+            rest.contains(&flag),
+            "`clove sync --help` [REST] lacks {flag}: {rest}"
+        );
+        assert!(
+            doc_line.contains(&flag),
+            "agent-doc sync line lacks {flag}: {doc_line}"
+        );
+    }
+}
+
+/// An idle sync reads the store once and lists the issues once per page:
+/// the planner, the comment plans, and the assignee baseline share one scan.
+#[test]
+#[cfg_attr(not(feature = "test-knobs"), ignore = "needs a `test-knobs` clove")]
+fn an_idle_sync_scans_the_store_once_and_lists_each_page_once() {
+    let mock = MockGitHub::start();
+    mock.paginate(2);
+    let dir = init_repo();
+    for title in ["One", "Two", "Three"] {
+        clove(dir.path(), mock.addr)
+            .args(["new", title, "--type", "bug"])
+            .assert()
+            .success();
+    }
+    sync(dir.path(), mock.addr, &[]);
+    assert_eq!(mock.issue_count(), 3);
+
+    let log = dir.path().join("host-calls.log");
+    let lists_before = mock.list_get_count();
+    let out = clove(dir.path(), mock.addr)
+        .env("CLOVE_HOST_CALL_LOG", &log)
+        .args(["sync", "--format", "json", "github", "owner/repo"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "sync failed: {out:?}");
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["data"]["in_sync"], 3, "{v}");
+
+    let calls = std::fs::read_to_string(&log).unwrap();
+    let scans = calls
+        .lines()
+        .filter(|m| *m == "store.scan" || *m == "store.scan_frontmatter")
+        .count();
+    assert_eq!(scans, 1, "store scans of an idle sync:\n{calls}");
+    // Three issues at two per page: two list pages, each fetched once.
+    assert_eq!(mock.list_get_count() - lists_before, 2);
+}
+
 #[test]
 fn no_comments_flag_skips_comment_sync() {
     let mock = MockGitHub::start();

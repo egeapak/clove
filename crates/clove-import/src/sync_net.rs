@@ -75,6 +75,11 @@ pub fn sync_github(
         adopt_links,
     } = options;
     let (owner, repo) = parse_repo_spec(spec)?;
+    // One store scan per run while nothing is written: the planner, each
+    // comment plan's `external_ref` index, and the assignee baseline all read
+    // the same scan, and every write drops it.
+    let cached = crate::store::CachedStore::new(store);
+    let store: &dyn Store = &cached;
 
     let state_path = SyncState::path_for(store.repo_root(), spec);
 

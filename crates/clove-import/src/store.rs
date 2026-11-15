@@ -85,6 +85,120 @@ fn comment_key(saved: &Value) -> String {
         .to_owned()
 }
 
+/// A [`Store`] that scans once until the next write.
+///
+/// One sync run reads the whole store several times: the planner's input, the
+/// `external_ref` index of each comment plan, and the assignee baseline. Each
+/// read is a full file scan (over the host IPC channel, for a plugin). This
+/// wrapper keeps the last [`Store::scan`] and answers [`Store::scan`] and
+/// [`Store::scan_frontmatter`] from it. Every write method drops the copy, so
+/// a read after a write sees the write. Reads of one item ([`Store::get`],
+/// [`Store::comments`]) are not cached.
+pub struct CachedStore<'a> {
+    inner: &'a dyn Store,
+    scan: RefCell<Option<Scan>>,
+}
+
+impl<'a> CachedStore<'a> {
+    pub fn new(inner: &'a dyn Store) -> Self {
+        CachedStore {
+            inner,
+            scan: RefCell::new(None),
+        }
+    }
+
+    fn cached(&self) -> Result<Scan, ImportError> {
+        if let Some(scan) = self.scan.borrow().as_ref() {
+            return Ok(scan.clone());
+        }
+        let scan = self.inner.scan()?;
+        *self.scan.borrow_mut() = Some(scan.clone());
+        Ok(scan)
+    }
+
+    /// Run a write and drop the cached scan, whether the write failed or not
+    /// (a failed write can still have changed a file).
+    fn write<T>(&self, op: impl FnOnce(&dyn Store) -> T) -> T {
+        let out = op(self.inner);
+        self.scan.borrow_mut().take();
+        out
+    }
+}
+
+impl Store for CachedStore<'_> {
+    fn repo_root(&self) -> &Utf8Path {
+        self.inner.repo_root()
+    }
+
+    fn scan(&self) -> Result<Scan, ImportError> {
+        self.cached()
+    }
+
+    fn scan_frontmatter(&self) -> Result<Vec<ItemFrontmatter>, ImportError> {
+        Ok(self
+            .cached()?
+            .items
+            .into_iter()
+            .map(|item| item.frontmatter)
+            .collect())
+    }
+
+    fn get(&self, id: &CloveId) -> Result<Item, ImportError> {
+        self.inner.get(id)
+    }
+
+    fn new_id(&self) -> Result<CloveId, ImportError> {
+        self.inner.new_id()
+    }
+
+    fn create_item(&self, item: &Item) -> Result<(), ImportError> {
+        self.write(|s| s.create_item(item))
+    }
+
+    fn apply_edit(&self, id: &CloveId, request: &EditRequest) -> Result<Value, ImportError> {
+        self.write(|s| s.apply_edit(id, request))
+    }
+
+    fn dep_add(&self, id: &CloveId, dep: &CloveId) -> Result<(), ImportError> {
+        self.write(|s| s.dep_add(id, dep))
+    }
+
+    fn dep_remove(&self, id: &CloveId, dep: &CloveId) -> Result<(), ImportError> {
+        self.write(|s| s.dep_remove(id, dep))
+    }
+
+    fn link_external(
+        &self,
+        id: &CloveId,
+        source_system: &str,
+        external_ref: &str,
+    ) -> Result<DateTime<Utc>, ImportError> {
+        self.write(|s| s.link_external(id, source_system, external_ref))
+    }
+
+    fn comments(&self, id: &CloveId) -> Result<Vec<CommentPayload>, ImportError> {
+        self.inner.comments(id)
+    }
+
+    fn add_comment(
+        &self,
+        id: &CloveId,
+        author: &str,
+        body: &str,
+        timestamp: DateTime<Utc>,
+    ) -> Result<String, ImportError> {
+        self.write(|s| s.add_comment(id, author, body, timestamp))
+    }
+
+    fn update_comment(&self, id: &CloveId, key: &str, body: &str) -> Result<(), ImportError> {
+        self.write(|s| s.update_comment(id, key, body))
+    }
+
+    fn delete_comment(&self, id: &CloveId, key: &str) -> Result<(), ImportError> {
+        self.write(|s| s.delete_comment(id, key))
+    }
+}
+
 /// Direct access. `new_id` uses the prefix the store was opened with.
 pub struct DirectStore {
     store: ItemStore,
@@ -313,5 +427,127 @@ impl Store for HostStore {
 
     fn delete_comment(&self, id: &CloveId, key: &str) -> Result<(), ImportError> {
         self.with(|c| c.store_delete_comment(id.as_str(), key))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::*;
+
+    /// A [`DirectStore`] that counts the full scans it answers.
+    struct Counting {
+        inner: DirectStore,
+        scans: Cell<usize>,
+    }
+
+    impl Store for Counting {
+        fn repo_root(&self) -> &Utf8Path {
+            self.inner.repo_root()
+        }
+        fn scan(&self) -> Result<Scan, ImportError> {
+            self.scans.set(self.scans.get() + 1);
+            self.inner.scan()
+        }
+        fn scan_frontmatter(&self) -> Result<Vec<ItemFrontmatter>, ImportError> {
+            self.scans.set(self.scans.get() + 1);
+            self.inner.scan_frontmatter()
+        }
+        fn get(&self, id: &CloveId) -> Result<Item, ImportError> {
+            self.inner.get(id)
+        }
+        fn new_id(&self) -> Result<CloveId, ImportError> {
+            self.inner.new_id()
+        }
+        fn create_item(&self, item: &Item) -> Result<(), ImportError> {
+            self.inner.create_item(item)
+        }
+        fn apply_edit(&self, id: &CloveId, request: &EditRequest) -> Result<Value, ImportError> {
+            self.inner.apply_edit(id, request)
+        }
+        fn dep_add(&self, id: &CloveId, dep: &CloveId) -> Result<(), ImportError> {
+            self.inner.dep_add(id, dep)
+        }
+        fn dep_remove(&self, id: &CloveId, dep: &CloveId) -> Result<(), ImportError> {
+            self.inner.dep_remove(id, dep)
+        }
+        fn link_external(
+            &self,
+            id: &CloveId,
+            source_system: &str,
+            external_ref: &str,
+        ) -> Result<DateTime<Utc>, ImportError> {
+            self.inner.link_external(id, source_system, external_ref)
+        }
+        fn comments(&self, id: &CloveId) -> Result<Vec<CommentPayload>, ImportError> {
+            self.inner.comments(id)
+        }
+        fn add_comment(
+            &self,
+            id: &CloveId,
+            author: &str,
+            body: &str,
+            timestamp: DateTime<Utc>,
+        ) -> Result<String, ImportError> {
+            self.inner.add_comment(id, author, body, timestamp)
+        }
+        fn update_comment(&self, id: &CloveId, key: &str, body: &str) -> Result<(), ImportError> {
+            self.inner.update_comment(id, key, body)
+        }
+        fn delete_comment(&self, id: &CloveId, key: &str) -> Result<(), ImportError> {
+            self.inner.delete_comment(id, key)
+        }
+    }
+
+    #[test]
+    fn cached_store_scans_once_until_a_write() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8Path::from_path(tmp.path()).unwrap().to_owned();
+        std::fs::create_dir_all(root.join(".clove").join("issues")).unwrap();
+        let counting = Counting {
+            inner: DirectStore::new(ItemStore::new(root), "proj"),
+            scans: Cell::new(0),
+        };
+        let created = counting
+            .inner
+            .inner()
+            .create(
+                "proj",
+                clove_core::NewItem {
+                    title: "First".to_owned(),
+                    item_type: clove_types::ItemType::default(),
+                    priority: clove_types::Priority::DEFAULT,
+                    labels: vec![],
+                    deps: vec![],
+                    parent: None,
+                    assignee: None,
+                    body: "Body.".to_owned(),
+                },
+                Utc::now(),
+            )
+            .unwrap();
+        let id = created.frontmatter.id;
+        let cached = CachedStore::new(&counting);
+
+        // Reads share one scan, frontmatter-only reads included.
+        assert_eq!(cached.scan().unwrap().items.len(), 1);
+        assert_eq!(cached.scan_frontmatter().unwrap()[0].title, "First");
+        assert_eq!(cached.scan().unwrap().items.len(), 1);
+        assert_eq!(counting.scans.get(), 1);
+
+        // A write drops the scan, so the next read sees the write.
+        cached
+            .link_external(&id, "github", "gh-7")
+            .expect("link the item");
+        let frontmatters = cached.scan_frontmatter().unwrap();
+        assert_eq!(frontmatters[0].external_ref.as_deref(), Some("gh-7"));
+        assert_eq!(counting.scans.get(), 2);
+
+        // A failed write drops it too.
+        let missing = CloveId::new("proj-ZZZZZZZZ").unwrap();
+        assert!(cached.link_external(&missing, "github", "gh-8").is_err());
+        cached.scan().unwrap();
+        assert_eq!(counting.scans.get(), 3);
     }
 }

@@ -40,7 +40,7 @@ pub use restore::{
     apply_restore, parse_export_json, parse_export_jsonl, plan_restore, RestorePlan, RestoreReport,
     EXPORT_FORMAT_VERSION,
 };
-pub use store::{DirectStore, HostStore, Scan, Store};
+pub use store::{CachedStore, DirectStore, HostStore, Scan, Store};
 pub use sync::{
     plan_sync, ConflictPolicy, Direction, SkippedItem, SyncConflict, SyncPlan, SyncReport,
     SyncState, SyncSummary,
