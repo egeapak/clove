@@ -49,6 +49,11 @@ CREATE INDEX IF NOT EXISTS idx_snapshots_captured ON snapshots(captured_at);
 
 /// Ensure the `snapshots` table exists on `conn`. Called from [`Index::open`] and
 /// the reindex build path so every opened/rebuilt index can hold history.
+/// The history table, which a cache rebuild keeps.
+pub(crate) const SNAPSHOTS_TABLE: &str = "snapshots";
+/// The one index [`SNAPSHOTS_DDL`] creates on it.
+pub(crate) const SNAPSHOTS_INDEX: &str = "idx_snapshots_captured";
+
 pub(crate) fn ensure_table(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(SNAPSHOTS_DDL)
 }
@@ -111,7 +116,11 @@ pub(crate) fn preserve_from(db_path: &Utf8Path) -> Vec<RawSnapshot> {
         return Vec::new();
     }
     Connection::open(db_path)
-        .and_then(|conn| read_raw(&conn))
+        .and_then(|conn| {
+            // Wait for a writer instead of reading nothing from a locked file.
+            conn.busy_timeout(std::time::Duration::from_secs(5))?;
+            read_raw(&conn)
+        })
         .unwrap_or_default()
 }
 

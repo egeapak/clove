@@ -340,6 +340,7 @@ fn the_index_tier_hydrates_to_exactly_the_file_answer() {
                     assert_eq!(want.source, Source::Files, "{label}");
                     assert_eq!(got.total, want.total, "{label}: total");
                     assert_eq!(rows_of(&got.rows), rows_of(&want.rows), "{label}: rows");
+                    assert_eq!(got.warnings, want.warnings, "{label}: warnings");
                 }
             }
         }
@@ -516,4 +517,229 @@ fn synced_and_parent_select_the_intended_items() {
         sorted(&[1, 2])
     );
     assert!(ids(with(Filters::default(), |f| f.parent = Some(fx.ids[5].clone()))).is_empty());
+}
+
+/// A tiered answer is hydrated file by file, which only pays while the page is
+/// a small share of the store. A page that is most of the store (`--limit 0`,
+/// the web board) must come from the file tier instead: `blocked --limit 0` on
+/// the index tier took twice as long as `--no-index` at 80k items.
+///
+/// The floor is lowered so six items exercise the rule; the default floor keeps
+/// every other test in this file on the index.
+#[test]
+fn a_page_that_is_most_of_the_store_is_answered_from_the_files() {
+    let fx = fixture();
+    let indexed = fx.indexed().with_hydrate_floor(0);
+    let files = fx.files();
+    let all = Filters::default();
+    let order = Order::default();
+
+    // Unlimited `list`: six rows of a six-item store.
+    let got = indexed
+        .list(&all, order, Page::unlimited(), Projection::Full)
+        .unwrap();
+    let want = files
+        .list(&all, order, Page::unlimited(), Projection::Full)
+        .unwrap();
+    assert_eq!(got.source, Source::Files, "a whole-store page is a scan");
+    assert_eq!(rows_of(&got.rows), rows_of(&want.rows));
+    assert_eq!(got.total, want.total);
+    assert!(got.graph.is_some(), "the file tier hands back its graph");
+
+    // One row of six is still worth a tier.
+    let got = indexed
+        .list(&all, order, Page::new(0, Some(1), 0), Projection::Full)
+        .unwrap();
+    assert_eq!(got.source, Source::Index, "a small page stays on the index");
+    assert_eq!(got.total, 6);
+
+    // A lean page reads no files, so its size never matters.
+    let got = indexed
+        .list(&all, order, Page::unlimited(), Projection::Lean)
+        .unwrap();
+    assert_eq!(got.source, Source::Index);
+
+    // `blocked` rows cost more (each reads its dependencies again), so two
+    // blocked rows of six are already past its share.
+    let got = indexed
+        .blocked(&all, order, Page::unlimited(), Projection::Full)
+        .unwrap();
+    let want = files
+        .blocked(&all, order, Page::unlimited(), Projection::Full)
+        .unwrap();
+    assert_eq!(got.source, Source::Files);
+    assert_eq!(rows_of(&got.rows), rows_of(&want.rows));
+
+    // With the default floor the same reads stay on the index: a store this
+    // small is cheap either way, and the probe is not worth a `readdir`.
+    let got = fx
+        .indexed()
+        .list(&all, order, Page::unlimited(), Projection::Full)
+        .unwrap();
+    assert_eq!(got.source, Source::Index);
+}
+
+/// Add `count` open items straight to the store, behind the index's back.
+fn add_items(fx: &Fixture, count: usize, tag: &str) {
+    let store = ItemStore::new(fx.root.clone());
+    for i in 0..count {
+        store
+            .create(
+                "proj",
+                NewItem {
+                    title: format!("{tag} {i}"),
+                    item_type: ItemType::Feature,
+                    priority: Priority(2),
+                    labels: Vec::new(),
+                    deps: Vec::new(),
+                    parent: None,
+                    assignee: None,
+                    body: String::new(),
+                },
+                chrono::Utc::now(),
+            )
+            .unwrap();
+    }
+}
+
+/// An index that falls more than `STALE_REFRESH_LIMIT` items behind is brought
+/// up to date by the next read, not bypassed.
+///
+/// It used to be bypassed and left as it was: after 25 `clove new` calls every
+/// read reported `files`, with no warning, until a manual `clove reindex`, and
+/// paid the per-file staleness pass plus a whole-store scan each time.
+#[test]
+fn an_index_far_behind_is_refreshed_by_the_next_read() {
+    let fx = fixture();
+    let indexed = fx.indexed();
+    let all = Filters::default();
+    let list = |engine: &Engine| {
+        engine
+            .list(&all, Order::default(), Page::unlimited(), Projection::Lean)
+            .unwrap()
+    };
+    let indexed_rows = || {
+        clove_index::Index::open(&fx.clove_dir.join("index.db"))
+            .unwrap()
+            .item_count()
+            .unwrap()
+    };
+    const { assert!(25 > clove_engine::STALE_REFRESH_LIMIT) };
+
+    // 25 new items behind a 6-item index: most of the store, so a rebuild.
+    add_items(&fx, 25, "pulled");
+    let got = list(&indexed);
+    assert_eq!(got.source, Source::Index, "the index must heal and answer");
+    assert_eq!(got.total, 31);
+    assert!(got.warnings.is_empty(), "{:?}", got.warnings);
+    assert_eq!(indexed_rows(), 31, "the refresh is stored, not redone");
+
+    // Grow the indexed store, then fall 21 items behind a 131-item index: a
+    // small share, so the changes are applied one by one.
+    add_items(&fx, 100, "bulk");
+    assert_eq!(list(&indexed).total, 131);
+    add_items(&fx, 21, "late");
+    let got = list(&indexed);
+    assert_eq!(got.source, Source::Index);
+    assert_eq!(got.total, 152);
+    assert_eq!(indexed_rows(), 152);
+
+    // And the answer is still the file answer.
+    let want = list(&fx.files());
+    assert_eq!(rows_of(&got.rows), rows_of(&want.rows));
+}
+
+/// An index error is a reason to use the files, never to fail the read: the
+/// index is a cache and the file tier is always correct.
+///
+/// `lean_via_index` used to propagate a failed staleness apply or query as an
+/// I/O error, so one `SQLITE_BUSY` made `clove ls` exit non-zero.
+#[test]
+fn an_index_error_falls_back_to_the_files_with_a_warning() {
+    let fx = fixture();
+    // Break the query, not the open: every list selects `title`.
+    rusqlite::Connection::open(fx.clove_dir.join("index.db"))
+        .unwrap()
+        .execute_batch("ALTER TABLE items RENAME COLUMN title TO headline;")
+        .unwrap();
+
+    let all = Filters::default();
+    for query in ["list", "ready", "blocked"] {
+        let run = |engine: &Engine| {
+            let (order, window) = (Order::default(), Page::unlimited());
+            match query {
+                "ready" => engine.ready(&all, order, window, Projection::Full),
+                "blocked" => engine.blocked(&all, order, window, Projection::Full),
+                _ => engine.list(&all, order, window, Projection::Full),
+            }
+            .unwrap()
+        };
+        let got = run(&fx.indexed());
+        let want = run(&fx.files());
+        assert_eq!(got.source, Source::Files, "{query}");
+        assert_eq!(rows_of(&got.rows), rows_of(&want.rows), "{query}");
+        assert!(
+            got.warnings
+                .iter()
+                .any(|w| w.contains("answered from the files")),
+            "{query}: the fallback must be named, got {:?}",
+            got.warnings
+        );
+    }
+}
+
+/// `ready` names the items it left out because a hard dependency is missing,
+/// and names the same ones whichever tier answers.
+///
+/// Only the file tier used to build that warning, so `_meta.warnings` was empty
+/// with an index and filled with `--no-index`. The file tier also named closed
+/// items, which are never `ready` candidates, and ignored the query's filters.
+#[test]
+fn ready_warns_about_the_same_dangling_items_on_every_tier() {
+    let fx = fixture();
+    let store = ItemStore::new(fx.root.clone());
+    // A closed item with a missing dependency: not excluded from `ready` by
+    // that dependency, so it is not the warning's business.
+    let closed = fx.ids[5].clone();
+    edit(&store, &closed, |fm| {
+        fm.deps = vec![CloveId::new("proj-YYYYYYYY").unwrap()]
+    });
+    let updated = store.get(&closed).unwrap().frontmatter.updated;
+    clove_core::ops::transition(&store, &closed, ItemStatus::Closed, updated).unwrap();
+    clove_index::reindex(&fx.clove_dir.join("issues"), &fx.clove_dir.join("index.db")).unwrap();
+
+    let ready = |engine: &Engine, filters: &Filters| {
+        engine
+            .ready(
+                filters,
+                Order::default(),
+                Page::unlimited(),
+                Projection::Lean,
+            )
+            .unwrap()
+    };
+    let dangling_open = fx.ids[4].to_string(); // "epsilon widget", an epic
+
+    let all = Filters::default();
+    let got = ready(&fx.indexed(), &all);
+    let want = ready(&fx.files(), &all);
+    assert_eq!(got.source, Source::Index);
+    assert_eq!(want.source, Source::Files);
+    assert_eq!(got.warnings, want.warnings);
+    assert_eq!(
+        got.warnings,
+        vec![format!(
+            "1 item(s) excluded with dangling deps: {dangling_open}"
+        )],
+        "the open item only; the closed one was never a candidate"
+    );
+
+    // A filter that the dangling item does not match leaves nothing to warn
+    // about; one it matches (through the `q` residue too) keeps the warning.
+    let bugs = with(Filters::default(), |f| f.item_type = vec![ItemType::Bug]);
+    assert!(ready(&fx.indexed(), &bugs).warnings.is_empty());
+    assert!(ready(&fx.files(), &bugs).warnings.is_empty());
+    let q = with(Filters::default(), |f| f.q = Some("epsilon".to_owned()));
+    assert_eq!(ready(&fx.indexed(), &q).warnings, want.warnings);
+    assert_eq!(ready(&fx.files(), &q).warnings, want.warnings);
 }
