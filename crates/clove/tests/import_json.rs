@@ -7,6 +7,8 @@
 //! item byte-for-byte (ids, status incl. closed, type, priority, deps, parent,
 //! labels, body), and re-import is idempotent.
 
+mod support;
+
 use std::path::Path;
 use std::process::Command;
 
@@ -17,6 +19,7 @@ use tempfile::TempDir;
 /// A hermetic `clove` invocation rooted at `dir`.
 fn clove(dir: &Path) -> Command {
     let mut cmd = Command::cargo_bin("clove").unwrap();
+    cmd.envs(support::isolated_env(dir));
     cmd.current_dir(dir);
     cmd.env_remove("CLOVE_FORMAT");
     cmd.env_remove("EDITOR");

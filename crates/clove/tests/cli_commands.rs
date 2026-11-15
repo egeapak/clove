@@ -1,5 +1,7 @@
 //! End-to-end CLI tests for the M0 command surface and index wiring.
 
+mod support;
+
 use std::io::Write;
 use std::path::Path;
 use std::process::Command;
@@ -11,13 +13,11 @@ use tempfile::TempDir;
 /// A `clove` invocation rooted at `dir`, with a clean environment.
 fn clove(dir: &Path) -> Command {
     let mut cmd = Command::cargo_bin("clove").unwrap();
+    cmd.envs(support::isolated_env(dir));
     cmd.current_dir(dir);
     cmd.env_remove("CLOVE_FORMAT");
     cmd.env_remove("EDITOR");
     cmd.env("CLOVE_AUTHOR", "tester@example.com");
-    // Never the user's own hub: a live one of another protocol version is a
-    // `doctor` warning these tests do not expect.
-    cmd.env("CLOVE_RUNTIME_DIR", dir.join(".test-run"));
     cmd
 }
 

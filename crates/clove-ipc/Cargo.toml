@@ -2,11 +2,11 @@
 name = "clove-ipc"
 description = "clove daemon IPC: typed tarpc service for the CLI<->daemon seam (M3/M4)"
 edition.workspace = true
+rust-version.workspace = true
 version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 

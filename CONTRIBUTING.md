@@ -46,3 +46,16 @@ To sign off commits that you already made on your branch, run:
 git rebase --signoff <base-branch>
 git push --force-with-lease
 ```
+
+## Rust versions
+
+- `rust-toolchain.toml` pins the toolchain that CI and the release build use.
+  `rustup` installs it on the first `cargo` command. To move to a newer Rust,
+  change the version there and in the two workflow files, and fix the new
+  clippy lints in the same change.
+- `rust-version` in the root `Cargo.toml` is the minimum supported Rust version
+  (MSRV), and every crate inherits it. The `msrv` job in `ci.yml` builds the
+  workspace with that version. Raise it only when the code or a dependency
+  needs a newer Rust.
+
+`xtask/tests/versions.rs` checks that the workflow files use these two versions.

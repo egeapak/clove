@@ -2,6 +2,8 @@
 //! quietly: exit 0, no panic. The read end is closed *before* the spawn so every
 //! write deterministically hits EPIPE instead of landing in the pipe buffer.
 
+mod support;
+
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -13,6 +15,7 @@ fn run_with_closed_stdout(bin: &str, dir: &Path, args: &[&str]) -> Output {
     Command::cargo_bin(bin)
         .unwrap()
         .current_dir(dir)
+        .envs(support::isolated_env(dir))
         .env_remove("CLOVE_FORMAT")
         .env("CLOVE_AUTHOR", "tester@example.com")
         .args(args)
@@ -41,12 +44,14 @@ fn closed_stdout_ends_output_quietly() {
     Command::cargo_bin("clove")
         .unwrap()
         .current_dir(dir.path())
+        .envs(support::isolated_env(dir.path()))
         .args(["init", "--prefix", "proj"])
         .assert()
         .success();
     Command::cargo_bin("clove")
         .unwrap()
         .current_dir(dir.path())
+        .envs(support::isolated_env(dir.path()))
         .env("CLOVE_AUTHOR", "tester@example.com")
         .args(["new", "An item"])
         .assert()

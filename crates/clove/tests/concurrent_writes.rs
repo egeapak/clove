@@ -11,6 +11,8 @@
 //! the scenario the advisory lock exists for — `clove-core`'s own
 //! `concurrent_dep_adds_do_not_lose_updates` already covers the in-process case.
 
+mod support;
+
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -20,6 +22,7 @@ use tempfile::TempDir;
 
 fn clove(dir: &Path) -> Command {
     let mut cmd = Command::cargo_bin("clove").unwrap();
+    cmd.envs(support::isolated_env(dir));
     cmd.current_dir(dir);
     cmd.env_remove("CLOVE_FORMAT");
     cmd.env_remove("EDITOR");

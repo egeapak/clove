@@ -1,11 +1,18 @@
 //! Integration tests for the CLI foundation (T-CLI01): output format
 //! resolution, the JSON envelope, and exit codes.
 
+mod support;
+
 use assert_cmd::Command;
 use serde_json::Value;
 
 fn clove() -> Command {
     let mut cmd = Command::cargo_bin("clove").unwrap();
+    // These tests run outside any repository, so the isolation dirs go in
+    // cargo's per-package test tmpdir. Nothing creates them.
+    cmd.envs(support::isolated_env(std::path::Path::new(env!(
+        "CARGO_TARGET_TMPDIR"
+    ))));
     // Isolate from any ambient CLOVE_FORMAT in the developer's environment.
     cmd.env_remove("CLOVE_FORMAT");
     cmd

@@ -1,5 +1,7 @@
 //! T-CLI14: assert command JSON output validates against the published v1 schema.
 
+mod support;
+
 use std::path::Path;
 use std::process::Command;
 
@@ -10,6 +12,7 @@ use tempfile::TempDir;
 
 fn clove(dir: &Path) -> Command {
     let mut cmd = Command::cargo_bin("clove").unwrap();
+    cmd.envs(support::isolated_env(dir));
     cmd.current_dir(dir);
     cmd.env_remove("CLOVE_FORMAT");
     cmd

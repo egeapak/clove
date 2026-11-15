@@ -2,11 +2,11 @@
 name = "clove-engine"
 description = "clove read tier: the one daemon -> index -> files cascade behind the CLI, MCP, and web read surfaces"
 edition.workspace = true
+rust-version.workspace = true
 version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 

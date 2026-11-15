@@ -2,11 +2,11 @@
 name = "clove-mcp"
 description = "clove MCP (Model Context Protocol) server: exposes clove to AI agents over stdio (M4)"
 edition.workspace = true
+rust-version.workspace = true
 version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 

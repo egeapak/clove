@@ -2,8 +2,16 @@
 # (`cargo nextest run --workspace --all-features`; doctests run separately with
 # `cargo test --doc`, because nextest does not run them).
 
-# Setup scripts are still an experimental nextest feature (nextest 0.9.151).
+# Setup scripts are still an experimental nextest feature, so CI installs a
+# fixed nextest version (ci.yml, "Install cargo-nextest"). When you change that
+# version, check that this file still loads.
 experimental = ["setup-scripts"]
+
+[profile.default]
+# A test that runs longer than 2 minutes is reported as slow, and one that runs
+# longer than 10 minutes is killed and fails. Without this, a hung test holds
+# the run until the CI job's own 60-minute limit and names no test.
+slow-timeout = { period = "120s", terminate-after = 5 }
 
 [scripts.setup.test-bins]
 # Builds `cloved` and the plugins that the clove-cli daemon and plugin suites

@@ -26,11 +26,14 @@ exclude = ["fuzz"]
 
 [workspace.package]
 edition = "2021"
+# The minimum supported Rust version (MSRV). The dependency tree sets it:
+# cargo-platform 0.3.3 (a build dependency of octocrab) needs 1.91. The `msrv`
+# job in ci.yml builds the workspace with this version.
+rust-version = "1.91"
 version = "0.3.0"
 license = "AGPL-3.0-only"
 authors = ["Ege Apak"]
 repository = "https://github.com/egeapak/clove"
-homepage = "https://github.com/egeapak/clove"
 keywords = ["issue-tracker", "git", "cli", "dependency-graph", "mcp"]
 categories = ["command-line-utilities", "development-tools"]
 

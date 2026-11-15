@@ -1,0 +1,22 @@
+name: Advisories
+
+# CI runs cargo-deny on pushes and pull requests only, so a RustSec advisory or
+# a yank published while the repository is quiet stays unseen until the next
+# push. This runs the advisory check every day.
+on:
+  schedule:
+    - cron: "23 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  advisories:
+    name: cargo-deny advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
+        with:
+          command: check advisories
