@@ -31,9 +31,8 @@ pub fn run(
 
     // Items excluded from `ready` because they reference missing dependencies.
     // They are not lost: `clove blocked` lists them, with the broken ids in
-    // `blocked_by`. Only the file tier can see them — the index and daemon
-    // answer the ready query in SQL and never build the dangling set — which is
-    // why this is echoed rather than asserted.
+    // `blocked_by`. The file and index tiers both name them (the index from
+    // `has_dangling_deps`); a daemon answer carries whatever `cloved` sent.
     if !quiet && matches!(format, OutputFormat::Human) {
         for msg in &answer.warnings {
             eprintln!("warning: {msg}");

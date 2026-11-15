@@ -640,6 +640,7 @@ dependencies = [
  "clove-ipc",
  "clove-types",
  "rayon",
+ "rusqlite",
  "serde_json",
  "tempfile",
 ]

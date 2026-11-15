@@ -118,12 +118,6 @@ pub(crate) fn covering_index_ddl() -> &'static str {
     COVERING_INDEX_DDL
 }
 
-/// The schema DDL, for the reindex builder which initializes a fresh tmp
-/// database directly (T-S04) rather than through [`Index::open`].
-pub(crate) fn schema_ddl() -> &'static str {
-    SCHEMA_DDL
-}
-
 /// The explicit `items` column list, in a fixed order shared by every read path
 /// so a single row mapper ([`ItemRow::from_row`]) can decode them.
 pub(crate) const ITEM_COLUMNS: &str = "\
@@ -299,18 +293,7 @@ impl Index {
     /// on an unreadable file; prefer [`Index::open_or_create`], which recovers
     /// from both by rebuilding.
     pub fn open(path: &Utf8Path) -> Result<Index, IndexError> {
-        // SQLite follows a symlinked database (or journal) and writes into
-        // whatever it points at; a cloned repo could plant one.
-        for file in [
-            path.to_owned(),
-            Utf8PathBuf::from(format!("{path}-wal")),
-            Utf8PathBuf::from(format!("{path}-shm")),
-        ] {
-            clove_core::fs_safe::refuse_symlink(&file).map_err(|source| IndexError::IoError {
-                path: file.clone(),
-                source,
-            })?;
-        }
+        refuse_symlinked_db(path)?;
         let conn = Connection::open(path).map_err(|e| {
             if is_corrupt(&e) {
                 IndexError::CorruptIndex(e.to_string())
@@ -327,7 +310,7 @@ impl Index {
                 conn.execute_batch(COVERING_INDEX_DDL)?;
                 conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             }
-            v if v == SCHEMA_VERSION => {}
+            v if v == SCHEMA_VERSION => verify_schema_objects(&conn)?,
             found => {
                 return Err(IndexError::SchemaMismatch {
                     found,
@@ -358,7 +341,14 @@ impl Index {
                     "note: index schema changed (found {found}, expected {expected}); rebuilding {path}"
                 );
                 // The cache tables are rebuildable, but the durable stats history
-                // is not — carry it across the drop-and-rebuild (M4).
+                // is not. Rebuild the cache tables inside the file, so the
+                // history is never copied and the path never stops existing
+                // (a reader that opens a missing path creates an empty index).
+                if reset_in_place(path).is_ok() {
+                    return Index::open(path);
+                }
+                // The file could not be reset (for example a table of a module
+                // this build does not have): replace it and carry the history.
                 let preserved = crate::stats_store::preserve_from(path);
                 remove_db_files(path)?;
                 let index = Index::open(path)?;
@@ -406,9 +396,9 @@ impl Index {
             Err(other) => return Err(other),
         };
         eprintln!("note: index at {path} {reason}; rebuilding from {issues_dir}");
-        // Nothing is destroyed here. `reindex` builds into `<path>.tmp` under the
-        // rebuild lock and renames it over the live file, carrying the durable
-        // stats history across, so a rebuild that fails — most likely
+        // Nothing is destroyed here. `reindex` replaces the cache tables inside
+        // the file in one transaction under the rebuild lock, and leaves the
+        // durable stats history alone, so a rebuild that fails — most likely
         // `AlreadyRunning`, when a concurrent process is upgrading the same
         // index — leaves the old database in place and the *next* open retries.
         //
@@ -513,16 +503,138 @@ impl Index {
     }
 }
 
-/// Apply the per-connection PRAGMAs (DESIGN §6.1). `execute_batch` tolerates the
-/// row returned by `journal_mode`.
-fn set_pragmas(conn: &Connection) -> Result<(), IndexError> {
+/// Apply the per-connection settings (DESIGN §6.1). `execute_batch` tolerates
+/// the row returned by `journal_mode`.
+///
+/// `index.db` is git-ignored but can still arrive with a repository
+/// (`git add -f`, an archive), so its schema is not trusted: `trusted_schema`
+/// off stops views, triggers, and column expressions from calling functions
+/// with side effects, and defensive mode refuses `writable_schema` and writes
+/// to shadow tables. The busy timeout is set first, so the `journal_mode`
+/// switch also waits for a lock.
+pub(crate) fn set_pragmas(conn: &Connection) -> Result<(), IndexError> {
+    use rusqlite::config::DbConfig;
+    conn.execute_batch("PRAGMA busy_timeout=5000;")?;
+    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false)?;
+    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
     conn.execute_batch(
         "PRAGMA journal_mode=WAL;
          PRAGMA synchronous=NORMAL;
          PRAGMA foreign_keys=ON;
-         PRAGMA busy_timeout=5000;
          PRAGMA cache_size=-65536;",
     )?;
+    Ok(())
+}
+
+/// Refuse a database whose file, `-wal`, or `-shm` is a symlink. SQLite follows
+/// a symlinked database (or journal) and writes into whatever it points at; a
+/// cloned repo could plant one.
+pub(crate) fn refuse_symlinked_db(path: &Utf8Path) -> Result<(), IndexError> {
+    for file in [
+        path.to_owned(),
+        Utf8PathBuf::from(format!("{path}-wal")),
+        Utf8PathBuf::from(format!("{path}-shm")),
+    ] {
+        clove_core::fs_safe::refuse_symlink(&file).map_err(|source| IndexError::IoError {
+            path: file.clone(),
+            source,
+        })?;
+    }
+    Ok(())
+}
+
+/// The cache tables [`SCHEMA_DDL`] creates.
+const CACHE_TABLES: [&str; 5] = ["items", "edges", "labels", "meta", "file_mtimes"];
+
+/// Check that a database at the current schema version holds the cache tables
+/// as plain tables, and no view or trigger. clove creates neither, and either
+/// one can make the index answer differently from the item files (a view named
+/// `items`, a trigger that rewrites rows on every refresh). A failed check is
+/// [`IndexError::CorruptIndex`], so the caller rebuilds from the files.
+fn verify_schema_objects(conn: &Connection) -> Result<(), IndexError> {
+    let mut stmt = conn.prepare("SELECT type, name FROM sqlite_master")?;
+    let objects = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if let Some((kind, name)) = objects
+        .iter()
+        .find(|(kind, _)| kind == "view" || kind == "trigger")
+    {
+        return Err(IndexError::CorruptIndex(format!(
+            "unexpected {kind} `{name}` in the schema"
+        )));
+    }
+    for table in CACHE_TABLES {
+        if !objects
+            .iter()
+            .any(|(kind, name)| kind == "table" && name == table)
+        {
+            return Err(IndexError::CorruptIndex(format!(
+                "table `{table}` is missing"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Drop every schema object except the durable `snapshots` history table, then
+/// create the empty cache tables at [`SCHEMA_VERSION`]. The covering index is
+/// left to the caller, which creates it after its bulk load.
+///
+/// Runs inside the caller's transaction: until the commit, other connections
+/// keep reading the old tables. An object that cannot be dropped (a virtual
+/// table of a module this build lacks) is reported as
+/// [`IndexError::CorruptIndex`]; the caller then replaces the file.
+pub(crate) fn reset_cache_schema(tx: &rusqlite::Transaction<'_>) -> Result<(), IndexError> {
+    let objects = {
+        let mut stmt = tx.prepare(
+            "SELECT type, name, tbl_name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+    let quote = |name: &str| format!("\"{}\"", name.replace('"', "\"\""));
+    let keep_table = crate::stats_store::SNAPSHOTS_TABLE;
+    // Triggers and views first: a trigger may fire on a later drop. Indexes go
+    // with their tables, so only a stray index on `snapshots` needs a drop.
+    for pass in ["trigger", "view", "table", "index"] {
+        for (kind, name, tbl) in objects.iter().filter(|(kind, _, _)| kind == pass) {
+            let sql = match pass {
+                "table" if name == keep_table => continue,
+                "index" if tbl != keep_table || name == crate::stats_store::SNAPSHOTS_INDEX => {
+                    continue
+                }
+                _ => format!("DROP {} IF EXISTS {}", kind.to_uppercase(), quote(name)),
+            };
+            tx.execute_batch(&sql).map_err(|e| {
+                IndexError::CorruptIndex(format!("cannot drop {kind} `{name}`: {e}"))
+            })?;
+        }
+    }
+    tx.execute_batch(SCHEMA_DDL)?;
+    crate::stats_store::ensure_table(tx)?;
+    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    Ok(())
+}
+
+/// Rebuild the cache tables of the database at `path` as empty tables at the
+/// current schema version, keeping the `snapshots` history.
+fn reset_in_place(path: &Utf8Path) -> Result<(), IndexError> {
+    refuse_symlinked_db(path)?;
+    let mut conn = Connection::open(path)?;
+    set_pragmas(&conn)?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    reset_cache_schema(&tx)?;
+    tx.execute_batch(COVERING_INDEX_DDL)?;
+    tx.commit()?;
     Ok(())
 }
 
