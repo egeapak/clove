@@ -14,9 +14,6 @@ use std::process::{Child, Command, Stdio};
 
 use assert_cmd::prelude::*;
 
-/// Token records for this test's processes go here, never the user's clove home.
-const TEST_CLOVE_HOME: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/test-clove-home");
-
 /// The test run's `cloved` (built with all features, so it has `web`); the
 /// daemon cases can never pass by skipping.
 fn cloved() -> &'static Path {
@@ -29,7 +26,7 @@ fn clove(dir: &Path) -> Command {
     cmd.env_remove("CLOVE_FORMAT");
     cmd.env_remove("CLOVED_DISABLE_WEB");
     cmd.env("CLOVE_AUTHOR", "tester@example.com");
-    cmd.env("CLOVE_HOME", TEST_CLOVE_HOME)
+    cmd.env("CLOVE_HOME", support::clove_home(dir))
         .env("CLOVE_RUNTIME_DIR", dir.join("run"));
     cmd.env("CLOVED_PATH", cloved());
     cmd

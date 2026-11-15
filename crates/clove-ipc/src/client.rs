@@ -845,12 +845,20 @@ mod tests {
         assert_eq!(serde_json::from_str::<RpcError>(&wire).unwrap(), current);
     }
 
-    /// Token records for these tests go in the build, never the user's home.
+    /// Token records for these tests go beside the test binary, in the build's
+    /// own target directory (wherever `CARGO_TARGET_DIR` puts it), never the
+    /// user's clove home.
     fn isolate() {
-        clove_core::daemon_token::use_records_dir(Utf8PathBuf::from(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../target/test-clove-home/daemon-tokens"
-        )));
+        let exe = std::env::current_exe().expect("the test binary's path");
+        // `<target dir>/<profile>/deps/<test binary>`
+        let profile = exe
+            .parent()
+            .and_then(|deps| deps.parent())
+            .expect("a deps dir");
+        let records = profile.join("test-clove-home").join("daemon-tokens");
+        clove_core::daemon_token::use_records_dir(
+            Utf8PathBuf::from_path_buf(records).expect("a UTF-8 target dir"),
+        );
     }
 
     /// A private temp dir to root a test hub in (tempdirs are 0700 on Unix).

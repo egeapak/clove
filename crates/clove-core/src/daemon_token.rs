@@ -360,13 +360,18 @@ pub fn matches(expected: &str, presented: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// Records for these tests go in the build's target directory, never the
-    /// user's clove home.
+    /// Records for these tests go beside the test binary, in the build's own
+    /// target directory (wherever `CARGO_TARGET_DIR` puts it), never the user's
+    /// clove home.
     fn isolate() {
-        use_records_dir(Utf8PathBuf::from(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../target/test-clove-home/daemon-tokens"
-        )));
+        let exe = std::env::current_exe().expect("the test binary's path");
+        // `<target dir>/<profile>/deps/<test binary>`
+        let profile = exe
+            .parent()
+            .and_then(|deps| deps.parent())
+            .expect("a deps dir");
+        let records = profile.join("test-clove-home").join("daemon-tokens");
+        use_records_dir(Utf8PathBuf::from_path_buf(records).expect("a UTF-8 target dir"));
     }
 
     fn clove_dir() -> (tempfile::TempDir, Utf8PathBuf) {

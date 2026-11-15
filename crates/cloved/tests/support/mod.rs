@@ -26,9 +26,10 @@ pub const SIGTERM: i32 = 15;
 pub const SIGKILL: i32 = 9;
 
 /// The clove home every test process and hub uses: token records land here,
-/// never in the user's.
-pub const TEST_CLOVE_HOME: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/test-clove-home");
+/// never in the user's. It is under Cargo's per-build test temp dir, so it
+/// follows `CARGO_TARGET_DIR`. The tests share it safely: records are kept per
+/// project path, and every test's project is its own temp dir.
+pub const TEST_CLOVE_HOME: &str = concat!(env!("CARGO_TARGET_TMPDIR"), "/clove-home");
 
 /// Point this test process's token records at [`TEST_CLOVE_HOME`].
 pub fn isolate() {
