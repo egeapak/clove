@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi, type MockInstance } from 'vitest';
 import { store } from './store.svelte';
 import type { Item } from './types';
 
@@ -173,8 +173,18 @@ describe('store query loading', () => {
     (store as unknown as { pending: Map<string, unknown> }).pending.clear();
     (store as unknown as { query: unknown }).query = null;
     store.replaceAll([]);
+    refetch = vi.spyOn(store, 'refetch');
   });
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  // Every load `setQuery` started, spied so a test can await the real
+  // promises instead of sleeping. Each one settles after its own superseded
+  // check, so awaiting them all means every response has been handled.
+  let refetch: MockInstance<() => Promise<void>>;
+  const settled = () => Promise.allSettled(refetch.mock.results.map((r) => r.value));
 
   it('does not refetch when the query serializes to the same request', async () => {
     let itemCalls = 0;
@@ -191,21 +201,25 @@ describe('store query loading', () => {
     // A distinct object with identical contents — what a route's `$effect`
     // hands over on every unrelated re-render.
     store.setQuery({ limit: 100, offset: 0, sort: 'rank', dir: 'asc' });
-    await new Promise((r) => setTimeout(r, 50));
+    await settled();
+    expect(refetch).toHaveBeenCalledTimes(1);
     expect(itemCalls).toBe(1);
 
     store.setQuery({ limit: 100, offset: 100, sort: 'rank', dir: 'asc' });
-    await new Promise((r) => setTimeout(r, 50));
+    await settled();
+    expect(refetch).toHaveBeenCalledTimes(2);
     expect(itemCalls).toBe(2);
   });
 
   it('ignores a superseded response that lands after a newer one', async () => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
     vi.stubGlobal('fetch', async (url: string | URL) => {
       const u = String(url);
       if (!u.includes('/items')) return envelope(META);
-      // The FIRST query (offset=0) is the slow one, so it resolves last.
+      // The FIRST query (offset=0) is held, so it resolves last.
       const slow = !u.includes('offset=');
-      await new Promise((r) => setTimeout(r, slow ? 60 : 0));
+      if (slow) await held;
       return envelope([item({ id: slow ? 'proj-STALE' : 'proj-FRESH' })], {
         total: 2,
         offset: slow ? 0 : 100,
@@ -215,7 +229,12 @@ describe('store query loading', () => {
 
     store.setQuery({ limit: 1, offset: 0 });
     store.setQuery({ limit: 1, offset: 100 });
-    await new Promise((r) => setTimeout(r, 150));
+    // The newer request lands first...
+    await refetch.mock.results[1].value;
+    expect(store.all.map((i) => i.id)).toEqual(['proj-FRESH']);
+    // ...then the older one.
+    release();
+    await settled();
 
     // Both responses have arrived; the older one must not have overwritten the
     // newer. The query changes per keystroke in the filter box, and `fetch`
@@ -246,7 +265,7 @@ describe('store query loading', () => {
     store.setQuery({ limit: 1, offset: 100 });
     await vi.waitFor(() => expect(store.all.map((i) => i.id)).toEqual(['proj-FRESH']));
     release();
-    await new Promise((r) => setTimeout(r, 30));
+    await settled();
     expect(store.loadError).toBeNull();
     expect(store.all.map((i) => i.id)).toEqual(['proj-FRESH']);
   });
