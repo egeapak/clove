@@ -29,6 +29,18 @@ export function isMockMode() {
   return mockMode;
 }
 
+/** The message shown when the server refuses this page's access token. */
+export const UNAUTHORIZED_MESSAGE =
+  'The access token of this page is no longer valid, for example because the server restarted. ' +
+  'Open the URL that `clove serve` prints (it ends in ?token=…). ' +
+  'For a project that the daemon serves, `clove daemon status` shows the URL.';
+
+let unauthorizedHandler: (() => void) | null = null;
+/** Register the callback that runs when any request gets a 401. */
+export function onUnauthorized(handler: (() => void) | null) {
+  unauthorizedHandler = handler;
+}
+
 export class ApiError extends Error {
   code: string;
   exit: number;
@@ -60,6 +72,12 @@ async function reqUrl<T>(
       ...init?.headers
     }
   });
+  if (res.status === 401) {
+    // The auth layer answers in plain text, so this cannot go through the
+    // envelope parse below (it would read as a bare "HTTP 401").
+    unauthorizedHandler?.();
+    throw new ApiError('UNAUTHORIZED', UNAUTHORIZED_MESSAGE, 1, 401);
+  }
   let env: Envelope<T> | null = null;
   try {
     env = (await res.json()) as Envelope<T>;

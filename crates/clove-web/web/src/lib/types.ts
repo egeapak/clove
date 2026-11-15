@@ -130,7 +130,12 @@ export interface Envelope<T> {
   _meta?: Record<string, unknown>;
 }
 
-export type ConnState = 'connecting' | 'live' | 'offline' | 'mock';
+/**
+ * `unauthorized`: the server refused this page's access token (401). The token
+ * lasts as long as the server process, so this is what a tab sees after the
+ * server restarted. Reconnecting cannot fix it; the user must open the new URL.
+ */
+export type ConnState = 'connecting' | 'live' | 'offline' | 'mock' | 'unauthorized';
 
 export interface ListQuery {
   status?: Status;

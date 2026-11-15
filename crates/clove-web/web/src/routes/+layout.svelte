@@ -9,7 +9,7 @@
   import ThemeSwitcher from '$lib/components/ThemeSwitcher.svelte';
   import SourceLink from '$lib/components/SourceLink.svelte';
   import ProjectSwitcher from '$lib/components/ProjectSwitcher.svelte';
-  import { api } from '$lib/api';
+  import { api, UNAUTHORIZED_MESSAGE } from '$lib/api';
   import { isActiveTab, projectSlug } from '$lib/urls';
   import Toasts from '$lib/components/Toasts.svelte';
   import NewItemModal from '$lib/components/NewItemModal.svelte';
@@ -46,7 +46,9 @@
         ? 'demo'
         : store.conn === 'connecting'
           ? 'connecting'
-          : 'offline'
+          : store.conn === 'unauthorized'
+            ? 'no access'
+            : 'offline'
   );
 
   function submitSearch(e: Event) {
@@ -140,6 +142,10 @@
     <span class="new-label">New item</span>
   </button>
 </div>
+
+{#if store.conn === 'unauthorized'}
+  <div class="auth-banner" role="alert">{UNAUTHORIZED_MESSAGE}</div>
+{/if}
 
 <main class="page" class:full={fullWidth}>
   {@render children()}
@@ -250,8 +256,16 @@
   .dot.connecting {
     background: var(--prio-1);
   }
-  .dot.offline {
+  .dot.offline,
+  .dot.unauthorized {
     background: var(--red);
+  }
+  .auth-banner {
+    padding: 10px 22px;
+    font-size: 13px;
+    color: var(--text);
+    background: color-mix(in srgb, var(--red) 14%, var(--surface-app));
+    border-bottom: 1px solid color-mix(in srgb, var(--red) 40%, transparent);
   }
   .page {
     flex: 1;

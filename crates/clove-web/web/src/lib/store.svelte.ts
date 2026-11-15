@@ -1,7 +1,7 @@
 import { browser, dev } from '$app/environment';
 import { base } from '$app/paths';
 import type { Item, ConnState, ItemPage, ListQuery, Meta } from './types';
-import { api, isMockMode } from './api';
+import { api, isMockMode, onUnauthorized } from './api';
 import { queryString } from './query';
 import { eventsUrl } from './urls';
 
@@ -329,6 +329,13 @@ class Store {
 
 export const store = new Store();
 
+// A 401 on any request means the page's token is stale (the server restarted).
+// Show that once, and stop the live channel from retrying forever.
+onUnauthorized(() => {
+  store.conn = 'unauthorized';
+  clearReconnect();
+});
+
 // ---- WebSocket live channel with backoff + resync ----
 let ws: WebSocket | null = null;
 let backoff = 500;
@@ -338,7 +345,7 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let lifecycleBound = false;
 
 function connect() {
-  if (!browser) return;
+  if (!browser || store.conn === 'unauthorized') return;
   // Guard against a double-connect (e.g. Vite HMR re-running this module, or a
   // visibility/online trigger firing while a socket is already live).
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
@@ -352,7 +359,9 @@ function connect() {
   }
   store.conn = 'connecting';
 
+  let opened = false;
   ws.onopen = () => {
+    opened = true;
     backoff = 500;
     store.conn = 'live';
     resync(); // on (re)connect
@@ -382,8 +391,21 @@ function connect() {
   };
 
   ws.onclose = () => {
+    if (store.conn === 'unauthorized') return;
     store.conn = 'offline';
-    scheduleReconnect();
+    if (opened) {
+      scheduleReconnect();
+      return;
+    }
+    // The upgrade itself failed. A browser does not say why, and a 401 (the
+    // server restarted with a new token) never heals by retrying: ask the API.
+    // A 401 there marks the store unauthorized and stops the loop.
+    void api.meta().then(
+      () => scheduleReconnect(),
+      () => {
+        if (store.conn !== 'unauthorized') scheduleReconnect();
+      }
+    );
   };
   ws.onerror = () => {
     try {
@@ -409,6 +431,7 @@ function clearReconnect() {
 }
 
 function scheduleReconnect() {
+  if (store.conn === 'unauthorized') return;
   if (isMockMode()) {
     store.conn = 'mock';
     return;
@@ -421,7 +444,7 @@ function scheduleReconnect() {
 
 /** Reset backoff and reconnect immediately (online / tab-visible). */
 function reconnectNow() {
-  if (isMockMode()) return;
+  if (isMockMode() || store.conn === 'unauthorized') return;
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
   backoff = 500;
   clearReconnect();
@@ -467,7 +490,7 @@ export async function startLive() {
   } catch (e) {
     // Initial load failed: surface a distinct error so views can offer Retry.
     store.loadError = e instanceof Error ? e.message : 'load failed';
-    store.conn = 'offline';
+    if (store.conn !== 'unauthorized') store.conn = 'offline';
   }
   if (isMockMode() || (dev && store.meta?.source === 'mock')) {
     store.conn = 'mock';
@@ -484,7 +507,8 @@ export async function retryLoad() {
     await store.refetch();
   } catch (e) {
     store.loadError = e instanceof Error ? e.message : 'load failed';
-    store.conn = 'offline';
+    // The failed request may have marked the token refused; keep that state.
+    if ((store.conn as ConnState) !== 'unauthorized') store.conn = 'offline';
     return;
   }
   if (!isMockMode()) connect();

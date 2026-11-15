@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { api, filterMock } from './api';
+import { api, filterMock, ApiError, onUnauthorized, UNAUTHORIZED_MESSAGE } from './api';
 
 // `$app/environment` is stubbed with dev=false (see src/test/app-stubs), so
 // withMock() takes the real() branch and actually issues fetch — which we stub.
@@ -158,5 +158,45 @@ describe('filterMock answers a query the way the server would', () => {
     expect(closed.total).toBeLessThan(unfiltered.total);
     expect(closed.items.every((i) => i.status === 'closed')).toBe(true);
     expect(filterMock({ status: 'closed', limit: 1 }).total).toBe(closed.total);
+  });
+});
+
+describe('a refused access token', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    onUnauthorized(null);
+  });
+
+  it('reports a 401 as UNAUTHORIZED with the how-to message, not a bare HTTP 401', async () => {
+    // The auth layer answers in plain text, not in the JSON envelope.
+    vi.stubGlobal(
+      'fetch',
+      async () =>
+        new Response('401: this clove web UI needs its access token.', {
+          status: 401,
+          headers: { 'content-type': 'text/plain; charset=utf-8' }
+        })
+    );
+    const seen = vi.fn();
+    onUnauthorized(seen);
+    const err = await api.meta().catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.code).toBe('UNAUTHORIZED');
+    expect(err.status).toBe(401);
+    expect(err.message).toBe(UNAUTHORIZED_MESSAGE);
+    expect(err.message).toContain('?token=');
+    expect(seen).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not call the handler for other errors', async () => {
+    vi.stubGlobal(
+      'fetch',
+      async () => new Response('bad gateway', { status: 502, headers: { 'content-type': 'text/plain' } })
+    );
+    const seen = vi.fn();
+    onUnauthorized(seen);
+    const err = await api.meta().catch((e) => e);
+    expect(err.code).toBe('NON_JSON');
+    expect(seen).not.toHaveBeenCalled();
   });
 });
