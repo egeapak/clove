@@ -29,7 +29,7 @@ use crate::AppState;
 /// parses item files — none of which may happen on an async worker. (`cloved`
 /// hosts this server on a two-worker runtime, so one blocking read there would
 /// stall `ping`, the watcher, and every other request.)
-async fn blocking<T, F>(f: F) -> Result<T, ApiError>
+pub(crate) async fn blocking<T, F>(f: F) -> Result<T, ApiError>
 where
     F: FnOnce() -> Result<T, ApiError> + Send + 'static,
     T: Send + 'static,
@@ -51,7 +51,10 @@ where
 /// no graph and derives the same three values per item from its own dependency
 /// closure (`ops::graph_terms_detailed`). Both go through
 /// [`crate::dto::with_terms`], so the row cannot differ by tier.
-fn values_of(answer: ListAnswer, state: &AppState) -> Result<Vec<Value>, ApiError> {
+///
+/// Blocking (a tiered answer reads each row's dependency files): call it inside
+/// [`blocking`], never on an axum worker.
+fn values_of(answer: ListAnswer, store: &clove_core::ItemStore) -> Result<Vec<Value>, ApiError> {
     let ListAnswer { rows, graph, .. } = answer;
     let rows = match rows {
         Rows::Full(rows) => rows,
@@ -70,11 +73,27 @@ fn values_of(answer: ListAnswer, state: &AppState) -> Result<Vec<Value>, ApiErro
         None => rows
             .iter()
             .map(|row| {
-                let terms = clove_core::ops::graph_terms_detailed(&state.store, &row.frontmatter)?;
-                let missing = missing_refs_on_disk(&state.store, &row.frontmatter);
+                let terms = clove_core::ops::graph_terms_detailed(store, &row.frontmatter)?;
+                let missing = missing_refs_on_disk(store, &row.frontmatter);
                 Ok(Value::Object(with_terms(&row.frontmatter, &terms, missing)))
             })
             .collect(),
+    }
+}
+
+/// The projection for a read over `window`.
+///
+/// A windowed read keeps the tiers: the index or daemon answers the query and
+/// only the page is read back from disk. An **unwindowed** read (the web
+/// default, and always the board) returns every matching item, and a tier
+/// would answer it the expensive way: read every item file to hydrate the
+/// rows, then read each row's dependency files again for the graph terms. One
+/// file scan reads each file once and hands back the graph it built, so that
+/// request is pinned to the file tier.
+fn projection_for(window: clove_core::view::Page) -> Projection {
+    match window.limit {
+        None => Projection::Files,
+        Some(_) => Projection::Full,
     }
 }
 
@@ -153,7 +172,7 @@ impl Shape {
 /// `false` — the same treatment `?sort=` and `?status=` get, and the reason is
 /// the same: `?compact=yes` quietly returning the full shape is a result a
 /// client cannot distinguish from a server that does not support the parameter.
-fn bool_param(params: &HashMap<String, String>, key: &str) -> Result<bool, ApiError> {
+pub(crate) fn bool_param(params: &HashMap<String, String>, key: &str) -> Result<bool, ApiError> {
     match params.get(key).map(String::as_str) {
         None | Some("") | Some("false") | Some("0") => Ok(false),
         Some("true") | Some("1") => Ok(true),
@@ -220,8 +239,10 @@ fn page_window(params: &HashMap<String, String>) -> Result<clove_core::view::Pag
 }
 
 /// Load the whole store's frontmatter and the derived graph context.
-fn load(state: &AppState) -> Result<(Vec<ItemFrontmatter>, GraphContext), ApiError> {
-    let (frontmatters, _errors) = state.store.scan_frontmatter()?;
+///
+/// Blocking (a whole-store scan): call it inside [`blocking`].
+fn load(store: &clove_core::ItemStore) -> Result<(Vec<ItemFrontmatter>, GraphContext), ApiError> {
+    let (frontmatters, _errors) = store.scan_frontmatter()?;
     let ctx = GraphContext::build(&frontmatters);
     Ok((frontmatters, ctx))
 }
@@ -326,22 +347,22 @@ pub async fn list_items(
     };
 
     let engine = state.engine.clone();
+    let store = state.store.clone();
     let (f, w) = (filters.clone(), window);
-    let answer = blocking(move || {
+    let (source, total, page) = blocking(move || {
         // Full frontmatter: this API renders every field plus the graph terms,
         // which no lean row carries.
+        let projection = projection_for(w);
         let answer = match mode {
-            ListMode::Ready => engine.ready(&f, order, w, Projection::Full),
-            ListMode::Blocked => engine.blocked(&f, order, w, Projection::Full),
-            ListMode::All => engine.list(&f, order, w, Projection::Full),
-        };
-        answer.map_err(ApiError::from)
+            ListMode::Ready => engine.ready(&f, order, w, projection),
+            ListMode::Blocked => engine.blocked(&f, order, w, projection),
+            ListMode::All => engine.list(&f, order, w, projection),
+        }?;
+        let (source, total) = (answer.source.as_str(), answer.total);
+        // Rendering reads files on a tiered answer, so it stays in here.
+        Ok((source, total, values_of(answer, &store)?))
     })
     .await?;
-
-    let source = answer.source.as_str();
-    let total = answer.total;
-    let page = values_of(answer, &state)?;
     // `returned` counts rows, so it is taken before shaping — a projection
     // changes each row's keys, never how many rows came back.
     let returned = page.len();
@@ -474,15 +495,14 @@ pub async fn get_board(
     // The board shows every matching item grouped into columns, so the query is
     // unwindowed: `limit`/`offset` window each *column* below, not the query.
     let engine = state.engine.clone();
+    let store = state.store.clone();
     let (f, unwindowed) = (filters.clone(), clove_core::view::Page::unlimited());
-    let answer = blocking(move || {
-        engine
-            .list(&f, order, unwindowed, Projection::Full)
-            .map_err(ApiError::from)
+    let (source, selected) = blocking(move || {
+        let answer = engine.list(&f, order, unwindowed, projection_for(unwindowed))?;
+        let source = answer.source.as_str();
+        Ok((source, values_of(answer, &store)?))
     })
     .await?;
-    let source = answer.source.as_str();
-    let selected = values_of(answer, &state)?;
 
     let mut columns: Vec<(&str, &str, Vec<Value>)> = vec![
         ("open", "Open", Vec::new()),
@@ -654,8 +674,13 @@ pub async fn get_stats_history(
     // is a 422 whether or not this repo has recorded snapshots.
     let window = page_window(&params)?;
 
-    // Durable recorded snapshots win when present.
-    if let Some((points, total)) = recorded_history_points(&state, &params, window) {
+    // Durable recorded snapshots win when present. Reading them opens SQLite
+    // and parses every stored snapshot, so it runs off the async workers.
+    let recorded = {
+        let (state, params) = (state.clone(), params.clone());
+        blocking(move || Ok(recorded_history_points(&state, &params, window))).await?
+    };
+    if let Some((points, total)) = recorded {
         let recorded = points.len();
         return Ok(ok(
             json!(points),
@@ -690,7 +715,9 @@ pub async fn get_stats_history(
             .clamp(1, 365)
     };
 
-    let (frontmatters, _ctx) = load(&state)?;
+    let store = state.store.clone();
+    // Only the frontmatter is needed here; `load` would also build the graph.
+    let frontmatters = blocking(move || Ok(store.scan_frontmatter()?.0)).await?;
     let today = chrono::Utc::now().date_naive();
     let days = if all_days {
         let oldest = frontmatters
@@ -750,17 +777,21 @@ pub async fn get_stats_history(
 
 /// `GET /api/v1/meta` — bootstraps the filter dropdowns and create form.
 pub async fn get_meta(State(state): State<AppState>) -> ApiResult {
-    let (frontmatters, _ctx) = load(&state)?;
-    let mut labels: BTreeSet<String> = BTreeSet::new();
-    let mut assignees: BTreeSet<String> = BTreeSet::new();
-    for fm in &frontmatters {
-        for l in &fm.labels {
-            labels.insert(l.clone());
+    // A whole-store frontmatter scan (and the sync-state read below): off the
+    // async workers. Only labels and assignees are needed, so no graph is built.
+    let store = state.store.clone();
+    let clove_dir = state.clove_dir();
+    let (labels, assignees, sync) = blocking(move || {
+        let (frontmatters, _errors) = store.scan_frontmatter()?;
+        let mut labels: BTreeSet<String> = BTreeSet::new();
+        let mut assignees: BTreeSet<String> = BTreeSet::new();
+        for fm in frontmatters {
+            labels.extend(fm.labels);
+            assignees.extend(fm.assignee);
         }
-        if let Some(a) = &fm.assignee {
-            assignees.insert(a.clone());
-        }
-    }
+        Ok((labels, assignees, crate::sync::targets(&clove_dir)))
+    })
+    .await?;
     let data = json!({
         "id_prefix": state.id_prefix,
         "types": ["bug", "feature", "chore", "docs", "epic"],
@@ -769,7 +800,7 @@ pub async fn get_meta(State(state): State<AppState>) -> ApiResult {
         "labels": labels.into_iter().collect::<Vec<_>>(),
         "assignees": assignees.into_iter().collect::<Vec<_>>(),
         "daemon": { "running": state.daemon_running, "web_addr": Value::Null },
-        "sync": crate::sync::targets(&state.clove_dir()),
+        "sync": sync,
         "source": state.source,
         // The AGPL-3.0 section 13 source offer, linked from the SPA's top bar.
         "source_code": clove_core::source::source_json(),
@@ -779,12 +810,16 @@ pub async fn get_meta(State(state): State<AppState>) -> ApiResult {
 
 /// `GET /api/v1/cycles` — hard-dependency cycles.
 pub async fn get_cycles(State(state): State<AppState>) -> ApiResult {
-    let (_frontmatters, ctx) = load(&state)?;
-    let cycles: Vec<Vec<String>> = ctx
-        .graph()
-        .all_cycles()
-        .into_iter()
-        .map(|cycle| cycle.iter().map(CloveId::to_string).collect())
-        .collect();
+    let store = state.store.clone();
+    let cycles: Vec<Vec<String>> = blocking(move || {
+        let (_frontmatters, ctx) = load(&store)?;
+        Ok(ctx
+            .graph()
+            .all_cycles()
+            .into_iter()
+            .map(|cycle| cycle.iter().map(CloveId::to_string).collect())
+            .collect())
+    })
+    .await?;
     Ok(ok_data(json!({ "cycles": cycles })))
 }

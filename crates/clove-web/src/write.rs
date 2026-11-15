@@ -1,6 +1,11 @@
 //! Write endpoints. Every mutation goes through `clove_core::ItemStore` (atomic
 //! rename + advisory lock), so web writes are concurrency-safe with the CLI and
 //! daemon and re-enter the file-watcher → push loop. Each returns the updated item.
+//!
+//! Every handler runs its store work through [`blocking`]: a write takes the
+//! store lock, reads and renames files, and `dep_add`/`set_parent` scan the
+//! whole store for the cycle check — none of which may happen on an axum
+//! worker (see [`crate::read`]).
 
 use std::collections::HashMap;
 
@@ -15,6 +20,7 @@ use serde_json::{json, Value};
 
 use crate::dto::{item_value, missing_refs_on_disk};
 use crate::error::{ok, ApiError, ApiResult};
+use crate::read::{blocking, bool_param};
 use crate::AppState;
 
 fn parse_id(raw: &str) -> Result<CloveId, ApiError> {
@@ -37,11 +43,41 @@ where
 /// The terms come from the item's own dependency closure rather than a
 /// whole-store graph build: a write response used to re-scan and re-parse every
 /// file in the repo to report whether the one item just written was ready.
-fn respond_item(state: &AppState, item: &Item) -> ApiResult {
+///
+/// Blocking: call it inside [`blocking`].
+fn item_object(state: &AppState, item: &Item) -> Result<Value, ApiError> {
     let terms = clove_core::ops::graph_terms_detailed(&state.store, &item.frontmatter)?;
     let missing = missing_refs_on_disk(&state.store, &item.frontmatter);
-    let obj = item_value(item, &state.issues_dir, &terms, missing);
-    Ok(ok(Value::Object(obj), json!({ "source": state.source })))
+    Ok(Value::Object(item_value(
+        item,
+        &state.issues_dir,
+        &terms,
+        missing,
+    )))
+}
+
+/// `_meta` of a write response.
+///
+/// `source` names the tier that answered, as on the read endpoints, and a
+/// write response is always rendered from the item files. It used to carry the
+/// serving mode (`standalone`/`daemon`): a value outside the published enum
+/// under `clove serve`, and a claim of `daemon` under `cloved` for an answer
+/// read straight off disk.
+fn write_meta() -> Value {
+    json!({ "source": clove_engine::Source::Files.as_str() })
+}
+
+/// Run a write on a blocking task and render the item it returns.
+async fn write_item<F>(state: AppState, f: F) -> ApiResult
+where
+    F: FnOnce(&AppState) -> Result<Item, ApiError> + Send + 'static,
+{
+    let data = blocking(move || {
+        let item = f(&state)?;
+        item_object(&state, &item)
+    })
+    .await?;
+    Ok(ok(data, write_meta()))
 }
 
 #[derive(Debug, Deserialize)]
@@ -78,18 +114,25 @@ pub async fn create_item(State(state): State<AppState>, body: ApiJson<CreateBody
         assignee: body.assignee,
         body: body.body,
     };
-    let created = ops::create(
-        &state.store,
-        &state.id_prefix,
-        state.default_type,
-        spec,
-        Utc::now(),
-    )?;
-    let id = parse_id(created["id"].as_str().unwrap_or_default())?;
-    respond_item(&state, &state.store.get(&id)?)
+    write_item(state, move |state| {
+        let created = ops::create(
+            &state.store,
+            &state.id_prefix,
+            state.default_type,
+            spec,
+            Utc::now(),
+        )?;
+        let id = parse_id(created["id"].as_str().unwrap_or_default())?;
+        Ok(state.store.get(&id)?)
+    })
+    .await
 }
 
+// `deny_unknown_fields`: a key this endpoint does not edit (`parent`, `deps`,
+// a typo) is an error, as it is for `clove set` and the MCP `clove_edit` tool,
+// rather than a 200 that changed nothing.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PatchBody {
     #[serde(default)]
     pub title: Option<String>,
@@ -146,8 +189,20 @@ pub async fn patch_item(
         labels: body.labels.map(LabelEdit::Set),
     };
 
-    apply_edit(&state.store, &id, &req, Utc::now())?;
-    respond_item(&state, &state.store.get(&id)?)
+    // The same answer the MCP tool and `clove set` give for an edit that names
+    // no field.
+    if req.is_empty() {
+        return Err(ApiError::from(CloveError::InvalidField {
+            field: "body".to_owned(),
+            reason: "no fields to edit".to_owned(),
+        }));
+    }
+
+    write_item(state, move |state| {
+        apply_edit(&state.store, &id, &req, Utc::now())?;
+        Ok(state.store.get(&id)?)
+    })
+    .await
 }
 
 #[derive(Debug, Deserialize)]
@@ -173,8 +228,11 @@ pub async fn put_labels(
         }),
         ..Default::default()
     };
-    apply_edit(&state.store, &id, &req, Utc::now())?;
-    respond_item(&state, &state.store.get(&id)?)
+    write_item(state, move |state| {
+        apply_edit(&state.store, &id, &req, Utc::now())?;
+        Ok(state.store.get(&id)?)
+    })
+    .await
 }
 
 #[derive(Debug, Deserialize)]
@@ -191,19 +249,36 @@ pub async fn add_comment(
     body: ApiJson<CommentBody>,
 ) -> ApiResult {
     let id = parse_id(&id)?;
-    if !state.store.exists(&id) {
-        return Err(ApiError::from(CloveError::NotFound { id: id.to_string() }));
-    }
     let body = body.0;
-    // A single-token author slug round-trips cleanly through the comment-filename
-    // parser (`<ts>-<author>-<rand>.md`); an email with punctuation would not.
-    let author = body
-        .author
-        .filter(|a| !a.trim().is_empty())
-        .unwrap_or_else(|| "web".to_owned());
-    core_add_comment(&state.issues_dir, &id, &author, &body.body)?;
-    let item = state.store.get(&id)?;
-    respond_item(&state, &item)
+    write_item(state, move |state| {
+        if !state.store.exists(&id) {
+            return Err(ApiError::from(CloveError::NotFound { id: id.to_string() }));
+        }
+        let author = body
+            .author
+            .filter(|a| !a.trim().is_empty())
+            .unwrap_or_else(|| default_comment_author(state));
+        core_add_comment(&state.issues_dir, &id, &author, &body.body)?;
+        Ok(state.store.get(&id)?)
+    })
+    .await
+}
+
+/// The author of a comment whose request names none.
+///
+/// The shared rule (`CLOVE_AUTHOR`, the git identity, `$USER`) that
+/// `clove comment` and the MCP `clove_comment` tool use, so a comment typed in
+/// the browser is attributed to the same person as one typed in the terminal.
+/// The server process may have nothing to resolve (the `cloved` hub runs with
+/// a minimal environment); it then keeps the surface name `web` rather than
+/// the rule's `unknown`.
+fn default_comment_author(state: &AppState) -> String {
+    let author = clove_core::comments::comment_author(state.store.repo_root());
+    if author == "unknown" {
+        "web".to_owned()
+    } else {
+        author
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -220,8 +295,11 @@ pub async fn add_dep(
 ) -> ApiResult {
     let id = parse_id(&id)?;
     let dep = parse_id(&body.0.dep)?;
-    ops::dep_add(&state.store, &id, &dep, Utc::now())?;
-    respond_item(&state, &state.store.get(&id)?)
+    write_item(state, move |state| {
+        ops::dep_add(&state.store, &id, &dep, Utc::now())?;
+        Ok(state.store.get(&id)?)
+    })
+    .await
 }
 
 /// `DELETE /api/v1/items/:id/deps/:dep`. Idempotent (HTTP DELETE semantics): a
@@ -232,10 +310,13 @@ pub async fn remove_dep(
 ) -> ApiResult {
     let id = parse_id(&id)?;
     let dep = parse_id(&dep)?;
-    if state.store.get(&id)?.frontmatter.deps.contains(&dep) {
-        ops::dep_remove(&state.store, &id, &dep, Utc::now())?;
-    }
-    respond_item(&state, &state.store.get(&id)?)
+    write_item(state, move |state| {
+        if state.store.get(&id)?.frontmatter.deps.contains(&dep) {
+            ops::dep_remove(&state.store, &id, &dep, Utc::now())?;
+        }
+        Ok(state.store.get(&id)?)
+    })
+    .await
 }
 
 #[derive(Debug, Deserialize)]
@@ -257,8 +338,11 @@ pub async fn put_parent(
         Some(p) => Some(parse_id(p)?),
         None => None,
     };
-    ops::set_parent(&state.store, &id, parent.as_ref(), Utc::now())?;
-    respond_item(&state, &state.store.get(&id)?)
+    write_item(state, move |state| {
+        ops::set_parent(&state.store, &id, parent.as_ref(), Utc::now())?;
+        Ok(state.store.get(&id)?)
+    })
+    .await
 }
 
 /// `DELETE /api/v1/items/:id?force=`.
@@ -268,12 +352,12 @@ pub async fn delete_item(
     Query(params): Query<HashMap<String, String>>,
 ) -> ApiResult {
     let id = parse_id(&id)?;
-    let force = params.get("force").map(String::as_str) == Some("true");
-    state.store.delete(&id, force)?;
-    Ok(ok(
-        json!({ "id": id.to_string(), "deleted": true }),
-        json!({ "source": state.source }),
-    ))
+    // Through `bool_param`, like every other flag: `?force=1` used to read as
+    // `false`, and `?force=yes` is now an error rather than a refused delete.
+    let force = bool_param(&params, "force")?;
+    let deleted = id.to_string();
+    blocking(move || Ok(state.store.delete(&id, force)?)).await?;
+    Ok(ok(json!({ "id": deleted, "deleted": true }), write_meta()))
 }
 
 /// A JSON body extractor that maps deserialization failures to the clove error
@@ -291,7 +375,11 @@ where
     async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
         let axum::Json(value) = axum::Json::<T>::from_request(req, state)
             .await
-            .map_err(|e| ApiError::bad_request(format!("invalid request body: {e}")))?;
+            // `body_text`, not `Display`: it carries the cause (which key,
+            // which line), where `Display` only names the rejection class.
+            .map_err(|e| {
+                ApiError::bad_request(format!("invalid request body: {}", e.body_text()))
+            })?;
         Ok(ApiJson(value))
     }
 }

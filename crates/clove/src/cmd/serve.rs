@@ -72,8 +72,8 @@ pub fn run(
 
     if !ip.is_loopback() && !quiet {
         status!(
-            "warning: serving on a non-loopback address ({ip}) exposes write access \
-             with no authentication; use only on a trusted network"
+            "warning: serving on a non-loopback address ({ip}) sends the access \
+             token and all data unencrypted; use only on a trusted network"
         );
     }
 
@@ -91,6 +91,13 @@ pub fn run(
     // the engine the web always read files, so "force a file scan" was kept by
     // accident — afterwards it was simply false.
     .with_read_tiers(!no_index, !no_index, deep);
+    // The port is open to every local user; the token in the printed URL is
+    // what limits the UI to whoever can read this terminal.
+    let auth = clove_web::WebAuth::generate().map_err(|source| CloveError::Io {
+        path: ctx.root.clone(),
+        source,
+    })?;
+    let state = state.with_auth(auth.clone());
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -107,7 +114,7 @@ pub fn run(
         } else {
             clove_web::bind_or_free_port(requested).await?
         };
-        let url = format!("http://{}", listener.local_addr()?);
+        let url = auth.url(&format!("http://{}/", listener.local_addr()?));
         if !quiet {
             if args.port.is_none() && listener.local_addr()?.port() != requested.port() {
                 status!(
