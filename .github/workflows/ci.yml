@@ -162,10 +162,12 @@ jobs:
       # budgets (reindex, ls, ready, search, staleness). Both files only assert
       # in optimized builds (debug is several times slower), and the ordinary
       # test job is a debug build, so this job is the only place they can fail.
+      # One test thread: the gates of one file must not compete for the CPU.
+      # A gate fails only when all of its rounds are over budget (`perf_gate`).
       - name: Perf gate tests
         run: |
-          cargo test --release -p clove-core --test perf_gates
-          cargo test --release -p clove-index --test index_perf_gates
+          cargo test --release -p clove-core --test perf_gates -- --test-threads=1
+          cargo test --release -p clove-index --test index_perf_gates -- --test-threads=1
 
   fuzz:
     name: fuzz (30s/target)

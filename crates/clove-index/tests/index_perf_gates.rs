@@ -14,7 +14,7 @@
 use std::time::{Duration, Instant};
 
 use camino::Utf8PathBuf;
-use clove_core::fixtures::write_fixtures;
+use clove_core::fixtures::{perf_gate, write_fixtures, GATE_PAUSE, GATE_ROUNDS};
 use clove_index::{reindex, Filter, Index, QueryMode};
 use filetime::FileTime;
 use tempfile::TempDir;
@@ -45,12 +45,26 @@ fn best_of(iters: u32, mut op: impl FnMut()) -> Duration {
     best
 }
 
-fn assert_within(label: &str, elapsed: Duration, budget: Duration) {
-    eprintln!("m1 perf gate {label}: {elapsed:?} (budget {budget:?})");
+/// Measure `op` with [`perf_gate`]: fail only when every round is over
+/// `budget`, and only in optimized builds. A debug build runs one round and
+/// asserts nothing.
+fn gate(label: &str, iters: u32, budget: Duration, op: impl FnMut()) {
+    let rounds = if cfg!(debug_assertions) {
+        1
+    } else {
+        GATE_ROUNDS
+    };
+    let run = perf_gate(rounds, iters, budget, GATE_PAUSE, op);
+    eprintln!(
+        "m1 perf gate {label}: {:?} (budget {budget:?}, rounds {:?})",
+        run.best(),
+        run.rounds
+    );
     if !cfg!(debug_assertions) {
         assert!(
-            elapsed <= budget,
-            "{label} took {elapsed:?}, over the {budget:?} budget (M1 acceptance gate)"
+            run.passed(),
+            "{label}: every round was over the {budget:?} budget: {:?} (M1 acceptance gate)",
+            run.rounds
         );
     }
 }
@@ -81,7 +95,7 @@ fn m1_index_perf_gates() {
     let (_tmp, issues, db) = setup(n);
 
     // reindex gate (build the warm index in the process).
-    let reindex_elapsed = best_of(3, || {
+    gate("reindex", 3, Duration::from_millis(1000), || {
         reindex(&issues, &db).unwrap();
     });
     let index = Index::open(&db).unwrap();
@@ -90,12 +104,11 @@ fn m1_index_perf_gates() {
         n,
         "reindex must index every item"
     );
-    assert_within("reindex", reindex_elapsed, Duration::from_millis(1000));
 
     // ls gate: the lean list projection (`query_list`) is what `clove ls` serves
     // from the index — only the columns the list renders, no per-row label parse.
     let mut ls_count = 0;
-    let ls_elapsed = best_of(20, || {
+    gate("ls_lean", 20, Duration::from_millis(8), || {
         ls_count = index.query_list(&Filter::default()).unwrap().len();
     });
     assert_eq!(ls_count, n, "ls must return every item");
@@ -105,11 +118,10 @@ fn m1_index_perf_gates() {
     // removed). The 8 ms bound keeps ~2x headroom over the observed time so CI
     // catches a covering-scan regression (e.g. the index-only plan silently
     // reverting to a table scan) instead of hiding it under a loose budget.
-    // See DESIGN.md §13.1.
-    assert_within("ls_lean", ls_elapsed, Duration::from_millis(8));
+    // See DESIGN.md §13.1. (The gate above enforces it.)
 
     // ready gate: the lean projection in Ready mode.
-    let ready_elapsed = best_of(20, || {
+    gate("ready_lean", 20, Duration::from_millis(15), || {
         let rows = index
             .query_list(&Filter {
                 mode: QueryMode::Ready,
@@ -118,7 +130,6 @@ fn m1_index_perf_gates() {
             .unwrap();
         std::hint::black_box(rows.len());
     });
-    assert_within("ready_lean", ready_elapsed, Duration::from_millis(15));
 
     // Search gate — a *file scan*, not an index query, and deliberately so.
     //
@@ -137,25 +148,25 @@ fn m1_index_perf_gates() {
     let root = issues.parent().unwrap().parent().unwrap().to_path_buf();
     let store = clove_core::ItemStore::new(root);
     let mut hits = 0;
-    let search_elapsed = best_of(5, || {
-        // The real path: classify during the scan so peak memory tracks the
-        // result size, not the store size.
-        let mut found = clove_core::ops::search_hits(&store, "medium").unwrap();
-        hits = clove_core::view::rank_hits(
-            &mut found,
-            clove_core::view::SearchOrder::default(),
-            &std::collections::HashMap::new(),
-        )
-        .len();
-    });
+    gate(
+        "search_selective_file_scan",
+        5,
+        Duration::from_millis(400),
+        || {
+            // The real path: classify during the scan so peak memory tracks the
+            // result size, not the store size.
+            let mut found = clove_core::ops::search_hits(&store, "medium").unwrap();
+            hits = clove_core::view::rank_hits(
+                &mut found,
+                clove_core::view::SearchOrder::default(),
+                &std::collections::HashMap::new(),
+            )
+            .len();
+        },
+    );
     assert!(
         hits > 0 && hits < n,
         "selective search must match a subset, got {hits}"
-    );
-    assert_within(
-        "search_selective_file_scan",
-        search_elapsed,
-        Duration::from_millis(400),
     );
 
     // Broad match ("benchmark" is in every body): informational. The scan cost is
@@ -175,15 +186,10 @@ fn m1_index_perf_gates() {
 
     // Staleness fast path, 0 stale: the O(readdir) `check_staleness_fast` (the
     // default the CLI uses) trusts dir mtime + count and skips per-file stats.
-    let stale_elapsed = best_of(20, || {
+    gate("staleness_clean_fast", 20, Duration::from_millis(5), || {
         let report = index.check_staleness_fast(&issues).unwrap();
         assert!(report.is_clean(), "freshly indexed corpus must be clean");
     });
-    assert_within(
-        "staleness_clean_fast",
-        stale_elapsed,
-        Duration::from_millis(5),
-    );
 
     // The deep path (`--deep`) stats every file; informational — it intentionally
     // exceeds the 5 ms budget at 10k (that is why it is opt-in).
