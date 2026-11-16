@@ -2,11 +2,12 @@
 schema: 1
 id: clov-MKTVAKGE
 title: 'web: each page load fetches its rows twice and /meta three times'
-status: open
+status: closed
 type: chore
 priority: 2
 created: 2026-11-15T07:11:47.568Z
-updated: 2026-11-15T07:11:47.568Z
+updated: 2026-11-16T21:01:57.415Z
+closed: 2026-11-16T21:01:57.415Z
 labels: []
 deps: []
 relates: []
