@@ -51,8 +51,9 @@ use serde_json::Value;
 
 /// Up to this many out-of-date items are always refreshed one by one. Above it
 /// the engine still refreshes, and rebuilds the index instead when the changes
-/// are also more than a quarter of the indexed store (DESIGN §6.4).
-pub const STALE_REFRESH_LIMIT: usize = 20;
+/// are also more than a quarter of the indexed store (DESIGN §6.4). The daemon
+/// uses the same value.
+pub use clove_index::STALE_REFRESH_LIMIT;
 
 /// Above this many items in a page, hydrate in parallel. Mirrors
 /// `ItemStore::scan_frontmatter`'s own threshold, so a hydrated page and a
@@ -325,6 +326,10 @@ impl Tiers {
         }
     }
 }
+
+/// One closed id and the ids of the active items whose `deps` still name it
+/// (see [`Engine::open_dependents`]).
+pub type OpenDependents = (CloveId, Vec<String>);
 
 /// The read engine: one store, one optional index, one cached daemon client.
 ///
@@ -601,10 +606,107 @@ impl Engine {
                 });
             }
         }
+        if !self.store.exists(id) {
+            return Err(CloveError::NotFound { id: id.to_string() });
+        }
+        if let Some(frontmatters) = self.frontmatters_via_index() {
+            let (graph, _dangling) = GraphStore::build(&frontmatters);
+            // The item file exists, so an index with no node for it is behind
+            // the files: the file scan answers instead of a false "not found".
+            if let Some(node) = graph.dep_tree(id, depth) {
+                return Ok(Answer {
+                    source: Source::Index,
+                    value: node.to_json(),
+                });
+            }
+        }
         Ok(Answer {
             source: Source::Files,
             value: ops::dep_tree(&self.store, id, depth)?,
         })
+    }
+
+    /// The frontmatter of every item, in id order: from the index when it can
+    /// be brought up to date, else from a file scan (whose unreadable files are
+    /// left out, as every scan-based read leaves them out).
+    ///
+    /// For the reads that need the whole graph (`dep tree`, `dep cycle`,
+    /// `stats`): with a fresh index they read no item file.
+    pub fn frontmatters(&self) -> Result<Answer<Vec<ItemFrontmatter>>, CloveError> {
+        if let Some(value) = self.frontmatters_via_index() {
+            return Ok(Answer {
+                source: Source::Index,
+                value,
+            });
+        }
+        let (mut value, _errors) = self.store.scan_frontmatter()?;
+        value.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(Answer {
+            source: Source::Files,
+            value,
+        })
+    }
+
+    /// For each of `ids`, the active items (not `closed`) whose `deps` name
+    /// it, in id order. An id with no such item is left out.
+    ///
+    /// The `clove close` warning. With a fresh index this is one indexed
+    /// lookup per id and reads no item file.
+    pub fn open_dependents(
+        &self,
+        ids: &[CloveId],
+    ) -> Result<Answer<Vec<OpenDependents>>, CloveError> {
+        if let Some(index) = self.fresh_index() {
+            let answer: Result<Vec<_>, _> = ids
+                .iter()
+                .map(|id| index.open_dependents(id.as_str()).map(|d| (id.clone(), d)))
+                .collect();
+            if let Ok(found) = answer {
+                return Ok(Answer {
+                    source: Source::Index,
+                    value: found.into_iter().filter(|(_, d)| !d.is_empty()).collect(),
+                });
+            }
+        }
+        let (frontmatters, _errors) = self.store.scan_frontmatter()?;
+        let value = ids
+            .iter()
+            .map(|id| {
+                let mut dependents: Vec<String> = frontmatters
+                    .iter()
+                    .filter(|fm| {
+                        fm.status != clove_types::ItemStatus::Closed && fm.deps.contains(id)
+                    })
+                    .map(|fm| fm.id.to_string())
+                    .collect();
+                dependents.sort();
+                (id.clone(), dependents)
+            })
+            .filter(|(_, d)| !d.is_empty())
+            .collect();
+        Ok(Answer {
+            source: Source::Files,
+            value,
+        })
+    }
+
+    /// The index, brought up to date, when the index tier may answer a
+    /// whole-graph read: the tier is on, the index exists, and reads may
+    /// refresh it (`index.auto_refresh`). With refresh off the index can be
+    /// behind, and these reads have no way to say so, so the files answer.
+    /// Any error is a reason to read the files, not to fail.
+    fn fresh_index(&self) -> Option<Index> {
+        if !self.tiers.index || !self.tiers.auto_refresh || !self.db_path.exists() {
+            return None;
+        }
+        let index = Index::open_or_rebuild(&self.db_path, &self.issues_dir).ok()?;
+        self.refresh(index).ok()
+    }
+
+    /// [`Self::fresh_index`]'s frontmatter mirror (see
+    /// `Index::graph_frontmatters`), or `None` to read the files.
+    fn frontmatters_via_index(&self) -> Option<Vec<ItemFrontmatter>> {
+        self.fresh_index()?.graph_frontmatters().ok()
     }
 
     /// The work-item analytics report.
@@ -623,6 +725,12 @@ impl Engine {
                     value,
                 });
             }
+        }
+        if let Some(frontmatters) = self.frontmatters_via_index() {
+            return Ok(Answer {
+                source: Source::Index,
+                value: stats_value(&frontmatters, top, include_epics, now),
+            });
         }
         Ok(Answer {
             source: Source::Files,
@@ -985,6 +1093,23 @@ fn query_request(kind: QueryKind, filters: &Filters, order: Order, window: Page)
         offset: window.offset,
         limit: window.limit,
     }
+}
+
+/// The `stats` report of `frontmatters`, in the shape `ops::stats` returns.
+fn stats_value(
+    frontmatters: &[ItemFrontmatter],
+    top: usize,
+    include_epics: bool,
+    now: DateTime<Utc>,
+) -> Value {
+    let (graph, _dangling) = GraphStore::build(frontmatters);
+    let report = clove_core::compute_stats(
+        frontmatters,
+        &graph,
+        now,
+        clove_core::StatsOptions { top, include_epics },
+    );
+    serde_json::to_value(&report).unwrap_or(Value::Null)
 }
 
 /// Whether an index error is SQLite refusing the *shape* of the query rather

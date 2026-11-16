@@ -33,6 +33,7 @@ pub fn run(
     ids: &[String],
     status: ItemStatus,
     quiet: bool,
+    no_index: bool,
 ) -> Result<ExitCode, CloveError> {
     if let [id] = ids {
         let saved = transition_one(ctx, id, status)?;
@@ -40,6 +41,7 @@ pub fn run(
             ctx,
             status,
             quiet,
+            no_index,
             std::slice::from_ref(&saved.frontmatter.id),
         );
         print_item(format, &saved, Map::new());
@@ -55,7 +57,7 @@ pub fn run(
         .iter()
         .filter_map(|(_, r)| r.as_ref().ok().map(|item| item.frontmatter.id.clone()))
         .collect();
-    warn_open_dependents(ctx, status, quiet, &closed);
+    warn_open_dependents(ctx, status, quiet, no_index, &closed);
 
     let first_err = results.iter().find_map(|(_, r)| r.as_ref().err());
     let failed = results.iter().filter(|(_, r)| r.is_err()).count();
@@ -126,25 +128,29 @@ fn entry(id: &str, result: &Result<Item, CloveError>) -> Value {
 
 /// Closing an item that others depend on is allowed, but warned about (stderr,
 /// before the item output). This is best-effort and reads only *other* items'
-/// `deps`, so it runs after the writes, outside the store lock, with a single
-/// scan however many ids were closed.
-fn warn_open_dependents(ctx: &Ctx, status: ItemStatus, quiet: bool, ids: &[CloveId]) {
+/// `deps`, so it runs after the writes, outside the store lock, with one read
+/// however many ids were closed.
+fn warn_open_dependents(
+    ctx: &Ctx,
+    status: ItemStatus,
+    quiet: bool,
+    no_index: bool,
+    ids: &[CloveId],
+) {
     if status != ItemStatus::Closed || quiet || ids.is_empty() {
         return;
     }
-    let (frontmatters, _errors) = ctx.store.scan_frontmatter().unwrap_or_default();
-    for id in ids {
-        let dependents: Vec<String> = frontmatters
-            .iter()
-            .filter(|fm| fm.status != ItemStatus::Closed && fm.deps.contains(id))
-            .map(|fm| fm.id.to_string())
-            .collect();
-        if !dependents.is_empty() {
-            eprintln!(
-                "warning: {} still has open dependents: {}",
-                id.as_str(),
-                dependents.join(", ")
-            );
-        }
+    // With a fresh index this is one indexed lookup per id, not a parse of
+    // every item file after each close. The warning is best effort: a read
+    // that fails prints nothing rather than failing a close that succeeded.
+    let Ok(answer) = ctx.engine(no_index, false).open_dependents(ids) else {
+        return;
+    };
+    for (id, dependents) in answer.value {
+        eprintln!(
+            "warning: {} still has open dependents: {}",
+            id.as_str(),
+            dependents.join(", ")
+        );
     }
 }

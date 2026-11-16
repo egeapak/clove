@@ -743,3 +743,86 @@ fn ready_warns_about_the_same_dangling_items_on_every_tier() {
     assert_eq!(ready(&fx.indexed(), &q).warnings, want.warnings);
     assert_eq!(ready(&fx.files(), &q).warnings, want.warnings);
 }
+
+/// The whole-graph reads (`clove close`'s warning, `dep tree`, `dep cycle`,
+/// `stats`) answer from a fresh index exactly as from the files. The index
+/// mirror must carry every frontmatter field `stats` reads (labels, assignee,
+/// the timestamps, the refs), not only the graph fields, or the counts drift.
+#[test]
+fn whole_graph_reads_answer_from_the_index_as_from_the_files() {
+    let fx = fixture();
+    let (indexed, files) = (fx.indexed(), fx.files());
+
+    // The frontmatter mirror: field for field, in id order.
+    let got = indexed.frontmatters().unwrap();
+    let want = files.frontmatters().unwrap();
+    assert_eq!(got.source, Source::Index, "or this comparison is vacuous");
+    assert_eq!(want.source, Source::Files);
+    assert_eq!(got.value, want.value);
+
+    // The close warning: b and d have one open dependent each (a and c); the
+    // others have none, so they are left out.
+    let got = indexed.open_dependents(&fx.ids).unwrap();
+    let want = files.open_dependents(&fx.ids).unwrap();
+    assert_eq!(got.source, Source::Index);
+    assert_eq!(want.source, Source::Files);
+    assert_eq!(got.value, want.value);
+    assert_eq!(
+        got.value,
+        vec![
+            (fx.ids[1].clone(), vec![fx.ids[0].to_string()]),
+            (fx.ids[3].clone(), vec![fx.ids[2].to_string()]),
+        ]
+    );
+
+    // A closed dependent is not open: close c, and d has none left.
+    let store = ItemStore::new(fx.root.clone());
+    let updated = store.get(&fx.ids[2]).unwrap().frontmatter.updated;
+    clove_core::ops::transition(&store, &fx.ids[2], ItemStatus::Closed, updated).unwrap();
+    let got = indexed.open_dependents(&fx.ids).unwrap();
+    assert_eq!(got.source, Source::Index);
+    assert_eq!(got.value, files.open_dependents(&fx.ids).unwrap().value);
+    assert_eq!(
+        got.value,
+        vec![(fx.ids[1].clone(), vec![fx.ids[0].to_string()])],
+        "the refresh before the read saw the close"
+    );
+
+    for id in &fx.ids {
+        let got = indexed.dep_tree(id, usize::MAX).unwrap();
+        let want = files.dep_tree(id, usize::MAX).unwrap();
+        assert_eq!(got.source, Source::Index, "dep tree of {id}");
+        assert_eq!(want.source, Source::Files);
+        assert_eq!(got.value, want.value, "dep tree of {id}");
+    }
+
+    let now = clove_types::parse_rfc3339("2026-06-20T00:00:00Z").unwrap();
+    for (top, epics) in [(5, true), (1, false)] {
+        let got = indexed.stats(top, epics, now).unwrap();
+        let want = files.stats(top, epics, now).unwrap();
+        assert_eq!(got.source, Source::Index, "stats top={top} epics={epics}");
+        assert_eq!(want.source, Source::Files);
+        assert_eq!(got.value, want.value, "stats top={top} epics={epics}");
+    }
+}
+
+/// With `index.auto_refresh = false` a read may not bring the index up to
+/// date, and these reads have no way to say that it is behind, so the files
+/// answer them.
+#[test]
+fn whole_graph_reads_use_the_files_when_reads_may_not_refresh() {
+    let fx = fixture();
+    let engine = fx.engine(Tiers {
+        auto_refresh: false,
+        ..Tiers::default()
+    });
+    assert_eq!(engine.frontmatters().unwrap().source, Source::Files);
+    assert_eq!(
+        engine.open_dependents(&fx.ids).unwrap().source,
+        Source::Files
+    );
+    assert_eq!(
+        engine.dep_tree(&fx.ids[0], 3).unwrap().source,
+        Source::Files
+    );
+}

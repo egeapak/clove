@@ -108,6 +108,19 @@ TMPDIR=/tmp scripts/ci/daemon-smoke.sh <extracted-dir>     # hub flow (sets its 
 - [ ] After the CLI and daemon steps, `git status --porcelain --untracked-files=all .clove`
       lists only item and comment files: no `*.lock`, `index.db*`, `daemon.token` or `sync/`.
 - [ ] `clove -f json ls|ready|blocked` report `_meta.source == "daemon"`.
+- [ ] **In-place save is indexed.** In a scratch project with the daemon serving
+      it, open an item file in an editor that saves in place (for example
+      `vim` with `:set backupcopy=yes`) and change its title. Within about 1 s,
+      `clove -f json ls` (source `daemon`) shows the new title. Run this on
+      each platform (inotify, FSEvents, ReadDirectoryChangesW).
+- [ ] **A recreated `.clove/issues` is picked up.** In a scratch git repo with
+      the daemon serving it, commit two items, `git checkout` a commit without
+      `.clove/issues`, then `git checkout` back. `clove -f json ls` lists both
+      items again (source `daemon` or `index`, never an empty list), and
+      `clove -f json daemon status` still shows the project.
+- [ ] `clove -f json ready` with an item whose `deps` name a missing id (edit
+      the file by hand) reports the same `_meta.warnings` line with the daemon
+      serving and with `--no-index`.
 - [ ] In a scratch project with the daemon serving it, `clove import tk <.tickets>`
       raises `writes_applied` in `clove -f json daemon status` by at least the
       number of imported items (plugin writes go through the daemon).

@@ -1464,3 +1464,70 @@ fn new_and_comment_report_the_title() {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["data"]["title"], "Fix the parser");
 }
+
+/// With a fresh index, `clove close` finds the open dependents in the index and
+/// reads no other item file, and `stats` answers from the index.
+///
+/// The proof that the dependent's file is not read: it is overwritten with
+/// unparseable bytes of the same size, with its old mtime put back, so the
+/// staleness check still trusts its index row. A file scan cannot parse it and
+/// so cannot name it; only the index can.
+#[test]
+fn close_warns_from_the_index_without_reading_other_item_files() {
+    let dir = init_repo();
+    let dep = new_item(dir.path(), "the dependency", &[]);
+    let dependent = new_item(dir.path(), "waits for it", &[]);
+    new_item(dir.path(), "unrelated", &[]);
+    clove(dir.path())
+        .args(["dep", "add", &dependent, &dep])
+        .assert()
+        .success();
+
+    // Old mtimes everywhere, so no file is inside the window in which the
+    // staleness check hashes contents.
+    let issues = dir.path().join(".clove/issues");
+    let old = filetime::FileTime::from_unix_time(1_600_000_000, 0);
+    for entry in std::fs::read_dir(&issues).unwrap() {
+        filetime::set_file_mtime(entry.unwrap().path(), old).unwrap();
+    }
+    clove(dir.path()).arg("reindex").assert().success();
+
+    let stats = json_ok(clove(dir.path()).arg("stats"));
+    assert_eq!(stats["_meta"]["source"], "index", "{stats}");
+    let total = |v: &Value| v["data"]["total"].as_u64();
+    let files = json_ok(clove(dir.path()).args(["--no-index", "stats"]));
+    assert_eq!(files["_meta"]["source"], "files");
+    assert_eq!(total(&stats), Some(3), "{stats}");
+    assert_eq!(total(&stats), total(&files), "{stats} vs {files}");
+
+    let path = issues.join(format!("{dependent}.md"));
+    let size = std::fs::metadata(&path).unwrap().len() as usize;
+    std::fs::write(&path, "\u{1}".repeat(size)).unwrap();
+    filetime::set_file_mtime(&path, old).unwrap();
+
+    let out = clove(dir.path()).args(["close", &dep]).output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "warning: {dep} still has open dependents: {dependent}"
+        )),
+        "the index names the dependent whose file is unreadable: {stderr}"
+    );
+
+    // The file scan cannot: the unparseable file is left out of it, so the
+    // same close from the files names no dependent.
+    clove(dir.path())
+        .args(["--no-index", "status", &dep, "open"])
+        .assert()
+        .success();
+    let out = clove(dir.path())
+        .args(["--no-index", "close", &dep])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("open dependents"),
+        "{out:?}"
+    );
+}

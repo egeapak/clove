@@ -3,8 +3,9 @@
 //! Aggregates the store into a single report — counts by status / type /
 //! priority / assignee / label, ready / blocked totals, dependency-cycle count,
 //! epic completion rollups, and created/closed throughput — alongside daemon and
-//! index telemetry. Analytics are computed from a single file scan + graph build
-//! (files are always truth); the index/daemon are reported, not relied on.
+//! index telemetry. Analytics are computed from one graph build over the item
+//! frontmatters: from the index when a read can bring it up to date (it mirrors
+//! the files), else from a file scan. `_meta.source` names which.
 //!
 //! Snapshots persist to a `snapshots` table **inside the index database**
 //! (`.clove/index.db`) so trends can be replayed with `--history`. The index
@@ -37,8 +38,11 @@ pub fn run(
         include_epics: !args.no_epics,
     };
 
-    // Compute analytics from the files (the single source of truth).
-    let (frontmatters, _errors) = ctx.store.scan_frontmatter()?;
+    // Compute analytics from the index when it can be brought up to date
+    // (a mirror of the files, with no item file read), else from the files.
+    let answer = ctx.engine(no_index, false).frontmatters()?;
+    let source = answer.source.as_str();
+    let frontmatters = answer.value;
     let (graph, _dangling) = GraphStore::build(&frontmatters);
     // Milliseconds, like every stored clove timestamp: this stamps both the
     // `_meta.generated_at` echo and (with `--snapshot`) the recorded
@@ -64,7 +68,7 @@ pub fn run(
             print_json_success(
                 data,
                 json!({
-                    "source": "files",
+                    "source": source,
                     "generated_at": clove_types::canonical_rfc3339(now),
                     "snapshotted": args.snapshot,
                 }),

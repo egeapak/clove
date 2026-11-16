@@ -79,6 +79,8 @@ windows-sys = { version = "0.59", features = [
 
 [dev-dependencies]
 tempfile.workspace = true
+filetime.workspace = true  # backdate mtimes: prove a read answered from the index
+rusqlite.workspace = true  # a second connection that makes an index apply fail (L20)
 # `test-util` unlocks tokio's virtual clock (`#[tokio::test(start_paused)]`),
 # which the watcher's debounce tests use so they assert the coalescing rule
 # instead of racing the OS scheduler. Dev-only — not in the shipped binary.

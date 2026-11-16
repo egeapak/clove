@@ -53,13 +53,14 @@ fn parse_type(s: &str) -> ItemType {
     }
 }
 
-/// Reconstruct the graph-relevant frontmatters from the index tables.
+/// Reconstruct the item frontmatters from the index tables, in id order.
 ///
-/// Only the fields `GraphStore::build` consults are populated truthfully
-/// (`id`, `status`, `item_type`, `priority`, `parent`, and the four edge lists);
-/// the rest carry harmless defaults. Edges come from the `edges` table by kind;
-/// the parent link comes from `items.parent_id` (ParentOf is not stored in
-/// `edges`).
+/// Every field the index stores is populated truthfully: the scalars,
+/// `labels`, the three timestamps, `source_system`, `external_ref`, the parent
+/// link (from `items.parent_id`; ParentOf is not stored in `edges`), and the
+/// four edge lists (from the `edges` table by kind). So a `GraphStore` built
+/// from them, and the `stats` report computed from them, equal the ones built
+/// from a file scan. Only `schema` is not stored; it is always 1.
 pub(crate) fn reconstruct_frontmatters(
     conn: &Connection,
 ) -> Result<Vec<ItemFrontmatter>, IndexError> {
@@ -99,48 +100,100 @@ pub(crate) fn reconstruct_frontmatters(
         }
     }
 
-    let mut stmt =
-        conn.prepare("SELECT id, title, status, item_type, priority, parent_id FROM items")?;
+    let mut stmt = conn.prepare(
+        "SELECT id, title, status, item_type, priority, parent_id, assignee, labels, \
+                created_at, updated_at, closed_at, source_system, external_ref \
+         FROM items ORDER BY id",
+    )?;
     let rows = stmt.query_map([], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, String>(3)?,
-            r.get::<_, u8>(4)?,
-            r.get::<_, Option<String>>(5)?,
-        ))
+        Ok(StoredRow {
+            id: r.get(0)?,
+            title: r.get(1)?,
+            status: r.get(2)?,
+            item_type: r.get(3)?,
+            priority: r.get(4)?,
+            parent_id: r.get(5)?,
+            assignee: r.get(6)?,
+            labels: r.get(7)?,
+            created_at: r.get(8)?,
+            updated_at: r.get(9)?,
+            closed_at: r.get(10)?,
+            source_system: r.get(11)?,
+            external_ref: r.get(12)?,
+        })
     })?;
 
     let mut out = Vec::new();
     for row in rows {
-        let (id, title, status, item_type, priority, parent_id) = row?;
-        let Ok(cid) = CloveId::new(&id) else {
+        let row = row?;
+        let Ok(cid) = CloveId::new(&row.id) else {
             continue;
         };
-        let parent = parent_id.and_then(|p| CloveId::new(&p).ok());
+        let parent = row.parent_id.and_then(|p| CloveId::new(&p).ok());
         out.push(ItemFrontmatter {
             schema: 1,
             id: cid,
-            title,
-            status: parse_status(&status),
-            item_type: parse_type(&item_type),
-            priority: Priority(priority),
-            created: epoch(),
-            updated: epoch(),
-            closed: None,
-            assignee: None,
+            title: row.title,
+            status: parse_status(&row.status),
+            item_type: parse_type(&row.item_type),
+            priority: Priority(row.priority),
+            created: parse_time(&row.created_at),
+            updated: parse_time(&row.updated_at),
+            closed: row.closed_at.as_deref().map(parse_time),
+            assignee: row.assignee,
             parent,
-            labels: Vec::new(),
-            deps: deps.remove(&id).unwrap_or_default(),
-            relates: relates.remove(&id).unwrap_or_default(),
-            duplicates: duplicates.remove(&id).unwrap_or_default(),
-            supersedes: supersedes.remove(&id).unwrap_or_default(),
-            source_system: None,
-            external_ref: None,
+            labels: serde_json::from_str(&row.labels).unwrap_or_default(),
+            deps: deps.remove(&row.id).unwrap_or_default(),
+            relates: relates.remove(&row.id).unwrap_or_default(),
+            duplicates: duplicates.remove(&row.id).unwrap_or_default(),
+            supersedes: supersedes.remove(&row.id).unwrap_or_default(),
+            source_system: row.source_system,
+            external_ref: row.external_ref,
         });
     }
     Ok(out)
+}
+
+/// One `items` row as [`reconstruct_frontmatters`] reads it.
+struct StoredRow {
+    id: String,
+    title: String,
+    status: String,
+    item_type: String,
+    priority: u8,
+    parent_id: Option<String>,
+    assignee: Option<String>,
+    labels: String,
+    created_at: String,
+    updated_at: String,
+    closed_at: Option<String>,
+    source_system: Option<String>,
+    external_ref: Option<String>,
+}
+
+/// A stored timestamp column (`to_rfc3339()` spelling, see `write_row`). The
+/// index wrote it, so it parses; a value that does not is the epoch.
+fn parse_time(s: &str) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .map(|t| t.with_timezone(&chrono::Utc))
+        .unwrap_or_else(|_| epoch())
+}
+
+/// The active items (not `closed`) whose `deps` name `id`, in id order.
+///
+/// The index twin of filtering a file scan by `status != closed &&
+/// deps.contains(id)`: one lookup on `idx_edges_to`, no item file read.
+pub(crate) fn open_dependents(conn: &Connection, id: &str) -> Result<Vec<String>, IndexError> {
+    use clove_core::graph::EdgeKind;
+    let mut stmt = conn.prepare(
+        "SELECT e.from_id FROM edges e JOIN items i ON i.id = e.from_id \
+         WHERE e.to_id = ?1 AND e.kind = ?2 AND i.status != 'closed' \
+         ORDER BY e.from_id",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![id, EdgeKind::DependsOn as u8], |r| {
+        r.get::<_, String>(0)
+    })?;
+    rows.collect::<Result<_, _>>().map_err(IndexError::from)
 }
 
 /// Recompute and persist the derived columns (`topological_rank`,
@@ -209,6 +262,12 @@ impl crate::db::Index {
     /// because the index `items`/`edges` tables are an exact mirror of them.
     pub fn graph_frontmatters(&self) -> Result<Vec<ItemFrontmatter>, IndexError> {
         reconstruct_frontmatters(self.conn())
+    }
+
+    /// The active items whose `deps` name `id`, in id order, with no item
+    /// file read (see [`open_dependents`]).
+    pub fn open_dependents(&self, id: &str) -> Result<Vec<String>, IndexError> {
+        open_dependents(self.conn(), id)
     }
 }
 

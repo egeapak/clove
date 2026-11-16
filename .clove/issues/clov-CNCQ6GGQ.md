@@ -2,11 +2,12 @@
 schema: 1
 id: clov-CNCQ6GGQ
 title: close warning, dep tree, and stats scan every item file when a fresh index exists
-status: open
+status: closed
 type: feature
 priority: 2
 created: 2026-11-14T19:23:21.367Z
-updated: 2026-11-14T19:23:21.367Z
+updated: 2026-11-15T07:06:51.068Z
+closed: 2026-11-15T07:06:51.068Z
 labels: []
 deps: []
 relates: []

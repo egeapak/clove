@@ -94,6 +94,15 @@ wait_for "project a's watcher" "watching a"
 [ "$(source_of a)" = daemon ] || fail "ls in a not served by the daemon: $(source_of a)"
 ok "reads in a served by the daemon"
 
+# A reindex while the daemon serves the project holds index.db open (its write
+# connection and its pooled readers). The rebuild runs inside the live file, so
+# on Windows it must not fail with a sharing violation.
+reindexed=$(cd "$work/a" && clove reindex -f json) || fail "reindex with the daemon serving: $reindexed"
+[ "$(echo "$reindexed" | field .data.items_indexed)" = 1 ] || fail "reindex: $reindexed"
+[ "$(source_of a)" = daemon ] || fail "ls in a not served by the daemon after reindex"
+(cd "$work/a" && clove ls | grep -q "smoke item a") || fail "the item is gone after reindex"
+ok "reindex with the daemon serving"
+
 second=$(cd "$work/b" && clove daemon start -f json)
 [ "$(echo "$second" | field .data.pid)" = "$hub_pid" ] || fail "project b got another hub: $second"
 wait_for "project b's watcher" "watching b"

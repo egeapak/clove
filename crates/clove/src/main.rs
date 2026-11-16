@@ -301,10 +301,12 @@ fn run_repo(
         Commands::Set(a) => cmd::set::run(ctx, f, a).map(|_| ok),
         Commands::Status(a) => {
             let s = util::parse_status(&a.state)?;
-            cmd::status::run(ctx, f, &a.ids, s, quiet)
+            cmd::status::run(ctx, f, &a.ids, s, quiet, no_index)
         }
-        Commands::Start(a) => cmd::status::run(ctx, f, &a.ids, ItemStatus::InProgress, quiet),
-        Commands::Close(a) => cmd::status::run(ctx, f, &a.ids, ItemStatus::Closed, quiet),
+        Commands::Start(a) => {
+            cmd::status::run(ctx, f, &a.ids, ItemStatus::InProgress, quiet, no_index)
+        }
+        Commands::Close(a) => cmd::status::run(ctx, f, &a.ids, ItemStatus::Closed, quiet, no_index),
         Commands::Label(a) => cmd::label::run(ctx, f, &a.id, &a.action, &a.label).map(|_| ok),
         Commands::Assign(a) => cmd::assign::run(ctx, f, &a.id, a.assignee, a.clear).map(|_| ok),
         Commands::Parent(a) => cmd::parent::run(ctx, f, &a.id, a.parent, a.clear).map(|_| ok),
