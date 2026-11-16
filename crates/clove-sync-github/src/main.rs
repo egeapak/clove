@@ -54,7 +54,11 @@ const INFO: PluginInfo = PluginInfo {
 /// stripped. Mirrors the host's `SyncArgs` (minus the `tracker` selector, which
 /// the dispatch already consumed by choosing this plugin).
 #[derive(Debug, Parser)]
-#[command(name = "clove-sync-github", no_binary_name = true)]
+#[command(
+    name = "clove-sync-github",
+    no_binary_name = true,
+    about = "Two-way sync of clove items with GitHub Issues (`clove sync github`)."
+)]
 struct Cli {
     /// The `owner/repo` to sync with.
     #[arg(value_name = "OWNER/REPO")]

@@ -884,7 +884,7 @@ clove new <title> [--type bug|feature|chore|docs|epic]
           [-p|--priority 0-4] [-l|--label KEY:VAL ...]
           [--dep ID ...] [--parent ID] [-a|--assignee STR]
           [-b|--body STR | --body-file PATH] [--format json]
-clove show <id> [--format json] [--fields FIELD,...]
+clove show <id> [--format json] [--fields FIELD,...] [-v|--verbose]
 clove edit <id>                             # opens $EDITOR
 clove edit <id> --field KEY=VALUE [--field KEY=VALUE ...]  # non-interactive
 clove edit <id> [-b|--body STR | --body-file PATH]         # replace the body (PATH `-` = stdin);

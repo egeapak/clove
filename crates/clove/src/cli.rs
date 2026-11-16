@@ -137,7 +137,7 @@ There are no built-in sync providers — every provider is an external \
 clove-sync-<provider> plugin. The same clove-sync-github binary also serves the \
 one-way `clove import github` (pull) and `clove export github` (push).\n\
 Form: clove sync [--format json] github <owner/repo> [--dry-run] [--prefer P] \
-[--no-comments] [--delete-remote-comments].\n\
+[--no-comments] [--delete-remote-comments] [--adopt-links].\n\
 Note: clove global flags (--format, --color, --quiet, …) must come BEFORE the \
 provider — everything after it is the provider's own arguments.")]
     Sync(SyncArgs),
@@ -435,10 +435,12 @@ pub struct NewArgs {
 pub struct ShowArgs {
     /// The item id.
     pub id: String,
-    /// Comma-separated field projection.
+    /// Comma-separated field projection. Human output prints one
+    /// `name: value` line per field.
     #[arg(long, value_name = "LIST")]
     pub fields: Option<String>,
-    /// Compute `ready`/`blocked_by` even for human output.
+    /// Human output: also print `blocked_by`, the parent and other links, the
+    /// external ref, and the timestamps. JSON always has every field.
     #[arg(short = 'v', long)]
     pub verbose: bool,
     /// Omit null and empty-list keys from JSON output (as `clove_show` does).
@@ -860,7 +862,8 @@ pub struct SyncArgs {
     /// `github`).
     pub provider: String,
     /// Everything after the provider — the `owner/repo` and any provider flags
-    /// (`--dry-run`, `--prefer`, `--no-comments`, `--delete-remote-comments`) — forwarded to the plugin.
+    /// (`--dry-run`, `--prefer`, `--no-comments`, `--delete-remote-comments`,
+    /// `--adopt-links`) — forwarded to the plugin.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub rest: Vec<String>,
 }

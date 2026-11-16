@@ -2,11 +2,12 @@
 schema: 1
 id: clov-34P0YRJ3
 title: 'sync github: every sync lists all issues of the repository and scans the store several times'
-status: open
+status: closed
 type: chore
 priority: 2
 created: 2026-11-14T19:15:06.150Z
-updated: 2026-11-14T19:15:06.150Z
+updated: 2026-11-15T07:03:58.069Z
+closed: 2026-11-15T07:03:58.069Z
 labels: []
 deps: []
 relates: []

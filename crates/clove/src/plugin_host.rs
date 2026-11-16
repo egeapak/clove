@@ -474,8 +474,26 @@ impl From<ToolError> for RpcFailure {
     }
 }
 
+/// Append `method` to the file `CLOVE_HOST_CALL_LOG` names, one name per
+/// line, so a test can count the plugin's calls (`store.scan`, …). A
+/// `test-knobs` build only; elsewhere, and when the write fails, nothing.
+fn log_call(method: &str) {
+    use std::io::Write as _;
+    let Some(path) = crate::knobs::var("CLOVE_HOST_CALL_LOG") else {
+        return;
+    };
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{method}");
+    }
+}
+
 /// Run one method on the engine.
 fn dispatch(shared: &Shared, method: &str, params: Value) -> Result<Value, RpcFailure> {
+    log_call(method);
     let engine = || shared.engine();
     match method {
         "hello" => Err(RpcFailure {
