@@ -78,6 +78,11 @@ export interface Meta {
    * from an older server.
    */
   source_code?: SourceCode;
+  /**
+   * The server's change sequence when this answer was read (`_meta.seq`, the
+   * counter the WebSocket `hello` frame reports). Absent from an older server.
+   */
+  seq?: number;
 }
 
 /** The source offer of the running clove build. */
@@ -173,4 +178,7 @@ export interface ItemPage {
   returned: number;
   offset: number;
   limit: number;
+  /** The server's change sequence when the page was read (`_meta.seq`); absent
+   *  from an older server. */
+  seq?: number;
 }

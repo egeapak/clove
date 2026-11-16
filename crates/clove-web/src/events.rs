@@ -23,7 +23,9 @@ use crate::AppState;
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "event", content = "data")]
 pub enum Event {
-    /// Sent immediately on connect.
+    /// Sent immediately on connect. `seq` is the same counter `GET /items` and
+    /// `GET /meta` report as `_meta.seq`; it is read after the socket
+    /// subscribes, so a batch announced after it reaches this socket.
     #[serde(rename = "hello")]
     Hello {
         protocol: u32,

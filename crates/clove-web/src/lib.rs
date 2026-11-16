@@ -221,13 +221,19 @@ impl AppState {
     }
 
     /// The current event sequence number (advances on every published batch).
+    ///
+    /// `GET /items` and `GET /meta` report it as `_meta.seq`, read before their
+    /// data, and the WebSocket `hello` frame carries it too: a page whose data
+    /// was read at the hello's seq has missed no batch.
     pub fn current_seq(&self) -> u64 {
-        self.seq.load(Ordering::Relaxed)
+        // Acquire pairs with the Release in `next_seq`: a reader that sees a
+        // batch's seq also sees the writes the batch announced.
+        self.seq.load(Ordering::Acquire)
     }
 
     /// Allocate the next sequence number for a published batch.
     pub fn next_seq(&self) -> u64 {
-        self.seq.fetch_add(1, Ordering::Relaxed) + 1
+        self.seq.fetch_add(1, Ordering::AcqRel) + 1
     }
 }
 

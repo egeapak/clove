@@ -170,6 +170,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - After the web server restarts with a new token, an open tab shows "no
   access" and a banner with the URL to open. It no longer reconnects forever.
 - A keyboard move on the web board keeps focus on the moved card.
+- A web page load fetches its rows and `/meta` once, not two and three
+  times. `GET /items` and `GET /meta` report the change sequence as
+  `_meta.seq`.
 
 ### Security
 
