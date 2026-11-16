@@ -159,6 +159,39 @@ async fn list_returns_envelope_with_items() {
     assert!(body.contains("\"total\":2"));
 }
 
+/// `GET /items` and `GET /meta` report the change sequence the WebSocket
+/// `hello` frame carries (`AppState::current_seq`) as `_meta.seq`, so a page
+/// can tell whether a batch was announced after its data was read and skip the
+/// resync on connect when none was.
+#[tokio::test]
+async fn list_and_meta_report_the_change_sequence() {
+    let (_tmp, state, _main, _dep) = fixture();
+    let app = build_router(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let seq_of = |body: &str| -> serde_json::Value {
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        v["_meta"]["seq"].clone()
+    };
+
+    for path in ["/api/v1/items?limit=100", "/api/v1/meta"] {
+        let (status, body) = get(addr, path).await;
+        assert!(status.contains("200"), "{path}: {status}");
+        assert_eq!(seq_of(&body), serde_json::json!(0), "{path}: {body}");
+    }
+    // Two batches announced: the next reads report the new sequence.
+    state.next_seq();
+    assert_eq!(state.next_seq(), 2);
+    for path in ["/api/v1/items?limit=100", "/api/v1/meta"] {
+        let (_status, body) = get(addr, path).await;
+        assert_eq!(seq_of(&body), serde_json::json!(2), "{path}: {body}");
+        assert_eq!(state.current_seq(), 2);
+    }
+}
+
 /// The web API decodes `limit` through the same shared `Page` as the CLI and
 /// MCP: absent → the web default (unlimited), `0` → unlimited, `n` → at most
 /// `n`, and `total` is always the pre-pagination count. `?limit=0` used to be

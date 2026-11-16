@@ -346,6 +346,10 @@ pub async fn list_items(
         }
     };
 
+    // The change sequence, read *before* the data: a write that lands during
+    // the read is announced with a later seq, so a page comparing this with the
+    // WebSocket `hello` seq resyncs rather than missing it.
+    let seq = state.current_seq();
     let engine = state.engine.clone();
     let store = state.store.clone();
     let (f, w) = (filters.clone(), window);
@@ -379,6 +383,7 @@ pub async fn list_items(
             "dir": order.dir_str(),
             "filters": serde_json::to_value(&filters).unwrap_or(Value::Null),
             "source": source,
+            "seq": seq,
         }),
     ))
 }
@@ -779,6 +784,8 @@ pub async fn get_stats_history(
 pub async fn get_meta(State(state): State<AppState>) -> ApiResult {
     // A whole-store frontmatter scan (and the sync-state read below): off the
     // async workers. Only labels and assignees are needed, so no graph is built.
+    // `seq` is read first for the same reason as on `GET /items`.
+    let seq = state.current_seq();
     let store = state.store.clone();
     let clove_dir = state.clove_dir();
     let (labels, assignees, sync) = blocking(move || {
@@ -805,7 +812,7 @@ pub async fn get_meta(State(state): State<AppState>) -> ApiResult {
         // The AGPL-3.0 section 13 source offer, linked from the SPA's top bar.
         "source_code": clove_core::source::source_json(),
     });
-    Ok(ok_data(data))
+    Ok(ok(data, json!({ "seq": seq })))
 }
 
 /// `GET /api/v1/cycles` — hard-dependency cycles.
