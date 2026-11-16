@@ -69,6 +69,16 @@ pub struct App {
     refresh_rx: Option<std::sync::mpsc::Receiver<Result<ScanResult, String>>>,
     /// Spinner animation frame, advanced by `on_tick` while busy.
     spinner_frame: usize,
+    /// A write landed while a scan was in flight. That scan may have read the
+    /// store before the write, so `poll_refresh` starts one more scan when it
+    /// lands instead of showing a stale view.
+    rescan_queued: bool,
+    /// The status to show when the in-flight refresh lands (for example
+    /// "created X" after a save), in place of "N item(s) loaded".
+    pending_status: Option<String>,
+    /// The tab-bar badge counts, in `Tab::ALL` order. Computed once per refresh
+    /// in `finish_refresh`, so a frame does not walk every item.
+    tab_counts: [usize; 3],
 
     // Filter menu state.
     pub filter_menu: FilterMenu,
@@ -101,6 +111,9 @@ impl App {
             busy: false,
             refresh_rx: None,
             spinner_frame: 0,
+            rescan_queued: false,
+            pending_status: None,
+            tab_counts: [0; 3],
             filter_menu: FilterMenu::default(),
             form: FormState::default(),
             id_prefix: "proj".to_owned(),
@@ -154,6 +167,22 @@ impl App {
         if self.refresh_rx.is_some() {
             return;
         }
+        self.spawn_scan();
+    }
+
+    /// Start a background scan after a write. The write already reached disk,
+    /// so a scan that is in flight may predate it: queue one more scan instead
+    /// of dropping the request. `status` is shown when the scan lands.
+    fn refresh_after_write(&mut self, status: Option<String>) {
+        self.pending_status = status;
+        if self.refresh_rx.is_some() {
+            self.rescan_queued = true;
+            return;
+        }
+        self.spawn_scan();
+    }
+
+    fn spawn_scan(&mut self) {
         let store = self.data.store.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -176,13 +205,27 @@ impl App {
         match rx.try_recv() {
             Ok(Ok(result)) => {
                 self.data.apply(result);
-                self.finish_refresh();
+                if std::mem::take(&mut self.rescan_queued) {
+                    // Show what landed, then read the store again so the
+                    // write that came after this scan started is seen too.
+                    // The save status waits for that second scan.
+                    let status = self.pending_status.take();
+                    self.finish_refresh();
+                    self.pending_status = status;
+                    self.spawn_scan();
+                } else {
+                    self.finish_refresh();
+                }
                 true
             }
             Ok(Err(message)) => {
                 self.status = message;
                 self.busy = false;
                 self.refresh_rx = None;
+                self.pending_status = None;
+                if std::mem::take(&mut self.rescan_queued) {
+                    self.spawn_scan();
+                }
                 true
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => false,
@@ -191,6 +234,8 @@ impl App {
                 self.status = "refresh failed (worker exited)".to_owned();
                 self.busy = false;
                 self.refresh_rx = None;
+                self.pending_status = None;
+                self.rescan_queued = false;
                 true
             }
         }
@@ -201,9 +246,14 @@ impl App {
     fn finish_refresh(&mut self) {
         self.busy = false;
         self.refresh_rx = None;
+        self.tab_counts = Tab::ALL.map(|tab| self.count_for(tab));
         self.rebuild_facets();
         self.recompute_view();
         self.load_detail();
+        if let Some(status) = self.pending_status.take() {
+            self.status = status;
+            return;
+        }
         self.status = format!(
             "{} item(s) loaded{}",
             self.data.all.len(),
@@ -216,8 +266,8 @@ impl App {
     }
 
     /// Re-scan the store **synchronously** and rebuild all derived state,
-    /// preserving the selected item where possible. Used at launch and after a
-    /// write (the manual `r` refresh uses the non-blocking [`start_refresh`]).
+    /// preserving the selected item where possible. Used at launch (the manual
+    /// `r` refresh and a save use the non-blocking [`start_refresh`]).
     pub fn refresh(&mut self) {
         if let Err(msg) = self.data.scan() {
             self.status = msg;
@@ -438,8 +488,14 @@ impl App {
     }
 
     /// Count of items belonging to `tab` (ignoring the active search), for the
-    /// tab-bar badges.
+    /// tab-bar badges. Stored at the last refresh, so a frame does not walk
+    /// every item.
     pub fn visible_for(&self, tab: Tab) -> usize {
+        let index = Tab::ALL.iter().position(|t| *t == tab).unwrap_or(0);
+        self.tab_counts[index]
+    }
+
+    fn count_for(&self, tab: Tab) -> usize {
         match tab {
             Tab::All => self.data.all.len(),
             Tab::Ready => self
@@ -790,7 +846,7 @@ impl App {
     }
 
     /// Validate + apply the form through the shared `clove_core` write path, then
-    /// refresh. On error the form stays open with the message shown.
+    /// start a background refresh. On error the form stays open with the message shown.
     pub fn form_submit(&mut self) {
         if self.form.title.trim().is_empty() {
             self.form.error = Some("title cannot be empty".to_owned());
@@ -804,8 +860,9 @@ impl App {
         match result {
             Ok(status) => {
                 self.mode = Mode::Browse;
-                self.refresh();
-                self.status = status;
+                // Re-scan off the UI thread: a large store must not freeze the
+                // UI after every save. The status shows when the scan lands.
+                self.refresh_after_write(Some(status));
             }
             Err(e) => {
                 self.form.error = Some(e.to_string());
@@ -815,7 +872,7 @@ impl App {
                 // the still-open form reflect what actually reached disk (a create
                 // is a single atomic op, so it can't partially apply).
                 if self.form.mode == FormMode::Edit {
-                    self.refresh();
+                    self.refresh_after_write(None);
                 }
             }
         }
@@ -1253,6 +1310,76 @@ mod tests {
         false
     }
 
+    /// Submit the form, then wait for the background refresh it started, the
+    /// way the event loop does with `poll_refresh`.
+    fn submit(app: &mut App) {
+        app.form_submit();
+        while app.refresh_rx.is_some() {
+            assert!(drain_refresh(app), "the save refresh delivered a result");
+        }
+    }
+
+    #[test]
+    fn a_save_refreshes_off_the_ui_thread() {
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        app.start_new();
+        app.form.title = "Saved async".to_owned();
+        app.form_submit();
+        // The write is on disk, but the view has not been re-scanned on the UI
+        // thread: a background scan is in flight.
+        assert_eq!(app.mode, Mode::Browse);
+        assert!(app.is_busy() && app.refresh_rx.is_some(), "scan in flight");
+        assert_eq!(
+            app.total_count(),
+            3,
+            "the cached view is not re-scanned yet"
+        );
+        assert!(drain_refresh(&mut app));
+        assert_eq!(app.total_count(), 4);
+        assert!(app.data.all.iter().any(|fm| fm.title == "Saved async"));
+        assert!(
+            app.status.starts_with("created "),
+            "the save status shows when the scan lands: {}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn a_save_during_a_scan_queues_another_scan() {
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        // A scan that may have read the store before the save below.
+        app.start_refresh();
+        app.start_new();
+        app.form.title = "Saved mid-scan".to_owned();
+        app.form_submit();
+        assert!(app.rescan_queued, "the save queues a second scan");
+        assert!(drain_refresh(&mut app), "the first scan lands");
+        assert!(app.refresh_rx.is_some(), "the queued scan starts");
+        assert!(drain_refresh(&mut app), "the queued scan lands");
+        assert!(!app.is_busy());
+        assert!(app.data.all.iter().any(|fm| fm.title == "Saved mid-scan"));
+        assert!(app.status.starts_with("created "), "{}", app.status);
+    }
+
+    #[test]
+    fn tab_counts_are_stored_at_refresh() {
+        let (_dir, store) = fixture();
+        let mut app = App::new(store);
+        let ready = app.visible_for(Tab::Ready);
+        let blocked = app.visible_for(Tab::Blocked);
+        // Changing the derived sets without a refresh does not move the badges:
+        // the counts are not recomputed per frame.
+        app.data.ready.clear();
+        app.data.blocked.clear();
+        assert_eq!(app.visible_for(Tab::Ready), ready);
+        assert_eq!(app.visible_for(Tab::Blocked), blocked);
+        app.refresh();
+        assert_eq!(app.visible_for(Tab::Ready), ready, "a refresh recounts");
+        assert_eq!(app.visible_for(Tab::All), 3);
+    }
+
     #[test]
     fn background_refresh_applies_off_thread() {
         let (_dir, store) = fixture();
@@ -1383,7 +1510,7 @@ mod tests {
         app.mode = Mode::Form;
         app.form.title = "Renamed base".to_owned();
         app.form.deps = dependent.to_string();
-        app.form_submit();
+        submit(&mut app);
 
         // The graph op failed → the form stays open with the error shown.
         assert_eq!(app.mode, Mode::Form);
@@ -1415,7 +1542,7 @@ mod tests {
         app.form.assignee = "carol".to_owned();
         app.form.labels = "area:web, Urgent".to_owned();
         app.form.body = "hello".to_owned();
-        app.form_submit();
+        submit(&mut app);
 
         assert_eq!(app.mode, Mode::Browse, "form closes on success");
         let created = app
@@ -1449,7 +1576,7 @@ mod tests {
         app.form.assignee = "dave".to_owned();
         app.form.labels = "x, y".to_owned();
         app.form.body = "edited body".to_owned();
-        app.form_submit();
+        submit(&mut app);
 
         assert_eq!(app.mode, Mode::Browse);
         let item = app.data.store.get(&id).unwrap();
@@ -1496,7 +1623,7 @@ mod tests {
 
         app.form.title.push_str("!!");
         app.form.labels.push_str(", mine");
-        app.form_submit();
+        submit(&mut app);
 
         assert_eq!(app.mode, Mode::Browse, "{:?}", app.form.error);
         let item = app.data.store.get(&id).unwrap();
@@ -1527,7 +1654,7 @@ mod tests {
 
         app.start_edit();
         assert!(app.form.to_edit_request().is_empty());
-        app.form_submit();
+        submit(&mut app);
 
         assert_eq!(app.mode, Mode::Browse);
         assert_eq!(app.status, format!("no changes to {id}"));
@@ -1559,7 +1686,7 @@ mod tests {
                         app.form_next_field();
                     }
                 }
-                app.form_submit();
+                submit(&mut app);
                 let error = app.form.error.clone().expect("submit failed");
 
                 let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
@@ -1604,7 +1731,7 @@ mod tests {
             if !deps.is_empty() {
                 app.form.deps = deps.to_owned();
             }
-            app.form_submit();
+            submit(&mut app);
 
             assert_eq!(app.mode, Mode::Form, "parent={parent:?} deps={deps:?}");
             assert!(app.form.error.is_some(), "parent={parent:?} deps={deps:?}");
@@ -1645,7 +1772,7 @@ mod tests {
         app.mode = Mode::Form;
         app.form.parent = base.to_string();
         app.form.deps = base.to_string();
-        app.form_submit();
+        submit(&mut app);
 
         assert_eq!(app.mode, Mode::Browse);
         let updated = app.data.store.get(&independent).unwrap();
@@ -2054,7 +2181,7 @@ mod tests {
         let mut app = App::new(store);
         app.start_new();
         app.form.title = "   ".to_owned();
-        app.form_submit();
+        submit(&mut app);
         assert_eq!(app.mode, Mode::Form, "stays open on validation error");
         assert!(app.form.error.is_some());
     }

@@ -66,6 +66,33 @@ describe('board keyboard move', () => {
     const again = await screen.findByRole('button', { name: 'Move #0000000A to Closed' });
     await waitFor(() => expect(document.activeElement).toBe(again));
   });
+
+  it('shows the moved card\'s buttons before it focuses one', async () => {
+    // jsdom has no layout. Model the browser: the move buttons are
+    // `display: none` unless their card has focus within, and `focus()` on a
+    // hidden element does nothing.
+    const realFocus = HTMLElement.prototype.focus;
+    vi.spyOn(HTMLElement.prototype, 'focus').mockImplementation(function (this: HTMLElement, opts?: FocusOptions) {
+      const wrap = this.closest('.card-wrap');
+      const hidden = this.closest('.kbd-move') !== null && !(wrap && wrap.contains(document.activeElement));
+      if (!hidden) realFocus.call(this, opts);
+    });
+    items = [
+      item({ id: 'proj-0000000A', title: 'First' }),
+      item({ id: 'proj-0000000B', title: 'Second' })
+    ];
+    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(600);
+    vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(1200);
+    render(BoardPage);
+    const move = await screen.findByRole('button', { name: 'Move #0000000A to In Progress' });
+    // A keyboard user reaches the button through its card.
+    (move.closest('.card-wrap') as HTMLElement).focus();
+    move.focus();
+    expect(document.activeElement).toBe(move);
+    await fireEvent.click(move);
+    const again = await screen.findByRole('button', { name: 'Move #0000000A to Closed' });
+    await waitFor(() => expect(document.activeElement).toBe(again));
+  });
 });
 
 describe('new item modal', () => {

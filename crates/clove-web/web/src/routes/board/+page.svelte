@@ -163,6 +163,10 @@
         await tick();
         const again = moveButton(item.id, dir);
         if (again) {
+          // The move buttons are `display: none` until the card has focus
+          // within (or hover), and a browser does not focus a hidden element.
+          // Focus the card first, so its buttons show, then the button.
+          again.closest<HTMLElement>('.card-wrap')?.focus({ preventScroll: true });
           again.focus();
           break;
         }
