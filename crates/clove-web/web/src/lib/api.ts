@@ -107,6 +107,12 @@ function metaNum(meta: Record<string, unknown>, key: string, fallback: number): 
   return typeof v === 'number' && Number.isFinite(v) ? v : fallback;
 }
 
+/** A numeric `_meta` field, or `undefined` when the server omits it. */
+function optNum(meta: Record<string, unknown>, key: string): number | undefined {
+  const v = meta[key];
+  return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+}
+
 /** In dev, when no backend responds, fall back to mock data. */
 async function withMock<T>(real: () => Promise<T>, mock: () => T): Promise<T> {
   if (mockMode) return mock();
@@ -144,7 +150,8 @@ export const api = {
         total: metaNum(meta, 'total', items.length),
         returned: metaNum(meta, 'returned', items.length),
         offset: metaNum(meta, 'offset', query.offset ?? 0),
-        limit: metaNum(meta, 'limit', query.limit ?? 0)
+        limit: metaNum(meta, 'limit', query.limit ?? 0),
+        seq: optNum(meta, 'seq')
       };
     }, () => filterMock(query));
   },
@@ -183,7 +190,11 @@ export const api = {
 
   async meta(): Promise<Meta> {
     return withMock(
-      () => req<Meta>('/meta'),
+      async () => {
+        const { data, meta } = await reqEnvelope<Meta>('/meta');
+        const seq = optNum(meta, 'seq');
+        return seq === undefined ? data : { ...data, seq };
+      },
       () => mockMeta()
     );
   },

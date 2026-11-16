@@ -64,6 +64,17 @@ class Store {
    *  query changes per keystroke in the filter box, and `fetch` gives no
    *  ordering guarantee. */
   private loadToken = 0;
+  /**
+   * The server's change sequence (`_meta.seq`) the current window and meta
+   * were read at — the lower of the two — or `null` when unknown (an older
+   * server, or no window loaded yet). The live channel compares it with the
+   * `hello` frame's seq to skip a resync that would refetch the same data.
+   */
+  private dataSeq: number | null = null;
+  /** The latest `refetch` while it runs (see {@link Store.settled}). */
+  private loading: Promise<void> | null = null;
+  /** The `/meta` request in flight, shared by {@link Store.ensureMeta}. */
+  private metaLoad: Promise<Meta> | null = null;
 
   // Pending optimistic ops per id. Concurrent edits to the same id must compose:
   // we keep the pre-edit `base` (server-authoritative) plus an ordered list of
@@ -160,6 +171,7 @@ class Store {
     this.order = [];
     this.query = null;
     this.answered = null;
+    this.dataSeq = null;
     this.pending.clear();
     this.total = 0;
     this.offset = 0;
@@ -284,7 +296,9 @@ class Store {
    */
   async ensureMeta() {
     if (this.meta) return;
-    this.meta = await api.meta();
+    // Share the request a route's `setQuery` already has in flight: on a page
+    // load both run before either answers, and each used to issue its own.
+    this.meta = await (this.metaLoad ?? this.loadMeta());
     // Deliberately does NOT clear `loadError`: this call knows only that
     // `/meta` succeeded. Clearing it erased a *list* failure that had already
     // been recorded — routes mount before the layout's `onMount`, so a deep
@@ -293,12 +307,51 @@ class Store {
     if (isMockMode()) this.conn = 'mock';
   }
 
-  async refetch() {
+  /** Issue a `/meta` request and publish it for {@link Store.ensureMeta}. */
+  private loadMeta(): Promise<Meta> {
+    const p = api.meta();
+    this.metaLoad = p;
+    const clear = () => {
+      if (this.metaLoad === p) this.metaLoad = null;
+    };
+    p.then(clear, clear);
+    return p;
+  }
+
+  /**
+   * Whether the current window is the server's answer as of change sequence
+   * `seq`: loaded, not failed, and read when the server's sequence was `seq`.
+   */
+  currentAt(seq: number): boolean {
+    return this.answered !== null && this.loadError === null && this.dataSeq === seq;
+  }
+
+  /** Resolves once no `refetch` is running (a newer one started meanwhile is
+   *  waited for too). Never rejects. */
+  async settled() {
+    while (this.loading) {
+      const p = this.loading;
+      await p.catch(() => {});
+      if (this.loading === p) break;
+    }
+  }
+
+  refetch(): Promise<void> {
+    const p = this.load();
+    this.loading = p;
+    const clear = () => {
+      if (this.loading === p) this.loading = null;
+    };
+    p.then(clear, clear);
+    return p;
+  }
+
+  private async load() {
     const token = ++this.loadToken;
     // Before any view has declared a query there is nothing to page: load the
     // dropdown/bootstrap metadata alone rather than the entire store.
     if (!this.query) {
-      const meta = await api.meta();
+      const meta = await this.loadMeta();
       if (token !== this.loadToken) return;
       this.meta = meta;
       this.loadError = null;
@@ -309,7 +362,9 @@ class Store {
     let page: ItemPage;
     let meta: Meta;
     try {
-      [page, meta] = await Promise.all([api.items(asked), api.meta()]);
+      // Always a fresh `/meta`: a shared one may have been read before the
+      // change this refetch answers.
+      [page, meta] = await Promise.all([api.items(asked), this.loadMeta()]);
     } catch (e) {
       // Nor may its *failure*: every caller records a rejection as `loadError`,
       // and a late error from an abandoned request replaced the newer query's
@@ -321,6 +376,8 @@ class Store {
     if (token !== this.loadToken) return;
     this.replaceAll(page.items, page);
     this.answered = queryString(asked);
+    this.dataSeq =
+      page.seq !== undefined && meta.seq !== undefined ? Math.min(page.seq, meta.seq) : null;
     this.meta = meta;
     this.loadError = null;
     if (isMockMode()) this.conn = 'mock';
@@ -342,6 +399,8 @@ let backoff = 500;
 let lastSeq = -1;
 let started = false;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+/** Sockets opened since `startLive`; the first one may skip its resync. */
+let opens = 0;
 let lifecycleBound = false;
 
 function connect() {
@@ -360,11 +419,16 @@ function connect() {
   store.conn = 'connecting';
 
   let opened = false;
+  // The first socket of a page load opens just after the route loaded its
+  // window: its `hello` decides whether that load missed a change. Every
+  // reconnect resyncs, since the server may have restarted (and its seq with it).
+  let awaitHello = false;
   ws.onopen = () => {
     opened = true;
     backoff = 500;
     store.conn = 'live';
-    resync(); // on (re)connect
+    if (opens++ === 0) awaitHello = true;
+    else resync(); // on reconnect
   };
 
   ws.onmessage = (ev) => {
@@ -375,9 +439,23 @@ function connect() {
       return;
     }
     switch (frame.event) {
-      case 'hello':
-        lastSeq = frame.data?.seq ?? lastSeq;
+      case 'hello': {
+        const seq = frame.data?.seq;
+        lastSeq = seq ?? lastSeq;
+        if (!awaitHello) break;
+        awaitHello = false;
+        // A batch announced after the window was read means the window may
+        // be stale; a server without `_meta.seq` leaves it unknown. Either
+        // way, resync, as every connect used to.
+        if (typeof seq !== 'number') {
+          resync();
+          break;
+        }
+        void store.settled().then(() => {
+          if (!store.currentAt(seq)) resync();
+        });
         break;
+      }
       case 'batch': {
         // A full rescan is sub-second even at 10k items, so any change just
         // triggers a refetch of the (lean) list. `seq` is tracked for logging /
@@ -481,6 +559,7 @@ export function stopLive() {
 export async function startLive() {
   if (started) return;
   started = true;
+  opens = 0;
   bindLifecycle();
   try {
     // Only the bootstrap metadata: the mounted route has already asked for the

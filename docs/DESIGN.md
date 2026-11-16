@@ -1278,6 +1278,18 @@ briefly how it worked, and it labelled the *previous* page's rows with the new
 page's range whenever a fetch was slow, and permanently whenever one failed.
 Startup loads `/meta` alone.
 
+**A page load reads its window once.** `GET /items` and `GET /meta` report the
+server's change sequence as `_meta.seq` — the counter the `/api/v1/events`
+WebSocket's `hello` frame carries and every `batch` advances — read *before*
+the data, so a write that lands during the read leaves the response behind the
+`hello` rather than missed. The SPA keeps the lower of the two seqs its window
+and meta were read at; when the first socket of a page load says `hello` with
+that same seq it skips the resync, so a page load issues one `/items` and one
+`/meta` request (the layout's `/meta` load shares the route's in-flight one).
+A different seq, a response without `_meta.seq` (an older server), a failed
+load, and every *re*connect (the server may have restarted, and its seq with
+it) still resync.
+
 The **API** default is nevertheless still unlimited (`view::defaults::WEB_LIMIT
 = 0`), and deliberately: that one constant is the default for `GET /items`, the
 board's per-column window, `GET /stats/history` *and* `GET /items/:id/comments`,
