@@ -17,16 +17,14 @@ use assert_cmd::prelude::*;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
-/// Token records for this test's processes go here, never the user's clove home.
-const TEST_CLOVE_HOME: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/test-clove-home");
-
 fn clove(dir: &Path) -> Command {
     let mut cmd = Command::cargo_bin("clove").unwrap();
     cmd.current_dir(dir);
     cmd.env_remove("CLOVE_FORMAT");
     cmd.env("CLOVE_AUTHOR", "tester@example.com");
-    // Any daemon a test starts lives in the test repo's own runtime directory.
-    cmd.env("CLOVE_HOME", TEST_CLOVE_HOME)
+    // Any daemon a test starts lives in the test repo's own runtime directory,
+    // and its token records in the test repo's own clove home.
+    cmd.env("CLOVE_HOME", support::clove_home(dir))
         .env("CLOVE_RUNTIME_DIR", runtime_dir(dir));
     cmd
 }
@@ -1073,7 +1071,8 @@ fn auto_starts_daemon_and_heartbeats() {
     );
     // This process reads the token too: from the same records as the hub.
     clove_core::daemon_token::use_records_dir(
-        camino::Utf8PathBuf::from(TEST_CLOVE_HOME).join("daemon-tokens"),
+        camino::Utf8PathBuf::from_path_buf(support::clove_home(dir.path()).join("daemon-tokens"))
+            .unwrap(),
     );
     let mut client = DaemonClient::probe_at(&hub, &clove_dir).expect("daemon alive");
     let first = client.status().unwrap().ping_count;
@@ -1720,7 +1719,7 @@ fn read_tools_use_the_daemon_tier_and_agree_with_the_files() {
 
     let cloved = support::cloved();
     let mut daemon = std::process::Command::new(cloved)
-        .env("CLOVE_HOME", TEST_CLOVE_HOME)
+        .env("CLOVE_HOME", support::clove_home(dir.path()))
         .env("CLOVE_RUNTIME_DIR", runtime_dir(dir.path()))
         .env("CLOVED_DISABLE_WEB", "1")
         .arg("run")
@@ -2022,7 +2021,8 @@ fn a_relative_clove_dir_writes_into_the_callers_project() {
         .success();
 
     let mut cmd = clove(b.path());
-    cmd.env("CLOVE_HOME", TEST_CLOVE_HOME)
+    // `b` talks to the hub that `a` started, so it reads `a`'s token records.
+    cmd.env("CLOVE_HOME", support::clove_home(a.path()))
         .env("CLOVE_RUNTIME_DIR", &run)
         .env("CLOVED_PATH", &cloved)
         .env("CLOVED_DISABLE_WEB", "1")

@@ -84,11 +84,14 @@ git2 = "0.21"                   # M3 daemon git auto-sync only (vendored libgit2
 # RFC3339 timestamps. clock = Utc::now() (used everywhere); drop the default
 # `wasmbind` (no wasm target) and the legacy no-op `oldtime`.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
-# GitHub REST API client (clove-import, M2). Keep the default TLS/JWT providers
-# (rustls-ring + jwt-rust-crypto) the working build relies on; drop only the
-# unused middleware (retry/timeout/tracing).
-octocrab = { version = "0.51", default-features = false, features = [
-    "default-client", "follow-redirect", "rustls", "rustls-ring", "jwt-rust-crypto",
+# GitHub REST API client (clove-import, M2). Keep the TLS provider
+# (rustls-ring) the working build relies on; drop the unused middleware
+# (retry/timeout/tracing) and JWT support (`jwt`, `jwt-*`). clove signs in with
+# a personal token, never as a GitHub App, so it never signs a JWT. Without JWT
+# support, `rsa` and `crypto-bigint` are not in the tree (RUSTSEC-2023-0071,
+# RUSTSEC-2026-0387).
+octocrab = { version = "0.54", default-features = false, features = [
+    "default-client", "follow-redirect", "rustls", "rustls-ring",
 ] }
 # Proxy support for the GitHub client (clove-import `github` feature). All are
 # already in the tree through octocrab; these lines only turn on hyper-util's

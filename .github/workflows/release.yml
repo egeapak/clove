@@ -185,8 +185,11 @@ jobs:
         run: |
           npm ci
           npm run build
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: 1.100.0
       - name: Pack
-        run: scripts/release/pack-web-dist.sh crates/clove-web/dist "${GITHUB_REF_NAME#v}" web-dist
+        run: cargo xtask pack-web-dist crates/clove-web/dist "${GITHUB_REF_NAME#v}" web-dist
       - uses: actions/upload-artifact@v4
         with:
           name: clove-web-dist

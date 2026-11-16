@@ -30,8 +30,16 @@ use std::sync::{Mutex, OnceLock};
 pub fn isolated_env(dir: &Path) -> [(&'static str, PathBuf); 2] {
     [
         ("CLOVE_RUNTIME_DIR", dir.join(".test-run")),
-        ("CLOVE_HOME", dir.join(".test-clove-home")),
+        ("CLOVE_HOME", clove_home(dir)),
     ]
+}
+
+/// The private clove home under `dir` that [`isolated_env`] sets. A test that
+/// sets `CLOVE_RUNTIME_DIR` itself uses this for `CLOVE_HOME`, so token records
+/// never land in a directory that other tests share. Every process that talks
+/// to one hub must use the home of the test that started it.
+pub fn clove_home(dir: &Path) -> PathBuf {
+    dir.join(".test-clove-home")
 }
 
 /// The `cloved` built for this test run (all features, so the `CLOVED_*` test

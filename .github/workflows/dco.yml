@@ -19,5 +19,8 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: 1.100.0
       - name: Every commit is signed off
-        run: scripts/ci/check-dco.sh "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}"
+        run: cargo xtask check-dco "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}"

@@ -112,7 +112,8 @@ jobs:
         # default build of the CLI and of cloved's own tests. The daemon that the
         # clove-cli suites spawn is the all-features `cloved` from the setup
         # script on both arms (those suites need its test knobs), so a default
-        # `cloved` is covered by its own tests only. The sync_github mock suite
+        # `cloved` is covered by its own tests and by the lean daemon smoke
+        # step below. The sync_github mock suite
         # runs on both arms (proving clove sync github dispatches to the plugin
         # end to end). nextest does not run doctests, so `cargo test --doc` runs
         # them.
@@ -120,6 +121,17 @@ jobs:
           cargo nextest run --workspace --all-features --no-fail-fast
           cargo test --workspace --all-features --doc
           cargo nextest run -p clove-cli -p cloved --no-fail-fast
+      - name: Lean daemon smoke
+        # The default-features `clove` and `cloved` (what `cargo install`
+        # builds), end to end: one hub for two projects, daemon-served reads,
+        # a hard kill, and stop. CLOVE_SMOKE_WEB=0 also checks that this
+        # `cloved` has no web server, so the step cannot pass on a `web` build.
+        # Windows runs the same script on a `web` build in the daemon-windows job.
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          cargo build -p clove-cli -p cloved
+          CLOVE_SMOKE_WEB=0 scripts/ci/daemon-smoke.sh "$PWD/target/debug"
       - name: Benchmarks compile (T-X01)
         # Build and link the bench targets in the test profile, which reuses the
         # artifacts of the Test step. `cargo bench --no-run` used the bench
@@ -162,10 +174,12 @@ jobs:
       # budgets (reindex, ls, ready, search, staleness). Both files only assert
       # in optimized builds (debug is several times slower), and the ordinary
       # test job is a debug build, so this job is the only place they can fail.
+      # One test thread: the gates of one file must not compete for the CPU.
+      # A gate fails only when all of its rounds are over budget (`perf_gate`).
       - name: Perf gate tests
         run: |
-          cargo test --release -p clove-core --test perf_gates
-          cargo test --release -p clove-index --test index_perf_gates
+          cargo test --release -p clove-core --test perf_gates -- --test-threads=1
+          cargo test --release -p clove-index --test index_perf_gates -- --test-threads=1
 
   fuzz:
     name: fuzz (30s/target)

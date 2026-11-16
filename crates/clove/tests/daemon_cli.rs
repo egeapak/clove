@@ -18,9 +18,6 @@ use assert_cmd::Command;
 /// purpose: a wait ends on its condition, never on this.
 const HANG_GUARD: Duration = Duration::from_secs(30);
 
-/// Token records for this test's processes go here, never the user's clove home.
-const TEST_CLOVE_HOME: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/test-clove-home");
-
 /// The test run's `cloved`. It is built with all features: the `CLOVED_*` delay
 /// knobs only exist in a `test-knobs` build, and the web-server cases need a
 /// daemon with `web`.
@@ -28,11 +25,20 @@ fn cloved() -> &'static Path {
     support::cloved()
 }
 
+/// The clove home of the hub rooted at `run`: beside the runtime directory, in
+/// the same per-test temp dir. Every process that talks to that hub reads its
+/// token records from here, and no other test shares them.
+fn clove_home(run: &Path) -> PathBuf {
+    run.parent()
+        .expect("a runtime dir has a parent")
+        .join("clove-home")
+}
+
 /// `clove` in `dir`, talking to the hub rooted at `run`.
 fn clove(dir: &Path, run: &Path) -> Command {
     let mut c = Command::cargo_bin("clove").unwrap();
     c.current_dir(dir)
-        .env("CLOVE_HOME", TEST_CLOVE_HOME)
+        .env("CLOVE_HOME", clove_home(run))
         .env("CLOVE_RUNTIME_DIR", run)
         .env("CLOVED_PATH", cloved())
         .env("CLOVED_DISABLE_WEB", "1");
@@ -604,7 +610,7 @@ fn a_stop_while_the_start_is_still_loading_wins() {
     init(dir, &run.path);
     let mut start = std::process::Command::new(assert_cmd::cargo::cargo_bin("clove"))
         .current_dir(dir)
-        .env("CLOVE_HOME", TEST_CLOVE_HOME)
+        .env("CLOVE_HOME", clove_home(&run.path))
         .env("CLOVE_RUNTIME_DIR", &run.path)
         .env("CLOVED_PATH", cloved())
         .env("CLOVED_DISABLE_WEB", "1")
@@ -890,7 +896,8 @@ fn a_clove_home_other_than_the_daemons_is_reported() {
     let status = elsewhere(&["daemon", "status", "-f", "json"]);
     let warnings = status["data"]["warnings"].to_string();
     assert!(
-        warnings.contains("CLOVE_HOME") && warnings.contains(TEST_CLOVE_HOME.trim_end_matches('/')),
+        warnings.contains("CLOVE_HOME")
+            && warnings.contains(clove_home(&run.path).to_str().unwrap()),
         "status did not report the mismatch: {status}"
     );
     let doctor = elsewhere(&["doctor", "-f", "json"]);
@@ -1319,7 +1326,7 @@ fn serve_waits_for_a_daemon_that_is_still_starting() {
     init(dir, &run.path);
     // A hub that takes its lock and then takes its time to bind.
     let mut hub = std::process::Command::new(cloved())
-        .env("CLOVE_HOME", TEST_CLOVE_HOME)
+        .env("CLOVE_HOME", clove_home(&run.path))
         .env("CLOVE_RUNTIME_DIR", &run.path)
         .env("CLOVED_WEB_PORT", "0")
         .env("CLOVED_BIND_DELAY_MS", "2000")
@@ -1337,7 +1344,7 @@ fn serve_waits_for_a_daemon_that_is_still_starting() {
 
     let mut serve = std::process::Command::new(assert_cmd::cargo::cargo_bin("clove"))
         .current_dir(dir)
-        .env("CLOVE_HOME", TEST_CLOVE_HOME)
+        .env("CLOVE_HOME", clove_home(&run.path))
         .env("CLOVE_RUNTIME_DIR", &run.path)
         .env("CLOVED_PATH", cloved())
         .env("CLOVED_WEB_PORT", "0")

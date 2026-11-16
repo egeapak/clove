@@ -355,7 +355,7 @@ The release workflow triggers on a `v*` tag and builds the native binaries — `
 `crates/clove-web/dist`; the platform jobs download that tree and compile with
 `CLOVE_SKIP_WEB_BUILD=1`. The same job packs it into
 `clove-web-dist-v<version>.tar.gz` (+ `.sha256`, via
-`scripts/release/pack-web-dist.sh`) and attaches it to the Release, so the
+`cargo xtask pack-web-dist`) and attaches it to the Release, so the
 binaries and the SPA a published `clove-web` downloads are byte-identical. Shipping the plugins in the release archive is what
 lets a binary-install user run `clove sync github` / `clove import beads` without
 a separate `cargo install`:

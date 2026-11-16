@@ -6,8 +6,11 @@
 //! Output is fully determined by `seed`, so benchmarks and the performance-gate
 //! tests are reproducible. Shared by `cargo xtask bench-fixtures`, the criterion
 //! benches, and `tests/perf_gates.rs`.
+//!
+//! [`perf_gate`] is the measurement that the performance-gate tests share.
 
 use std::io::{self, Write};
+use std::time::{Duration, Instant};
 
 use camino::Utf8Path;
 
@@ -167,3 +170,105 @@ pub fn deps_fuzz_document(deps_bytes: &[u8]) -> Vec<u8> {
 
 /// The stable id used by the fuzz targets and their corpus-replay test.
 pub const FUZZ_ID: &str = "fuzz-00000000";
+
+/// How many rounds a performance gate measures before it fails.
+pub const GATE_ROUNDS: u32 = 3;
+
+/// The pause between two rounds of a performance gate, so that a short burst
+/// of load on the machine can pass.
+pub const GATE_PAUSE: Duration = Duration::from_millis(250);
+
+/// The result of one performance gate: the fastest time of each round that ran.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateRun {
+    /// The budget that the gate measured against.
+    pub budget: Duration,
+    /// The fastest time of each round, in the order that the rounds ran.
+    pub rounds: Vec<Duration>,
+}
+
+impl GateRun {
+    /// Whether a round finished within the budget.
+    pub fn passed(&self) -> bool {
+        self.rounds.iter().any(|round| *round <= self.budget)
+    }
+
+    /// The fastest time of all rounds.
+    pub fn best(&self) -> Duration {
+        self.rounds.iter().copied().min().unwrap_or(Duration::MAX)
+    }
+}
+
+/// Measure `op` against `budget` for a performance-gate test.
+///
+/// A round runs `op` `iters` times and keeps the fastest time. When a round is
+/// within the budget, the gate stops and passes. Otherwise it waits `pause` and
+/// runs another round, up to `rounds` rounds. Load on a shared machine slows
+/// some rounds, but a real regression slows every round, so the gate fails only
+/// when every round is over the budget.
+pub fn perf_gate(
+    rounds: u32,
+    iters: u32,
+    budget: Duration,
+    pause: Duration,
+    mut op: impl FnMut(),
+) -> GateRun {
+    let mut run = GateRun {
+        budget,
+        rounds: Vec::new(),
+    };
+    for round in 0..rounds.max(1) {
+        if round > 0 {
+            std::thread::sleep(pause);
+        }
+        let mut best = Duration::MAX;
+        for _ in 0..iters.max(1) {
+            let start = Instant::now();
+            op();
+            best = best.min(start.elapsed());
+        }
+        run.rounds.push(best);
+        if best <= budget {
+            break;
+        }
+    }
+    run
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BUDGET: Duration = Duration::from_millis(50);
+    const SLOW: Duration = Duration::from_millis(80);
+
+    #[test]
+    fn a_gate_within_budget_stops_after_one_round() {
+        let run = perf_gate(3, 2, BUDGET, Duration::ZERO, || {});
+        assert!(run.passed());
+        assert_eq!(run.rounds.len(), 1);
+    }
+
+    #[test]
+    fn a_slow_round_under_load_does_not_fail_the_gate() {
+        // The first round is slow (a burst of load), the second is fast.
+        let mut calls = 0;
+        let run = perf_gate(3, 1, BUDGET, Duration::ZERO, || {
+            calls += 1;
+            if calls == 1 {
+                std::thread::sleep(SLOW);
+            }
+        });
+        assert!(run.passed(), "{run:?}");
+        assert_eq!(run.rounds.len(), 2);
+        assert!(run.rounds[0] > BUDGET);
+    }
+
+    #[test]
+    fn a_regression_fails_every_round() {
+        let run = perf_gate(3, 2, BUDGET, Duration::ZERO, || std::thread::sleep(SLOW));
+        assert!(!run.passed(), "{run:?}");
+        assert_eq!(run.rounds.len(), 3);
+        assert!(run.best() > BUDGET);
+    }
+}

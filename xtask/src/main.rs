@@ -17,9 +17,23 @@
 //!   tree guards that CI runs (see `guards.rs`).
 //! - `guard-glibc <floor> <binary>...` fails when a Linux binary requires a
 //!   newer glibc than `<floor>`. The release workflow runs it.
+//! - `pack-web-dist <dist> <version> <out>` packs the built SPA into the
+//!   release assets that a published `clove-web` downloads (see
+//!   `web_dist.rs`). The release workflow runs it.
+//! - `check-dco <base> <head>` fails when a commit of `base..head` has no
+//!   `Signed-off-by` for its author (see `dco.rs`). `dco.yml` runs it.
 
+mod dco;
 mod guards;
 mod publish;
+mod web_dist;
+
+// The pure half of the `clove-web` build script's download: the tests of
+// `web_dist` check that a packed dist passes its checksum and extraction.
+#[cfg(test)]
+#[path = "../../crates/clove-web/build/fetch.rs"]
+#[allow(dead_code)]
+mod fetch;
 
 use camino::Utf8PathBuf;
 use clove_core::fixtures::write_fixtures;
@@ -35,6 +49,8 @@ fn main() -> anyhow::Result<()> {
         Some("guard-no-web") => guards::no_web(),
         Some("guard-tls") => guards::tls(),
         Some("guard-glibc") => guards::glibc(args.collect()),
+        Some("pack-web-dist") => web_dist::run(args.collect()),
+        Some("check-dco") => dco::check(args.collect()),
         Some(other) => {
             eprintln!("xtask: unknown command `{other}`");
             std::process::exit(1);
@@ -42,7 +58,7 @@ fn main() -> anyhow::Result<()> {
         None => {
             eprintln!(
                 "usage: cargo xtask <bench-fixtures|test-all|test-bins|publish-order|\
-                 guard-sdk-licenses|guard-no-web|guard-tls|guard-glibc>"
+                 guard-sdk-licenses|guard-no-web|guard-tls|guard-glibc|pack-web-dist|check-dco>"
             );
             std::process::exit(1);
         }

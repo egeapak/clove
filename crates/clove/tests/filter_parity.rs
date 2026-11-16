@@ -35,7 +35,7 @@ fn clove() -> Command {
 fn run_in(dir: &Path, args: &[&str]) -> std::process::Output {
     clove()
         .current_dir(dir)
-        .env("CLOVE_HOME", TEST_CLOVE_HOME)
+        .env("CLOVE_HOME", support::clove_home(dir))
         .env("CLOVE_RUNTIME_DIR", runtime_dir(dir))
         .args(args)
         .output()
@@ -835,9 +835,6 @@ fn query_json_filter_takes_one_value_or_many() {
     );
 }
 
-/// Token records for this test's processes go here, never the user's clove home.
-const TEST_CLOVE_HOME: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/test-clove-home");
-
 /// The third path: a live `cloved`. The filters ride `QueryRequest.filters`, so
 /// a dropped wire field shows up here as the *unfiltered* list.
 #[cfg(unix)]
@@ -876,7 +873,10 @@ mod daemon {
     fn spawn_daemon(clove_dir: &Path, bin: &Path) -> Daemon {
         let run = runtime_dir(clove_dir.parent().unwrap());
         let child = Command::new(bin)
-            .env("CLOVE_HOME", TEST_CLOVE_HOME)
+            .env(
+                "CLOVE_HOME",
+                crate::support::clove_home(clove_dir.parent().unwrap()),
+            )
             .env("CLOVE_RUNTIME_DIR", &run)
             .env("CLOVED_DISABLE_WEB", "1")
             .arg("run")
