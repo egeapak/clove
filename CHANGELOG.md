@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-18
+
 ### Added
 
 - `clove edit --body` / `--body-file` and `clove new --body-file` (`-` reads
@@ -14,6 +16,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   refuses another repository. `--adopt-links` overrides.
 - `cargo xtask publish-order`, `guard-sdk-licenses`, `guard-no-web`,
   `guard-tls`, and `guard-glibc`.
+- `clove start`, `clove close`, and `clove status` accept one or more ids
+  (`clove start ID1 ID2`, `clove status ID1 ID2 closed`). Every id is
+  attempted. With one id the output is unchanged. With several ids, JSON
+  `data` is an array with one `{id, ok, item}` or `{id, ok, error}` entry per
+  id, the envelope `ok` is `false` and a top-level `error` is set if any id
+  failed, and the exit code is the exit code of the first failed id. JSONL
+  prints one line per id.
+- `clove_plugin::run_raw(info, |cx, args| -> ExitCode)`: the plugin harness
+  without the rendering step. It answers `--clove-plugin-info`, renders the
+  error envelope when the host env is missing, and strips the leading
+  command/provider echo; the closure renders and returns the exit code.
+  `clove-sync-github`, `clove-import-tk`, and `clove-import-beads` use it.
+- On Windows, plugin discovery (`clove <x>`, `clove plugin list`) tries every
+  `PATHEXT` extension clove can start (`.com`, `.exe`, `.bat`, `.cmd`,
+  `.ps1`), not only `.exe`. An unset or empty `PATHEXT` means
+  `.COM;.EXE;.BAT;.CMD`, and `.exe` is always kept.
+- `clove sync github` checks the body GitHub stored after it creates or
+  updates an issue or a comment. When a proxy or GitHub App changed the body
+  on the way (for example, an appended footer), sync edits it back once and
+  lists it in `data.bodies_corrected`. If the edit back fails, sync adds a
+  warning and goes on with the run.
+- The web API (`clove serve`) adds `missing_refs` to every item row: every id
+  in `deps`, `parent`, `relates`, `duplicates`, and `supersedes` that has no
+  backing item, for an item of any status.
+- `GET /stats/history` accepts `?days=all`: every day from the oldest item's
+  `created` date, at least 90 days.
 
 ### Changed
 
@@ -68,6 +96,46 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `cargo xtask pack-web-dist` and `cargo xtask check-dco` replace the shell
   scripts of the same job.
 - `octocrab` 0.54, built without JWT support.
+- `clove_plugin::emit_success` (and so `run`/`run_with_info`) emits
+  `_meta: {"warnings": []}` instead of `_meta: {}`, the same shape the import
+  plugins emit. This includes the `clove sync github --dry-run` JSON envelope.
+- `clove setup` registers the MCP server in the project's `.mcp.json`, the
+  file Claude Code reads project servers from, and enables it with
+  `enabledMcpjsonServers` in `.claude/settings.json`. Before, it wrote the
+  server to the `mcpServers` key of `settings.json`, which Claude Code does not
+  read, so the server did not start. Setup removes that old entry when it is
+  unchanged. `clove setup --global` does not edit `~/.claude.json`; it prints
+  `claude mcp add --scope user clove -- clove mcp` instead.
+- The DCO sign-off is optional for now. The `DCO sign-off` CI job runs only
+  when the repository variable `REQUIRE_DCO` is `true` (`CONTRIBUTING.md`).
+- The agent directives that `clove setup` writes (`CLOVE.md`), the MCP server
+  instructions, and `clove agent-doc` now say when to file items and how to
+  split work: one item per separate task, bug, or fix; the steps of one task
+  are comments on its item; every item has a self-contained body without
+  conversation context. `scripts/agent-eval/` measures how well agents follow
+  the directives.
+- The agent directives require naming an item to the user as its id and
+  title (`` `clov-H2D91NF2` (Fix the parser) ``), never a bare id. To make that
+  easy, `clove new` and `clove comment` now print the title, and their JSON
+  `data` (and the `clove_new` / `clove_comment` MCP results) gain a `title`
+  key. `clove new` keeps the id and path as its first two fields.
+- The id-and-title rule now covers every mention: a repeated mention of the
+  same item and an id in a list get the title too, the title is copied
+  exactly, and the directives tell the agent to check every id in a reply
+  before it sends the reply.
+- The `CLOVE.md` directives tell an agent to run the check that shows the work
+  is done before it writes the closing comment, and to quote the actual result
+  of that check (which tests pass and which fail) in that comment.
+- The `CLOVE.md` directives show a short "Do not write / Write instead" table
+  of conversation context that items and comments must not contain, and say
+  that an item filed and left open needs no comment.
+
+- Index schema 6 → 7 (`items.file_size`). The index rebuilds itself once on
+  upgrade.
+- cargo-nextest is the supported test runner. `cargo xtask test-all` runs
+  `cargo nextest run --workspace --all-features` and then the doctests. A
+  plain `cargo test` fails the daemon and plugin suites with a message that
+  names nextest.
 
 ### Fixed
 
@@ -173,101 +241,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A web page load fetches its rows and `/meta` once, not two and three
   times. `GET /items` and `GET /meta` report the change sequence as
   `_meta.seq`.
-
-### Security
-
-- Human CLI output no longer prints terminal control sequences from item text.
-- `index.db` is opened with `trusted_schema=OFF` and defensive mode. An index
-  that contains a view or a trigger is rebuilt.
-- Item reads refuse symlinks and non-regular files. `clove setup` and `clove
-  init --merge-driver` do not write through symlinks in a project.
-- A published `clove-web` verifies its downloaded web UI against a SHA-256
-  pinned in the crate, not against the `.sha256` in the Release.
-- Workflow tokens are read-only by default, and third-party actions are pinned
-  to commits. CI runs a daily advisory check.
-- `rusqlite` 0.41, which bundles SQLite 3.54 (RUSTSEC-2026-0459).
-
-### Removed
-
-- The unmaintained `.woodpecker/` pipelines and the redundant
-  `package.homepage` manifest key.
-
-## [0.3.0] - 2026-11-09
-
-### Added
-
-- `clove start`, `clove close`, and `clove status` accept one or more ids
-  (`clove start ID1 ID2`, `clove status ID1 ID2 closed`). Every id is
-  attempted. With one id the output is unchanged. With several ids, JSON
-  `data` is an array with one `{id, ok, item}` or `{id, ok, error}` entry per
-  id, the envelope `ok` is `false` and a top-level `error` is set if any id
-  failed, and the exit code is the exit code of the first failed id. JSONL
-  prints one line per id.
-- `clove_plugin::run_raw(info, |cx, args| -> ExitCode)`: the plugin harness
-  without the rendering step. It answers `--clove-plugin-info`, renders the
-  error envelope when the host env is missing, and strips the leading
-  command/provider echo; the closure renders and returns the exit code.
-  `clove-sync-github`, `clove-import-tk`, and `clove-import-beads` use it.
-- On Windows, plugin discovery (`clove <x>`, `clove plugin list`) tries every
-  `PATHEXT` extension clove can start (`.com`, `.exe`, `.bat`, `.cmd`,
-  `.ps1`), not only `.exe`. An unset or empty `PATHEXT` means
-  `.COM;.EXE;.BAT;.CMD`, and `.exe` is always kept.
-- `clove sync github` checks the body GitHub stored after it creates or
-  updates an issue or a comment. When a proxy or GitHub App changed the body
-  on the way (for example, an appended footer), sync edits it back once and
-  lists it in `data.bodies_corrected`. If the edit back fails, sync adds a
-  warning and goes on with the run.
-- The web API (`clove serve`) adds `missing_refs` to every item row: every id
-  in `deps`, `parent`, `relates`, `duplicates`, and `supersedes` that has no
-  backing item, for an item of any status.
-- `GET /stats/history` accepts `?days=all`: every day from the oldest item's
-  `created` date, at least 90 days.
-
-### Changed
-
-- `clove_plugin::emit_success` (and so `run`/`run_with_info`) emits
-  `_meta: {"warnings": []}` instead of `_meta: {}`, the same shape the import
-  plugins emit. This includes the `clove sync github --dry-run` JSON envelope.
-- `clove setup` registers the MCP server in the project's `.mcp.json`, the
-  file Claude Code reads project servers from, and enables it with
-  `enabledMcpjsonServers` in `.claude/settings.json`. Before, it wrote the
-  server to the `mcpServers` key of `settings.json`, which Claude Code does not
-  read, so the server did not start. Setup removes that old entry when it is
-  unchanged. `clove setup --global` does not edit `~/.claude.json`; it prints
-  `claude mcp add --scope user clove -- clove mcp` instead.
-- The DCO sign-off is optional for now. The `DCO sign-off` CI job runs only
-  when the repository variable `REQUIRE_DCO` is `true` (`CONTRIBUTING.md`).
-- The agent directives that `clove setup` writes (`CLOVE.md`), the MCP server
-  instructions, and `clove agent-doc` now say when to file items and how to
-  split work: one item per separate task, bug, or fix; the steps of one task
-  are comments on its item; every item has a self-contained body without
-  conversation context. `scripts/agent-eval/` measures how well agents follow
-  the directives.
-- The agent directives require naming an item to the user as its id and
-  title (`` `clov-H2D91NF2` (Fix the parser) ``), never a bare id. To make that
-  easy, `clove new` and `clove comment` now print the title, and their JSON
-  `data` (and the `clove_new` / `clove_comment` MCP results) gain a `title`
-  key. `clove new` keeps the id and path as its first two fields.
-- The id-and-title rule now covers every mention: a repeated mention of the
-  same item and an id in a list get the title too, the title is copied
-  exactly, and the directives tell the agent to check every id in a reply
-  before it sends the reply.
-- The `CLOVE.md` directives tell an agent to run the check that shows the work
-  is done before it writes the closing comment, and to quote the actual result
-  of that check (which tests pass and which fail) in that comment.
-- The `CLOVE.md` directives show a short "Do not write / Write instead" table
-  of conversation context that items and comments must not contain, and say
-  that an item filed and left open needs no comment.
-
-- Index schema 6 → 7 (`items.file_size`). The index rebuilds itself once on
-  upgrade.
-- cargo-nextest is the supported test runner. `cargo xtask test-all` runs
-  `cargo nextest run --workspace --all-features` and then the doctests. A
-  plain `cargo test` fails the daemon and plugin suites with a message that
-  names nextest.
-
-### Fixed
-
 - `CLOVE.md` named a `clove list` command that does not exist; it now names
   `clove ls`, and a test rejects any subcommand the CLI does not define.
 - `.clove/write.lock`, the store write lock, is git-ignored. `clove init` writes
@@ -325,6 +298,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   of the last 90 days.
 - TUI form: a long value that scrolls sideways keeps the field labels
   visible. Before, the labels were cut (`itle:`, `atus:`).
+
+### Security
+
+- Human CLI output no longer prints terminal control sequences from item text.
+- `index.db` is opened with `trusted_schema=OFF` and defensive mode. An index
+  that contains a view or a trigger is rebuilt.
+- Item reads refuse symlinks and non-regular files. `clove setup` and `clove
+  init --merge-driver` do not write through symlinks in a project.
+- A published `clove-web` verifies its downloaded web UI against a SHA-256
+  pinned in the crate, not against the `.sha256` in the Release.
+- Workflow tokens are read-only by default, and third-party actions are pinned
+  to commits. CI runs a daily advisory check.
+- `rusqlite` 0.41, which bundles SQLite 3.54 (RUSTSEC-2026-0459).
+
+### Removed
+
+- The unmaintained `.woodpecker/` pipelines and the redundant
+  `package.homepage` manifest key.
 
 ## [0.2.0] - 2026-10-21
 
