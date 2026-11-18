@@ -311,6 +311,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Workflow tokens are read-only by default, and third-party actions are pinned
   to commits. CI runs a daily advisory check.
 - `rusqlite` 0.41, which bundles SQLite 3.54 (RUSTSEC-2026-0459).
+- `libz-sys` 1.1.33 in `cloved`'s libgit2 (RUSTSEC-2026-0544).
 
 ### Removed
 
