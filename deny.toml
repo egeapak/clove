@@ -77,6 +77,15 @@ ignore = [
     # code is not in any clove binary. Remove this entry when rmcp moves to 3.9+
     # (a major-version API change).
     "RUSTSEC-2026-0462",
+    # `chrono` is unmaintained (not a vulnerability; no safe upgrade exists).
+    # clove uses it for every timestamp, in clove-types and through rmcp,
+    # schemars, and octocrab, so a move to `jiff` or `time` is its own change.
+    # Remove this entry when chrono is gone from the dependency tree.
+    "RUSTSEC-2026-0543",
+    # `humantime` is unmaintained because it wraps chrono (not a
+    # vulnerability). Pulled only by `tarpc` (the daemon IPC). Remove with the
+    # chrono entry, or when tarpc drops humantime.
+    "RUSTSEC-2026-0542",
 ]
 
 [sources]
